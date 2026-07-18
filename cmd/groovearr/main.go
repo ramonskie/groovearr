@@ -65,7 +65,9 @@ func main() {
 	}
 
 	// Download orchestrator.
-	orch := download.NewOrchestrator(registry)
+	orch := download.NewOrchestrator(registry, func() config.QualityConfig {
+		return cfg.Get().Quality
+	})
 
 	// Post-download processor: renames files into organized library structure,
 	// then fetches cover art for the album directory, then writes audio tags.

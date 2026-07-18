@@ -4,14 +4,16 @@ import (
 	"context"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
 type mockPlugin struct {
-	name        string
-	display     string
-	configured  bool
-	connected   bool
+	name          string
+	display       string
+	configured    bool
+	connected     bool
+	searchResults []domain.TrackResult
 }
 
 func (m *mockPlugin) Name() string                                  { return m.name }
@@ -20,9 +22,12 @@ func (m *mockPlugin) IsConfigured() bool                            { return m.c
 func (m *mockPlugin) Connected() bool                                { return m.connected }
 func (m *mockPlugin) CheckConnection(ctx context.Context) error       { return nil }
 func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult, []domain.AlbumResult, error) {
+	if m.searchResults != nil {
+		return m.searchResults, nil, nil
+	}
 	return nil, nil, nil
 }
-func (m *mockPlugin) Download(ctx context.Context, u, f string, s int64) (string, error) { return "", nil }
+func (m *mockPlugin) Download(ctx context.Context, u, f string, s int64) (string, error) { return "mock-dl-1", nil }
 func (m *mockPlugin) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error)   { return nil, nil }
 func (m *mockPlugin) GetDownloadStatus(ctx context.Context, id string) (*domain.DownloadRecord, error) {
 	return nil, nil
@@ -122,7 +127,7 @@ func TestRegistryReplace(t *testing.T) {
 func TestOrchestratorSearch(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek", configured: true})
-	orch := NewOrchestrator(r)
+	orch := NewOrchestrator(r, nil)
 
 	_, _, err := orch.Search(context.Background(), "soulseek", "query")
 	if err != nil {
@@ -142,10 +147,151 @@ func TestOrchestratorSearch(t *testing.T) {
 
 func TestOrchestratorDownloadInvalidSource(t *testing.T) {
 	r := NewRegistry()
-	orch := NewOrchestrator(r)
+	orch := NewOrchestrator(r, nil)
 
 	_, err := orch.Download(context.Background(), "nonexistent", "user", "file", 0)
 	if err == nil {
 		t.Error("expected error for nonexistent source")
 	}
+}
+
+func TestFilterByQuality(t *testing.T) {
+	makeCand := func(quality string, bitrate int) candidate {
+		return candidate{
+			track:      domain.TrackResult{SearchResult: domain.SearchResult{Quality: quality, Bitrate: bitrate}},
+			sourceName: "test",
+			score:      0.8,
+		}
+	}
+
+	t.Run("preferred format flac filters out mp3", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 1411),
+			makeCand("mp3", 320),
+		}
+		qc := config.QualityConfig{PreferredFormat: "flac"}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 1 || result[0].track.Quality != "flac" {
+			t.Errorf("expected 1 flac candidate, got %d", len(result))
+		}
+	})
+
+	t.Run("preferred format mp3 accepts mp3_320", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 1411),
+			makeCand("mp3_320", 320),
+		}
+		qc := config.QualityConfig{PreferredFormat: "mp3"}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 1 || result[0].track.Quality != "mp3_320" {
+			t.Errorf("expected 1 mp3_320 candidate, got %d", len(result))
+		}
+	})
+
+	t.Run("min bitrate filters low quality", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 1411),
+			makeCand("mp3", 128),
+		}
+		qc := config.QualityConfig{MinBitrate: 320}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 1 || result[0].track.Quality != "flac" {
+			t.Errorf("expected 1 candidate >= 320kbps, got %d", len(result))
+		}
+	})
+
+	t.Run("combined format + bitrate filter", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 800),           // wrong format
+			makeCand("mp3_320", 320),         // right format, good bitrate
+			makeCand("mp3_128", 128),         // right format, low bitrate
+			makeCand("flac", 1411),           // wrong format
+		}
+		qc := config.QualityConfig{PreferredFormat: "mp3", MinBitrate: 300}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 1 || result[0].track.Bitrate != 320 {
+			t.Errorf("expected 1 mp3_320 candidate, got %d", len(result))
+		}
+	})
+
+	t.Run("empty config is no-op", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 1411),
+			makeCand("mp3", 320),
+		}
+		result := filterByQuality(candidates, config.QualityConfig{})
+		if len(result) != 2 {
+			t.Errorf("expected all candidates to pass, got %d", len(result))
+		}
+	})
+
+	t.Run("preferred any is no-op", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("flac", 1411),
+			makeCand("mp3", 320),
+			makeCand("ogg", 192),
+		}
+		qc := config.QualityConfig{PreferredFormat: "any"}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 3 {
+			t.Errorf("expected all candidates with any format, got %d", len(result))
+		}
+	})
+
+	t.Run("mp3 matches mp3_128", func(t *testing.T) {
+		candidates := []candidate{
+			makeCand("mp3_128", 128),
+		}
+		qc := config.QualityConfig{PreferredFormat: "mp3"}
+		result := filterByQuality(candidates, qc)
+		if len(result) != 1 {
+			t.Errorf("expected mp3 to match mp3_128, got %d", len(result))
+		}
+	})
+}
+
+func TestDownloadBestQualityFilter(t *testing.T) {
+	r := NewRegistry()
+
+	// Plugin that returns results with mixed quality.
+	searchResults := []domain.TrackResult{
+		{
+			SearchResult: domain.SearchResult{
+				Username: "test_user", Filename: "low_quality.mp3",
+				Size: 1000, Bitrate: 128, Quality: "mp3_128",
+				Duration: 200000,
+			},
+			Artist: "Test Artist", Title: "Test Title",
+		},
+		{
+			SearchResult: domain.SearchResult{
+				Username: "test_user", Filename: "high_quality.flac",
+				Size: 5000, Bitrate: 1411, Quality: "flac",
+				Duration: 200000,
+			},
+			Artist: "Test Artist", Title: "Test Title",
+		},
+	}
+	r.Register(&mockPlugin{name: "test", display: "Test", configured: true, searchResults: searchResults})
+
+	t.Run("filters out low bitrate candidates", func(t *testing.T) {
+		orch := NewOrchestrator(r, func() config.QualityConfig {
+			return config.QualityConfig{PreferredFormat: "any", MinBitrate: 500}
+		})
+		_, _, _, err := orch.DownloadBest(context.Background(), "Test Title", "Test Artist", 200000, "")
+		if err != nil {
+			t.Fatalf("DownloadBest failed: %v", err)
+		}
+		// Should have picked the flac (1411kbps) over mp3_128 (128kbps).
+	})
+
+	t.Run("returns error when no candidates match quality", func(t *testing.T) {
+		orch := NewOrchestrator(r, func() config.QualityConfig {
+			return config.QualityConfig{PreferredFormat: "flac", MinBitrate: 2000}
+		})
+		_, _, _, err := orch.DownloadBest(context.Background(), "Test Title", "Test Artist", 200000, "")
+		if err == nil {
+			t.Fatal("expected error when no candidates match quality")
+		}
+	})
 }

@@ -5,9 +5,11 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/matching"
 )
@@ -121,18 +123,25 @@ func (e *Engine) ClearCompleted() {
 
 // Orchestrator routes search and download to configured plugins.
 type Orchestrator struct {
-	registry     *Registry
-	matcher      *matching.Engine
-	pathOverride map[string]string // downloadID → corrected file path
-	mu           sync.RWMutex
+	registry      *Registry
+	matcher       *matching.Engine
+	qualityConfig func() config.QualityConfig
+	pathOverride  map[string]string // downloadID → corrected file path
+	mu            sync.RWMutex
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
-func NewOrchestrator(registry *Registry) *Orchestrator {
+// qualityConfig is a function that returns the latest quality preferences
+// (thread-safe via config.Persistence). Pass nil to use defaults (no filtering).
+func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConfig) *Orchestrator {
+	if qualityConfig == nil {
+		qualityConfig = func() config.QualityConfig { return config.QualityConfig{} }
+	}
 	return &Orchestrator{
-		registry:     registry,
-		matcher:      matching.New(),
-		pathOverride: make(map[string]string),
+		registry:      registry,
+		matcher:       matching.New(),
+		qualityConfig: qualityConfig,
+		pathOverride:  make(map[string]string),
 	}
 }
 
@@ -199,12 +208,6 @@ func (o *Orchestrator) DownloadBest(ctx context.Context, title, artist string, d
 		query = artist + " " + title
 	}
 
-	type candidate struct {
-		track      domain.TrackResult
-		sourceName string
-		score      float64
-	}
-
 	var candidates []candidate
 	for _, p := range o.registry.Configured() {
 		if p.Name() == excludeSource {
@@ -239,6 +242,16 @@ func (o *Orchestrator) DownloadBest(ctx context.Context, title, artist string, d
 
 	if len(candidates) == 0 {
 		return "", "", 0, fmt.Errorf("no matching track found across sources (min confidence %.0f%%)", minConfidence*100)
+	}
+
+	// Apply quality filter.
+	qc := o.qualityConfig()
+	if (qc.PreferredFormat != "" && qc.PreferredFormat != "any") || qc.MinBitrate > 0 {
+		candidates = filterByQuality(candidates, qc)
+		if len(candidates) == 0 {
+			return "", "", 0, fmt.Errorf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
+				qc.PreferredFormat, qc.MinBitrate)
+		}
 	}
 
 	// Pick best score.
@@ -297,6 +310,44 @@ func (o *Orchestrator) GetDownloads(ctx context.Context) []domain.DownloadRecord
 	}
 
 	return all
+}
+
+// candidate is used internally by DownloadBest for scoring + filtering.
+type candidate struct {
+	track      domain.TrackResult
+	sourceName string
+	score      float64
+}
+
+// filterByQuality filters candidates by preferred_format and min_bitrate.
+func filterByQuality(candidates []candidate, qc config.QualityConfig) []candidate {
+	result := candidates[:0]
+	for _, c := range candidates {
+		if qc.PreferredFormat != "" && qc.PreferredFormat != "any" {
+			if !qualityMatches(qc.PreferredFormat, c.track.Quality) {
+				continue
+			}
+		}
+		if qc.MinBitrate > 0 && c.track.Bitrate < qc.MinBitrate {
+			continue
+		}
+		result = append(result, c)
+	}
+	return result
+}
+
+// qualityMatches returns true if the candidate's quality matches the preferred format.
+// "flac" matches "flac". "mp3" matches "mp3", "mp3_320", "mp3_128".
+func qualityMatches(want, have string) bool {
+	want = strings.ToLower(want)
+	have = strings.ToLower(have)
+	if want == have {
+		return true
+	}
+	if want == "mp3" && (have == "mp3_320" || have == "mp3_128") {
+		return true
+	}
+	return false
 }
 
 // SetDownloadPath records a corrected file path for a download (e.g., after post-download renaming).
