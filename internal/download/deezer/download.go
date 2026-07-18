@@ -15,6 +15,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -400,6 +401,17 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	}
 	if ctx.Err() != nil {
 		return
+	}
+
+	// Fetch album cover URL from public API.
+	trackIDInt, convErr := strconv.Atoi(trackID)
+	if convErr == nil {
+		apiClient := New(c.cfg)
+		if trk, err := apiClient.GetTrack(ctx, trackIDInt); err == nil && trk != nil {
+			c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+				r.CoverURL = trk.Album.CoverXL
+			})
+		}
 	}
 
 	trackToken, _ := trackData["TRACK_TOKEN"].(string)

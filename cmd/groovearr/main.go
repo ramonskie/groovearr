@@ -67,8 +67,12 @@ func main() {
 	// Download orchestrator.
 	orch := download.NewOrchestrator(registry)
 
-	// Post-download processor: renames files into organized library structure.
-	postProc := download.NewPostProcessor(newRenamerHook(cfg))
+	// Post-download processor: renames files into organized library structure,
+	// then fetches cover art for the album directory.
+	postProc := download.NewPostProcessor(
+		newRenamerHook(cfg),
+		library.NewCoverHook(store),
+	)
 
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")

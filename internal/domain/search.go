@@ -20,6 +20,7 @@ type TrackResult struct {
 	Title       string `json:"title,omitempty"`
 	Album       string `json:"album,omitempty"`
 	TrackNumber int    `json:"track_number,omitempty"`
+	CoverURL    string `json:"cover_url,omitempty"` // album cover image URL (source-agnostic)
 }
 
 // AlbumResult is an album-level search hit containing multiple tracks.

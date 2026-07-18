@@ -34,7 +34,7 @@ Small but impactful fixes to what's already built.
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
 | 16 | **Post-download file renaming** — apply `folder_template` via `PathResolver` after download completes | ✅ Done | S | PathResolver (done) |
-| 17 | **Cover art download hook** — post-processing hook fetches album/artist covers from Deezer, caches as `cover.jpg` in album dir, populates `thumb_url` in DB | 🔴 High | M | PostProcessor (done), Deezer API (done) |
+| 17 | **Cover art download hook** — post-processing hook fetches album/artist covers from Deezer, caches as `cover.jpg` in album dir, populates `thumb_url` in DB | ✅ Done | M | PostProcessor (done), Deezer API (done) |
 | 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | 🔴 High | M | `dhowden/tag` |
 | 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | 🔴 High | L | `bogem/id3v2`, FLAC Vorbis |
 | 20 | **Config validation** — validate URLs, quality values, path existence at save time | 🟡 Medium | S | — |
@@ -43,7 +43,7 @@ Small but impactful fixes to what's already built.
 | 23 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
 | 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | 🟡 Medium | S | — |
 | 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | 🟡 Medium | M | — |
-| 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | 🟡 Medium | M | Cover art hook |
+| 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | ✅ Done | M | Cover art hook |
 
 ### #17 Cover Art Hook — Implementation Plan
 
@@ -203,22 +203,21 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 11 features | 🟡 1/11 |
+| 1 | Core Quality | 11 features | 🟡 3/11 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
 | 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **78 features** | **16 done, 62 remaining** |
+| **Total** | | **78 features** | **18 done, 60 remaining** |
 
 ### Immediate Next Steps (Tier 1)
 
-1. **Cover art download hook** — post-processing hook via Deezer API, cache as `cover.jpg`, populate `thumb_url`
-2. **Audio tag reading** — add `dhowden/tag` to scanner for accurate metadata
-3. **Audio tag writing** — embed metadata after download (ID3 + FLAC Vorbis)
-4. **Config validation** — validate on save in UI + server-side
-5. **Authentication** — basic login gate for API access
+1. **Audio tag reading** — add `dhowden/tag` to scanner for accurate metadata
+2. **Audio tag writing** — embed metadata after download (ID3 + FLAC Vorbis)
+3. **Config validation** — validate on save in UI + server-side
+4. **Authentication** — basic login gate for API access
 
 ### First Major Feature Block (Tier 3-4)
 

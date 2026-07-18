@@ -157,6 +157,26 @@ tr:hover td{background:#252525}
 .search-bar input{flex:1}
 .search-bar select{width:140px}
 .search-bar button{white-space:nowrap}
+
+/* ─── Album grid ──────────────────────────────────────────── */
+.album-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(160px,1fr));gap:16px}
+.album-card{
+  background:#1f1f1f;border:1px solid #2a2a2a;border-radius:6px;
+  overflow:hidden;transition:border-color .15s;cursor:pointer;
+}
+.album-card:hover{border-color:#7c5ce7}
+.album-cover{
+  width:100%;aspect-ratio:1;object-fit:cover;background:#2a2a2a;
+  display:block;
+}
+.album-cover-placeholder{
+  width:100%;aspect-ratio:1;background:#2a2a2a;
+  display:flex;align-items:center;justify-content:center;
+  font-size:32px;color:#555;
+}
+.album-info{padding:10px}
+.album-info .album-title{font-size:13px;font-weight:600;color:#ddd;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.album-info .album-artist{font-size:11px;color:#888;margin-top:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
 </style>
 </head>
 <body>
@@ -240,6 +260,10 @@ tr:hover td{background:#252525}
     <div class="card" id="library-artists" style="display:none">
       <div class="card-header"><h2>Artists</h2></div>
       <div id="artists-list"></div>
+    </div>
+    <div class="card" id="library-albums" style="display:none">
+      <div class="card-header"><h2>Albums</h2></div>
+      <div class="album-grid" id="albums-grid"></div>
     </div>
     <div class="card">
       <div class="card-header"><h2>Tracks (<span id="lib-track-count">0</span>)</h2></div>
@@ -790,17 +814,36 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 // ─── Library ──────────────────────────────────────────────
 async function loadLibrary() {
   try {
-    const [tracksR, artistsR] = await Promise.all([
-      fetch('/api/library/tracks'), fetch('/api/library/artists')
+    const [tracksR, artistsR, albumsR] = await Promise.all([
+      fetch('/api/library/tracks'), fetch('/api/library/artists'), fetch('/api/library/albums')
     ]);
     const tracks = await tracksR.json();
     const artists = await artistsR.json();
+    const albums = await albumsR.json();
     document.getElementById('lib-track-count').textContent = tracks.length || 0;
     if (artists.length) {
       document.getElementById('library-artists').style.display = 'block';
       document.getElementById('artists-list').innerHTML = artists.map(a =>
         `<span style="display:inline-block;background:#2a2a2a;padding:4px 10px;margin:3px;border-radius:4px;font-size:12px">${esc(a.name)}</span>`
       ).join('');
+    }
+    // Albums with covers.
+    if (albums.length) {
+      document.getElementById('library-albums').style.display = 'block';
+      document.getElementById('albums-grid').innerHTML = albums.map(a => {
+        const coverSrc = a.thumb_url ? `/api/covers/${a.id}` : '';
+        const coverHTML = coverSrc
+          ? `<img class="album-cover" src="${coverSrc}" alt="${esc(a.title)}" loading="lazy" onerror="this.style.display='none';this.nextElementSibling.style.display='flex'">`
+            + `<div class="album-cover-placeholder" style="display:none">&#x1F3B5;</div>`
+          : `<div class="album-cover-placeholder">&#x1F3B5;</div>`;
+        return `<div class="album-card">
+          ${coverHTML}
+          <div class="album-info">
+            <div class="album-title" title="${esc(a.title)}">${esc(a.title)}</div>
+            <div class="album-artist">${esc(getArtistName(artists, a.artist_id))}</div>
+          </div>
+        </div>`;
+      }).join('');
     }
     const tbl = document.getElementById('lib-tracks-table');
     if (tracks.length) {
@@ -815,6 +858,11 @@ async function loadLibrary() {
       tbl.innerHTML = '<tr><td colspan="4" style="color:#666;text-align:center;padding:20px">No tracks in library. Downloads are scanned automatically when they complete.</td></tr>';
     }
   } catch(e) { logError('LIB', 'loadLibrary failed', e); }
+}
+
+function getArtistName(artists, artistId) {
+  const a = artists.find(x => x.id === artistId);
+  return a ? a.name : 'Unknown Artist';
 }
 
 async function scanLibrary() {

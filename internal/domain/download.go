@@ -35,4 +35,5 @@ type DownloadRecord struct {
 	FilePath    string        `json:"file_path,omitempty"`
 	Error       string        `json:"error,omitempty"`
 	TrackID     string        `json:"track_id,omitempty"` // source-specific ID
+	CoverURL    string        `json:"cover_url,omitempty"` // album cover image URL
 }

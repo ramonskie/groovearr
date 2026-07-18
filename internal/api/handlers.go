@@ -4,10 +4,13 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
 
 	"github.com/ramonskie/groovearr/internal/config"
@@ -65,6 +68,7 @@ func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
 	mux.HandleFunc("POST /api/library/scan", s.handleLibraryScan)
+	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
 
 	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
@@ -413,6 +417,61 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 		"errors":   agg.Errors,
 		"paths":    paths,
 	})
+}
+
+// handleCoverArt serves the cover.jpg image for an album.
+func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
+	albumIDStr := r.PathValue("albumID")
+	albumID, err := strconv.ParseInt(albumIDStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid album ID"))
+		return
+	}
+
+	ctx := r.Context()
+	album, err := s.store.GetAlbum(ctx, albumID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("album not found"))
+		return
+	}
+
+	artist, err := s.store.GetArtist(ctx, album.ArtistID)
+	if err != nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
+		return
+	}
+
+	// Try to find the album directory from existing tracks.
+	cfg := s.cfg.Get()
+	var albumDir string
+	tracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
+	if len(tracks) > 0 && tracks[0].FilePath != "" {
+		albumDir = filepath.Dir(tracks[0].FilePath)
+	} else {
+		// Fall back to constructing the path from the folder template.
+		resolver := library.NewPathResolver(cfg.Library.FolderTemplate)
+		resolved := resolver.Resolve(library.ResolveArgs{
+			Artist:    artist.Name,
+			Album:     album.Title,
+			Year:      album.Year,
+			TrackNum:  1,
+			Title:     "dummy",
+			Ext:       "mp3",
+			AlbumType: "Album",
+		})
+		if resolved == "" {
+			writeError(w, http.StatusNotFound, fmt.Errorf("cannot resolve album path"))
+			return
+		}
+		albumDir = filepath.Join(cfg.Library.LibraryPath, resolved)
+	}
+
+	coverPath := filepath.Join(albumDir, "cover.jpg")
+	if _, err := os.Stat(coverPath); os.IsNotExist(err) {
+		http.Error(w, "cover not found", http.StatusNotFound)
+		return
+	}
+	http.ServeFile(w, r, coverPath)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────

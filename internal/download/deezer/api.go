@@ -329,6 +329,7 @@ func (t Track) ToTrackResult(quality string) domain.TrackResult {
 		Title:       t.Title,
 		Album:       t.Album.Title,
 		TrackNumber: t.TrackPos,
+		CoverURL:    t.Album.CoverXL,
 	}
 }
 
