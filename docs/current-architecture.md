@@ -142,7 +142,6 @@ WAL mode, foreign keys ON, idempotent `CREATE TABLE IF NOT EXISTS` (no migration
 | `PathResolver` template-based renaming | Implemented but **not wired** — downloads stay flat in download path |
 | `ArtistImage` type | **Defined, never used** |
 | `QualityConfig` (min_bitrate, preferred_format) | **Not consulted** by any download logic |
-| `MusicVideosPath` config | **Never used** |
 | Deezer OAuth (`access_token` field) | **No OAuth flow** implemented |
 | External ID columns (Spotify, iTunes, etc.) | Schema ready but **never populated** |
 | Album-art images | ThumbURL fields exist but **no image fetching/display** |

@@ -477,7 +477,8 @@ func (c *DownloadClient) getMediaURL(trackToken string) (string, string) {
 	if prefIdx >= 0 {
 		order = append(order[prefIdx:], order[:prefIdx]...)
 	}
-	if !c.cfg.AllowFallback {
+	// Allow fallback unless explicitly disabled.
+	if c.cfg.AllowFallback != nil && !*c.cfg.AllowFallback {
 		order = order[:1]
 	}
 

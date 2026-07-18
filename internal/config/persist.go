@@ -31,10 +31,13 @@ func (p *Persistence) Get() Config {
 }
 
 // Update merges partial config and persists to disk.
-func (p *Persistence) Update(fn func(cfg *Config)) error {
+// The callback runs under the write lock. If it returns an error, the save is aborted.
+func (p *Persistence) Update(fn func(cfg *Config) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	fn(&p.cfg)
+	if err := fn(&p.cfg); err != nil {
+		return err
+	}
 	return p.save()
 }
 

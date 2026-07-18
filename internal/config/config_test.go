@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -37,10 +38,11 @@ func TestPersistenceLoadOrCreate(t *testing.T) {
 	}
 
 	// Update and verify persistence.
-	err = p.Update(func(cfg *Config) {
+	err = p.Update(func(cfg *Config) error {
 		cfg.Soulseek.SlskdURL = "http://slskd:5030"
 		cfg.Soulseek.APIKey = "secret123"
 		cfg.Deezer.ARL = "arl_token"
+		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,9 +72,9 @@ func TestPersistenceUpdate(t *testing.T) {
 	p, _ := LoadOrCreate(path)
 
 	// Multiple updates should accumulate.
-	p.Update(func(cfg *Config) { cfg.Soulseek.SlskdURL = "url1" })
-	p.Update(func(cfg *Config) { cfg.Soulseek.APIKey = "key1" })
-	p.Update(func(cfg *Config) { cfg.Deezer.Quality = "mp3_320" })
+	_ = p.Update(func(cfg *Config) error { cfg.Soulseek.SlskdURL = "url1"; return nil })
+	_ = p.Update(func(cfg *Config) error { cfg.Soulseek.APIKey = "key1"; return nil })
+	_ = p.Update(func(cfg *Config) error { cfg.Deezer.Quality = "mp3_320"; return nil })
 
 	cfg := p.Get()
 	if cfg.Soulseek.SlskdURL != "url1" {
@@ -97,5 +99,102 @@ func TestPersistenceDefaultsAfterCorrupt(t *testing.T) {
 	if err == nil {
 		t.Error("expected error for corrupt JSON")
 		_ = p
+	}
+}
+
+func TestValidateDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+	errs := cfg.Validate()
+	if len(errs) > 0 {
+		t.Errorf("default config should be valid, got: %v", errs)
+	}
+}
+
+func TestValidateBadURL(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Soulseek.SlskdURL = "not-a-url!!!"
+	errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "slskd_url") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected slskd_url error, got: %v", errs)
+	}
+}
+
+func TestValidateBadDeezerQuality(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Deezer.ARL = "token123"
+	cfg.Deezer.Quality = "wav"
+	errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "deezer.quality") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected deezer.quality error, got: %v", errs)
+	}
+}
+
+func TestValidateSearchTimeout(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Soulseek.SearchTimeout = 0
+	errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "search_timeout") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected search_timeout error, got: %v", errs)
+	}
+}
+
+func TestValidateBadPreferredFormat(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Quality.PreferredFormat = "wav"
+	errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "preferred_format") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected preferred_format error, got: %v", errs)
+	}
+}
+
+func TestValidateNoTemplateTokens(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Library.FolderTemplate = "just-a-string"
+	errs := cfg.Validate()
+	found := false
+	for _, e := range errs {
+		if strings.Contains(e, "folder_template") {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("expected folder_template warning, got: %v", errs)
+	}
+}
+
+func TestValidateEmptyARLNoQualityCheck(t *testing.T) {
+	// When ARL is empty, bad quality should not be flagged since Deezer isn't configured.
+	cfg := DefaultConfig()
+	cfg.Deezer.ARL = ""
+	cfg.Deezer.Quality = "wav"
+	errs := cfg.Validate()
+	for _, e := range errs {
+		if strings.Contains(e, "deezer.quality") {
+			t.Errorf("quality check should be skipped when ARL is empty, got: %v", errs)
+		}
 	}
 }

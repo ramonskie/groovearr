@@ -118,38 +118,27 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.cfg.Update(func(cfg *config.Config) {
-		if partial.Soulseek.SlskdURL != "" {
-			cfg.Soulseek.SlskdURL = partial.Soulseek.SlskdURL
+	err := s.cfg.Update(func(cfg *config.Config) error {
+		// Merge partial onto a copy first to validate, then apply to live config.
+		merged := *cfg
+		mergeConfig(&merged, &partial)
+
+		if errs := merged.Validate(); len(errs) > 0 {
+			return &validationError{errs}
 		}
-		if partial.Soulseek.APIKey != "" {
-			cfg.Soulseek.APIKey = partial.Soulseek.APIKey
-		}
-		if partial.Soulseek.DownloadPath != "" {
-			cfg.Soulseek.DownloadPath = partial.Soulseek.DownloadPath
-		}
-		if partial.Soulseek.SearchTimeout > 0 {
-			cfg.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
-		}
-		if partial.Deezer.ARL != "" {
-			cfg.Deezer.ARL = partial.Deezer.ARL
-		}
-		if partial.Deezer.Quality != "" {
-			cfg.Deezer.Quality = partial.Deezer.Quality
-		}
-		// Library settings.
-		if partial.Library.FolderTemplate != "" {
-			cfg.Library.FolderTemplate = partial.Library.FolderTemplate
-		}
-		if partial.Library.RootPath != "" {
-			cfg.Library.RootPath = partial.Library.RootPath
-		}
-		if partial.Library.MusicPaths != nil {
-			cfg.Library.MusicPaths = partial.Library.MusicPaths
-		}
+
+		mergeConfig(cfg, &partial)
+		return nil
 	})
 
 	if err != nil {
+		if ve, ok := err.(*validationError); ok {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":  "validation failed",
+				"errors": ve.Errors,
+			})
+			return
+		}
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
 		return
 	}
@@ -160,6 +149,13 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
+
+// validationError carries config validation failures.
+type validationError struct {
+	Errors []string
+}
+
+func (e *validationError) Error() string { return "validation failed" }
 
 func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 	names := s.orch.Registry().Names()
@@ -449,4 +445,53 @@ func noCache(next http.Handler) http.Handler {
 		w.Header().Set("Expires", "0")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// mergeConfig copies non-zero fields from partial into dst.
+// Extracted from handleUpdateConfig so validation can preview the merge result.
+func mergeConfig(dst, partial *config.Config) {
+	if partial.Soulseek.SlskdURL != "" {
+		dst.Soulseek.SlskdURL = partial.Soulseek.SlskdURL
+	}
+	if partial.Soulseek.APIKey != "" {
+		dst.Soulseek.APIKey = partial.Soulseek.APIKey
+	}
+	if partial.Soulseek.DownloadPath != "" {
+		dst.Soulseek.DownloadPath = partial.Soulseek.DownloadPath
+	}
+	if partial.Soulseek.SearchTimeout > 0 {
+		dst.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
+	}
+	if partial.Soulseek.MinUploadSpeed >= 0 {
+		dst.Soulseek.MinUploadSpeed = partial.Soulseek.MinUploadSpeed
+	}
+	if partial.Deezer.ARL != "" {
+		dst.Deezer.ARL = partial.Deezer.ARL
+	}
+	if partial.Deezer.Quality != "" {
+		dst.Deezer.Quality = partial.Deezer.Quality
+	}
+	if partial.Deezer.AccessToken != "" {
+		dst.Deezer.AccessToken = partial.Deezer.AccessToken
+	}
+	if partial.Deezer.AllowFallback != nil {
+		dst.Deezer.AllowFallback = partial.Deezer.AllowFallback
+	}
+
+	if partial.Library.FolderTemplate != "" {
+		dst.Library.FolderTemplate = partial.Library.FolderTemplate
+	}
+	if partial.Library.RootPath != "" {
+		dst.Library.RootPath = partial.Library.RootPath
+	}
+	if partial.Library.MusicPaths != nil {
+		dst.Library.MusicPaths = partial.Library.MusicPaths
+	}
+
+	if partial.Quality.PreferredFormat != "" {
+		dst.Quality.PreferredFormat = partial.Quality.PreferredFormat
+	}
+	if partial.Quality.MinBitrate > 0 {
+		dst.Quality.MinBitrate = partial.Quality.MinBitrate
+	}
 }
