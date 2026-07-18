@@ -593,6 +593,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 	return records
 }
 
+// parseState maps slskd's download state strings to canonical domain states.
 func parseState(s string) domain.DownloadState {
 	lower := strings.ToLower(s)
 	switch {
@@ -600,7 +601,7 @@ func parseState(s string) domain.DownloadState {
 		return domain.DownloadSucceeded
 	case strings.Contains(lower, "errored") || strings.Contains(lower, "failed"):
 		return domain.DownloadErrored
-	case strings.Contains(lower, "cancelled"):
+	case strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled"):
 		return domain.DownloadCancelled
 	case strings.Contains(lower, "aborted"):
 		return domain.DownloadAborted

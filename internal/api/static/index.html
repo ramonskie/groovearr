@@ -723,7 +723,7 @@ async function refreshDownloads() {
     const downloads = await r.json();
     const el = document.getElementById('downloads-list');
     const badge = document.getElementById('dl-badge');
-    const active = downloads.filter(d => !['Completed, Succeeded','Errored','Cancelled','Aborted'].includes(d.state));
+    const active = downloads.filter(d => !['succeeded','errored','cancelled','aborted'].includes(d.state));
     badge.textContent = active.length || '0';
     badge.classList.toggle('show', active.length > 0);
     if (!downloads.length) {
@@ -745,7 +745,7 @@ async function refreshDownloads() {
             ${d.error ? `<div style="color:#ef9a9a;font-size:12px;margin-top:4px">${esc(d.error)}</div>` : ''}
             ${d.file_path ? `<div style="color:#81c784;font-size:12px;margin-top:4px">Saved: ${esc(d.file_path)}</div>` : ''}
           </div>
-          ${!d.state.includes('Completed') && !d.state.includes('Errored') && !d.state.includes('Cancelled') ?
+          ${!['succeeded','errored','cancelled','aborted'].includes(d.state) ?
             `<button class="btn btn-danger btn-sm" onclick="cancelDownload('${d.id}')">Cancel</button>` : ''}
         </div>
       </div>
@@ -753,7 +753,7 @@ async function refreshDownloads() {
     // Auto-scan.
     let newCompleted = 0;
     for (const d of downloads) {
-      if (d.state === 'Completed, Succeeded' && d.file_path && !scannedDownloadIDs.has(d.id)) {
+      if (d.state === 'succeeded' && d.file_path && !scannedDownloadIDs.has(d.id)) {
         scannedDownloadIDs.add(d.id); newCompleted++;
       }
     }
@@ -776,7 +776,7 @@ async function clearCompleted() {
     const r = await fetch('/api/downloads');
     const downloads = await r.json();
     for (const d of downloads) {
-      if (['Completed, Succeeded','Errored','Cancelled','Aborted'].includes(d.state)) {
+      if (['succeeded','errored','cancelled','aborted'].includes(d.state)) {
         await fetch('/api/downloads/' + encodeURIComponent(d.id), {method:'DELETE'});
       }
     }

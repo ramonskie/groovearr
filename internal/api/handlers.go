@@ -114,7 +114,7 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	var partial config.Config
 	if err := json.NewDecoder(r.Body).Decode(&partial); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
@@ -139,7 +139,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -206,7 +206,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		Source string `json:"source"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Query == "" {
@@ -217,7 +217,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tracks, albums, err := s.orch.Search(ctx, req.Source, req.Query)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if tracks == nil {
@@ -241,14 +241,14 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		Size     int64  `json:"size"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 
 	ctx := r.Context()
 	id, err := s.orch.Download(ctx, req.Source, req.Username, req.Filename, req.Size)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 
@@ -265,7 +265,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		ExcludeSource string `json:"exclude_source"`  // source to skip (the one that just failed)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusBadRequest, err)
 		return
 	}
 	if req.Title == "" {
@@ -276,7 +276,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	id, source, confidence, err := s.orch.DownloadBest(ctx, req.Title, req.Artist, req.Duration, req.ExcludeSource)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err)
 		return
 	}
 
@@ -317,7 +317,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if err := s.orch.CancelDownload(r.Context(), id); err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusNotFound, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
@@ -329,7 +329,7 @@ func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tracks, err := s.store.SearchTracks(ctx, "", 200)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if tracks == nil {
@@ -342,7 +342,7 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	artists, err := s.store.ListArtists(ctx, 0, 200)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if artists == nil {
@@ -355,7 +355,7 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	albums, err := s.store.SearchAlbums(ctx, "", 200)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
 	if albums == nil {
@@ -435,6 +435,11 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	json.NewEncoder(w).Encode(v)
+}
+
+// writeError sends a JSON error response.
+func writeError(w http.ResponseWriter, status int, err error) {
+	writeJSON(w, status, map[string]string{"error": err.Error()})
 }
 
 // noCache wraps a handler to prevent browser caching (useful for development).

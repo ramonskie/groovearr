@@ -4,12 +4,12 @@ package domain
 type DownloadState string
 
 const (
-	DownloadInitializing DownloadState = "Initializing"
-	DownloadDownloading  DownloadState = "InProgress, Downloading"
-	DownloadSucceeded    DownloadState = "Completed, Succeeded"
-	DownloadErrored      DownloadState = "Errored"
-	DownloadCancelled    DownloadState = "Cancelled"
-	DownloadAborted      DownloadState = "Aborted"
+	DownloadInitializing DownloadState = "initializing"
+	DownloadDownloading  DownloadState = "downloading"
+	DownloadSucceeded    DownloadState = "succeeded"
+	DownloadErrored      DownloadState = "errored"
+	DownloadCancelled    DownloadState = "cancelled"
+	DownloadAborted      DownloadState = "aborted"
 )
 
 // TerminalStates returns true if the state is final (no more progress expected).
