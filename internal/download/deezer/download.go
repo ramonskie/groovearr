@@ -830,6 +830,9 @@ func parsePlaylistItems(rawList []any) []DeezerPlaylist {
 		if err := json.Unmarshal(raw, &p); err != nil {
 			continue
 		}
+		if p.ID == "" || p.Title == "" {
+			continue
+		}
 		out = append(out, p)
 	}
 	return out

@@ -2,9 +2,11 @@ package playlist
 
 import (
 	"context"
+	"os"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/matching"
 )
 
 type mockSource struct {
@@ -52,9 +54,11 @@ func TestRegistry(t *testing.T) {
 }
 
 type mockStore struct {
-	playlists      map[int64]*domain.Playlist
-	playlistTracks map[int64][]domain.PlaylistTrack
-	nextID         int64
+	playlists       map[int64]*domain.Playlist
+	playlistTracks  map[int64][]domain.PlaylistTrack
+	artists         map[string]*domain.Artist // name → artist
+	searchTracks    []domain.Track            // tracks returned by SearchTracks
+	nextID          int64
 }
 
 func (m *mockStore) next() int64 { m.nextID++; return m.nextID }
@@ -102,9 +106,24 @@ func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) 
 }
 
 // Remaining Store methods — stubs.
-func (m *mockStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, error) { return 0, nil }
-func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) { return nil, nil }
-func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) { return nil, nil }
+func (m *mockStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, error) {
+	if m.artists == nil { m.artists = map[string]*domain.Artist{} }
+	existing := m.artists[a.Name]
+	if existing != nil { return existing.ID, nil }
+	id := m.next()
+	a.ID = id
+	m.artists[a.Name] = a
+	return id, nil
+}
+func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
+	for _, a := range m.artists {
+		if a.ID == id { return a, nil }
+	}
+	return nil, nil
+}
+func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
+	return m.artists[name], nil
+}
 func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) { return nil, nil }
 func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) { return nil, nil }
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) { return 0, nil }
@@ -112,13 +131,102 @@ func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, erro
 func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) { return nil, nil }
 func (m *mockStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) { return nil, nil }
 func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) { return 0, nil }
-func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error) { return nil, nil }
+func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error)       { return nil, nil }
 func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) { return nil, nil }
 func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) { return nil, nil }
-func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) { return nil, nil }
+func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
+	return m.searchTracks, nil
+}
 func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.Track, error) { return nil, nil }
-func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
+func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error                          { return nil }
 func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) { return nil, nil }
 func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error) { return nil, nil }
 func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) { return nil, nil }
-func (m *mockStore) Close() error { return nil }
+func (m *mockStore) Close() error                                                                { return nil }
+
+func TestParseFilenameMeta(t *testing.T) {
+	tests := []struct {
+		input           string
+		wantArtist, wantAlbum, wantTitle string
+	}{
+		{"Artist - Title", "Artist", "", "Title"},
+		{"Artist - Album - Title", "Artist", "Album", "Title"},
+		{"SingleWord", "", "", "SingleWord"},
+		{"  Spaces  -  Clean  ", "Spaces", "", "Clean"},
+		{"", "", "", ""},
+	}
+	for _, tt := range tests {
+		artist, album, title := parseFilenameMeta(tt.input)
+		if artist != tt.wantArtist || album != tt.wantAlbum || title != tt.wantTitle {
+			t.Errorf("parseFilenameMeta(%q) = (%q, %q, %q), want (%q, %q, %q)",
+				tt.input, artist, album, title, tt.wantArtist, tt.wantAlbum, tt.wantTitle)
+		}
+	}
+}
+
+func TestSanitizePath(t *testing.T) {
+	tests := []struct{ input, want string }{
+		{"hello", "hello"},
+		{"a/b:c", "a_b_c"},
+		{"rock*pop?top\"song<best>classic|mix", "rock_pop_top_song_best_classic_mix"},
+	}
+	for _, tt := range tests {
+		got := sanitizePath(tt.input)
+		if got != tt.want {
+			t.Errorf("sanitizePath(%q) = %q, want %q", tt.input, got, tt.want)
+		}
+	}
+}
+
+func TestCopyFile(t *testing.T) {
+	dir := t.TempDir()
+	src := dir + "/src.txt"
+	dst := dir + "/dst.txt"
+	content := []byte("test data")
+	os.WriteFile(src, content, 0o644)
+
+	if err := copyFile(src, dst); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := os.ReadFile(dst)
+	if string(got) != string(content) {
+		t.Errorf("copied content = %q, want %q", string(got), string(content))
+	}
+}
+
+func TestFindInLibrary(t *testing.T) {
+	// Test findInLibrary with a mock store that returns search results.
+	store := &mockStore{
+		playlists:      map[int64]*domain.Playlist{},
+		playlistTracks: map[int64][]domain.PlaylistTrack{},
+		artists:        map[string]*domain.Artist{},
+	}
+	// Seed an artist and track in the store.
+	store.artists["Test Artist"] = &domain.Artist{ID: 1, Name: "Test Artist"}
+	store.searchTracks = []domain.Track{
+		{ID: 10, ArtistID: 1, Title: "Test Song", Duration: 200000},
+	}
+
+	svc := &Service{
+		store:   store,
+		matcher: matching.New(),
+	}
+
+	t.Run("exact match", func(t *testing.T) {
+		id := svc.findInLibrary(context.Background(), TrackInfo{
+			Title: "Test Song", Artist: "Test Artist",
+		})
+		if id != 10 {
+			t.Errorf("expected track ID 10, got %d", id)
+		}
+	})
+
+	t.Run("no match", func(t *testing.T) {
+		id := svc.findInLibrary(context.Background(), TrackInfo{
+			Title: "Nonexistent", Artist: "Nobody",
+		})
+		if id != 0 {
+			t.Errorf("expected 0, got %d", id)
+		}
+	})
+}

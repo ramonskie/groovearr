@@ -453,6 +453,20 @@ func sanitizePath(name string) string {
 	return replacer.Replace(name)
 }
 
+// parseFilenameMeta extracts artist and title from a "Artist - Title" formatted string.
+func parseFilenameMeta(s string) (artist, album, title string) {
+	s = strings.TrimSpace(s)
+	parts := strings.SplitN(s, " - ", 3)
+	switch len(parts) {
+	case 3:
+		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
+	case 2:
+		return strings.TrimSpace(parts[0]), "", strings.TrimSpace(parts[1])
+	default:
+		return "", "", s
+	}
+}
+
 // copyFile copies src to dst.
 func copyFile(src, dst string) error {
 	s, err := os.Open(src)
