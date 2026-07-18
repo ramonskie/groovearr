@@ -149,6 +149,11 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 //	Artist/Album/TrackNumber - Title.ext
 //	Artist - Album/TrackNumber - Title.ext
 //	Artist/Album (Year)/TrackNumber Title.ext
+//
+// Flat filenames (no directory structure) fall back to parsing " - " separators:
+//
+//	Artist - Title.ext          → artist=Artist, album=Unknown Album, track=Title
+//	Artist - Album - Title.ext  → artist=Artist, album=Album, track=Title
 func parsePath(path string) (track, artist, album string) {
 	dir := filepath.Dir(path)
 	filename := filepath.Base(path)
@@ -194,9 +199,24 @@ func parsePath(path string) (track, artist, album string) {
 		}
 		track = parts[1]
 	default:
-		artist = "Unknown Artist"
-		album = "Unknown Album"
-		track = parts[0]
+		// Flat file: try "Artist - Title" or "Artist - Album - Title" patterns.
+		if strings.Contains(title, " - ") {
+			flatParts := strings.SplitN(title, " - ", 3)
+			switch len(flatParts) {
+			case 3:
+				artist = strings.TrimSpace(flatParts[0])
+				album = strings.TrimSpace(flatParts[1])
+				track = strings.TrimSpace(flatParts[2])
+			case 2:
+				artist = strings.TrimSpace(flatParts[0])
+				album = "Unknown Album"
+				track = strings.TrimSpace(flatParts[1])
+			}
+		} else {
+			artist = "Unknown Artist"
+			album = "Unknown Album"
+			track = parts[0]
+		}
 	}
 
 	return track, artist, album

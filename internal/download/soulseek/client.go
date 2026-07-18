@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"path"
+	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -213,7 +214,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 		return out, nil
 	}
 
-	records := parseDownloadStatus(resp)
+	records := parseDownloadStatus(resp, c.cfg.DownloadPath)
 	c.downloadsMu.Lock()
 	for _, r := range records {
 		c.downloads[r.ID] = &r
@@ -235,7 +236,7 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dom
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}
 
-	records := parseDownloadStatus(resp)
+	records := parseDownloadStatus(resp, c.cfg.DownloadPath)
 	if len(records) == 0 {
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}
@@ -547,7 +548,7 @@ func extractAlbumPath(filename string) string {
 	return strings.Join(parts[:len(parts)-1], "/")
 }
 
-func parseDownloadStatus(raw json.RawMessage) []domain.DownloadRecord {
+func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.DownloadRecord {
 	var users []struct {
 		Username    string `json:"username"`
 		Directories []struct {
@@ -571,6 +572,10 @@ func parseDownloadStatus(raw json.RawMessage) []domain.DownloadRecord {
 	for _, user := range users {
 		for _, dir := range user.Directories {
 			for _, f := range dir.Files {
+				filePath := ""
+				if f.Filename != "" && downloadPath != "" {
+					filePath = filepath.Join(downloadPath, f.Filename)
+				}
 				records = append(records, domain.DownloadRecord{
 					ID:          f.ID,
 					SourceName:  pluginName,
@@ -580,6 +585,7 @@ func parseDownloadStatus(raw json.RawMessage) []domain.DownloadRecord {
 					Size:        f.Size,
 					Transferred: f.BytesTransferred,
 					Speed:       f.AverageSpeed,
+					FilePath:    filePath,
 				})
 			}
 		}

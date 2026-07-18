@@ -69,6 +69,31 @@ func TestParsePath_SingleFile(t *testing.T) {
 	}
 }
 
+func TestParsePath_FlatArtistTrack(t *testing.T) {
+	tests := []struct {
+		path       string
+		wantTrack  string
+		wantArtist string
+		wantAlbum  string
+	}{
+		{"Daft Punk - Get Lucky.flac", "Get Lucky", "Daft Punk", "Unknown Album"},
+		{"Artist - Album - Title.mp3", "Title", "Artist", "Album"},
+		{"SingleArtist.flac", "SingleArtist", "Unknown Artist", "Unknown Album"},
+	}
+	for _, tt := range tests {
+		track, artist, album := parsePath(tt.path)
+		if track != tt.wantTrack {
+			t.Errorf("%s: track = %q, want %q", tt.path, track, tt.wantTrack)
+		}
+		if artist != tt.wantArtist {
+			t.Errorf("%s: artist = %q, want %q", tt.path, artist, tt.wantArtist)
+		}
+		if album != tt.wantAlbum {
+			t.Errorf("%s: album = %q, want %q", tt.path, album, tt.wantAlbum)
+		}
+	}
+}
+
 func TestAudioExtensions(t *testing.T) {
 	valid := []string{".mp3", ".flac", ".ogg", ".m4a", ".wav"}
 	for _, ext := range valid {

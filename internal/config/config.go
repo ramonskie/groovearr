@@ -34,9 +34,10 @@ type DeezerConfig struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	MusicPaths       []string `json:"music_paths"`
-	MusicVideosPath  string   `json:"music_videos_path,omitempty"`
-	FolderTemplate   string   `json:"folder_template"` // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	RootPath        string   `json:"root_path"`        // where organized downloads end up
+	MusicPaths      []string `json:"music_paths"`      // additional directories to scan
+	MusicVideosPath string   `json:"music_videos_path,omitempty"`
+	FolderTemplate  string   `json:"folder_template"`  // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
 }
 
 // QualityConfig holds quality preferences for downloads.
@@ -58,6 +59,7 @@ func DefaultConfig() Config {
 			AllowFallback: true,
 		},
 		Library: LibraryConfig{
+			RootPath:       "./music",
 			FolderTemplate: "{artist}/{album} ({year})/{track:02d} - {title}",
 		},
 		Quality: QualityConfig{
@@ -87,6 +89,12 @@ func Load(path string) (Config, error) {
 		abs, err := filepath.Abs(cfg.Soulseek.DownloadPath)
 		if err == nil {
 			cfg.Soulseek.DownloadPath = abs
+		}
+	}
+	if cfg.Library.RootPath != "" && !filepath.IsAbs(cfg.Library.RootPath) {
+		abs, err := filepath.Abs(cfg.Library.RootPath)
+		if err == nil {
+			cfg.Library.RootPath = abs
 		}
 	}
 

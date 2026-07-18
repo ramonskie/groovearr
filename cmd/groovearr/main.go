@@ -10,6 +10,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
 	"github.com/ramonskie/groovearr/internal/download/soulseek"
@@ -56,13 +57,16 @@ func main() {
 	// Download orchestrator.
 	orch := download.NewOrchestrator(registry)
 
+	// Post-download processor: renames files into organized library structure.
+	postProc := download.NewPostProcessor(newRenamerHook(cfg))
+
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
 	if addr == "" {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, orch, store, scanner)
+	srv := api.NewServer(addr, cfg, orch, store, scanner, postProc)
 
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
@@ -75,5 +79,23 @@ func main() {
 
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
+	}
+}
+
+// newRenamerHook creates a post-download hook that renames files using the configured
+// folder template. It reads the latest config on each call so template changes take effect
+// without restart. Files are moved from the download staging area to the library root.
+func newRenamerHook(cfg *config.Persistence) download.PostDownloadHook {
+	return func(ctx context.Context, record domain.DownloadRecord) (string, error) {
+		c := cfg.Get()
+		template := c.Library.FolderTemplate
+		root := c.Library.RootPath
+		if root == "" {
+			root = c.Soulseek.DownloadPath // backward compat
+		}
+		renamer := library.NewRenamer(template, root)
+
+		// Extract metadata from the filename if the download client didn't provide structured data.
+		return renamer.Rename(record.FilePath, library.FileMeta{})
 	}
 }

@@ -121,15 +121,18 @@ func (e *Engine) ClearCompleted() {
 
 // Orchestrator routes search and download to configured plugins.
 type Orchestrator struct {
-	registry *Registry
-	matcher  *matching.Engine
+	registry     *Registry
+	matcher      *matching.Engine
+	pathOverride map[string]string // downloadID → corrected file path
+	mu           sync.RWMutex
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
 func NewOrchestrator(registry *Registry) *Orchestrator {
 	return &Orchestrator{
-		registry: registry,
-		matcher:  matching.New(),
+		registry:     registry,
+		matcher:      matching.New(),
+		pathOverride: make(map[string]string),
 	}
 }
 
@@ -282,7 +285,23 @@ func (o *Orchestrator) GetDownloads(ctx context.Context) []domain.DownloadRecord
 		all = append(all, records...)
 	}
 
+	// Apply post-process path overrides.
+	o.mu.RLock()
+	defer o.mu.RUnlock()
+	for i := range all {
+		if override, ok := o.pathOverride[all[i].ID]; ok {
+			all[i].FilePath = override
+		}
+	}
+
 	return all
+}
+
+// SetDownloadPath records a corrected file path for a download (e.g., after post-download renaming).
+func (o *Orchestrator) SetDownloadPath(downloadID, path string) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.pathOverride[downloadID] = path
 }
 
 // CancelDownload cancels a download by ID.

@@ -22,20 +22,22 @@ var staticFS embed.FS
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg     *config.Persistence
-	orch    *download.Orchestrator
-	store   library.Store
-	scanner *library.Scanner
-	httpSrv *http.Server
+	cfg      *config.Persistence
+	orch     *download.Orchestrator
+	store    library.Store
+	scanner  *library.Scanner
+	postProc *download.PostProcessor
+	httpSrv  *http.Server
 }
 
 // NewServer creates an HTTP server with all routes wired.
-func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator, store library.Store, scanner *library.Scanner) *Server {
+func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator, store library.Store, scanner *library.Scanner, postProc *download.PostProcessor) *Server {
 	s := &Server{
-		cfg:     cfg,
-		orch:    orch,
-		store:   store,
-		scanner: scanner,
+		cfg:      cfg,
+		orch:     orch,
+		store:    store,
+		scanner:  scanner,
+		postProc: postProc,
 	}
 
 	mux := http.NewServeMux()
@@ -138,6 +140,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		// Library settings.
 		if partial.Library.FolderTemplate != "" {
 			cfg.Library.FolderTemplate = partial.Library.FolderTemplate
+		}
+		if partial.Library.RootPath != "" {
+			cfg.Library.RootPath = partial.Library.RootPath
 		}
 		if partial.Library.MusicPaths != nil {
 			cfg.Library.MusicPaths = partial.Library.MusicPaths
@@ -292,6 +297,24 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 	if downloads == nil {
 		downloads = []domain.DownloadRecord{}
 	}
+
+	// Run post-download hooks (e.g., file renaming).
+	if s.postProc != nil {
+		before := make(map[string]string, len(downloads))
+		for _, d := range downloads {
+			before[d.ID] = d.FilePath
+		}
+
+		s.postProc.ProcessDownloads(ctx, downloads)
+
+		// Record path overrides so the orchestrator serves corrected paths on next poll.
+		for _, d := range downloads {
+			if newPath := d.FilePath; newPath != "" && newPath != before[d.ID] {
+				s.orch.SetDownloadPath(d.ID, newPath)
+			}
+		}
+	}
+
 	writeJSON(w, http.StatusOK, downloads)
 }
 
@@ -348,26 +371,23 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
 
-	// Collect paths to scan: MusicPaths + DownloadPath if not already included.
-	paths := make([]string, 0, len(cfg.Library.MusicPaths)+1)
-	for _, p := range cfg.Library.MusicPaths {
-		if p != "" {
+	// Collect unique paths: RootPath + MusicPaths + DownloadPath.
+	seen := map[string]bool{}
+	paths := make([]string, 0, len(cfg.Library.MusicPaths)+3)
+
+	addPath := func(p string) {
+		if p != "" && !seen[p] {
+			seen[p] = true
 			paths = append(paths, p)
 		}
 	}
-	if cfg.Soulseek.DownloadPath != "" {
-		// Only add DownloadPath if not already in MusicPaths.
-		found := false
-		for _, p := range paths {
-			if p == cfg.Soulseek.DownloadPath {
-				found = true
-				break
-			}
-		}
-		if !found {
-			paths = append(paths, cfg.Soulseek.DownloadPath)
-		}
+
+	addPath(cfg.Library.RootPath)
+	for _, p := range cfg.Library.MusicPaths {
+		addPath(p)
 	}
+	addPath(cfg.Soulseek.DownloadPath)
+
 	if len(paths) == 0 {
 		paths = append(paths, "./downloads")
 	}
