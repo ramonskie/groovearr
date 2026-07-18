@@ -1,7 +1,9 @@
 package library
 
 import (
+	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -169,6 +171,78 @@ func TestParseTrackNumber(t *testing.T) {
 	}
 }
 
+func TestReadFileTags(t *testing.T) {
+	t.Run("non-audio file returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "not-audio.txt")
+		if err := os.WriteFile(path, []byte("hello world"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tags, err := readFileTags(path)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if tags != nil {
+			t.Errorf("expected nil tags for non-audio file, got %+v", tags)
+		}
+	})
+
+	t.Run("empty file returns nil", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "empty.mp3")
+		if err := os.WriteFile(path, []byte{}, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tags, err := readFileTags(path)
+		if err != nil {
+			t.Errorf("unexpected error: %v", err)
+		}
+		if tags != nil {
+			t.Errorf("expected nil tags for empty file, got %+v", tags)
+		}
+	})
+
+	t.Run("missing file returns error", func(t *testing.T) {
+		_, err := readFileTags("/nonexistent/file.mp3")
+		if err == nil {
+			t.Error("expected error for missing file")
+		}
+	})
+
+	t.Run("minimal FLAC with vorbis comments", func(t *testing.T) {
+		dir := t.TempDir()
+		path := filepath.Join(dir, "test.flac")
+		if err := os.WriteFile(path, minimalFLAC("Test Artist", "Test Album", "Test Title", 2024, 5, 1), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		tags, err := readFileTags(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if tags == nil {
+			t.Fatal("expected tags from FLAC file")
+		}
+		if tags.Artist != "Test Artist" {
+			t.Errorf("artist = %q, want Test Artist", tags.Artist)
+		}
+		if tags.Album != "Test Album" {
+			t.Errorf("album = %q, want Test Album", tags.Album)
+		}
+		if tags.Title != "Test Title" {
+			t.Errorf("title = %q, want Test Title", tags.Title)
+		}
+		if tags.Year != 2024 {
+			t.Errorf("year = %d, want 2024", tags.Year)
+		}
+		if tags.TrackNum != 5 {
+			t.Errorf("trackNum = %d, want 5", tags.TrackNum)
+		}
+		if tags.DiscNum != 1 {
+			t.Errorf("discNum = %d, want 1", tags.DiscNum)
+		}
+	})
+}
+
 func TestScannerScanPath(t *testing.T) {
 	// Create temp directory with test files.
 	dir := t.TempDir()
@@ -265,3 +339,76 @@ func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) 
 func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error)   { return nil, nil }
 func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error)   { return nil, nil }
 func (m *mockStore) Close() error                                                                       { return nil }
+
+// minimalFLAC creates a valid minimal FLAC file with Vorbis comments.
+// The file contains enough structure for dhowden/tag to parse artist, album,
+// title, year, track number, and disc number.
+func minimalFLAC(artist, album, title string, year, trackNum, discNum int) []byte {
+	var buf bytes.Buffer
+
+	// FLAC marker.
+	buf.WriteString("fLaC")
+
+	// STREAMINFO metadata block (last block = false, since vorbis comment follows).
+	// Block header: 1 byte (0x00 = not last) + 3 byte BE length.
+	streamInfoData := make([]byte, 34)
+	// Minimum block size (2 bytes): 4096
+	binary.BigEndian.PutUint16(streamInfoData[0:2], 4096)
+	// Maximum block size (2 bytes): 4096
+	binary.BigEndian.PutUint16(streamInfoData[2:4], 4096)
+	// Minimum frame size (3 bytes): 0
+	// Maximum frame size (3 bytes): 0
+	// Sample rate (20 bits) + channels (3 bits) + bits per sample (5 bits) + total samples (36 bits)
+	// Sample rate: 44100 = 0xAC44, shifted left 4: 0xAC440
+	binary.BigEndian.PutUint32(streamInfoData[10:14], 0x0AC44000) // sample_rate=44100, channels=2, bps=16
+	binary.BigEndian.PutUint32(streamInfoData[14:18], 0x00000000) // total samples upper
+	binary.BigEndian.PutUint32(streamInfoData[18:22], 0x00000000) // total samples lower
+	buf.WriteByte(0x00)           // not last block
+	writeUint24BE(&buf, 34)       // length
+	buf.Write(streamInfoData)     // STREAMINFO data
+
+	// Vorbis comment block.
+	var commentsBuf bytes.Buffer
+	vendor := "reference libFLAC 1.3.2 20170101"
+	writeVorbisString(&commentsBuf, vendor)
+	// Comment count: 6 (ARTIST, ALBUM, TITLE, DATE, TRACKNUMBER, DISCNUMBER)
+	writeUint32LE(&commentsBuf, 6)
+	writeVorbisComment(&commentsBuf, "ARTIST", artist)
+	writeVorbisComment(&commentsBuf, "ALBUM", album)
+	writeVorbisComment(&commentsBuf, "TITLE", title)
+	writeVorbisComment(&commentsBuf, "DATE", fmt.Sprintf("%d", year))
+	writeVorbisComment(&commentsBuf, "TRACKNUMBER", fmt.Sprintf("%d", trackNum))
+	writeVorbisComment(&commentsBuf, "DISCNUMBER", fmt.Sprintf("%d", discNum))
+
+	commentsData := commentsBuf.Bytes()
+	buf.WriteByte(0x84)           // last block = true (0x80) | block type = 4 (Vorbis comment)
+	writeUint24BE(&buf, len(commentsData))
+	buf.Write(commentsData)
+
+	return buf.Bytes()
+}
+
+// writeUint24BE writes a 24-bit big-endian integer.
+func writeUint24BE(buf *bytes.Buffer, v int) {
+	buf.WriteByte(byte(v >> 16))
+	buf.WriteByte(byte(v >> 8))
+	buf.WriteByte(byte(v))
+}
+
+// writeUint32LE writes a 32-bit little-endian integer.
+func writeUint32LE(buf *bytes.Buffer, v int) {
+	var b [4]byte
+	binary.LittleEndian.PutUint32(b[:], uint32(v))
+	buf.Write(b[:])
+}
+
+// writeVorbisString writes a string with a 4-byte LE length prefix (Vorbis format).
+func writeVorbisString(buf *bytes.Buffer, s string) {
+	writeUint32LE(buf, len(s))
+	buf.WriteString(s)
+}
+
+// writeVorbisComment writes a KEY=VALUE pair in Vorbis comment format.
+func writeVorbisComment(buf *bytes.Buffer, key, value string) {
+	writeVorbisString(buf, key+"="+value)
+}

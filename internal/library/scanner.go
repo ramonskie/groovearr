@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/dhowden/tag"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
@@ -33,6 +34,59 @@ type ScanStats struct {
 // NewScanner creates a library scanner.
 func NewScanner(store Store) *Scanner {
 	return &Scanner{store: store}
+}
+
+// tagMeta holds metadata extracted from audio file tags.
+type tagMeta struct {
+	Artist    string
+	Album     string
+	Title     string
+	Year      int
+	TrackNum  int
+	DiscNum   int
+	Genre     string
+}
+
+// readFileTags attempts to read audio metadata from a file using ID3/FLAC/Vorbis tags.
+// Returns nil, nil if no tags are found or the file isn't recognized audio (caller falls
+// back to path parsing). Only returns an error for filesystem-level failures.
+func readFileTags(path string) (*tagMeta, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	m, err := tag.ReadFrom(f)
+	if err != nil {
+		// Any parse error means no usable tags — fall back to path parsing.
+		return nil, nil
+	}
+
+	trackNum, _ := m.Track()
+	discNum, _ := m.Disc()
+
+	meta := &tagMeta{
+		Artist:   strings.TrimSpace(m.Artist()),
+		Album:    strings.TrimSpace(m.Album()),
+		Title:    strings.TrimSpace(m.Title()),
+		Year:     m.Year(),
+		TrackNum: trackNum,
+		DiscNum:  discNum,
+		Genre:    strings.TrimSpace(m.Genre()),
+	}
+
+	// If no structured artist, try AlbumArtist.
+	if meta.Artist == "" {
+		meta.Artist = strings.TrimSpace(m.AlbumArtist())
+	}
+
+	// If everything is empty, treat as no tags.
+	if meta.Artist == "" && meta.Album == "" && meta.Title == "" {
+		return nil, nil
+	}
+
+	return meta, nil
 }
 
 // audioExtensions are file extensions recognized as audio.
@@ -77,25 +131,54 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 			return nil
 		}
 
-		// Parse metadata from path relative to scan root.
+		// Try reading audio tags first; fall back to path parsing if none found.
 		relPath, _ := filepath.Rel(absRoot, path)
-		track, artist, album := parsePath(relPath)
+		tags, err := readFileTags(path)
+		if err != nil {
+			log.Printf("scanner: tag read %s: %v", path, err)
+			stats.Errors++
+			return nil
+		}
+
+		var (
+			trackTitle  string
+			artistName  string
+			albumTitle  string
+			albumYear   int
+			trackNumber int
+			discNumber  int
+			genres      []string
+		)
+
+		if tags != nil {
+			trackTitle = tags.Title
+			artistName = tags.Artist
+			albumTitle = tags.Album
+			albumYear = tags.Year
+			trackNumber = tags.TrackNum
+			discNumber = tags.DiscNum
+			if tags.Genre != "" {
+				genres = splitGenres(tags.Genre)
+			}
+		} else {
+			trackTitle, artistName, albumTitle = parsePath(relPath)
+		}
 
 		// Get or create artist.
 		var artistID int64
-		existingArtist, dbErr := s.store.GetArtistByName(ctx, artist)
+		existingArtist, dbErr := s.store.GetArtistByName(ctx, artistName)
 		if dbErr != nil {
-			log.Printf("scanner: GetArtistByName %q: %v", artist, dbErr)
+			log.Printf("scanner: GetArtistByName %q: %v", artistName, dbErr)
 			stats.Errors++
 			return nil
 		}
 		if existingArtist != nil {
 			artistID = existingArtist.ID
 		} else {
-			a := &domain.Artist{Name: artist}
+			a := &domain.Artist{Name: artistName}
 			id, err := s.store.UpsertArtist(ctx, a)
 			if err != nil {
-				log.Printf("scanner: upsert artist %q: %v", artist, err)
+				log.Printf("scanner: upsert artist %q: %v", artistName, err)
 				stats.Errors++
 				return nil
 			}
@@ -104,15 +187,15 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 
 		// Get or create album.
 		var albumID int64
-		albums, dbErr := s.store.SearchAlbums(ctx, album, 1)
+		albums, dbErr := s.store.SearchAlbums(ctx, albumTitle, 1)
 		if dbErr != nil {
-			log.Printf("scanner: SearchAlbums %q: %v", album, dbErr)
+			log.Printf("scanner: SearchAlbums %q: %v", albumTitle, dbErr)
 			stats.Errors++
 			return nil
 		}
 		found := false
 		for _, al := range albums {
-			if strings.EqualFold(al.Title, album) && al.ArtistID == artistID {
+			if strings.EqualFold(al.Title, albumTitle) && al.ArtistID == artistID {
 				albumID = al.ID
 				found = true
 				break
@@ -121,16 +204,30 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		if !found {
 			a := &domain.Album{
 				ArtistID:  artistID,
-				Title:     album,
+				Title:     albumTitle,
+				Year:      albumYear,
+				Genres:    genres,
 				AlbumType: domain.AlbumTypeAlbum,
 			}
 			id, err := s.store.UpsertAlbum(ctx, a)
 			if err != nil {
-				log.Printf("scanner: upsert album %q: %v", album, err)
+				log.Printf("scanner: upsert album %q: %v", albumTitle, err)
 				stats.Errors++
 				return nil
 			}
 			albumID = id
+		} else if albumYear != 0 {
+			// Update album year if we have one and album already exists.
+			for i := range albums {
+				if albums[i].ID == albumID && albums[i].Year == 0 {
+					albums[i].Year = albumYear
+					if _, err := s.store.UpsertAlbum(ctx, &albums[i]); err != nil {
+						log.Printf("scanner: update album year %q: %v", albumTitle, err)
+						stats.Errors++
+					}
+					break
+				}
+			}
 		}
 
 		// Get file info.
@@ -144,13 +241,15 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		t := &domain.Track{
 			AlbumID:     albumID,
 			ArtistID:    artistID,
-			Title:       track,
+			Title:       trackTitle,
+			TrackNumber: trackNumber,
+			DiscNumber:  discNumber,
 			FilePath:    path,
 			FileSize:    fi.Size(),
 		}
 
 		if _, err := s.store.UpsertTrack(ctx, t); err != nil {
-			log.Printf("scanner: upsert track %q: %v", track, err)
+			log.Printf("scanner: upsert track %q: %v", trackTitle, err)
 			stats.Errors++
 			return nil
 		}
@@ -289,4 +388,19 @@ func ParseTrackNumber(filename string) int {
 		return n
 	}
 	return 0
+}
+
+// splitGenres splits a genre tag string on common separators (;, ,, /).
+func splitGenres(s string) []string {
+	parts := strings.FieldsFunc(s, func(r rune) bool {
+		return r == ';' || r == ',' || r == '/'
+	})
+	var result []string
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			result = append(result, p)
+		}
+	}
+	return result
 }
