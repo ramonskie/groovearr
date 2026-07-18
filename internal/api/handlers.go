@@ -270,10 +270,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Source   string `json:"source"`
-		Username string `json:"username"`
-		Filename string `json:"filename"`
-		Size     int64  `json:"size"`
+		Source      string `json:"source"`
+		Username    string `json:"username"`
+		Filename    string `json:"filename"`
+		Size        int64  `json:"size"`
+		Artist      string `json:"artist,omitempty"`
+		Album       string `json:"album,omitempty"`
+		Title       string `json:"title,omitempty"`
+		TrackNumber int    `json:"track_number,omitempty"`
+		DiscNumber  int    `json:"disc_number,omitempty"`
+		Year        int    `json:"year,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -285,6 +291,12 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
+	}
+
+	// Store metadata from the request for post-download renaming.
+	if req.Artist != "" || req.Title != "" {
+		s.orch.SetDownloadMeta(id, req.Artist, req.Album, req.Title,
+			req.TrackNumber, req.DiscNumber, req.Year)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"download_id": id})

@@ -121,6 +121,16 @@ func (e *Engine) ClearCompleted() {
 
 // ─── Orchestrator ───────────────────────────────────────────────────
 
+// downloadMeta holds track metadata carried from search to post-download renamer.
+type downloadMeta struct {
+	Artist      string
+	Album       string
+	Title       string
+	TrackNumber int
+	DiscNumber  int
+	Year        int
+}
+
 // Orchestrator routes search and download to configured plugins.
 type Orchestrator struct {
 	registry      *Registry
@@ -128,6 +138,7 @@ type Orchestrator struct {
 	engine        *Engine
 	qualityConfig func() config.QualityConfig
 	pathOverride  map[string]string // downloadID → corrected file path
+	metaOverride  map[string]downloadMeta
 	mu            sync.RWMutex
 }
 
@@ -144,6 +155,7 @@ func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConf
 		engine:        NewEngine(),
 		qualityConfig: qualityConfig,
 		pathOverride:  make(map[string]string),
+		metaOverride:  make(map[string]downloadMeta),
 	}
 }
 
@@ -285,6 +297,10 @@ func (o *Orchestrator) DownloadBest(ctx context.Context, title, artist string, d
 		return "", "", best.score, fmt.Errorf("download from %s failed: %w", best.sourceName, dlErr)
 	}
 
+	// Store metadata from the search result for post-download renaming.
+	o.SetDownloadMeta(id, best.track.Artist, best.track.Album, best.track.Title,
+		best.track.TrackNumber, 0, 0)
+
 	return id, best.sourceName, best.score, nil
 }
 
@@ -309,6 +325,26 @@ func (o *Orchestrator) GetDownloads(ctx context.Context) []domain.DownloadRecord
 		if override, ok := o.pathOverride[all[i].ID]; ok {
 			all[i].FilePath = override
 		}
+		if meta, ok := o.metaOverride[all[i].ID]; ok {
+			if meta.Artist != "" {
+				all[i].Artist = meta.Artist
+			}
+			if meta.Album != "" {
+				all[i].Album = meta.Album
+			}
+			if meta.Title != "" {
+				all[i].Title = meta.Title
+			}
+			if meta.TrackNumber != 0 {
+				all[i].TrackNumber = meta.TrackNumber
+			}
+			if meta.DiscNumber != 0 {
+				all[i].DiscNumber = meta.DiscNumber
+			}
+			if meta.Year != 0 {
+				all[i].Year = meta.Year
+			}
+		}
 	}
 
 	return all
@@ -322,13 +358,34 @@ func (o *Orchestrator) GetDownloadStatus(ctx context.Context, downloadID string)
 			continue
 		}
 		if record != nil {
-			// Apply path override.
+			// Clone to avoid mutating the plugin's internal pointer without its lock.
+			cp := *record
 			o.mu.RLock()
 			if override, ok := o.pathOverride[downloadID]; ok {
-				record.FilePath = override
+				cp.FilePath = override
+			}
+			if meta, ok := o.metaOverride[downloadID]; ok {
+				if meta.Artist != "" {
+					cp.Artist = meta.Artist
+				}
+				if meta.Album != "" {
+					cp.Album = meta.Album
+				}
+				if meta.Title != "" {
+					cp.Title = meta.Title
+				}
+				if meta.TrackNumber != 0 {
+					cp.TrackNumber = meta.TrackNumber
+				}
+				if meta.DiscNumber != 0 {
+					cp.DiscNumber = meta.DiscNumber
+				}
+				if meta.Year != 0 {
+					cp.Year = meta.Year
+				}
 			}
 			o.mu.RUnlock()
-			return record
+			return &cp
 		}
 	}
 	return nil
@@ -377,6 +434,20 @@ func (o *Orchestrator) SetDownloadPath(downloadID, path string) {
 	o.mu.Lock()
 	defer o.mu.Unlock()
 	o.pathOverride[downloadID] = path
+}
+
+// SetDownloadMeta stores track metadata for a download (used by post-download renamer).
+func (o *Orchestrator) SetDownloadMeta(downloadID, artist, album, title string, trackNum, discNum, year int) {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	o.metaOverride[downloadID] = downloadMeta{
+		Artist:      artist,
+		Album:       album,
+		Title:       title,
+		TrackNumber: trackNum,
+		DiscNumber:  discNum,
+		Year:        year,
+	}
 }
 
 // CancelDownload cancels a download by ID.

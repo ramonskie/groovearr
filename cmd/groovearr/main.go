@@ -134,7 +134,15 @@ func newRenamerHook(cfg *config.Persistence) download.PostDownloadHook {
 		}
 		renamer := library.NewRenamer(template, root)
 
-		// Extract metadata from the filename if the download client didn't provide structured data.
-		return renamer.Rename(record.FilePath, library.FileMeta{})
+		// Use metadata carried through from search results.
+		meta := library.FileMeta{
+			Artist:   record.Artist,
+			Album:    record.Album,
+			Title:    record.Title,
+			Year:     record.Year,
+			TrackNum: record.TrackNumber,
+			DiscNum:  record.DiscNumber,
+		}
+		return renamer.Rename(record.FilePath, meta)
 	}
 }

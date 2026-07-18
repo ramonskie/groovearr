@@ -410,13 +410,25 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		return
 	}
 
-	// Fetch album cover URL from public API.
+	// Fetch track metadata from public API (cover URL + renamer metadata).
 	trackIDInt, convErr := strconv.Atoi(trackID)
 	if convErr == nil {
 		apiClient := New(c.cfg)
 		if trk, err := apiClient.GetTrack(ctx, trackIDInt); err == nil && trk != nil {
+			year := 0
+			if len(trk.ReleaseDate) >= 4 {
+				if y, parseErr := strconv.Atoi(trk.ReleaseDate[:4]); parseErr == nil {
+					year = y
+				}
+			}
 			c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
 				r.CoverURL = trk.Album.CoverXL
+				r.Artist = trk.Artist.Name
+				r.Album = trk.Album.Title
+				r.Title = trk.Title
+				r.TrackNumber = trk.TrackPos
+				r.DiscNumber = trk.DiskNumber
+				r.Year = year
 			})
 		}
 	}

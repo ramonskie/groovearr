@@ -52,11 +52,34 @@ type FileMeta struct {
 func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 	ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
 
-	// Build resolve args: use provided metadata, fall back to filename parsing.
+	// Build resolve args: use provided metadata, fall back to ID3 tags, then filename parsing.
 	artist := meta.Artist
 	album := meta.Album
 	title := meta.Title
 
+	if artist == "" || album == "" || title == "" {
+		// Try reading embedded ID3/FLAC tags to fill missing fields.
+		if tags, tagErr := readFileTags(filePath); tagErr == nil && tags != nil {
+			if artist == "" {
+				artist = tags.Artist
+			}
+			if album == "" {
+				album = tags.Album
+			}
+			if title == "" {
+				title = tags.Title
+			}
+			if meta.Year == 0 {
+				meta.Year = tags.Year
+			}
+			if meta.TrackNum == 0 {
+				meta.TrackNum = tags.TrackNum
+			}
+			if meta.DiscNum == 0 {
+				meta.DiscNum = tags.DiscNum
+			}
+		}
+	}
 	if artist == "" {
 		artist, album, title = parseMetadataFromFilename(filepath.Base(filePath))
 	}
