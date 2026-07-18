@@ -33,16 +33,62 @@ Small but impactful fixes to what's already built.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 16 | **Post-download file renaming** — apply `folder_template` via `PathResolver` after download completes | 🔴 High | S | PathResolver (done) |
-| 17 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | 🔴 High | M | `dhowden/tag` |
-| 18 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | 🔴 High | L | `bogem/id3v2`, FLAC Vorbis |
-| 19 | **Config validation** — validate URLs, quality values, path existence at save time | 🟡 Medium | S | — |
-| 20 | **DB migration versioning** — `golang-migrate/migrate` or embed version SQL instead of idempotent CREATE | 🟡 Medium | S | — |
-| 21 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | 🟡 Medium | S | — |
-| 22 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
-| 23 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | 🟡 Medium | S | — |
-| 24 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | 🟡 Medium | M | — |
-| 25 | **Album-art display** — fetch + cache cover images, show in UI | 🟡 Medium | M | — |
+| 16 | **Post-download file renaming** — apply `folder_template` via `PathResolver` after download completes | ✅ Done | S | PathResolver (done) |
+| 17 | **Cover art download hook** — post-processing hook fetches album/artist covers from Deezer, caches as `cover.jpg` in album dir, populates `thumb_url` in DB | 🔴 High | M | PostProcessor (done), Deezer API (done) |
+| 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | 🔴 High | M | `dhowden/tag` |
+| 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | 🔴 High | L | `bogem/id3v2`, FLAC Vorbis |
+| 20 | **Config validation** — validate URLs, quality values, path existence at save time | 🟡 Medium | S | — |
+| 21 | **DB migration versioning** — `golang-migrate/migrate` or embed version SQL instead of idempotent CREATE | 🟡 Medium | S | — |
+| 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | 🟡 Medium | S | — |
+| 23 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
+| 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | 🟡 Medium | S | — |
+| 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | 🟡 Medium | M | — |
+| 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | 🟡 Medium | M | Cover art hook |
+
+### #17 Cover Art Hook — Implementation Plan
+
+**Architecture**: A `PostDownloadHook` registered after the renamer hook. Runs in the same `ProcessDownloads` call.
+
+**Gaps to close**:
+1. `TrackResult` discards Deezer album/artist IDs during search → download. Need to carry `CoverURL` (or DeezerAlbumID) through to the `DownloadRecord`.
+2. `DownloadRecord` has no cover/image field. Add `CoverURL string`.
+3. Deezer `song.getData` response contains album/artist IDs but they're not extracted.
+4. `thumb_url` columns exist in DB but never written. Store needs an `UpdateAlbumThumb` method (or use existing `UpsertAlbum`).
+
+**Hook flow**:
+```
+download completes (FilePath set by plugin)
+  → renamer hook: moves file to library root
+  → cover hook:
+      1. Read DownloadRecord.CoverURL (set by plugin at download time)
+      2. If empty, skip (Soulseek doesn't provide covers)
+      3. Parse artist/album from file path
+      4. GET cover URL → write to album_dir/cover.jpg
+      5. Update albums.thumb_url via store
+      6. (Optional) fetch artist picture, update artists.thumb_url
+```
+
+**Cache strategy**: `cover.jpg` stored in the album directory. No separate cache directory needed — the album folder IS the cache. If `cover.jpg` already exists, skip download.
+
+**Deezer data available**:
+| Source | Field | Size |
+|--------|-------|------|
+| Public API `Track.Album.CoverXL` | 1000×1000 | From search results |
+| Public API `Artist.PictureXL` | 1000×1000 | From search results |
+| Private API `song.getData` | Album/artist IDs | During download |
+
+**Files to create/modify**:
+| File | Change |
+|------|--------|
+| `internal/domain/download.go` | Add `CoverURL` to `DownloadRecord` |
+| `internal/domain/search.go` | Add `CoverURL` to `TrackResult` |
+| `internal/download/deezer/api.go` | `Track.ToTrackResult()` carries CoverURL |
+| `internal/download/deezer/download.go` | `Download()` copies CoverURL from search result to record |
+| `internal/library/cover.go` | New: `CoverHook` implementing `PostDownloadHook` |
+| `internal/api/handlers.go` | New `GET /api/covers/{albumID}` proxy endpoint |
+| `internal/library/sqlite/store.go` | `UpdateAlbumThumb(albumID, url)` |
+| `cmd/groovearr/main.go` | Register cover hook in PostProcessor |
+| `internal/api/static/index.html` | `<img>` tags in library views |
 
 ---
 
@@ -157,22 +203,22 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 10 features | ❌ 0/10 |
+| 1 | Core Quality | 11 features | 🟡 1/11 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
 | 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **77 features** | **15 done, 62 remaining** |
+| **Total** | | **78 features** | **16 done, 62 remaining** |
 
 ### Immediate Next Steps (Tier 1)
 
-1. **Post-download renaming** — wire PathResolver (already built) into download completion flow
+1. **Cover art download hook** — post-processing hook via Deezer API, cache as `cover.jpg`, populate `thumb_url`
 2. **Audio tag reading** — add `dhowden/tag` to scanner for accurate metadata
 3. **Audio tag writing** — embed metadata after download (ID3 + FLAC Vorbis)
-4. **Authentication** — basic login gate for API access
-5. **Config validation** — validate on save in UI + server-side
+4. **Config validation** — validate on save in UI + server-side
+5. **Authentication** — basic login gate for API access
 
 ### First Major Feature Block (Tier 3-4)
 
