@@ -45,7 +45,18 @@ func (s *Store) Close() error {
 // ─── Schema ──────────────────────────────────────────────────────────
 
 func (s *Store) migrate() error {
-	statements := []string{
+	// Ensure version tracking table exists.
+	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+		return fmt.Errorf("migration: schema_version: %w", err)
+	}
+
+	// Read current schema version (0 on fresh DB).
+	var version int
+	s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
+
+	// Version 1: initial schema (idempotent CREATE TABLE IF NOT EXISTS).
+	if version < 1 {
+		statements := []string{
 		`CREATE TABLE IF NOT EXISTS artists (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -118,8 +129,18 @@ func (s *Store) migrate() error {
 
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
-			return fmt.Errorf("migration: %w", err)
+			return fmt.Errorf("migration v1: %w", err)
 		}
+	}
+		version = 1
+	}
+
+	// Record current version.
+	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
+		return fmt.Errorf("migration: clear version: %w", err)
+	}
+	if _, err := s.db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
+		return fmt.Errorf("migration: set version: %w", err)
 	}
 	return nil
 }

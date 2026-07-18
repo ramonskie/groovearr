@@ -38,7 +38,7 @@ Small but impactful fixes to what's already built.
 | 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | ✅ Done | M | `dhowden/tag` |
 | 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | ✅ Done | L | `bogem/id3v2`, `go-flac/flacpicture` |
 | 20 | **Config validation** — validate URLs, quality values, path existence at save time | ✅ Done | S | — |
-| 21 | **DB migration versioning** — `golang-migrate/migrate` or embed version SQL instead of idempotent CREATE | 🟡 Medium | S | — |
+| 21 | **DB migration versioning** — version-tracked schema with `schema_version` table | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
 | 23 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
 | 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | ✅ Done | S | — |
@@ -203,7 +203,7 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 11 features | 🟡 9/11 |
+| 1 | Core Quality | 11 features | 🟡 10/11 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
