@@ -262,6 +262,21 @@ func (c *DownloadClient) GetDownloadStatus(ctx context.Context, downloadID strin
 
 // CancelDownload cancels an active download by cancelling its context.
 func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, remove bool) error {
+	c.downloadsMu.Lock()
+	r, ok := c.downloads[downloadID]
+	if ok {
+		r.State = domain.DownloadCancelled
+		r.Error = ""
+	}
+	if remove {
+		delete(c.downloads, downloadID)
+	}
+	c.downloadsMu.Unlock()
+
+	if !ok {
+		return fmt.Errorf("deezer: download %s not found", downloadID)
+	}
+
 	// Cancel the underlying context to stop the goroutine.
 	c.cancelMu.Lock()
 	if cancel, ok := c.cancelFuncs[downloadID]; ok {
@@ -270,17 +285,6 @@ func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, 
 	}
 	c.cancelMu.Unlock()
 
-	c.downloadsMu.Lock()
-	defer c.downloadsMu.Unlock()
-
-	r, ok := c.downloads[downloadID]
-	if !ok {
-		return fmt.Errorf("deezer: download %s not found", downloadID)
-	}
-	r.State = domain.DownloadCancelled
-	if remove {
-		delete(c.downloads, downloadID)
-	}
 	return nil
 }
 
@@ -332,7 +336,7 @@ func (c *DownloadClient) authenticate() error {
 		return fmt.Errorf("deezer: ARL token not set")
 	}
 
-	resp, err := c.gwCall("deezer.getUserData", nil)
+	resp, err := c.gwCall(context.Background(), "deezer.getUserData", nil)
 	if err != nil {
 		return fmt.Errorf("deezer auth: %w", err)
 	}
@@ -378,7 +382,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	}
 
 	// Get track data from private API.
-	trackData, err := c.gwCall("song.getData", map[string]any{"sng_id": trackID})
+	trackData, err := c.gwCall(ctx, "song.getData", map[string]any{"sng_id": trackID})
 	if err != nil {
 		c.setError(downloadID, fmt.Sprintf("failed to get track data: %v", err))
 		return
@@ -588,7 +592,7 @@ func (c *DownloadClient) getMediaURL(trackToken string) (string, string) {
 
 // ─── Gateway API ────────────────────────────────────────────────────
 
-func (c *DownloadClient) gwCall(method string, params map[string]any) (map[string]any, error) {
+func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[string]any) (map[string]any, error) {
 	u, _ := url.Parse(gwAPI)
 	q := u.Query()
 	q.Set("method", method)
@@ -610,7 +614,7 @@ func (c *DownloadClient) gwCall(method string, params map[string]any) (map[strin
 	}
 	b, _ := json.Marshal(bodyData)
 
-	req, err := http.NewRequest(http.MethodPost, u.String(), strings.NewReader(string(b)))
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(string(b)))
 	if err != nil {
 		return nil, err
 	}
