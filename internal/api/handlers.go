@@ -66,7 +66,7 @@ func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
 	mux.HandleFunc("POST /api/library/scan", s.handleLibraryScan)
 
-	s.httpSrv = &http.Server{Addr: addr, Handler: withCORS(mux)}
+	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
 }
 
@@ -82,6 +82,13 @@ func (s *Server) Shutdown(ctx context.Context) error {
 }
 
 // ─── Middleware ──────────────────────────────────────────────────────
+
+func withLogging(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		log.Printf("%s %s", r.Method, r.URL.Path)
+		next.ServeHTTP(w, r)
+	})
+}
 
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -78,6 +78,16 @@ func main() {
 
 	srv := api.NewServer(addr, cfg, orch, store, scanner, postProc)
 
+	log.Printf("groovearr starting")
+	log.Printf("  config:   %s", configPath)
+	log.Printf("  database: %s", dbPath)
+	log.Printf("  download: %s", currentCfg.Library.DownloadPath)
+	log.Printf("  library:  %s", currentCfg.Library.LibraryPath)
+	log.Printf("  listening on %s", addr)
+	if currentCfg.Soulseek.SlskdURL != "" {
+		log.Printf("  slskd:    %s", currentCfg.Soulseek.SlskdURL)
+	}
+
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
