@@ -88,6 +88,9 @@ func (r *PathResolver) Resolve(args ResolveArgs) string {
 	// Track number with optional padding.
 	result = strings.ReplaceAll(result, "{track}", fmt.Sprintf("%d", args.TrackNum))
 	result = replacePaddedToken(result, "{track:", args.TrackNum)
+	// {position} alias for playlist ordering.
+	result = strings.ReplaceAll(result, "{position}", fmt.Sprintf("%d", args.TrackNum))
+	result = replacePaddedToken(result, "{position:", args.TrackNum)
 
 	// Clean up any remaining unresolved tokens (remove them).
 	result = cleanRemainingTokens(result)

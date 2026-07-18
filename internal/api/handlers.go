@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -19,6 +20,7 @@ import (
 	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
 	"github.com/ramonskie/groovearr/internal/download/soulseek"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/playlist"
 )
 
 //go:embed static/*
@@ -26,22 +28,24 @@ var staticFS embed.FS
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg      *config.Persistence
-	orch     *download.Orchestrator
-	store    library.Store
-	scanner  *library.Scanner
-	postProc *download.PostProcessor
-	httpSrv  *http.Server
+	cfg         *config.Persistence
+	orch        *download.Orchestrator
+	store       library.Store
+	scanner     *library.Scanner
+	postProc    *download.PostProcessor
+	playlistSvc *playlist.Service
+	httpSrv     *http.Server
 }
 
 // NewServer creates an HTTP server with all routes wired.
-func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator, store library.Store, scanner *library.Scanner, postProc *download.PostProcessor) *Server {
+func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator, store library.Store, scanner *library.Scanner, postProc *download.PostProcessor, playlistSvc *playlist.Service) *Server {
 	s := &Server{
-		cfg:      cfg,
-		orch:     orch,
-		store:    store,
-		scanner:  scanner,
-		postProc: postProc,
+		cfg:         cfg,
+		orch:        orch,
+		store:       store,
+		scanner:     scanner,
+		postProc:    postProc,
+		playlistSvc: playlistSvc,
 	}
 
 	mux := http.NewServeMux()
@@ -69,6 +73,16 @@ func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
 	mux.HandleFunc("POST /api/library/scan", s.handleLibraryScan)
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
+
+	// Playlist routes.
+	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
+	mux.HandleFunc("GET /api/playlists/sources/{source}", s.handlePlaylistSourceBrowse)
+	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
+	mux.HandleFunc("GET /api/playlists/{id}", s.handleGetPlaylist)
+	mux.HandleFunc("POST /api/playlists/import", s.handleImportPlaylist)
+	mux.HandleFunc("POST /api/playlists/{id}/download-missing", s.handleDownloadMissing)
+	mux.HandleFunc("POST /api/playlists/{id}/sync", s.handleSyncPlaylist)
+	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
 
 	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
@@ -485,6 +499,177 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	http.ServeFile(w, r, coverPath)
 }
 
+// ─── Playlist handlers ────────────────────────────────────────────────
+
+func (s *Server) handlePlaylistSources(w http.ResponseWriter, r *http.Request) {
+	if s.playlistSvc == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	srcs := s.playlistSvc.Sources()
+	var out []map[string]string
+	for _, src := range srcs {
+		out = append(out, map[string]string{
+			"name":    src.Name(),
+			"display": src.DisplayName(),
+		})
+	}
+	if out == nil {
+		out = []map[string]string{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handlePlaylistSourceBrowse(w http.ResponseWriter, r *http.Request) {
+	source := r.PathValue("source")
+	if s.playlistSvc == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	ctx := r.Context()
+	items, err := s.playlistSvc.BrowseSource(ctx, source)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if items == nil {
+		items = []playlist.SourcePlaylistItem{}
+	}
+	writeJSON(w, http.StatusOK, items)
+}
+
+func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
+	if s.playlistSvc == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	ctx := r.Context()
+	playlists, err := s.store.ListPlaylists(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if playlists == nil {
+		playlists = []domain.Playlist{}
+	}
+	writeJSON(w, http.StatusOK, playlists)
+}
+
+func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid playlist ID"))
+		return
+	}
+	ctx := r.Context()
+	p, err := s.store.GetPlaylist(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if p == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("playlist not found"))
+		return
+	}
+	tracks, _ := s.store.GetPlaylistTracks(ctx, id)
+	if tracks == nil {
+		tracks = []domain.PlaylistTrack{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"playlist": p,
+		"tracks":   tracks,
+	})
+}
+
+func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
+	if s.playlistSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("playlist service not available"))
+		return
+	}
+	var req struct {
+		Source     string `json:"source"`
+		PlaylistID string `json:"playlist_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Source == "" || req.PlaylistID == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("source and playlist_id required"))
+		return
+	}
+
+	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"playlist":  result.Playlist,
+		"tracks":    result.Tracks,
+		"linked":    result.Linked,
+		"unmatched": result.Unmatched,
+	})
+}
+
+func (s *Server) handleDownloadMissing(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid playlist ID"))
+		return
+	}
+	if s.playlistSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("playlist service not available"))
+		return
+	}
+	queued, err := s.playlistSvc.DownloadMissing(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"queued": queued})
+}
+
+func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid playlist ID"))
+		return
+	}
+	if s.playlistSvc == nil {
+		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("playlist service not available"))
+		return
+	}
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		defer cancel()
+		if err := s.playlistSvc.SyncPlaylist(ctx, id); err != nil {
+			log.Printf("playlist sync %d: %v", id, err)
+		}
+	}()
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "syncing"})
+}
+
+func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid playlist ID"))
+		return
+	}
+	ctx := r.Context()
+	if err := s.store.DeletePlaylist(ctx, id); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 func (s *Server) reloadSoulseek() {
@@ -573,6 +758,12 @@ func mergeConfig(dst, partial *config.Config) {
 	}
 	if partial.Library.LibraryPath != "" {
 		dst.Library.LibraryPath = partial.Library.LibraryPath
+	}
+	if partial.Library.PlaylistPath != "" {
+		dst.Library.PlaylistPath = partial.Library.PlaylistPath
+	}
+	if partial.Library.PlaylistTemplate != "" {
+		dst.Library.PlaylistTemplate = partial.Library.PlaylistTemplate
 	}
 
 	if partial.Quality.PreferredFormat != "" {

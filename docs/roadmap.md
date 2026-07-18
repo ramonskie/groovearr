@@ -131,10 +131,10 @@ Spotify integration for playlist import/sync, artist following, and discovery.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 41 | **Spotify OAuth** — login flow, token refresh, scoped access | 🔴 High | M | Spotify Developer App |
-| 42 | **Spotify playlist import** — list user playlists, import tracks to DB | 🔴 High | M | Spotify OAuth |
-| 43 | **Playlist sync (Spotify → library)** — REFRESH → DISCOVER → SYNC → DOWNLOAD pipeline | 🔴 High | L | Playlist + matching + download |
-| 44 | **Playlist explorer UI** — browse playlists, view tracks, trigger sync | 🟡 Medium | M | Playlist sync |
+| 41 | **Spotify OAuth** — login flow, token refresh, scoped access | 🟡 In Progress | M | Playlist framework |
+| 42 | **Deezer playlist import** — import playlists via ARL, download tracks, separate playlist folder | ✅ Done | M | Playlist framework |
+| 43 | **Playlist sync** — refresh, discover missing, download pipeline | 🟡 In Progress | L | Playlist service |
+| 44 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
 | 45 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
 | 46 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
 | 47 | **Wishlist / retry queue** — failed downloads go to wishlist for auto-retry | 🟡 Medium | M | Download pipeline |
@@ -210,7 +210,7 @@ Deployment, security, and operational concerns.
 | 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **78 features** | **26 done, 52 remaining** |
+| **Total** | | **78 features** | **28 done, 50 remaining** |
 
 ### Immediate Next Steps
 

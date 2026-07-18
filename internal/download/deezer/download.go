@@ -127,6 +127,13 @@ func (c *DownloadClient) IsConfigured() bool {
 	return c.cfg.ARL != ""
 }
 
+// UserID returns the authenticated Deezer user ID, or 0 if not authenticated.
+func (c *DownloadClient) UserID() int {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.userID
+}
+
 // CheckConnection tries to authenticate with Deezer using the configured ARL.
 func (c *DownloadClient) CheckConnection(ctx context.Context) error {
 	if c.cfg.ARL == "" {
@@ -767,4 +774,108 @@ func indexOf(slice []string, item string) int {
 		}
 	}
 	return -1
+}
+
+// ─── Playlist API ─────────────────────────────────────────────────────
+
+// DeezerTrackInfo holds track-level data from Deezer playlist/song responses.
+type DeezerTrackInfo struct {
+	ID          string `json:"SNG_ID"`
+	Title       string `json:"SNG_TITLE"`
+	Artist      string `json:"ART_NAME"`
+	Album       string `json:"ALB_TITLE"`
+	Duration    string `json:"DURATION"`
+	TrackNumber string `json:"TRACK_NUMBER"`
+	DiskNumber  string `json:"DISK_NUMBER"`
+	ISRC        string `json:"ISRC"`
+}
+
+// DeezerPlaylist holds playlist data from Deezer's internal API.
+type DeezerPlaylist struct {
+	ID          string `json:"PLAYLIST_ID"`
+	Title       string `json:"TITLE"`
+	Description string `json:"DESCRIPTION"`
+	TrackCount  int    `json:"NB_SONG"`
+}
+
+// GetUserPlaylists fetches the authenticated user's playlists via the Deezer gateway.
+func (c *DownloadClient) GetUserPlaylists(ctx context.Context) ([]DeezerPlaylist, error) {
+	if err := c.ensureAuth(); err != nil {
+		return nil, fmt.Errorf("deezer auth: %w", err)
+	}
+
+	results, err := c.gwCall(ctx, "deezer.pageProfile", map[string]any{
+		"USER_ID": c.UserID(),
+		"tab":     "playlists",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pageProfile: %w", err)
+	}
+
+	// TAB.playlists.data contains the user's playlists.
+	if tab, ok := results["TAB"].(map[string]any); ok {
+		if pl, ok := tab["playlists"].(map[string]any); ok {
+			rawList, _ := pl["data"].([]any)
+			return parsePlaylistItems(rawList), nil
+		}
+	}
+	return nil, nil
+}
+
+func parsePlaylistItems(rawList []any) []DeezerPlaylist {
+	var out []DeezerPlaylist
+	for _, item := range rawList {
+		raw, _ := json.Marshal(item)
+		var p DeezerPlaylist
+		if err := json.Unmarshal(raw, &p); err != nil {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+// GetPlaylistTracks fetches all tracks in a Deezer playlist via the gateway.
+func (c *DownloadClient) GetPlaylistTracks(ctx context.Context, playlistID string) ([]DeezerTrackInfo, string, error) {
+	if err := c.ensureAuth(); err != nil {
+		return nil, "", fmt.Errorf("deezer auth: %w", err)
+	}
+
+	results, err := c.gwCall(ctx, "deezer.pagePlaylist", map[string]any{
+		"playlist_id": playlistID,
+		"nb":          500,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("pagePlaylist: %w", err)
+	}
+
+	// Extract playlist name from DATA.
+	var playlistName string
+	if data, ok := results["DATA"].(map[string]any); ok {
+		if name, ok := data["TITLE"].(string); ok {
+			playlistName = name
+		}
+	}
+
+	// SONGS is at results level (not inside DATA).
+	songs, _ := results["SONGS"].(map[string]any)
+	if songs == nil {
+		return nil, playlistName, nil
+	}
+
+	rawList, _ := songs["data"].([]any)
+	if rawList == nil {
+		return nil, playlistName, nil
+	}
+
+	var out []DeezerTrackInfo
+	for _, item := range rawList {
+		raw, _ := json.Marshal(item)
+		var t DeezerTrackInfo
+		if err := json.Unmarshal(raw, &t); err != nil {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out, playlistName, nil
 }

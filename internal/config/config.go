@@ -38,9 +38,11 @@ type DeezerConfig struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	DownloadPath   string `json:"download_path"`   // download staging directory
-	LibraryPath    string `json:"library_path"`    // where organized downloads end up
-	FolderTemplate string `json:"folder_template"` // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	DownloadPath     string `json:"download_path"`     // download staging directory
+	LibraryPath      string `json:"library_path"`      // where organized downloads end up
+	FolderTemplate   string `json:"folder_template"`   // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	PlaylistPath     string `json:"playlist_path"`     // separate folder for playlist downloads
+	PlaylistTemplate string `json:"playlist_template"` // e.g. "{position:02d} {artist} - {title}"
 }
 
 // QualityConfig holds quality preferences for downloads.
@@ -66,9 +68,11 @@ func DefaultConfig() Config {
 			AllowFallback: &allowFallback,
 		},
 		Library: LibraryConfig{
-			DownloadPath:   "./downloads",
-			LibraryPath:    "./music",
-			FolderTemplate: "{artist}/{album} ({year})/{track:02d} - {title}",
+			DownloadPath:     "./downloads",
+			LibraryPath:      "./music",
+			FolderTemplate:   "{artist}/{album} ({year})/{track:02d} - {title}",
+			PlaylistPath:     "./playlists",
+			PlaylistTemplate: "{position:02d} {artist} - {title}",
 		},
 		Quality: QualityConfig{
 			PreferredFormat: "flac",

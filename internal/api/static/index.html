@@ -197,6 +197,9 @@ tr:hover td{background:#252525}
     <a href="#" data-page="library">
       <span>&#127925;</span> Library
     </a>
+    <a href="#" data-page="playlists">
+      <span>&#128190;</span> Playlists
+    </a>
   </nav>
   <div class="sidebar-footer">
     <a href="#" data-page="settings" style="display:flex;align-items:center;gap:10px;
@@ -275,6 +278,30 @@ tr:hover td{background:#252525}
           No tracks in library. Downloads are scanned automatically when they complete.
         </td></tr>
       </table></div>
+    </div>
+  </div>
+
+  <!-- ─── PLAYLISTS PAGE ──────────────────────────── -->
+  <div class="page" id="page-playlists">
+    <div class="page-header">
+      <h1>Playlists</h1>
+      <div style="display:flex;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="browseDeezerPlaylists()">Browse Deezer</button>
+        <button class="btn btn-sm" onclick="manualImportPlaylist()">Import by ID</button>
+      </div>
+    </div>
+    <div id="playlists-status" class="status-msg"></div>
+    <div class="card" id="deezer-browse-card" style="display:none">
+      <div class="card-header"><h2>Deezer Playlists</h2></div>
+      <div style="overflow-x:auto"><table id="deezer-playlists-table">
+        <tr><td colspan="4" style="color:#666;text-align:center;padding:20px">Loading...</td></tr>
+      </table></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Imported Playlists</h2></div>
+      <div id="playlists-list">
+        <p style="color:#666;text-align:center;padding:20px">No playlists imported yet.</p>
+      </div>
     </div>
   </div>
 
@@ -376,6 +403,19 @@ tr:hover td{background:#252525}
         <button class="btn btn-primary" onclick="saveSettings()">Save</button>
         <div class="status-msg" id="settings-library-status"></div>
       </div>
+      <div class="card">
+        <div class="card-header"><h2>Playlist Download</h2></div>
+        <div class="form-group">
+          <label>Playlist Directory</label>
+          <input id="cfg-playlist-path" placeholder="./playlists">
+          <div class="hint">Separate folder for playlist downloads. Not mixed with the main library.</div>
+        </div>
+        <div class="form-group">
+          <label>Playlist Template</label>
+          <input id="cfg-playlist-template" placeholder="{position:02d} {artist} - {title}">
+          <div class="hint">Tokens: {position:02d} {artist} {title} {album} {ext}</div>
+        </div>
+      </div>
     </div>
   </div>
 
@@ -436,6 +476,7 @@ function navigateTo(pageName) {
   if (pageName === 'downloads') startPolling();
   else stopPolling();
   if (pageName === 'library') loadLibrary();
+  if (pageName === 'playlists') loadPlaylists();
   if (pageName === 'settings') loadConfig();
   if (pageName === 'search') loadSourceStatus();
 }
@@ -470,6 +511,8 @@ async function loadConfig() {
     document.getElementById('cfg-deezer-quality').value = currentConfig.deezer?.quality || 'flac';
     document.getElementById('cfg-folder-template').value = currentConfig.library?.folder_template || '';
     document.getElementById('cfg-library-path').value = currentConfig.library?.library_path || './music';
+    document.getElementById('cfg-playlist-path').value = currentConfig.library?.playlist_path || './playlists';
+    document.getElementById('cfg-playlist-template').value = currentConfig.library?.playlist_template || '{position:02d} {artist} - {title}';
     loadSourceStatus();
   } catch(e) { logError('CONFIG', 'loadConfig failed', e); }
 }
@@ -535,7 +578,9 @@ async function saveSettings() {
       library: {
         download_path: document.getElementById('cfg-download-path').value,
         library_path: document.getElementById('cfg-library-path').value,
-        folder_template: document.getElementById('cfg-folder-template').value
+        folder_template: document.getElementById('cfg-folder-template').value,
+        playlist_path: document.getElementById('cfg-playlist-path').value,
+        playlist_template: document.getElementById('cfg-playlist-template').value
       }
     };
     const r = await fetch('/api/config', {
@@ -907,6 +952,159 @@ async function autoScan() {
     if (document.getElementById('page-library').classList.contains('active')) loadLibrary();
   } catch(e) { logError('LIB', 'autoScan failed', e); }
   finally { autoScanRunning = false; }
+}
+
+// ─── Playlists ────────────────────────────────────────────
+async function loadPlaylists() {
+  try {
+    const r = await fetch('/api/playlists');
+    const playlists = await r.json();
+    const list = document.getElementById('playlists-list');
+    if (!playlists.length) {
+      list.innerHTML = '<p style="color:#666;text-align:center;padding:20px">No playlists imported yet. Use Import to add one.</p>';
+      return;
+    }
+    list.innerHTML = playlists.map(p => `<div class="card" style="cursor:pointer" onclick="viewPlaylist(${p.id})">
+      <div class="card-header">
+        <h2>${esc(p.name)}</h2>
+        <div>
+          <span class="badge badge-muted">${p.source}</span>
+          <span class="badge badge-muted">${p.track_count} tracks</span>
+          ${p.synced_at ? `<span class="badge badge-info">synced</span>` : `<span class="badge badge-warning">new</span>`}
+        </div>
+      </div>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="btn btn-sm" onclick="event.stopPropagation();syncPlaylist(${p.id})">Sync</button>
+        <button class="btn btn-sm" onclick="event.stopPropagation();downloadMissing(${p.id})">Download Missing</button>
+        <button class="btn btn-sm btn-danger" onclick="event.stopPropagation();deletePlaylist(${p.id})">Remove</button>
+      </div>
+    </div>`).join('');
+  } catch(e) { logError('PL', 'loadPlaylists failed', e); }
+}
+
+async function browseDeezerPlaylists() {
+  const card = document.getElementById('deezer-browse-card');
+  card.style.display = 'block';
+  const tbl = document.getElementById('deezer-playlists-table');
+  tbl.innerHTML = '<tr><td colspan="4" style="color:#666;text-align:center;padding:20px"><span class="spinner"></span>Loading...</td></tr>';
+  try {
+    const r = await fetch('/api/playlists/sources/deezer');
+    const items = await r.json();
+    if (!items.length) {
+      tbl.innerHTML = '<tr><td colspan="4" style="color:#666;text-align:center;padding:20px">No playlists found. Check your Deezer ARL in settings.</td></tr>';
+      return;
+    }
+    tbl.innerHTML = '<tr><th>Name</th><th>Tracks</th><th>Status</th><th></th></tr>' +
+      items.map(p => `<tr>
+        <td style="font-weight:500">${esc(p.name)}</td>
+        <td>${p.track_count}</td>
+        <td>${p.imported ? '<span class="badge badge-success">Imported</span>' : '<span class="badge badge-muted">Available</span>'}</td>
+        <td>${p.imported
+          ? `<button class="btn btn-sm" onclick="syncPlaylistById('${p.source_id}')">Sync</button>`
+          : `<button class="btn btn-primary btn-sm" onclick="importPlaylistById('${p.source_id}')">Import</button>`
+        }</td>
+      </tr>`).join('');
+  } catch(e) {
+    tbl.innerHTML = '<tr><td colspan="4" style="color:#ef5350;text-align:center;padding:20px">Failed to load: ' + e.message + '</td></tr>';
+    logError('PL', 'browse failed', e);
+  }
+}
+
+async function manualImportPlaylist() {
+  const id = prompt('Enter Deezer playlist URL or numeric ID:\n\nExample: https://www.deezer.com/en/playlist/12345678');
+  if (!id) return;
+  let playlistID = id.match(/playlist\/(\d+)/)?.[1];
+  if (!playlistID && /^\d+$/.test(id.trim())) playlistID = id.trim();
+  if (!playlistID) { alert('Could not extract a playlist ID.'); return; }
+  importPlaylistById(playlistID);
+}
+
+async function importPlaylistById(sourceID) {
+  const status = document.getElementById('playlists-status');
+  status.className = 'status-msg info show';
+  status.textContent = 'Importing...';
+  try {
+    const r = await fetch('/api/playlists/import', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source: 'deezer', playlist_id: sourceID})
+    });
+    if (r.ok) {
+      status.className = 'status-msg success show';
+      status.textContent = 'Import started!';
+      setTimeout(() => { loadPlaylists(); browseDeezerPlaylists(); }, 3000);
+    } else {
+      const err = await r.json();
+      status.className = 'status-msg error show';
+      status.textContent = err.error || 'Import failed';
+    }
+  } catch(e) {
+    status.className = 'status-msg error show';
+    status.textContent = 'Import failed: ' + e.message;
+  }
+}
+
+async function syncPlaylistById(sourceID) {
+  const status = document.getElementById('playlists-status');
+  status.className = 'status-msg info show';
+  status.textContent = 'Syncing...';
+  try {
+    const r = await fetch('/api/playlists');
+    const playlists = await r.json();
+    const match = playlists.find(p => p.source_playlist_id === sourceID);
+    if (!match) { status.textContent = 'Playlist not imported yet.'; return; }
+    await fetch(`/api/playlists/${match.id}/sync`, {method: 'POST'});
+    status.className = 'status-msg success show';
+    status.textContent = 'Sync started.';
+    setTimeout(() => { loadPlaylists(); browseDeezerPlaylists(); }, 3000);
+  } catch(e) {
+    status.className = 'status-msg error show';
+    status.textContent = 'Sync failed: ' + e.message;
+  }
+}
+
+async function viewPlaylist(id) {
+  const r = await fetch(`/api/playlists/${id}`);
+  const data = await r.json();
+  const tracks = data.tracks || [];
+  alert(`${data.playlist.name}\n${tracks.length} tracks\n\n${tracks.map((t,i) => `${i+1}. ${t.artist} — ${t.title} ${t.track_id ? '✓' : '⬇'}`).join('\n')}`);
+}
+
+async function syncPlaylist(id) {
+  const status = document.getElementById('playlists-status');
+  status.className = 'status-msg info show';
+  status.textContent = 'Syncing...';
+  try {
+    await fetch(`/api/playlists/${id}/sync`, {method: 'POST'});
+    status.className = 'status-msg success show';
+    status.textContent = 'Sync complete.';
+    setTimeout(loadPlaylists, 2000);
+  } catch(e) {
+    status.className = 'status-msg error show';
+    status.textContent = 'Sync failed: ' + e.message;
+  }
+}
+
+async function downloadMissing(id) {
+  const status = document.getElementById('playlists-status');
+  status.className = 'status-msg info show';
+  status.textContent = 'Downloading missing tracks...';
+  try {
+    const r = await fetch(`/api/playlists/${id}/download-missing`, {method: 'POST'});
+    const data = await r.json();
+    status.className = 'status-msg success show';
+    status.textContent = `Queued ${data.queued} downloads. Visit Downloads tab to monitor. Then Sync to link.`;
+    setTimeout(loadPlaylists, 2000);
+  } catch(e) {
+    status.className = 'status-msg error show';
+    status.textContent = 'Download failed: ' + e.message;
+  }
+}
+
+async function deletePlaylist(id) {
+  if (!confirm('Remove this playlist?')) return;
+  await fetch(`/api/playlists/${id}`, {method: 'DELETE'});
+  loadPlaylists();
 }
 
 // ─── Helpers ──────────────────────────────────────────────

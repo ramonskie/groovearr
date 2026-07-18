@@ -314,6 +314,26 @@ func (o *Orchestrator) GetDownloads(ctx context.Context) []domain.DownloadRecord
 	return all
 }
 
+// GetDownloadStatus looks up a download across all plugins by ID.
+func (o *Orchestrator) GetDownloadStatus(ctx context.Context, downloadID string) *domain.DownloadRecord {
+	for _, p := range o.registry.All() {
+		record, err := p.GetDownloadStatus(ctx, downloadID)
+		if err != nil {
+			continue
+		}
+		if record != nil {
+			// Apply path override.
+			o.mu.RLock()
+			if override, ok := o.pathOverride[downloadID]; ok {
+				record.FilePath = override
+			}
+			o.mu.RUnlock()
+			return record
+		}
+	}
+	return nil
+}
+
 // candidate is used internally by DownloadBest for scoring + filtering.
 type candidate struct {
 	track      domain.TrackResult

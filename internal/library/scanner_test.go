@@ -338,7 +338,15 @@ func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error            
 func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) { return nil, nil }
 func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error)   { return nil, nil }
 func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error)   { return nil, nil }
-func (m *mockStore) Close() error                                                                       { return nil }
+func (m *mockStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error)                 { return 0, nil }
+func (m *mockStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error)                    { return nil, nil }
+func (m *mockStore) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) { return nil, nil }
+func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error)                          { return nil, nil }
+func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error                                    { return nil }
+func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error                { return nil }
+func (m *mockStore) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error) { return nil, nil }
+func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error                      { return nil }
+func (m *mockStore) Close() error                                                                          { return nil }
 
 // minimalFLAC creates a valid minimal FLAC file with Vorbis comments.
 // The file contains enough structure for dhowden/tag to parse artist, album,

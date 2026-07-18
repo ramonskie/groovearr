@@ -1,0 +1,470 @@
+package playlist
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"time"
+
+	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/matching"
+)
+
+// Service orchestrates playlist import and sync.
+type Service struct {
+	registry *Registry
+	store    library.Store
+	orch     *download.Orchestrator
+	matcher  *matching.Engine
+	cfgFn    func() config.Config
+}
+
+// NewService creates a playlist service.
+func NewService(registry *Registry, store library.Store, orch *download.Orchestrator, cfgFn func() config.Config) *Service {
+	return &Service{
+		registry: registry,
+		store:    store,
+		orch:     orch,
+		matcher:  matching.New(),
+		cfgFn:    cfgFn,
+	}
+}
+
+// Sources returns all registered playlist sources.
+func (s *Service) Sources() []Source {
+	return s.registry.Configured()
+}
+
+// BrowseSource fetches all playlists from a source and marks which are already imported.
+func (s *Service) BrowseSource(ctx context.Context, sourceName string) ([]SourcePlaylistItem, error) {
+	src := s.registry.Get(sourceName)
+	if src == nil {
+		return nil, fmt.Errorf("playlist source %q not found", sourceName)
+	}
+
+	playlists, err := src.GetUserPlaylists(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch playlists: %w", err)
+	}
+
+	imported, _ := s.store.ListPlaylists(ctx)
+	importedIDs := make(map[string]bool)
+	for _, p := range imported {
+		if p.Source == sourceName {
+			importedIDs[p.SourcePlaylistID] = true
+		}
+	}
+
+	var out []SourcePlaylistItem
+	for _, p := range playlists {
+		out = append(out, SourcePlaylistItem{
+			SourceID:    p.SourceID,
+			Name:        p.Name,
+			Description: p.Description,
+			TrackCount:  p.TrackCount,
+			CoverURL:    p.CoverURL,
+			OwnerName:   p.OwnerName,
+			Imported:    importedIDs[p.SourceID],
+		})
+	}
+	return out, nil
+}
+
+// ─── Import ───────────────────────────────────────────────────────────
+
+// ImportResult holds the result of a playlist import.
+type ImportResult struct {
+	Playlist  *domain.Playlist
+	Tracks    []domain.PlaylistTrack
+	Linked    int
+	Unmatched int
+}
+
+// ImportPlaylist imports a playlist from a source: saves tracks and links existing library matches.
+// Does NOT trigger downloads — use DownloadMissing for that.
+func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string) (*ImportResult, error) {
+	src := s.registry.Get(sourceName)
+	if src == nil {
+		return nil, fmt.Errorf("playlist source %q not found", sourceName)
+	}
+
+	trackInfos, playlistName, err := src.GetPlaylistTracks(ctx, sourcePlaylistID)
+	if err != nil {
+		return nil, fmt.Errorf("fetch playlist tracks: %w", err)
+	}
+
+	playlists, err := src.GetUserPlaylists(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("fetch user playlists: %w", err)
+	}
+
+	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos))
+	if err != nil {
+		return nil, err
+	}
+
+	result := &ImportResult{Playlist: playlistRecord}
+
+	// Mark as synced.
+	now := time.Now().UTC().Format(time.RFC3339)
+	playlistRecord.SyncedAt = now
+	s.store.UpsertPlaylist(ctx, playlistRecord)
+
+	if err := s.store.DeletePlaylistTracks(ctx, playlistRecord.ID); err != nil {
+		return nil, fmt.Errorf("clear playlist tracks: %w", err)
+	}
+
+	for i, info := range trackInfos {
+		pt := domain.PlaylistTrack{
+			PlaylistID:    playlistRecord.ID,
+			Position:      i + 1,
+			SourceTrackID: info.SourceTrackID,
+			Title:         info.Title,
+			Artist:        info.Artist,
+			Album:         info.Album,
+			DurationMs:    info.DurationMs,
+			ISRC:         info.ISRC,
+		}
+
+		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
+			pt.TrackID = &trackID
+			result.Linked++
+		} else {
+			result.Unmatched++
+		}
+
+		if err := s.store.UpsertPlaylistTrack(ctx, &pt); err != nil {
+			log.Printf("playlist: save track %s: %v", info.Title, err)
+		}
+		result.Tracks = append(result.Tracks, pt)
+	}
+
+	log.Printf("playlist: imported %q — %d tracks (%d linked, %d unmatched)",
+		playlistRecord.Name, len(trackInfos), result.Linked, result.Unmatched)
+
+	// Build playlist folder from linked tracks (background context — outlives request).
+	go s.buildPlaylistFolder(context.Background(), playlistRecord.ID)
+
+	return result, nil
+}
+
+// ─── Download Missing ─────────────────────────────────────────────────
+
+// DownloadMissing queues downloads for all unmatched tracks in a playlist.
+func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, error) {
+	tracks, err := s.store.GetPlaylistTracks(ctx, playlistID)
+	if err != nil {
+		return 0, err
+	}
+
+	queued := 0
+	for _, pt := range tracks {
+		if pt.TrackID != nil {
+			continue
+		}
+		_, _, _, dlErr := s.orch.DownloadBest(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
+		if dlErr != nil {
+			log.Printf("playlist: download %s - %s: %v", pt.Artist, pt.Title, dlErr)
+			continue
+		}
+		queued++
+	}
+
+	log.Printf("playlist: download missing: queued %d tracks", queued)
+	return queued, nil
+}
+
+// ─── Sync (re-link) ───────────────────────────────────────────────────
+
+// SyncPlaylist re-scans the library and links any newly imported tracks.
+func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
+	p, err := s.store.GetPlaylist(ctx, playlistID)
+	if err != nil || p == nil {
+		return errors.New("playlist not found")
+	}
+
+	// Refresh track list from source (catches reordering, additions, removals).
+	src := s.registry.Get(p.Source)
+	if src != nil {
+		trackInfos, _, fetchErr := src.GetPlaylistTracks(ctx, p.SourcePlaylistID)
+		if fetchErr == nil && len(trackInfos) > 0 {
+			// Compare old vs new positions for logging.
+			oldTracks, _ := s.store.GetPlaylistTracks(ctx, playlistID)
+			oldPos := make(map[string]int) // sourceTrackID → old position
+			for _, ot := range oldTracks {
+				oldPos[ot.SourceTrackID] = ot.Position
+			}
+			for i, info := range trackInfos {
+				newPos := i + 1
+				if old, ok := oldPos[info.SourceTrackID]; ok && old != newPos {
+					log.Printf("playlist: %s moved position %d → %d", info.Title, old, newPos)
+				}
+			}
+
+			s.store.DeletePlaylistTracks(ctx, playlistID)
+			for i, info := range trackInfos {
+				pt := domain.PlaylistTrack{
+					PlaylistID: playlistID, Position: i + 1,
+					SourceTrackID: info.SourceTrackID,
+					Title: info.Title, Artist: info.Artist,
+					Album: info.Album, DurationMs: info.DurationMs,
+				}
+				if trackID := s.findInLibrary(ctx, info); trackID != 0 {
+					pt.TrackID = &trackID
+				}
+				s.store.UpsertPlaylistTrack(ctx, &pt)
+			}
+			p.TrackCount = len(trackInfos)
+		}
+	}
+
+	// Scan download, library, and playlist paths to import newly downloaded files.
+	cfg := s.cfgFn()
+	scanner := library.NewScanner(s.store)
+	for _, path := range []string{cfg.Library.DownloadPath, cfg.Library.LibraryPath, cfg.Library.PlaylistPath} {
+		if path == "" {
+			continue
+		}
+		scanner.ScanPath(ctx, path)
+	}
+
+	// Re-link tracks after scan.
+	tracks, _ := s.store.GetPlaylistTracks(ctx, playlistID)
+	for i := range tracks {
+		if tracks[i].TrackID != nil {
+			continue
+		}
+		info := TrackInfo{
+			SourceTrackID: tracks[i].SourceTrackID,
+			Title: tracks[i].Title, Artist: tracks[i].Artist,
+			DurationMs: tracks[i].DurationMs,
+		}
+		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
+			tracks[i].TrackID = &trackID
+			s.store.UpsertPlaylistTrack(ctx, &tracks[i])
+		}
+	}
+
+	p.SyncedAt = time.Now().UTC().Format(time.RFC3339)
+	s.store.UpsertPlaylist(ctx, p)
+
+	log.Printf("playlist: synced %q — %d tracks", p.Name, p.TrackCount)
+
+	// Build playlist folder.
+	go s.buildPlaylistFolder(ctx, playlistID)
+	return nil
+}
+
+// buildPlaylistFolder creates the playlist directory structure from linked tracks.
+func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
+	playlist, err := s.store.GetPlaylist(ctx, playlistID)
+	if err != nil || playlist == nil {
+		return
+	}
+	tracks, err := s.store.GetPlaylistTracks(ctx, playlistID)
+	if err != nil {
+		return
+	}
+
+	cfg := s.cfgFn()
+	root := cfg.Library.PlaylistPath
+	if root == "" {
+		root = "./playlists"
+	}
+	template := cfg.Library.PlaylistTemplate
+	if template == "" {
+		template = "{position:02d} {artist} - {title}"
+	}
+
+	// Create playlist directory.
+	playlistDir := filepath.Join(root, sanitizePath(playlist.Name))
+	if err := os.MkdirAll(playlistDir, 0o755); err != nil {
+		log.Printf("playlist: mkdir %s: %v", playlistDir, err)
+		return
+	}
+
+	renamer := library.NewPlaylistRenamer(template, playlistDir)
+	written := 0
+
+	for _, pt := range tracks {
+		if pt.TrackID == nil {
+			continue
+		}
+		// Get the library track to find its file path.
+		track, err := s.store.GetTrack(ctx, *pt.TrackID)
+		if err != nil || track == nil || track.FilePath == "" {
+			continue
+		}
+
+		ext := strings.TrimPrefix(filepath.Ext(track.FilePath), ".")
+		destPath := renamer.ResolvePath(pt.Position, pt.Artist, pt.Title, ext)
+		if destPath == "" || destPath == track.FilePath {
+			continue
+		}
+
+		// Ensure parent directory exists.
+		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
+			log.Printf("playlist: mkdir %s: %v", filepath.Dir(destPath), err)
+			continue
+		}
+
+		// Copy file to playlist folder (library copy stays intact).
+		if err := copyFile(track.FilePath, destPath); err != nil {
+			log.Printf("playlist: copy %s → %s: %v", track.FilePath, destPath, err)
+			continue
+		}
+		written++
+	}
+
+	log.Printf("playlist: built folder %q — %d tracks", playlist.Name, written)
+
+	// Clean up orphaned files from old positions.
+	keepFiles := make(map[string]bool)
+	for _, pt := range tracks {
+		if pt.TrackID == nil {
+			continue
+		}
+		track, _ := s.store.GetTrack(ctx, *pt.TrackID)
+		if track == nil {
+			continue
+		}
+		ext := strings.TrimPrefix(filepath.Ext(track.FilePath), ".")
+		destPath := renamer.ResolvePath(pt.Position, pt.Artist, pt.Title, ext)
+		if destPath != "" {
+			keepFiles[filepath.Base(destPath)] = true
+		}
+	}
+	entries, _ := os.ReadDir(playlistDir)
+	for _, e := range entries {
+		if !e.IsDir() && !keepFiles[e.Name()] {
+			path := filepath.Join(playlistDir, e.Name())
+			if err := os.Remove(path); err == nil {
+				log.Printf("playlist: removed orphaned file %s", e.Name())
+			}
+		}
+	}
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────
+
+// upsertPlaylist finds or creates a playlist record.
+func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int) (*domain.Playlist, error) {
+	existing, _ := s.store.GetPlaylistBySourceID(ctx, source, sourceID)
+	if existing != nil {
+		existing.TrackCount = trackCount
+		if _, err := s.store.UpsertPlaylist(ctx, existing); err != nil {
+			return nil, err
+		}
+		return existing, nil
+	}
+
+	var name, desc, cover, owner string
+	for _, p := range candidates {
+		if p.SourceID == sourceID {
+			name = p.Name
+			desc = p.Description
+			cover = p.CoverURL
+			owner = p.OwnerName
+			break
+		}
+	}
+	if name == "" {
+		name = sourceName // from pagePlaylist DATA
+	}
+	if name == "" {
+		name = fmt.Sprintf("%s playlist %s", source, sourceID)
+	}
+
+	p := &domain.Playlist{
+		Source:           source,
+		SourcePlaylistID: sourceID,
+		Name:             name,
+		Description:      desc,
+		TrackCount:       trackCount,
+		CoverURL:         cover,
+		OwnerName:        owner,
+		IsPublic:         true,
+	}
+	id, err := s.store.UpsertPlaylist(ctx, p)
+	if err != nil {
+		return nil, err
+	}
+	p.ID = id
+	return p, nil
+}
+
+// findInLibrary searches the library for a matching track.
+func (s *Service) findInLibrary(ctx context.Context, info TrackInfo) int64 {
+	tracks, err := s.store.SearchTracks(ctx, info.Title, 20)
+	if err != nil {
+		return 0
+	}
+
+	artistNorm := strings.ToLower(strings.TrimSpace(info.Artist))
+	artistCache := make(map[int64]string)
+	for _, t := range tracks {
+		if _, ok := artistCache[t.ArtistID]; ok {
+			continue
+		}
+		artist, _ := s.store.GetArtist(ctx, t.ArtistID)
+		if artist != nil {
+			artistCache[t.ArtistID] = artist.Name
+		}
+	}
+
+	// Exact title + artist match.
+	for _, t := range tracks {
+		name := artistCache[t.ArtistID]
+		if strings.ToLower(strings.TrimSpace(name)) == artistNorm &&
+			strings.EqualFold(t.Title, info.Title) {
+			return t.ID
+		}
+	}
+
+	// Fuzzy duration-based matching.
+	for _, t := range tracks {
+		name := artistCache[t.ArtistID]
+		if name == "" {
+			continue
+		}
+		score, _ := s.matcher.ScoreTrackMatch(
+			info.Title, []string{info.Artist}, info.DurationMs,
+			t.Title, []string{name}, t.Duration,
+		)
+		if score >= 0.85 {
+			return t.ID
+		}
+	}
+
+	return 0
+}
+
+// sanitizePath removes characters unsafe for directory names.
+func sanitizePath(name string) string {
+	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
+	return replacer.Replace(name)
+}
+
+// copyFile copies src to dst.
+func copyFile(src, dst string) error {
+	s, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+	d, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+	_, err = io.Copy(d, s)
+	return err
+}

@@ -37,6 +37,17 @@ type Store interface {
 	GetAlbumByExternalID(ctx context.Context, service, externalID string) (*domain.Album, error)
 	GetTrackByExternalID(ctx context.Context, service, externalID string) (*domain.Track, error)
 
+	// Playlists.
+	UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error)
+	GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error)
+	GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error)
+	ListPlaylists(ctx context.Context) ([]domain.Playlist, error)
+	DeletePlaylist(ctx context.Context, id int64) error
+
+	UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error
+	GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error)
+	DeletePlaylistTracks(ctx context.Context, playlistID int64) error
+
 	// Maintenance.
 	Close() error
 }

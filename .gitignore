@@ -10,6 +10,7 @@ build/
 # Downloads / media
 downloads/
 music/
+playlists/
 
 # Temporary files
 .tmp/

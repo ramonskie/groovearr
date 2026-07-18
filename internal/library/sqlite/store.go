@@ -135,6 +135,47 @@ func (s *Store) migrate() error {
 		version = 1
 	}
 
+	// Version 2: playlist support.
+	if version < 2 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS playlists (
+				id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+				source             TEXT NOT NULL,
+				source_playlist_id TEXT NOT NULL,
+				name               TEXT NOT NULL,
+				description        TEXT,
+				track_count        INTEGER,
+				cover_url          TEXT,
+				owner_name         TEXT,
+				is_public          INTEGER DEFAULT 1,
+				auto_sync          INTEGER DEFAULT 0,
+				synced_at          TEXT,
+				created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+				UNIQUE(source, source_playlist_id)
+			)`,
+			`CREATE TABLE IF NOT EXISTS playlist_tracks (
+				playlist_id     INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+				position        INTEGER NOT NULL,
+				track_id        INTEGER REFERENCES tracks(id),
+				source_track_id TEXT NOT NULL,
+				title           TEXT NOT NULL,
+				artist          TEXT NOT NULL,
+				album           TEXT,
+				duration_ms     INTEGER,
+				isrc            TEXT,
+				added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+				PRIMARY KEY (playlist_id, position)
+			)`,
+		}
+		for _, stmt := range statements {
+			if _, err := s.db.Exec(stmt); err != nil {
+				return fmt.Errorf("migration v2: %w", err)
+			}
+		}
+		version = 2
+	}
+
 	// Record current version.
 	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
 		return fmt.Errorf("migration: clear version: %w", err)
@@ -566,4 +607,160 @@ func externalIDColumn(service string) string {
 	default:
 		return ""
 	}
+}
+
+// ─── Playlist CRUD ────────────────────────────────────────────────────
+
+func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error) {
+	now := time.Now().UTC().Format(time.RFC3339)
+	autoSync := 0
+	if p.AutoSync {
+		autoSync = 1
+	}
+
+	if p.ID != 0 {
+		_, err := s.db.ExecContext(ctx, `
+			UPDATE playlists SET name=?, description=?, track_count=?, cover_url=?,
+			owner_name=?, is_public=?, auto_sync=?, synced_at=?, updated_at=?
+			WHERE id=?`,
+			p.Name, p.Description, p.TrackCount, p.CoverURL,
+			p.OwnerName, boolToInt(p.IsPublic), autoSync, p.SyncedAt, now, p.ID,
+		)
+		return p.ID, err
+	}
+
+	result, err := s.db.ExecContext(ctx, `
+		INSERT OR IGNORE INTO playlists (source, source_playlist_id, name, description,
+			track_count, cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		p.Source, p.SourcePlaylistID, p.Name, p.Description,
+		p.TrackCount, p.CoverURL, p.OwnerName, boolToInt(p.IsPublic), autoSync,
+		p.SyncedAt, now, now,
+	)
+	if err != nil {
+		return 0, err
+	}
+
+	id, _ := result.LastInsertId()
+	if id != 0 {
+		return id, nil
+	}
+
+	// Duplicate source+playlist ID — return existing.
+	existing, err := s.GetPlaylistBySourceID(ctx, p.Source, p.SourcePlaylistID)
+	if err != nil || existing == nil {
+		return 0, fmt.Errorf("playlist insert failed: %s/%s", p.Source, p.SourcePlaylistID)
+	}
+	return existing.ID, nil
+}
+
+func (s *Store) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
+	p := &domain.Playlist{}
+	var autoSync int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, source, source_playlist_id, name, description, track_count,
+			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+		FROM playlists WHERE id=?`, id,
+	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
+		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	p.AutoSync = autoSync != 0
+	return p, err
+}
+
+func (s *Store) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) {
+	p := &domain.Playlist{}
+	var autoSync int
+	err := s.db.QueryRowContext(ctx, `
+		SELECT id, source, source_playlist_id, name, description, track_count,
+			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+		FROM playlists WHERE source=? AND source_playlist_id=?`,
+		source, sourceID,
+	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
+		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	p.AutoSync = autoSync != 0
+	return p, err
+}
+
+func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, source, source_playlist_id, name, description, track_count,
+			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+		FROM playlists ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.Playlist
+	for rows.Next() {
+		var p domain.Playlist
+		var autoSync int
+		if err := rows.Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
+			&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+			&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			return nil, err
+		}
+		p.AutoSync = autoSync != 0
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeletePlaylist(ctx context.Context, id int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM playlists WHERE id=?`, id)
+	return err
+}
+
+func (s *Store) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx, `
+		INSERT OR REPLACE INTO playlist_tracks (playlist_id, position, track_id,
+			source_track_id, title, artist, album, duration_ms, isrc, added_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		t.PlaylistID, t.Position, t.TrackID, t.SourceTrackID,
+		t.Title, t.Artist, t.Album, t.DurationMs, t.ISRC, now,
+	)
+	return err
+}
+
+func (s *Store) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error) {
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT playlist_id, position, track_id, source_track_id, title, artist,
+			album, duration_ms, isrc
+		FROM playlist_tracks WHERE playlist_id=? ORDER BY position`, playlistID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []domain.PlaylistTrack
+	for rows.Next() {
+		var t domain.PlaylistTrack
+		if err := rows.Scan(&t.PlaylistID, &t.Position, &t.TrackID, &t.SourceTrackID,
+			&t.Title, &t.Artist, &t.Album, &t.DurationMs, &t.ISRC); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) DeletePlaylistTracks(ctx context.Context, playlistID int64) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM playlist_tracks WHERE playlist_id=?`, playlistID)
+	return err
+}
+
+func boolToInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }

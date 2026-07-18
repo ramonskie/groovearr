@@ -14,7 +14,9 @@
   "library": {
     "download_path": "./downloads",
     "library_path": "./music",
-    "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}"
+    "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}",
+    "playlist_path": "./playlists",
+    "playlist_template": "{position:02d} {artist} - {title}"
   },
   "quality": {
     "preferred_format": "flac",

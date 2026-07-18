@@ -16,6 +16,8 @@ import (
 	"github.com/ramonskie/groovearr/internal/download/soulseek"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
+	"github.com/ramonskie/groovearr/internal/playlist"
+	deezerpl "github.com/ramonskie/groovearr/internal/playlist/deezer"
 )
 
 func main() {
@@ -46,7 +48,7 @@ func main() {
 	currentCfg := cfg.Get()
 
 	// Ensure required directories exist.
-	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath} {
+	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath, currentCfg.Library.PlaylistPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
 				log.Printf("mkdir %s: %v", p, err)
@@ -77,13 +79,23 @@ func main() {
 		library.NewTagWriterHook(),
 	)
 
+	// Playlist service (Deezer via ARL).
+	playlistReg := playlist.NewRegistry()
+	if deezer.IsConfigured() {
+		deezerPlaylistSrc := deezerpl.NewPlaylistSource(deezer)
+		playlistReg.Register(deezerPlaylistSrc)
+	}
+	playlistSvc := playlist.NewService(playlistReg, store, orch, func() config.Config {
+		return cfg.Get()
+	})
+
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
 	if addr == "" {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, orch, store, scanner, postProc)
+	srv := api.NewServer(addr, cfg, orch, store, scanner, postProc, playlistSvc)
 
 	log.Printf("groovearr starting")
 	log.Printf("  config:   %s", configPath)
