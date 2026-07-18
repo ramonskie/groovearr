@@ -385,6 +385,9 @@ func minimalFLAC(artist, album, title string, year, trackNum, discNum int) []byt
 	writeUint24BE(&buf, len(commentsData))
 	buf.Write(commentsData)
 
+	// Append FLAC frame sync bytes so go-flac v1 parser has audio data to parse.
+	buf.Write([]byte{0xFF, 0xF8, 0x00, 0x00})
+
 	return buf.Bytes()
 }
 

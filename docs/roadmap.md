@@ -36,8 +36,8 @@ Small but impactful fixes to what's already built.
 | 16 | **Post-download file renaming** — apply `folder_template` via `PathResolver` after download completes | ✅ Done | S | PathResolver (done) |
 | 17 | **Cover art download hook** — post-processing hook fetches album/artist covers from Deezer, caches as `cover.jpg` in album dir, populates `thumb_url` in DB | ✅ Done | M | PostProcessor (done), Deezer API (done) |
 | 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | ✅ Done | M | `dhowden/tag` |
-| 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | 🔴 High | L | `bogem/id3v2`, FLAC Vorbis |
-| 20 | **Config validation** — validate URLs, quality values, path existence at save time | 🟡 Medium | S | — |
+| 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | ✅ Done | L | `bogem/id3v2`, `go-flac/flacpicture` |
+| 20 | **Config validation** — validate URLs, quality values, path existence at save time | ✅ Done | S | — |
 | 21 | **DB migration versioning** — `golang-migrate/migrate` or embed version SQL instead of idempotent CREATE | 🟡 Medium | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | 🟡 Medium | S | — |
 | 23 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
@@ -203,20 +203,20 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 11 features | 🟡 4/11 |
+| 1 | Core Quality | 11 features | 🟡 6/11 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
 | 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **78 features** | **19 done, 59 remaining** |
+| **Total** | | **78 features** | **21 done, 57 remaining** |
 
 ### Immediate Next Steps (Tier 1)
 
-1. **Audio tag writing** — embed metadata after download (ID3 + FLAC Vorbis)
-2. **Config validation** — validate on save in UI + server-side
-3. **Authentication** — basic login gate for API access
+1. **Wire `QualityConfig`** — use `min_bitrate` + `preferred_format` in download filter — #22
+2. **Artist unique constraint** — `UNIQUE` on `artists.name` — #24
+3. **Authentication** — basic login gate for API access — #66
 
 ### First Major Feature Block (Tier 3-4)
 

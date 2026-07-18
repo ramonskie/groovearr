@@ -68,10 +68,11 @@ func main() {
 	orch := download.NewOrchestrator(registry)
 
 	// Post-download processor: renames files into organized library structure,
-	// then fetches cover art for the album directory.
+	// then fetches cover art for the album directory, then writes audio tags.
 	postProc := download.NewPostProcessor(
 		newRenamerHook(cfg),
 		library.NewCoverHook(store),
+		library.NewTagWriterHook(),
 	)
 
 	// HTTP server.
