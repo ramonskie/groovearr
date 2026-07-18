@@ -44,6 +44,16 @@ func main() {
 	registry := download.NewRegistry()
 
 	currentCfg := cfg.Get()
+
+	// Ensure required directories exist.
+	for _, p := range []string{currentCfg.Soulseek.DownloadPath, currentCfg.Library.LibraryPath} {
+		if p != "" {
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				log.Printf("mkdir %s: %v", p, err)
+			}
+		}
+	}
+
 	slskd := soulseek.New(currentCfg.Soulseek)
 	if err := registry.Register(slskd); err != nil {
 		log.Fatalf("register soulseek: %v", err)
@@ -89,7 +99,7 @@ func newRenamerHook(cfg *config.Persistence) download.PostDownloadHook {
 	return func(ctx context.Context, record domain.DownloadRecord) (string, error) {
 		c := cfg.Get()
 		template := c.Library.FolderTemplate
-		root := c.Library.RootPath
+		root := c.Library.LibraryPath
 		if root == "" {
 			root = c.Soulseek.DownloadPath // backward compat
 		}

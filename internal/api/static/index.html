@@ -268,7 +268,7 @@ tr:hover td{background:#252525}
         <div class="form-group">
           <label>Directory</label>
           <input id="cfg-download-path" placeholder="./downloads">
-          <div class="hint">Where downloaded files are saved. Both Soulseek and Deezer use this path.</div>
+          <div class="hint">Download staging directory. Raw files land here before being organized into the library.</div>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">Save</button>
         <div class="status-msg" id="settings-general-status"></div>
@@ -332,19 +332,19 @@ tr:hover td{background:#252525}
     <!-- Library sub-tab -->
     <div class="subtab-content" id="settings-library">
       <div class="card">
+        <div class="card-header"><h2>Library Path</h2></div>
+        <div class="form-group">
+          <label>Directory</label>
+          <input id="cfg-library-path" placeholder="./music">
+          <div class="hint">Where organized files are moved after download. Files are renamed using the folder template below.</div>
+        </div>
+      </div>
+      <div class="card">
         <div class="card-header"><h2>Folder Organization</h2></div>
         <div class="form-group">
           <label>Template</label>
           <input id="cfg-folder-template" placeholder="{artist}/{album}/{track:00} - {title}">
           <div class="hint">Tokens: {artist} {album} {year} {track:00} {track:02d} {title} {ext} {disc:00} {album_type}</div>
-        </div>
-      </div>
-      <div class="card">
-        <div class="card-header"><h2>Scan Paths</h2></div>
-        <div class="form-group">
-          <label>Directories</label>
-          <input id="cfg-music-paths" placeholder="./downloads">
-          <div class="hint">Comma-separated directories to scan for music. The download path is always included.</div>
         </div>
         <button class="btn btn-primary" onclick="saveSettings()">Save</button>
         <div class="status-msg" id="settings-library-status"></div>
@@ -442,7 +442,7 @@ async function loadConfig() {
     document.getElementById('cfg-deezer-arl').value = currentConfig.deezer?.arl || '';
     document.getElementById('cfg-deezer-quality').value = currentConfig.deezer?.quality || 'flac';
     document.getElementById('cfg-folder-template').value = currentConfig.library?.folder_template || '';
-    document.getElementById('cfg-music-paths').value = (currentConfig.library?.music_paths || []).join(', ');
+    document.getElementById('cfg-library-path').value = currentConfig.library?.library_path || './music';
     loadSourceStatus();
   } catch(e) { logError('CONFIG', 'loadConfig failed', e); }
 }
@@ -507,8 +507,8 @@ async function saveSettings() {
         quality: document.getElementById('cfg-deezer-quality').value
       },
       library: {
-        folder_template: document.getElementById('cfg-folder-template').value,
-        music_paths: document.getElementById('cfg-music-paths').value.split(',').map(s => s.trim()).filter(s => s)
+        library_path: document.getElementById('cfg-library-path').value,
+        folder_template: document.getElementById('cfg-folder-template').value
       }
     };
     const r = await fetch('/api/config', {

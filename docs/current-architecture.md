@@ -109,7 +109,7 @@ type Plugin interface {
 {
   "soulseek":  { "slskd_url", "api_key", "download_path", "search_timeout", "min_upload_speed" },
   "deezer":    { "arl", "quality", "allow_fallback", "access_token" },
-  "library":   { "music_paths", "folder_template" },
+  "library":   { "library_path", "folder_template" },
   "quality":   { "preferred_format", "min_bitrate" }
 }
 ```

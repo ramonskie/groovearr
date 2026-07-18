@@ -13,8 +13,7 @@
     "access_token": ""
   },
   "library": {
-    "root_path": "./music",
-    "music_paths": null,
+    "library_path": "./music",
     "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}"
   },
   "quality": {

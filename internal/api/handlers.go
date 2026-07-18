@@ -7,6 +7,7 @@ import (
 	"io/fs"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/ramonskie/groovearr/internal/config"
@@ -146,6 +147,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Rebuild clients with new config.
 	s.reloadSoulseek()
 	s.reloadDeezer()
+
+	// Ensure required directories exist.
+	updated := s.cfg.Get()
+	for _, p := range []string{updated.Soulseek.DownloadPath, updated.Library.LibraryPath} {
+		if p != "" {
+			if err := os.MkdirAll(p, 0o755); err != nil {
+				log.Printf("mkdir %s: %v", p, err)
+			}
+		}
+	}
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
@@ -367,25 +378,10 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 	cfg := s.cfg.Get()
 
-	// Collect unique paths: RootPath + MusicPaths + DownloadPath.
-	seen := map[string]bool{}
-	paths := make([]string, 0, len(cfg.Library.MusicPaths)+3)
-
-	addPath := func(p string) {
-		if p != "" && !seen[p] {
-			seen[p] = true
-			paths = append(paths, p)
-		}
-	}
-
-	addPath(cfg.Library.RootPath)
-	for _, p := range cfg.Library.MusicPaths {
-		addPath(p)
-	}
-	addPath(cfg.Soulseek.DownloadPath)
-
-	if len(paths) == 0 {
-		paths = append(paths, "./downloads")
+	// Scan the library root only — download path is staging, not scanned.
+	paths := []string{cfg.Library.LibraryPath}
+	if paths[0] == "" {
+		paths[0] = "./music"
 	}
 
 	ctx := r.Context()
@@ -486,11 +482,8 @@ func mergeConfig(dst, partial *config.Config) {
 	if partial.Library.FolderTemplate != "" {
 		dst.Library.FolderTemplate = partial.Library.FolderTemplate
 	}
-	if partial.Library.RootPath != "" {
-		dst.Library.RootPath = partial.Library.RootPath
-	}
-	if partial.Library.MusicPaths != nil {
-		dst.Library.MusicPaths = partial.Library.MusicPaths
+	if partial.Library.LibraryPath != "" {
+		dst.Library.LibraryPath = partial.Library.LibraryPath
 	}
 
 	if partial.Quality.PreferredFormat != "" {

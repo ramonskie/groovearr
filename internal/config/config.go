@@ -39,9 +39,8 @@ type DeezerConfig struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	RootPath       string   `json:"root_path"`       // where organized downloads end up
-	MusicPaths     []string `json:"music_paths"`     // additional directories to scan
-	FolderTemplate string   `json:"folder_template"` // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	LibraryPath    string `json:"library_path"`    // where organized downloads end up
+	FolderTemplate string `json:"folder_template"` // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
 }
 
 // QualityConfig holds quality preferences for downloads.
@@ -68,7 +67,7 @@ func DefaultConfig() Config {
 			AllowFallback: &allowFallback,
 		},
 		Library: LibraryConfig{
-			RootPath:      "./music",
+			LibraryPath:      "./music",
 			FolderTemplate: "{artist}/{album} ({year})/{track:02d} - {title}",
 		},
 		Quality: QualityConfig{
@@ -108,8 +107,8 @@ func (c Config) Validate() []string {
 			errs = append(errs, "library.folder_template: contains no recognized tokens (e.g. {artist}, {album})")
 		}
 	}
-	if c.Library.RootPath != "" && strings.Contains(c.Library.RootPath, "\x00") {
-		errs = append(errs, "library.root_path: contains null bytes")
+	if c.Library.LibraryPath != "" && strings.Contains(c.Library.LibraryPath, "\x00") {
+		errs = append(errs, "library.library_path: contains null bytes")
 	}
 
 	// Quality.
@@ -146,10 +145,10 @@ func Load(path string) (Config, error) {
 			cfg.Soulseek.DownloadPath = abs
 		}
 	}
-	if cfg.Library.RootPath != "" && !filepath.IsAbs(cfg.Library.RootPath) {
-		abs, err := filepath.Abs(cfg.Library.RootPath)
+	if cfg.Library.LibraryPath != "" && !filepath.IsAbs(cfg.Library.LibraryPath) {
+		abs, err := filepath.Abs(cfg.Library.LibraryPath)
 		if err == nil {
-			cfg.Library.RootPath = abs
+			cfg.Library.LibraryPath = abs
 		}
 	}
 
