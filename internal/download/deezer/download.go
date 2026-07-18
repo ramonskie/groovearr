@@ -65,6 +65,10 @@ type DownloadClient struct {
 	// Per-download state.
 	downloadsMu sync.RWMutex
 	downloads   map[string]*domain.DownloadRecord // downloadID → record
+
+	// Cancellation for active downloads.
+	cancelMu    sync.Mutex
+	cancelFuncs map[string]context.CancelFunc // downloadID → cancel
 }
 
 // NewDownloadClient creates a Deezer download client.
@@ -92,7 +96,8 @@ func NewDownloadClient(cfg config.DeezerConfig, downloadPath string) *DownloadCl
 				},
 			},
 		},
-		downloads: make(map[string]*domain.DownloadRecord),
+		downloads:   make(map[string]*domain.DownloadRecord),
+		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 }
 
@@ -219,8 +224,14 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 	c.downloads[downloadID] = record
 	c.downloadsMu.Unlock()
 
+	// Create a cancellable context for this download goroutine.
+	dlCtx, cancel := context.WithCancel(ctx)
+	c.cancelMu.Lock()
+	c.cancelFuncs[downloadID] = cancel
+	c.cancelMu.Unlock()
+
 	// Start download in background.
-	go c.downloadSync(downloadID, trackID, displayName)
+	go c.downloadSync(dlCtx, downloadID, trackID, displayName)
 
 	return downloadID, nil
 }
@@ -249,8 +260,16 @@ func (c *DownloadClient) GetDownloadStatus(ctx context.Context, downloadID strin
 	return r, nil
 }
 
-// CancelDownload cancels an active download.
+// CancelDownload cancels an active download by cancelling its context.
 func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, remove bool) error {
+	// Cancel the underlying context to stop the goroutine.
+	c.cancelMu.Lock()
+	if cancel, ok := c.cancelFuncs[downloadID]; ok {
+		cancel()
+		delete(c.cancelFuncs, downloadID)
+	}
+	c.cancelMu.Unlock()
+
 	c.downloadsMu.Lock()
 	defer c.downloadsMu.Unlock()
 
@@ -345,11 +364,26 @@ func (c *DownloadClient) authenticate() error {
 
 // ─── Download implementation ────────────────────────────────────────
 
-func (c *DownloadClient) downloadSync(downloadID, trackID, displayName string) {
+func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, displayName string) {
+	// Clean up cancel func when done.
+	defer func() {
+		c.cancelMu.Lock()
+		delete(c.cancelFuncs, downloadID)
+		c.cancelMu.Unlock()
+	}()
+
+	// Check for early cancellation.
+	if ctx.Err() != nil {
+		return
+	}
+
 	// Get track data from private API.
 	trackData, err := c.gwCall("song.getData", map[string]any{"sng_id": trackID})
 	if err != nil {
 		c.setError(downloadID, fmt.Sprintf("failed to get track data: %v", err))
+		return
+	}
+	if ctx.Err() != nil {
 		return
 	}
 
@@ -375,7 +409,7 @@ func (c *DownloadClient) downloadSync(downloadID, trackID, displayName string) {
 	outPath := filepath.Join(c.dlPath, safeName+ext)
 
 	// Download and decrypt.
-	if err := c.downloadAndDecrypt(downloadID, trackID, mediaURL, outPath); err != nil {
+	if err := c.downloadAndDecrypt(ctx, downloadID, trackID, mediaURL, outPath); err != nil {
 		c.setError(downloadID, err.Error())
 		os.Remove(outPath)
 		return
@@ -389,15 +423,22 @@ func (c *DownloadClient) downloadSync(downloadID, trackID, displayName string) {
 		return
 	}
 
+	// Only mark succeeded if not already cancelled.
 	c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+		if r.State.Terminal() {
+			return // cancelled or errored during download
+		}
 		r.State = domain.DownloadSucceeded
 		r.Progress = 100.0
 		r.FilePath = outPath
 	})
 }
 
-func (c *DownloadClient) downloadAndDecrypt(downloadID, trackID, url, outPath string) error {
-	req, _ := http.NewRequest(http.MethodGet, url, nil)
+func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, trackID, url, outPath string) error {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		return fmt.Errorf("create request: %w", err)
+	}
 	resp, err := c.client.Do(req)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
@@ -427,6 +468,12 @@ func (c *DownloadClient) downloadAndDecrypt(downloadID, trackID, url, outPath st
 	})
 
 	for {
+		// Check for cancellation between chunks.
+		if ctx.Err() != nil {
+			os.Remove(outPath)
+			return ctx.Err()
+		}
+
 		n, readErr := io.ReadFull(resp.Body, buf)
 		if n > 0 {
 			chunk := buf[:n]
@@ -648,6 +695,9 @@ func blowfishDecrypt(data, key []byte) ([]byte, error) {
 
 func (c *DownloadClient) setError(downloadID, msg string) {
 	c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+		if r.State.Terminal() {
+			return // already cancelled — don't overwrite
+		}
 		r.State = domain.DownloadErrored
 		r.Error = msg
 	})
