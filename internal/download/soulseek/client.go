@@ -29,6 +29,7 @@ const displayName = "Soulseek"
 // Client implements download.Plugin for Soulseek via slskd REST API.
 type Client struct {
 	cfg      config.SoulseekConfig
+	dlPath   string // download staging directory (not from Soulseek config)
 	baseURL  string
 	apiKey   string
 	client   *http.Client
@@ -40,10 +41,11 @@ type Client struct {
 	downloadUsernames map[string]string                 // downloadID → username
 }
 
-// New creates a Soulseek client with the given config.
-func New(cfg config.SoulseekConfig) *Client {
+// New creates a Soulseek client with the given config and download path.
+func New(cfg config.SoulseekConfig, downloadPath string) *Client {
 	return &Client{
 		cfg:            cfg,
+		dlPath:         downloadPath,
 		baseURL:        strings.TrimRight(cfg.SlskdURL, "/"),
 		apiKey:         cfg.APIKey,
 		client:         &http.Client{Timeout: 120 * time.Second},
@@ -171,7 +173,7 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 	downloadReq := []map[string]any{{
 		"filename": filename,
 		"size":     fileSize,
-		"path":     c.cfg.DownloadPath,
+		"path":     c.dlPath,
 	}}
 
 	body, _ := json.Marshal(downloadReq)
@@ -215,7 +217,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 		return out, nil
 	}
 
-	records := parseDownloadStatus(resp, c.cfg.DownloadPath)
+	records := parseDownloadStatus(resp, c.dlPath)
 	c.downloadsMu.Lock()
 	for _, r := range records {
 		c.downloads[r.ID] = &r
@@ -237,7 +239,7 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dom
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}
 
-	records := parseDownloadStatus(resp, c.cfg.DownloadPath)
+	records := parseDownloadStatus(resp, c.dlPath)
 	if len(records) == 0 {
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}

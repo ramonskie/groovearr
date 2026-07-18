@@ -436,7 +436,7 @@ async function loadConfig() {
   try {
     const r = await fetch('/api/config');
     currentConfig = await r.json();
-    document.getElementById('cfg-download-path').value = currentConfig.soulseek?.download_path || './downloads';
+    document.getElementById('cfg-download-path').value = currentConfig.library?.download_path || './downloads';
     document.getElementById('cfg-slskd-url').value = currentConfig.soulseek?.slskd_url || '';
     document.getElementById('cfg-api-key').value = currentConfig.soulseek?.api_key || '';
     document.getElementById('cfg-deezer-arl').value = currentConfig.deezer?.arl || '';
@@ -499,14 +499,14 @@ async function saveSettings() {
     const body = {
       soulseek: {
         slskd_url: document.getElementById('cfg-slskd-url').value,
-        api_key: document.getElementById('cfg-api-key').value,
-        download_path: document.getElementById('cfg-download-path').value
+        api_key: document.getElementById('cfg-api-key').value
       },
       deezer: {
         arl: document.getElementById('cfg-deezer-arl').value,
         quality: document.getElementById('cfg-deezer-quality').value
       },
       library: {
+        download_path: document.getElementById('cfg-download-path').value,
         library_path: document.getElementById('cfg-library-path').value,
         folder_template: document.getElementById('cfg-folder-template').value
       }

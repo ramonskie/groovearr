@@ -2,7 +2,6 @@
   "soulseek": {
     "slskd_url": "http://localhost:5030",
     "api_key": "your-slskd-api-key",
-    "download_path": "./downloads",
     "search_timeout": 60,
     "min_upload_speed": 0
   },
@@ -13,6 +12,7 @@
     "access_token": ""
   },
   "library": {
+    "download_path": "./downloads",
     "library_path": "./music",
     "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}"
   },

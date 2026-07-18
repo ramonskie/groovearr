@@ -107,14 +107,83 @@ type Plugin interface {
 
 ```json
 {
-  "soulseek":  { "slskd_url", "api_key", "download_path", "search_timeout", "min_upload_speed" },
+  "soulseek":  { "slskd_url", "api_key", "search_timeout", "min_upload_speed" },
   "deezer":    { "arl", "quality", "allow_fallback", "access_token" },
-  "library":   { "library_path", "folder_template" },
+  "library":   { "download_path", "library_path", "folder_template" },
   "quality":   { "preferred_format", "min_bitrate" }
 }
 ```
 
 Loaded from `$GROOVEARR_CONFIG` (default `./config.json`). Thread-safe updates auto-persist.
+
+### Path Model
+
+Two directories, two purposes:
+
+| Config | Default | Purpose | Scanned? |
+|--------|---------|---------|----------|
+| `library.download_path` | `./downloads` | Staging — raw files land here from all download sources | ❌ |
+| `library.library_path` | `./music` | Library — renamer moves organized files here | ✅ |
+
+```
+./downloads/                              ← staging (all plugins)
+./downloads/Daft Punk - Get Lucky.flac    ← raw download
+         ↓ renamer (post-download hook)
+./music/Daft Punk/RAM (2013)/07 - Get Lucky.flac  ← final organized
+         ↓ scanner
+SQLite library record
+```
+
+All download plugins (Soulseek, Deezer, future Tidal/YouTube) share the same staging
+directory. Groovearr tells slskd where to save via per-download path override — slskd's
+own internal download directory is ignored.
+
+### Local Setup
+
+```bash
+./groovearr
+# Creates ./downloads/ and ./music/ automatically.
+# Edit ./config.json via the Settings UI at localhost:8008.
+```
+
+### Docker Setup
+
+Both containers must share the same directories at the same mount points:
+
+```yaml
+# docker-compose.yml
+services:
+  slskd:
+    image: slskd/slskd:latest
+    volumes:
+      - ./downloads:/downloads    # slskd writes here
+      # ...
+
+  groovearr:
+    build: .
+    volumes:
+      - ./downloads:/downloads    # groovearr reads here
+      - ./music:/music            # organized library lives here
+      - ./config.json:/config.json
+    environment:
+      - GROOVEARR_CONFIG=/config.json
+    ports:
+      - "8008:8008"
+```
+
+Config for this setup:
+```json
+{
+  "soulseek": {
+    "slskd_url": "http://slskd:5030",
+    "api_key": "your-api-key"
+  },
+  "library": {
+    "download_path": "/downloads",
+    "library_path": "/music"
+  }
+}
+```
 
 ## Database Schema
 

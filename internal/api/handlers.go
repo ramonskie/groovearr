@@ -150,7 +150,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Ensure required directories exist.
 	updated := s.cfg.Get()
-	for _, p := range []string{updated.Soulseek.DownloadPath, updated.Library.LibraryPath} {
+	for _, p := range []string{updated.Library.DownloadPath, updated.Library.LibraryPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
 				log.Printf("mkdir %s: %v", p, err)
@@ -412,7 +412,7 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) reloadSoulseek() {
 	cfg := s.cfg.Get()
-	slskd := soulseek.New(cfg.Soulseek)
+	slskd := soulseek.New(cfg.Soulseek, cfg.Library.DownloadPath)
 	if err := s.orch.Registry().Replace("soulseek", slskd); err != nil {
 		log.Printf("reload soulseek: %v", err)
 	}
@@ -420,7 +420,7 @@ func (s *Server) reloadSoulseek() {
 
 func (s *Server) reloadDeezer() {
 	cfg := s.cfg.Get()
-	dl := deezerdl.NewDownloadClient(cfg.Deezer, cfg.Soulseek.DownloadPath)
+	dl := deezerdl.NewDownloadClient(cfg.Deezer, cfg.Library.DownloadPath)
 	if err := s.orch.Registry().Replace("deezer", dl); err != nil {
 		log.Printf("reload deezer: %v", err)
 	}
@@ -457,9 +457,6 @@ func mergeConfig(dst, partial *config.Config) {
 	if partial.Soulseek.APIKey != "" {
 		dst.Soulseek.APIKey = partial.Soulseek.APIKey
 	}
-	if partial.Soulseek.DownloadPath != "" {
-		dst.Soulseek.DownloadPath = partial.Soulseek.DownloadPath
-	}
 	if partial.Soulseek.SearchTimeout > 0 {
 		dst.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
 	}
@@ -479,6 +476,9 @@ func mergeConfig(dst, partial *config.Config) {
 		dst.Deezer.AllowFallback = partial.Deezer.AllowFallback
 	}
 
+	if partial.Library.DownloadPath != "" {
+		dst.Library.DownloadPath = partial.Library.DownloadPath
+	}
 	if partial.Library.FolderTemplate != "" {
 		dst.Library.FolderTemplate = partial.Library.FolderTemplate
 	}

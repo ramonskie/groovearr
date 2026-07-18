@@ -22,11 +22,10 @@ type Config struct {
 
 // SoulseekConfig holds slskd connection settings.
 type SoulseekConfig struct {
-	SlskdURL      string `json:"slskd_url"`      // e.g. "http://localhost:5030"
-	APIKey        string `json:"api_key"`         // X-API-Key for slskd
-	DownloadPath  string `json:"download_path"`   // default: "./downloads"
-	SearchTimeout int    `json:"search_timeout"`  // seconds, default: 60
-	MinUploadSpeed int  `json:"min_upload_speed"` // Mbps, default: 0
+	SlskdURL       string `json:"slskd_url"`       // e.g. "http://localhost:5030"
+	APIKey         string `json:"api_key"`          // X-API-Key for slskd
+	SearchTimeout  int    `json:"search_timeout"`   // seconds, default: 60
+	MinUploadSpeed int    `json:"min_upload_speed"` // Mbps, default: 0
 }
 
 // DeezerConfig holds Deezer API and download settings.
@@ -39,6 +38,7 @@ type DeezerConfig struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
+	DownloadPath   string `json:"download_path"`   // download staging directory
 	LibraryPath    string `json:"library_path"`    // where organized downloads end up
 	FolderTemplate string `json:"folder_template"` // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
 }
@@ -59,7 +59,6 @@ func DefaultConfig() Config {
 	return Config{
 		Soulseek: SoulseekConfig{
 			SlskdURL:      "",
-			DownloadPath:  "./downloads",
 			SearchTimeout: 60,
 		},
 		Deezer: DeezerConfig{
@@ -67,7 +66,8 @@ func DefaultConfig() Config {
 			AllowFallback: &allowFallback,
 		},
 		Library: LibraryConfig{
-			LibraryPath:      "./music",
+			DownloadPath:   "./downloads",
+			LibraryPath:    "./music",
 			FolderTemplate: "{artist}/{album} ({year})/{track:02d} - {title}",
 		},
 		Quality: QualityConfig{
@@ -139,10 +139,10 @@ func Load(path string) (Config, error) {
 	}
 
 	// Expand relative paths.
-	if !filepath.IsAbs(cfg.Soulseek.DownloadPath) {
-		abs, err := filepath.Abs(cfg.Soulseek.DownloadPath)
+	if cfg.Library.DownloadPath != "" && !filepath.IsAbs(cfg.Library.DownloadPath) {
+		abs, err := filepath.Abs(cfg.Library.DownloadPath)
 		if err == nil {
-			cfg.Soulseek.DownloadPath = abs
+			cfg.Library.DownloadPath = abs
 		}
 	}
 	if cfg.Library.LibraryPath != "" && !filepath.IsAbs(cfg.Library.LibraryPath) {

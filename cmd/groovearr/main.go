@@ -46,7 +46,7 @@ func main() {
 	currentCfg := cfg.Get()
 
 	// Ensure required directories exist.
-	for _, p := range []string{currentCfg.Soulseek.DownloadPath, currentCfg.Library.LibraryPath} {
+	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
 				log.Printf("mkdir %s: %v", p, err)
@@ -54,12 +54,12 @@ func main() {
 		}
 	}
 
-	slskd := soulseek.New(currentCfg.Soulseek)
+	slskd := soulseek.New(currentCfg.Soulseek, currentCfg.Library.DownloadPath)
 	if err := registry.Register(slskd); err != nil {
 		log.Fatalf("register soulseek: %v", err)
 	}
 
-	deezer := deezerdl.NewDownloadClient(currentCfg.Deezer, currentCfg.Soulseek.DownloadPath)
+	deezer := deezerdl.NewDownloadClient(currentCfg.Deezer, currentCfg.Library.DownloadPath)
 	if err := registry.Register(deezer, "deezer_dl"); err != nil {
 		log.Printf("register deezer download: %v (continuing without deezer)", err)
 	}
@@ -101,7 +101,7 @@ func newRenamerHook(cfg *config.Persistence) download.PostDownloadHook {
 		template := c.Library.FolderTemplate
 		root := c.Library.LibraryPath
 		if root == "" {
-			root = c.Soulseek.DownloadPath // backward compat
+			root = c.Library.DownloadPath // backward compat
 		}
 		renamer := library.NewRenamer(template, root)
 

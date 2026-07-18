@@ -12,8 +12,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.Soulseek.SlskdURL != "" {
 		t.Error("default slskd_url should be empty")
 	}
-	if cfg.Soulseek.DownloadPath != "./downloads" {
-		t.Errorf("default download_path = %q, want ./downloads", cfg.Soulseek.DownloadPath)
+	if cfg.Library.DownloadPath != "./downloads" {
+		t.Errorf("default download_path = %q, want ./downloads", cfg.Library.DownloadPath)
 	}
 	if cfg.Deezer.Quality != "flac" {
 		t.Errorf("default deezer quality = %q, want flac", cfg.Deezer.Quality)
@@ -33,8 +33,8 @@ func TestPersistenceLoadOrCreate(t *testing.T) {
 		t.Fatal(err)
 	}
 	cfg := p.Get()
-	if cfg.Soulseek.DownloadPath != "./downloads" {
-		t.Errorf("download_path = %q", cfg.Soulseek.DownloadPath)
+	if cfg.Library.DownloadPath != "./downloads" {
+		t.Errorf("download_path = %q", cfg.Library.DownloadPath)
 	}
 
 	// Update and verify persistence.
