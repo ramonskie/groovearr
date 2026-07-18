@@ -211,6 +211,7 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 
 	downloadID := fmt.Sprintf("deezer-%s-%d", trackID, time.Now().UnixNano())
 
+	// Create record and start goroutine only after all checks pass.
 	record := &domain.DownloadRecord{
 		ID:          downloadID,
 		SourceName:  downloadPluginName,
@@ -224,15 +225,16 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 	c.downloads[downloadID] = record
 	c.downloadsMu.Unlock()
 
-	// Create a cancellable context for this download goroutine.
-	dlCtx, cancel := context.WithCancel(ctx)
+	log.Printf("deezer: download queued %s (%s)", downloadID, displayName)
+
+	// Use background context — the HTTP request context dies when the handler returns.
+	// Cancellation is handled via CancelDownload which calls the stored cancel func.
+	dlCtx, cancel := context.WithCancel(context.Background())
 	c.cancelMu.Lock()
 	c.cancelFuncs[downloadID] = cancel
 	c.cancelMu.Unlock()
 
-	// Start download in background.
 	go c.downloadSync(dlCtx, downloadID, trackID, displayName)
-
 	return downloadID, nil
 }
 
@@ -376,6 +378,14 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		c.cancelMu.Unlock()
 	}()
 
+	// Catch panics so they don't silently kill the goroutine.
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("deezer: download %s PANIC: %v", downloadID, r)
+			c.setError(downloadID, fmt.Sprintf("panic: %v", r))
+		}
+	}()
+
 	// Check for early cancellation.
 	if ctx.Err() != nil {
 		return
@@ -384,6 +394,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Get track data from private API.
 	trackData, err := c.gwCall(ctx, "song.getData", map[string]any{"sng_id": trackID})
 	if err != nil {
+		log.Printf("deezer: download %s: get track data: %v", downloadID, err)
 		c.setError(downloadID, fmt.Sprintf("failed to get track data: %v", err))
 		return
 	}
@@ -393,6 +404,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 
 	trackToken, _ := trackData["TRACK_TOKEN"].(string)
 	if trackToken == "" {
+		log.Printf("deezer: download %s: no track token", downloadID)
 		c.setError(downloadID, "no track token available")
 		return
 	}
@@ -400,9 +412,12 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Determine quality and get media URL with fallback.
 	mediaURL, actualQuality := c.getMediaURL(trackToken)
 	if mediaURL == "" {
+		log.Printf("deezer: download %s: no media URL (quality=%s)", downloadID, actualQuality)
 		c.setError(downloadID, "no media URL available")
 		return
 	}
+
+	log.Printf("deezer: download %s: starting (%s, %s)", downloadID, actualQuality, displayName)
 
 	ext := ".mp3"
 	if actualQuality == "flac" {
@@ -436,6 +451,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		r.Progress = 100.0
 		r.FilePath = outPath
 	})
+	log.Printf("deezer: download %s: succeeded → %s", downloadID, outPath)
 }
 
 func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, trackID, url, outPath string) error {

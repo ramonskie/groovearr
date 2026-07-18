@@ -9,6 +9,7 @@ build/
 
 # Downloads / media
 downloads/
+music/
 
 # Temporary files
 .tmp/
