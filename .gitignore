@@ -1,0 +1,25 @@
+# Secrets & config
+config.json
+
+# Build artifacts
+build/
+
+# Database
+*.db
+
+# Downloads / media
+downloads/
+
+# Temporary files
+.tmp/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~

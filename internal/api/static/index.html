@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Groovearr</title>
+<style>
+/* ─── Reset & Base ────────────────────────────────────────── */
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,Oxygen,Ubuntu,sans-serif;
+  background:#121212;color:#ccc;font-size:14px;line-height:1.5;
+  display:flex;
+}
+a{color:#7c5ce7;text-decoration:none}
+a:hover{color:#9b7cf7}
+
+/* ─── Sidebar ─────────────────────────────────────────────── */
+.sidebar{
+  width:220px;min-width:220px;background:#1a1a1a;border-right:1px solid #2a2a2a;
+  display:flex;flex-direction:column;height:100vh;position:sticky;top:0;
+}
+.sidebar-brand{
+  padding:18px 20px 14px;font-size:18px;font-weight:700;color:#e0e0e0;
+  border-bottom:1px solid #2a2a2a;letter-spacing:.5px;
+  display:flex;align-items:center;gap:8px;
+}
+.sidebar-brand .icon{font-size:20px}
+.sidebar-nav{flex:1;padding:8px 0;overflow-y:auto}
+.sidebar-nav a{
+  display:flex;align-items:center;gap:10px;padding:10px 20px;color:#999;
+  font-size:13px;font-weight:500;border-left:3px solid transparent;
+  transition:background .15s,color .15s,border-color .15s;
+}
+.sidebar-nav a:hover{background:#252525;color:#ccc}
+.sidebar-nav a.active{background:#252525;color:#e0e0e0;border-left-color:#7c5ce7}
+.sidebar-nav a .badge{
+  margin-left:auto;background:#7c5ce7;color:#fff;font-size:10px;padding:1px 7px;
+  border-radius:10px;min-width:20px;text-align:center;display:none;
+}
+.sidebar-nav a .badge.show{display:inline-block}
+.sidebar-footer{border-top:1px solid #2a2a2a;padding:8px 0}
+
+/* ─── Main Content ────────────────────────────────────────── */
+.main{
+  flex:1;overflow-y:auto;padding:24px 32px;max-width:1100px;
+}
+.page{display:none}
+.page.active{display:block}
+.page-header{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:20px;padding-bottom:12px;border-bottom:1px solid #2a2a2a;
+}
+.page-header h1{font-size:20px;font-weight:600;color:#e0e0e0}
+
+/* ─── Cards ────────────────────────────────────────────────── */
+.card{
+  background:#1f1f1f;border:1px solid #2a2a2a;border-radius:6px;
+  padding:20px;margin-bottom:16px;
+}
+.card-header{
+  display:flex;align-items:center;justify-content:space-between;
+  margin-bottom:12px;
+}
+.card-header h2{font-size:15px;font-weight:600;color:#ddd}
+
+/* ─── Sub-tabs (settings) ──────────────────────────────────── */
+.subtabs{
+  display:flex;gap:0;border-bottom:1px solid #2a2a2a;margin-bottom:20px;
+}
+.subtabs button{
+  padding:8px 20px;background:none;border:none;border-bottom:2px solid transparent;
+  color:#888;font-size:13px;font-weight:500;cursor:pointer;
+}
+.subtabs button:hover{color:#ccc}
+.subtabs button.active{color:#e0e0e0;border-bottom-color:#7c5ce7}
+.subtab-content{display:none}
+.subtab-content.active{display:block}
+
+/* ─── Forms ────────────────────────────────────────────────── */
+.form-group{margin-bottom:16px}
+.form-group label{display:block;font-size:12px;font-weight:600;color:#999;
+  margin-bottom:5px;text-transform:uppercase;letter-spacing:.5px}
+.form-group input,.form-group select{
+  width:100%;padding:8px 12px;background:#121212;border:1px solid #333;
+  border-radius:4px;color:#e0e0e0;font-size:13px;
+}
+.form-group input:focus,.form-group select:focus{
+  outline:none;border-color:#7c5ce7;box-shadow:0 0 0 1px rgba(124,92,231,.3);
+}
+.form-group .hint{font-size:11px;color:#666;margin-top:4px}
+.form-row{display:flex;gap:12px}
+.form-row .form-group{flex:1}
+
+/* ─── Buttons ──────────────────────────────────────────────── */
+.btn{
+  padding:8px 16px;border-radius:4px;font-size:13px;font-weight:500;
+  cursor:pointer;border:none;transition:background .15s,opacity .15s;
+}
+.btn:disabled{opacity:.4;cursor:not-allowed}
+.btn-primary{background:#7c5ce7;color:#fff}
+.btn-primary:hover:not(:disabled){background:#6a4fd4}
+.btn-success{background:#2e7d32;color:#fff}
+.btn-success:hover:not(:disabled){background:#256b28}
+.btn-danger{background:#c62828;color:#fff}
+.btn-danger:hover:not(:disabled){background:#a81d1d}
+.btn-ghost{background:transparent;color:#999;border:1px solid #444}
+.btn-ghost:hover:not(:disabled){background:#252525;color:#ccc}
+.btn-sm{padding:5px 12px;font-size:12px}
+.btn-icon{padding:6px 10px;line-height:1}
+
+/* ─── Status badges ────────────────────────────────────────── */
+.badge{
+  display:inline-block;padding:2px 8px;border-radius:3px;font-size:11px;font-weight:600;
+}
+.badge-success{background:#1b5e20;color:#81c784}
+.badge-warning{background:#4a3800;color:#ffd54f}
+.badge-error{background:#b71c1c;color:#ef9a9a}
+.badge-muted{background:#333;color:#999}
+
+/* ─── Tables ───────────────────────────────────────────────── */
+table{width:100%;border-collapse:collapse;font-size:13px}
+th{text-align:left;padding:8px 12px;border-bottom:2px solid #2a2a2a;
+  color:#999;font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.5px}
+td{padding:8px 12px;border-bottom:1px solid #1f1f1f;color:#ccc}
+tr:hover td{background:#252525}
+.row-clickable{cursor:pointer}
+.row-clickable:hover td{background:#252525}
+
+/* ─── Quality flags ────────────────────────────────────────── */
+.ql-flac{color:#81c784}.ql-mp3{color:#ffa726}.ql-ogg{color:#42a5f5}
+
+/* ─── Progress bar ─────────────────────────────────────────── */
+.progress{width:100%;height:5px;background:#333;border-radius:3px;margin-top:6px}
+.progress-fill{height:100%;background:#7c5ce7;border-radius:3px;transition:width .3s}
+
+/* ─── Status messages ──────────────────────────────────────── */
+.status-msg{
+  padding:10px 14px;border-radius:4px;margin-top:12px;font-size:13px;display:none;
+}
+.status-msg.show{display:block}
+.status-msg.info{background:#0d47a1;color:#90caf9}
+.status-msg.success{background:#1b5e20;color:#81c784}
+.status-msg.error{background:#b71c1c;color:#ef9a9a}
+
+/* ─── Spinner ──────────────────────────────────────────────── */
+.spinner{
+  display:inline-block;width:14px;height:14px;border:2px solid #444;
+  border-top-color:#7c5ce7;border-radius:50%;animation:spin .6s linear infinite;
+  vertical-align:middle;margin-right:6px;
+}
+@keyframes spin{to{transform:rotate(360deg)}}
+
+/* ─── Search bar ───────────────────────────────────────────── */
+.search-bar{display:flex;gap:8px;margin-bottom:16px}
+.search-bar input{flex:1}
+.search-bar select{width:140px}
+.search-bar button{white-space:nowrap}
+</style>
+</head>
+<body>
+
+<!-- ═══════════════════ SIDEBAR ═══════════════════ -->
+<aside class="sidebar">
+  <div class="sidebar-brand">
+    <span class="icon">&#9835;</span>Groovearr
+  </div>
+  <nav class="sidebar-nav">
+    <a href="#" data-page="search" class="active">
+      <span>&#128269;</span> Search
+    </a>
+    <a href="#" data-page="downloads">
+      <span>&#11015;</span> Downloads
+      <span class="badge" id="dl-badge">0</span>
+    </a>
+    <a href="#" data-page="library">
+      <span>&#127925;</span> Library
+    </a>
+  </nav>
+  <div class="sidebar-footer">
+    <a href="#" data-page="settings" style="display:flex;align-items:center;gap:10px;
+      padding:10px 20px;color:#999;font-size:13px;font-weight:500;
+      border-left:3px solid transparent;text-decoration:none;">
+      <span>&#9881;</span> Settings
+    </a>
+  </div>
+</aside>
+
+<!-- ═══════════════════ MAIN ═══════════════════════ -->
+<main class="main">
+
+  <!-- ─── SEARCH PAGE ─────────────────────────────── -->
+  <div class="page active" id="page-search">
+    <div class="page-header"><h1>Search</h1></div>
+    <div class="card">
+      <div class="search-bar">
+        <select id="search-source">
+          <option value="">Any configured</option>
+          <option value="soulseek">Soulseek</option>
+          <option value="deezer">Deezer</option>
+          <option value="hybrid">Hybrid (all)</option>
+        </select>
+        <input id="search-input" placeholder="Search artist, album, or track..."
+          onkeydown="if(event.key==='Enter')doSearch()">
+        <button class="btn btn-primary" onclick="doSearch()">Search</button>
+      </div>
+      <div id="search-status" class="status-msg"></div>
+    </div>
+    <div id="search-results" style="display:none">
+      <div class="card">
+        <div class="card-header"><h2>Tracks (<span id="track-count">0</span>)</h2></div>
+        <div style="overflow-x:auto"><table id="tracks-table"></table></div>
+      </div>
+      <div class="card" id="albums-card" style="display:none">
+        <div class="card-header"><h2>Albums (<span id="album-count">0</span>)</h2></div>
+        <div style="overflow-x:auto"><table id="albums-table"></table></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ─── DOWNLOADS PAGE ──────────────────────────── -->
+  <div class="page" id="page-downloads">
+    <div class="page-header">
+      <h1>Downloads</h1>
+      <button class="btn btn-danger btn-sm" onclick="clearCompleted()">Clear Finished</button>
+    </div>
+    <div id="downloads-list">
+      <div class="card"><p style="color:#666;text-align:center;padding:20px">No active downloads.</p></div>
+    </div>
+  </div>
+
+  <!-- ─── LIBRARY PAGE ────────────────────────────── -->
+  <div class="page" id="page-library">
+    <div class="page-header">
+      <h1>Library</h1>
+      <button class="btn btn-primary btn-sm" onclick="scanLibrary()">Scan Now</button>
+    </div>
+    <div id="library-status" class="status-msg"></div>
+    <div class="card" id="library-artists" style="display:none">
+      <div class="card-header"><h2>Artists</h2></div>
+      <div id="artists-list"></div>
+    </div>
+    <div class="card">
+      <div class="card-header"><h2>Tracks (<span id="lib-track-count">0</span>)</h2></div>
+      <div style="overflow-x:auto"><table id="lib-tracks-table">
+        <tr><td colspan="4" style="color:#666;text-align:center;padding:20px">
+          No tracks in library. Downloads are scanned automatically when they complete.
+        </td></tr>
+      </table></div>
+    </div>
+  </div>
+
+  <!-- ─── SETTINGS PAGE ───────────────────────────── -->
+  <div class="page" id="page-settings">
+    <div class="page-header"><h1>Settings</h1></div>
+
+    <div class="subtabs">
+      <button class="active" data-subtab="settings-general">General</button>
+      <button data-subtab="settings-sources">Download Sources</button>
+      <button data-subtab="settings-library">Library</button>
+    </div>
+
+    <!-- General sub-tab -->
+    <div class="subtab-content active" id="settings-general">
+      <div class="card">
+        <div class="card-header"><h2>Download Path</h2></div>
+        <div class="form-group">
+          <label>Directory</label>
+          <input id="cfg-download-path" placeholder="./downloads">
+          <div class="hint">Where downloaded files are saved. Both Soulseek and Deezer use this path.</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+        <div class="status-msg" id="settings-general-status"></div>
+      </div>
+    </div>
+
+    <!-- Download Sources sub-tab -->
+    <div class="subtab-content" id="settings-sources">
+      <!-- slskd -->
+      <div class="card">
+        <div class="card-header">
+          <h2>Soulseek (slskd)</h2>
+          <span id="slskd-badge" class="badge badge-muted">Not configured</span>
+        </div>
+        <div class="form-group">
+          <label>slskd URL</label>
+          <input id="cfg-slskd-url" placeholder="http://192.168.1.50:5030">
+          <div class="hint">REST API endpoint of your slskd daemon.</div>
+        </div>
+        <div class="form-group">
+          <label>API Key</label>
+          <input id="cfg-api-key" type="password" placeholder="slskd API key">
+          <div class="hint">Found in slskd web UI → Settings → API Keys.</div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+          <button class="btn btn-ghost btn-sm" id="btn-test-slskd" onclick="testConnection('soulseek')">Test Connection</button>
+          <span id="test-soulseek-msg" style="font-size:12px;align-self:center"></span>
+        </div>
+      </div>
+
+      <!-- Deezer -->
+      <div class="card">
+        <div class="card-header">
+          <h2>Deezer</h2>
+          <span id="deezer-badge" class="badge badge-muted">Not configured</span>
+        </div>
+        <div class="form-row">
+          <div class="form-group">
+            <label>ARL Token</label>
+            <input id="cfg-deezer-arl" type="password" placeholder="Deezer ARL cookie">
+            <div class="hint">Browser cookie from deezer.com.</div>
+          </div>
+          <div class="form-group">
+            <label>Quality</label>
+            <select id="cfg-deezer-quality">
+              <option value="flac">FLAC (Lossless)</option>
+              <option value="mp3_320">MP3 320kbps</option>
+              <option value="mp3_128">MP3 128kbps</option>
+            </select>
+          </div>
+        </div>
+        <div style="display:flex;gap:8px">
+          <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+          <button class="btn btn-ghost btn-sm" id="btn-test-deezer" onclick="testConnection('deezer')">Test Connection</button>
+          <span id="test-deezer-msg" style="font-size:12px;align-self:center"></span>
+        </div>
+      </div>
+    </div>
+
+    <!-- Library sub-tab -->
+    <div class="subtab-content" id="settings-library">
+      <div class="card">
+        <div class="card-header"><h2>Folder Organization</h2></div>
+        <div class="form-group">
+          <label>Template</label>
+          <input id="cfg-folder-template" placeholder="{artist}/{album}/{track:00} - {title}">
+          <div class="hint">Tokens: {artist} {album} {year} {track:00} {track:02d} {title} {ext} {disc:00} {album_type}</div>
+        </div>
+      </div>
+      <div class="card">
+        <div class="card-header"><h2>Scan Paths</h2></div>
+        <div class="form-group">
+          <label>Directories</label>
+          <input id="cfg-music-paths" placeholder="./downloads">
+          <div class="hint">Comma-separated directories to scan for music. The download path is always included.</div>
+        </div>
+        <button class="btn btn-primary" onclick="saveSettings()">Save</button>
+        <div class="status-msg" id="settings-library-status"></div>
+      </div>
+    </div>
+  </div>
+
+</main>
+
+<!-- ═══════════════════ SCRIPTS ═══════════════════════ -->
+<script>
+// ─── Logging ────────────────────────────────────────────────
+const LOG_LEVELS = { DEBUG: 0, INFO: 1, WARN: 2, ERROR: 3 };
+let LOG_LEVEL = LOG_LEVELS.DEBUG;
+function log(level, tag, msg, data) {
+  if (level < LOG_LEVEL) return;
+  const ts = new Date().toISOString().slice(11, 23);
+  const prefix = `[${ts}] [${tag}]`;
+  switch (level) {
+    case LOG_LEVELS.ERROR: console.error(prefix, msg, data || ''); break;
+    case LOG_LEVELS.WARN:  console.warn(prefix, msg, data || ''); break;
+    case LOG_LEVELS.INFO:  console.info(prefix, msg, data || ''); break;
+    default:               console.debug(prefix, msg, data || ''); break;
+  }
+}
+function logError(tag, msg, err) {
+  log(LOG_LEVELS.ERROR, tag, msg, { message: err?.message, stack: err?.stack });
+}
+window.addEventListener('error', (e) => {
+  logError('UNCAUGHT', 'window.onerror', e.error || e);
+});
+window.addEventListener('unhandledrejection', (e) => {
+  logError('UNHANDLED', 'Promise rejection', e.reason);
+});
+
+// ─── State ─────────────────────────────────────────────────
+let currentConfig = {};
+let pollTimer = null;
+let scannedDownloadIDs = new Set();
+let autoScanRunning = false;
+let lastAutoScan = 0;
+
+// ─── Page Navigation ──────────────────────────────────────
+function navigateTo(pageName) {
+  log(LOG_LEVELS.DEBUG, 'UI', 'navigateTo: ' + pageName);
+  // Update pages.
+  document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+  const page = document.getElementById('page-' + pageName);
+  if (page) page.classList.add('active');
+  // Update sidebar links.
+  document.querySelectorAll('.sidebar-nav a').forEach(a => a.classList.remove('active'));
+  const link = document.querySelector(`.sidebar-nav a[data-page="${pageName}"]`);
+  if (link) link.classList.add('active');
+  // Also handle settings link in footer.
+  const settingsLink = document.querySelector('.sidebar-footer a[data-page]');
+  if (settingsLink) {
+    settingsLink.style.borderLeftColor = pageName === 'settings' ? '#7c5ce7' : 'transparent';
+    settingsLink.style.color = pageName === 'settings' ? '#e0e0e0' : '#999';
+    settingsLink.style.background = pageName === 'settings' ? '#252525' : 'transparent';
+  }
+  // Side effects.
+  if (pageName === 'downloads') startPolling();
+  else stopPolling();
+  if (pageName === 'library') loadLibrary();
+  if (pageName === 'settings') loadConfig();
+  if (pageName === 'search') loadSourceStatus();
+}
+
+// Sidebar click handlers.
+document.querySelectorAll('.sidebar-nav a[data-page]').forEach(a => {
+  a.addEventListener('click', (e) => { e.preventDefault(); navigateTo(a.dataset.page); });
+});
+document.querySelector('.sidebar-footer a[data-page]').addEventListener('click', (e) => {
+  e.preventDefault(); navigateTo('settings');
+});
+
+// Settings sub-tabs.
+document.querySelectorAll('.subtabs button').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.subtabs button').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    document.querySelectorAll('.subtab-content').forEach(c => c.classList.remove('active'));
+    document.getElementById(btn.dataset.subtab).classList.add('active');
+  });
+});
+
+// ─── Config ───────────────────────────────────────────────
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    currentConfig = await r.json();
+    document.getElementById('cfg-download-path').value = currentConfig.soulseek?.download_path || './downloads';
+    document.getElementById('cfg-slskd-url').value = currentConfig.soulseek?.slskd_url || '';
+    document.getElementById('cfg-api-key').value = currentConfig.soulseek?.api_key || '';
+    document.getElementById('cfg-deezer-arl').value = currentConfig.deezer?.arl || '';
+    document.getElementById('cfg-deezer-quality').value = currentConfig.deezer?.quality || 'flac';
+    document.getElementById('cfg-folder-template').value = currentConfig.library?.folder_template || '';
+    document.getElementById('cfg-music-paths').value = (currentConfig.library?.music_paths || []).join(', ');
+    loadSourceStatus();
+  } catch(e) { logError('CONFIG', 'loadConfig failed', e); }
+}
+
+async function loadSourceStatus() {
+  try {
+    const r = await fetch('/api/config/sources');
+    const sources = await r.json();
+    for (const s of sources) {
+      const badgeEl = document.getElementById(s.name + '-badge');
+      if (!badgeEl) continue;
+      if (s.connected) {
+        badgeEl.textContent = 'Connected';
+        badgeEl.className = 'badge badge-success';
+      } else if (s.configured) {
+        badgeEl.textContent = 'Configured';
+        badgeEl.className = 'badge badge-warning';
+      } else {
+        badgeEl.textContent = 'Not configured';
+        badgeEl.className = 'badge badge-muted';
+      }
+    }
+  } catch(e) {}
+}
+
+async function testConnection(source) {
+  const btn = document.getElementById('btn-test-' + (source === 'soulseek' ? 'slskd' : 'deezer'));
+  const msg = document.getElementById('test-' + source + '-msg');
+  btn.disabled = true; btn.textContent = 'Testing...';
+  msg.textContent = ''; msg.style.color = '';
+  try {
+    const r = await fetch('/api/config/test/' + source, {method:'POST'});
+    const data = await r.json();
+    if (data.status === 'connected') {
+      btn.textContent = 'Connected ✓'; btn.className = 'btn btn-sm btn-success';
+      msg.textContent = 'Connected'; msg.style.color = '#81c784';
+    } else {
+      btn.textContent = 'Test Connection'; btn.className = 'btn btn-ghost btn-sm'; btn.disabled = false;
+      msg.textContent = data.error || 'Connection failed'; msg.style.color = '#ef9a9a';
+    }
+    loadSourceStatus();
+  } catch(e) {
+    btn.textContent = 'Test Connection'; btn.className = 'btn btn-ghost btn-sm'; btn.disabled = false;
+    msg.textContent = e.message; msg.style.color = '#ef9a9a';
+  }
+}
+
+async function saveSettings() {
+  const statusId = document.querySelector('.subtab-content.active')?.id === 'settings-library'
+    ? 'settings-library-status' : 'settings-general-status';
+  const status = document.getElementById(statusId);
+  status.className = 'status-msg info show'; status.textContent = 'Saving...';
+  try {
+    const body = {
+      soulseek: {
+        slskd_url: document.getElementById('cfg-slskd-url').value,
+        api_key: document.getElementById('cfg-api-key').value,
+        download_path: document.getElementById('cfg-download-path').value
+      },
+      deezer: {
+        arl: document.getElementById('cfg-deezer-arl').value,
+        quality: document.getElementById('cfg-deezer-quality').value
+      },
+      library: {
+        folder_template: document.getElementById('cfg-folder-template').value,
+        music_paths: document.getElementById('cfg-music-paths').value.split(',').map(s => s.trim()).filter(s => s)
+      }
+    };
+    const r = await fetch('/api/config', {
+      method: 'PUT', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(body)
+    });
+    if (r.ok) {
+      status.className = 'status-msg success show'; status.textContent = 'Settings saved.';
+      loadSourceStatus();
+    } else {
+      const err = await r.json();
+      status.className = 'status-msg error show';
+      status.textContent = 'Error: ' + (err.error || 'Failed');
+    }
+  } catch(err) {
+    status.className = 'status-msg error show'; status.textContent = 'Error: ' + err.message;
+  }
+}
+
+// ─── Search ───────────────────────────────────────────────
+async function doSearch() {
+  const q = document.getElementById('search-input').value.trim();
+  if (!q) return;
+  const source = document.getElementById('search-source').value;
+  const status = document.getElementById('search-status');
+  status.className = 'status-msg info show';
+  status.innerHTML = '<span class="spinner"></span>Searching...';
+  document.getElementById('search-results').style.display = 'none';
+  try {
+    const r = await fetch('/api/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: q, source: source})
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    status.className = 'status-msg'; status.textContent = '';
+    document.getElementById('search-results').style.display = 'block';
+    document.getElementById('track-count').textContent = data.tracks?.length || 0;
+    const tbl = document.getElementById('tracks-table');
+    if (data.tracks?.length) {
+      tbl.innerHTML = '<tr><th>#</th><th>Title</th><th>Quality</th><th>Size</th><th>Source</th></tr>' +
+        data.tracks.map((t,i) => `<tr class="row-clickable">
+          <td>${i+1}</td>
+          <td><div style="font-weight:500">${esc(t.title||t.filename)}</div>
+            <div style="font-size:11px;color:#888">${esc(t.artist||'')}</div></td>
+          <td><span class="ql-${t.quality}">${t.quality?.toUpperCase()||''} ${t.bitrate?t.bitrate+'kbps':''}</span></td>
+          <td>${fmtSize(t.size)}</td>
+          <td style="font-size:12px;color:#888">${esc(t.username)}</td>
+        </tr>`).join('');
+    } else {
+      tbl.innerHTML = '<tr><td colspan="5" style="color:#666;text-align:center;padding:20px">No tracks found.</td></tr>';
+    }
+    document.getElementById('album-count').textContent = data.albums?.length || 0;
+    const ac = document.getElementById('albums-card');
+    const atbl = document.getElementById('albums-table');
+    if (data.albums?.length) {
+      ac.style.display = 'block';
+      atbl.innerHTML = '<tr><th>#</th><th>Album</th><th>Tracks</th><th>Quality</th><th>Size</th></tr>' +
+        data.albums.map((a,i) => `<tr class="row-clickable">
+          <td>${i+1}</td>
+          <td><div style="font-weight:500">${esc(a.album_title)}</div>
+            <div style="font-size:11px;color:#888">${esc(a.artist||'')} ${a.year?'('+a.year+')':''}</div></td>
+          <td>${a.track_count}</td>
+          <td><span class="ql-${a.dominant_quality}">${a.dominant_quality?.toUpperCase()||''}</span></td>
+          <td>${fmtSize(a.total_size)}</td>
+        </tr>`).join('');
+    } else { ac.style.display = 'none'; }
+    // Double-click album row to download all tracks with cross-source fallback.
+    atbl.querySelectorAll('.row-clickable').forEach((row, i) => {
+      const a = data.albums[i];
+      if (!a) return;
+      row.addEventListener('dblclick', () => {
+        const count = a.tracks?.length || 0;
+        if (count === 0) {
+          // Deezer albums without track lists — search for tracks to download.
+          if (confirm(`Download tracks from "${a.album_title}" by ${a.artist||'?'}?`)) {
+            downloadAlbumFromSearch(a);
+          }
+        } else {
+          if (confirm(`Download ${count} tracks from "${a.album_title}"?`)) {
+            downloadAlbumTracks(a.tracks, a);
+          }
+        }
+      });
+      row.title = 'Double-click to download album';
+    });
+    // Download on double-click.
+    tbl.querySelectorAll('.row-clickable').forEach((row, i) => {
+      row.addEventListener('dblclick', () => {
+        const t = data.tracks[i];
+        if (t && confirm(`Download ${t.title||t.filename}?`)) {
+          const src = t.username === 'deezer_dl' ? 'deezer' : 'soulseek';
+          startDownload(src, t.username, t.filename, t.size);
+        }
+      });
+      row.title = 'Double-click to download';
+    });
+  } catch(err) {
+    status.className = 'status-msg error show'; status.textContent = 'Error: ' + err.message;
+  }
+}
+
+// ─── Downloads ────────────────────────────────────────────
+async function startDownload(source, username, filename, size) {
+  log(LOG_LEVELS.INFO, 'DL', `startDownload: source=${source} file=${filename}`);
+  try {
+    const r = await fetch('/api/download', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source, username, filename, size})
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    log(LOG_LEVELS.INFO, 'DL', 'download started, id=' + (data.download_id || '?'));
+    navigateTo('downloads');
+    refreshDownloads();
+  } catch(err) {
+    logError('DL', 'startDownload failed', err);
+    alert('Download failed: ' + err.message);
+  }
+}
+
+// downloadAlbumTracks downloads each track in an album with cross-source fallback.
+// For each track: try primary source first, then fall back to matching engine on other sources.
+async function downloadAlbumTracks(tracks, album) {
+  log(LOG_LEVELS.INFO, 'DL', `downloadAlbumTracks: ${tracks.length} tracks from "${album.album_title}"`);
+  for (const t of tracks) {
+    const src = t.username === 'deezer_dl' ? 'deezer' : 'soulseek';
+    const ok = await tryDownloadTrack(src, t);
+    if (!ok) {
+      // Fallback: search other sources for a matching track.
+      log(LOG_LEVELS.WARN, 'DL', `track "${t.filename}" failed on ${src}, trying cross-source match`);
+      const matched = await downloadBestMatch(t, src);
+      if (!matched) {
+        log(LOG_LEVELS.ERROR, 'DL', `track "${t.filename}" failed on all sources`);
+      }
+    }
+    // Small delay between downloads to avoid hammering APIs.
+    await new Promise(r => setTimeout(r, 300));
+  }
+}
+
+// downloadAlbumFromSearch searches Deezer for tracks of an album without a track list
+// (e.g. Deezer album search results) and downloads the best match for each expected track.
+async function downloadAlbumFromSearch(album) {
+  log(LOG_LEVELS.INFO, 'DL', `downloadAlbumFromSearch: "${album.album_title}" by ${album.artist}`);
+  try {
+    const r = await fetch('/api/search', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({query: album.artist + ' ' + album.album_title, source: 'deezer'})
+    });
+    const data = await r.json();
+    if (data.tracks?.length) {
+      for (const t of data.tracks) {
+        startDownload('deezer', 'deezer', t.filename, t.size);
+        await new Promise(r => setTimeout(r, 300));
+      }
+    } else {
+      alert('No tracks found for album: ' + album.album_title);
+    }
+  } catch(e) {
+    logError('DL', 'downloadAlbumFromSearch failed', e);
+    alert('Album download failed: ' + e.message);
+  }
+}
+
+// tryDownloadTrack attempts to download a single track from its primary source.
+// Returns true on success.
+async function tryDownloadTrack(source, track) {
+  try {
+    const r = await fetch('/api/download', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({source, username: track.username, filename: track.filename, size: track.size})
+    });
+    const data = await r.json();
+    if (data.error) throw new Error(data.error);
+    log(LOG_LEVELS.INFO, 'DL', `downloaded: ${track.filename} (${source})`);
+    return true;
+  } catch(err) {
+    log(LOG_LEVELS.WARN, 'DL', `tryDownloadTrack failed: ${track.filename}`, err.message);
+    return false;
+  }
+}
+
+// downloadBestMatch searches all other configured sources for a matching track
+// and downloads the best candidate via the matching engine.
+async function downloadBestMatch(track, excludeSource) {
+  try {
+    const r = await fetch('/api/download/match', {
+      method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        title: track.title || track.filename,
+        artist: track.artist || '',
+        duration: track.duration || 0,
+        exclude_source: excludeSource
+      })
+    });
+    const data = await r.json();
+    if (data.error) {
+      log(LOG_LEVELS.WARN, 'DL', `downloadBestMatch: no match for "${track.title||track.filename}" — ${data.error}`);
+      return false;
+    }
+    log(LOG_LEVELS.INFO, 'DL', `downloadBestMatch: matched "${track.title||track.filename}" via ${data.source} (${(data.confidence*100).toFixed(0)}%)`);
+    return true;
+  } catch(err) {
+    logError('DL', 'downloadBestMatch failed', err);
+    return false;
+  }
+}
+
+async function refreshDownloads() {
+  try {
+    const r = await fetch('/api/downloads');
+    const downloads = await r.json();
+    const el = document.getElementById('downloads-list');
+    const badge = document.getElementById('dl-badge');
+    const active = downloads.filter(d => !['Completed, Succeeded','Errored','Cancelled','Aborted'].includes(d.state));
+    badge.textContent = active.length || '0';
+    badge.classList.toggle('show', active.length > 0);
+    if (!downloads.length) {
+      el.innerHTML = '<div class="card"><p style="color:#666;text-align:center;padding:20px">No active downloads.</p></div>';
+      return;
+    }
+    el.innerHTML = downloads.map(d => `
+      <div class="card" style="padding:14px 20px">
+        <div style="display:flex;justify-content:space-between;align-items:center">
+          <div style="flex:1">
+            <div style="font-weight:500">${esc(d.display_name||d.filename)}</div>
+            <div style="font-size:11px;color:#888;margin-top:2px">
+              <span style="color:#7c5ce7">${esc(d.source_name)}</span> &middot; ${d.state}
+            </div>
+            <div class="progress"><div class="progress-fill" style="width:${d.progress||0}%"></div></div>
+            <div style="font-size:11px;color:#888;margin-top:4px">
+              ${fmtSize(d.transferred)} / ${fmtSize(d.size)} &middot; ${fmtSpeed(d.speed)}
+            </div>
+            ${d.error ? `<div style="color:#ef9a9a;font-size:12px;margin-top:4px">${esc(d.error)}</div>` : ''}
+            ${d.file_path ? `<div style="color:#81c784;font-size:12px;margin-top:4px">Saved: ${esc(d.file_path)}</div>` : ''}
+          </div>
+          ${!d.state.includes('Completed') && !d.state.includes('Errored') && !d.state.includes('Cancelled') ?
+            `<button class="btn btn-danger btn-sm" onclick="cancelDownload('${d.id}')">Cancel</button>` : ''}
+        </div>
+      </div>
+    `).join('');
+    // Auto-scan.
+    let newCompleted = 0;
+    for (const d of downloads) {
+      if (d.state === 'Completed, Succeeded' && d.file_path && !scannedDownloadIDs.has(d.id)) {
+        scannedDownloadIDs.add(d.id); newCompleted++;
+      }
+    }
+    if (newCompleted > 0) {
+      log(LOG_LEVELS.INFO, 'DL', `${newCompleted} download(s) completed, queueing auto-scan`);
+      autoScan();
+    }
+  } catch(e) { logError('DL', 'refreshDownloads failed', e); }
+}
+
+async function cancelDownload(id) {
+  try {
+    await fetch('/api/downloads/' + encodeURIComponent(id), {method:'DELETE'});
+    refreshDownloads();
+  } catch(e) { alert('Cancel failed: ' + e.message); }
+}
+
+async function clearCompleted() {
+  try {
+    const r = await fetch('/api/downloads');
+    const downloads = await r.json();
+    for (const d of downloads) {
+      if (['Completed, Succeeded','Errored','Cancelled','Aborted'].includes(d.state)) {
+        await fetch('/api/downloads/' + encodeURIComponent(d.id), {method:'DELETE'});
+      }
+    }
+    refreshDownloads();
+  } catch(e) {}
+}
+
+function startPolling() { stopPolling(); refreshDownloads(); pollTimer = setInterval(refreshDownloads, 2000); }
+function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = null; } }
+
+// ─── Library ──────────────────────────────────────────────
+async function loadLibrary() {
+  try {
+    const [tracksR, artistsR] = await Promise.all([
+      fetch('/api/library/tracks'), fetch('/api/library/artists')
+    ]);
+    const tracks = await tracksR.json();
+    const artists = await artistsR.json();
+    document.getElementById('lib-track-count').textContent = tracks.length || 0;
+    if (artists.length) {
+      document.getElementById('library-artists').style.display = 'block';
+      document.getElementById('artists-list').innerHTML = artists.map(a =>
+        `<span style="display:inline-block;background:#2a2a2a;padding:4px 10px;margin:3px;border-radius:4px;font-size:12px">${esc(a.name)}</span>`
+      ).join('');
+    }
+    const tbl = document.getElementById('lib-tracks-table');
+    if (tracks.length) {
+      tbl.innerHTML = '<tr><th>#</th><th>Title</th><th>Path</th><th>Size</th></tr>' +
+        tracks.map((t,i) => `<tr>
+          <td>${i+1}</td>
+          <td style="font-weight:500">${esc(t.title)}</td>
+          <td style="font-size:11px;color:#888;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(t.file_path)}</td>
+          <td>${fmtSize(t.file_size)}</td>
+        </tr>`).join('');
+    } else {
+      tbl.innerHTML = '<tr><td colspan="4" style="color:#666;text-align:center;padding:20px">No tracks in library. Downloads are scanned automatically when they complete.</td></tr>';
+    }
+  } catch(e) { logError('LIB', 'loadLibrary failed', e); }
+}
+
+async function scanLibrary() {
+  const status = document.getElementById('library-status');
+  status.className = 'status-msg info show';
+  status.innerHTML = '<span class="spinner"></span>Scanning...';
+  try {
+    const r = await fetch('/api/library/scan', {method:'POST'});
+    const data = await r.json();
+    status.className = data.errors > 0 ? 'status-msg error show' : 'status-msg success show';
+    const paths = (data.paths || []).join(', ');
+    let msg = `Scanned ${data.scanned} files: ${data.imported} new, ${data.skipped} already in library`;
+    if (data.errors > 0) msg += `, ${data.errors} errors (check server logs)`;
+    msg += ` (${paths})`;
+    status.textContent = msg;
+    log(LOG_LEVELS.INFO, 'LIB', 'scan done', data);
+    loadLibrary();
+  } catch(e) {
+    status.className = 'status-msg error show';
+    status.textContent = 'Scan failed: ' + e.message;
+    logError('LIB', 'scanLibrary failed', e);
+  }
+}
+
+async function autoScan() {
+  if (autoScanRunning) { log(LOG_LEVELS.DEBUG, 'LIB', 'autoScan skipped: running'); return; }
+  const now = Date.now();
+  if (now - lastAutoScan < 30000) {
+    log(LOG_LEVELS.DEBUG, 'LIB', `autoScan throttled (${((now-lastAutoScan)/1000).toFixed(0)}s ago)`); return;
+  }
+  autoScanRunning = true; lastAutoScan = now;
+  try {
+    log(LOG_LEVELS.INFO, 'LIB', 'autoScan started');
+    const r = await fetch('/api/library/scan', {method:'POST'});
+    const data = await r.json();
+    log(LOG_LEVELS.INFO, 'LIB', 'autoScan done', data);
+    if (document.getElementById('page-library').classList.contains('active')) loadLibrary();
+  } catch(e) { logError('LIB', 'autoScan failed', e); }
+  finally { autoScanRunning = false; }
+}
+
+// ─── Helpers ──────────────────────────────────────────────
+function esc(s) { return (s||'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;'); }
+function fmtSize(bytes) {
+  if (!bytes) return '0 B';
+  const u = ['B','KB','MB','GB']; let i = 0, s = bytes;
+  while (s >= 1024 && i < u.length-1) { s /= 1024; i++; }
+  return s.toFixed(i>0?1:0) + ' ' + u[i];
+}
+function fmtSpeed(bps) { return bps ? fmtSize(bps) + '/s' : ''; }
+
+// ─── Init ─────────────────────────────────────────────────
+loadConfig();
+</script>
+</body>
+</html>

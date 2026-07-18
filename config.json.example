@@ -1,0 +1,23 @@
+{
+  "soulseek": {
+    "slskd_url": "http://localhost:5030",
+    "api_key": "your-slskd-api-key",
+    "download_path": "./downloads",
+    "search_timeout": 60,
+    "min_upload_speed": 0
+  },
+  "deezer": {
+    "arl": "your-deezer-arl-token",
+    "quality": "flac",
+    "allow_fallback": true,
+    "access_token": ""
+  },
+  "library": {
+    "music_paths": null,
+    "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}"
+  },
+  "quality": {
+    "preferred_format": "flac",
+    "min_bitrate": 0
+  }
+}
