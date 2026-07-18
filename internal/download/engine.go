@@ -125,6 +125,7 @@ func (e *Engine) ClearCompleted() {
 type Orchestrator struct {
 	registry      *Registry
 	matcher       *matching.Engine
+	engine        *Engine
 	qualityConfig func() config.QualityConfig
 	pathOverride  map[string]string // downloadID → corrected file path
 	mu            sync.RWMutex
@@ -140,6 +141,7 @@ func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConf
 	return &Orchestrator{
 		registry:      registry,
 		matcher:       matching.New(),
+		engine:        NewEngine(),
 		qualityConfig: qualityConfig,
 		pathOverride:  make(map[string]string),
 	}

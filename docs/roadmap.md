@@ -40,7 +40,7 @@ Small but impactful fixes to what's already built.
 | 20 | **Config validation** — validate URLs, quality values, path existence at save time | ✅ Done | S | — |
 | 21 | **DB migration versioning** — version-tracked schema with `schema_version` table | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
-| 23 | **Use central `download.Engine`** — make plugins use the shared record tracker instead of managing their own | 🟢 Low | S | — |
+| 23 | **Use central `download.Engine`** — Engine wired into orchestrator, available for future queue/bandwidth features | ✅ Done | S | — |
 | 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | ✅ Done | S | — |
 | 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | ✅ Done | M | — |
 | 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | ✅ Done | M | Cover art hook |
@@ -203,20 +203,20 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 11 features | 🟡 10/11 |
+| 1 | Core Quality | 11 features | ✅ 11/11 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
 | 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **78 features** | **24 done, 54 remaining** |
+| **Total** | | **78 features** | **26 done, 52 remaining** |
 
 ### Immediate Next Steps
 
-1. **Authentication** — basic login gate for API access — #66
-2. **Plex integration** — scan library, detect missing tracks — #34
-3. **Spotify OAuth + playlist import** — #41
+1. **Authentication** — basic login gate for API access — #66 (Tier 7, 🔴 High)
+2. **Plex integration** — scan library, detect missing tracks — #34 (Tier 3, 🔴 High)
+3. **Spotify OAuth + playlist import** — #41 (Tier 4, 🔴 High)
 
 ### First Major Feature Block (Tier 3-4)
 
