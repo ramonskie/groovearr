@@ -348,8 +348,9 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 // ─── Library handlers ────────────────────────────────────────────────
 
 func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
+	q, offset, limit := parsePagination(r)
 	ctx := r.Context()
-	tracks, err := s.store.SearchTracks(ctx, "", 200)
+	tracks, err := s.store.SearchTracks(ctx, q, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -357,12 +358,20 @@ func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
 	if tracks == nil {
 		tracks = []domain.Track{}
 	}
+	_ = offset
 	writeJSON(w, http.StatusOK, tracks)
 }
 
 func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
+	q, offset, limit := parsePagination(r)
 	ctx := r.Context()
-	artists, err := s.store.ListArtists(ctx, 0, 200)
+	var artists []domain.Artist
+	var err error
+	if q != "" {
+		artists, err = s.store.SearchArtists(ctx, q, limit)
+	} else {
+		artists, err = s.store.ListArtists(ctx, offset, limit)
+	}
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -374,8 +383,9 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
+	q, offset, limit := parsePagination(r)
 	ctx := r.Context()
-	albums, err := s.store.SearchAlbums(ctx, "", 200)
+	albums, err := s.store.SearchAlbums(ctx, q, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -383,6 +393,7 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	if albums == nil {
 		albums = []domain.Album{}
 	}
+	_ = offset
 	writeJSON(w, http.StatusOK, albums)
 }
 
@@ -490,6 +501,18 @@ func (s *Server) reloadDeezer() {
 	if err := s.orch.Registry().Replace("deezer", dl); err != nil {
 		log.Printf("reload deezer: %v", err)
 	}
+}
+
+// parsePagination extracts q, offset, and limit from query parameters.
+// Defaults: q="", offset=0, limit=200.
+func parsePagination(r *http.Request) (q string, offset, limit int) {
+	q = r.URL.Query().Get("q")
+	offset, _ = strconv.Atoi(r.URL.Query().Get("offset"))
+	limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit <= 0 || limit > 1000 {
+		limit = 200
+	}
+	return
 }
 
 // writeJSON is a helper for JSON responses.

@@ -252,15 +252,19 @@ func TestStore_DuplicateUpsert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Second insert with same name creates a NEW row (no unique constraint on name).
+	// Second insert with same name returns the existing ID (unique constraint).
 	id2, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Duplicate"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Both should exist.
+	// Both calls return the same ID — no duplicates created.
+	if id1 != id2 {
+		t.Errorf("expected same ID for duplicate artist, got %d and %d", id1, id2)
+	}
+
 	all, _ := store.ListArtists(ctx, 0, 10)
-	if len(all) < 2 {
-		t.Errorf("expected >= 2 artists, got %d (ids: %d, %d)", len(all), id1, id2)
+	if len(all) != 1 {
+		t.Errorf("expected 1 artist, got %d", len(all))
 	}
 }

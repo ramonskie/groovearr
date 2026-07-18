@@ -59,6 +59,8 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+		`DROP INDEX IF EXISTS idx_artists_name`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_name ON artists(name)`,
 		`CREATE TABLE IF NOT EXISTS albums (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			artist_id INTEGER NOT NULL,
@@ -107,7 +109,6 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_albums_artist ON albums(artist_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_artists_name ON artists(name)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path)`,
 		`CREATE INDEX IF NOT EXISTS idx_artists_spotify ON artists(spotify_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_artists_deezer ON artists(deezer_id)`,
@@ -143,7 +144,7 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 	}
 
 	result, err := s.db.ExecContext(ctx, `
-		INSERT INTO artists (name, genres, summary, thumb_url,
+		INSERT OR IGNORE INTO artists (name, genres, summary, thumb_url,
 			spotify_id, itunes_id, deezer_id, musicbrainz_id, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		artist.Name, string(genresJSON), artist.Summary, artist.ThumbURL,
@@ -153,7 +154,21 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 	if err != nil {
 		return 0, err
 	}
-	return result.LastInsertId()
+
+	id, _ := result.LastInsertId()
+	if id != 0 {
+		return id, nil
+	}
+
+	// Duplicate name — return existing record ID.
+	existing, err := s.GetArtistByName(ctx, artist.Name)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return existing.ID, nil
+	}
+	return 0, fmt.Errorf("artist insert failed: %s", artist.Name)
 }
 
 func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {

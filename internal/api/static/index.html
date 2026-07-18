@@ -256,6 +256,9 @@ tr:hover td{background:#252525}
       <h1>Library</h1>
       <button class="btn btn-primary btn-sm" onclick="scanLibrary()">Scan Now</button>
     </div>
+    <div class="search-bar">
+      <input type="text" id="lib-search" placeholder="Search library..." oninput="loadLibrary()">
+    </div>
     <div id="library-status" class="status-msg"></div>
     <div class="card" id="library-artists" style="display:none">
       <div class="card-header"><h2>Artists</h2></div>
@@ -814,8 +817,10 @@ function stopPolling() { if (pollTimer) { clearInterval(pollTimer); pollTimer = 
 // ─── Library ──────────────────────────────────────────────
 async function loadLibrary() {
   try {
+    const q = encodeURIComponent(document.getElementById('lib-search')?.value || '');
+    const base = q ? `?q=${q}` : '';
     const [tracksR, artistsR, albumsR] = await Promise.all([
-      fetch('/api/library/tracks'), fetch('/api/library/artists'), fetch('/api/library/albums')
+      fetch(`/api/library/tracks${base}`), fetch(`/api/library/artists${base}`), fetch(`/api/library/albums${base}`)
     ]);
     const tracks = await tracksR.json();
     const artists = await artistsR.json();
