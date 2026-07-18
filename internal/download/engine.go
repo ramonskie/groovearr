@@ -169,6 +169,7 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 	for _, p := range plugins {
 		tracks, albums, err := p.Search(ctx, query)
 		if err != nil {
+			log.Printf("orchestrator: search %s failed: %v", p.Name(), err)
 			continue
 		}
 		allTracks = append(allTracks, tracks...)
@@ -280,6 +281,7 @@ func (o *Orchestrator) GetDownloads(ctx context.Context) []domain.DownloadRecord
 	for _, p := range o.registry.All() {
 		records, err := p.GetDownloads(ctx)
 		if err != nil {
+			log.Printf("orchestrator: GetDownloads %s failed: %v", p.Name(), err)
 			continue
 		}
 		all = append(all, records...)

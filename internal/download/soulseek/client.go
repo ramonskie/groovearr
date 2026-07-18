@@ -20,6 +20,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/library"
 )
 
 const pluginName = "soulseek"
@@ -499,8 +500,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 // parseTrackFilename extracts track number and title from a filename like "01 - Song Name.flac".
 func parseTrackFilename(filename string) (num int, title string) {
 	base := strings.TrimSuffix(path.Base(filename), path.Ext(filename))
-	re := regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
-	if m := re.FindStringSubmatch(base); m != nil {
+	if m := library.TrackNumRE.FindStringSubmatch(base); m != nil {
 		n, _ := strconv.Atoi(m[1])
 		return n, strings.TrimSpace(m[2])
 	}

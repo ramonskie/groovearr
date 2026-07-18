@@ -462,7 +462,7 @@ func mergeConfig(dst, partial *config.Config) {
 	if partial.Soulseek.SearchTimeout > 0 {
 		dst.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
 	}
-	if partial.Soulseek.MinUploadSpeed >= 0 {
+	if partial.Soulseek.MinUploadSpeed > 0 {
 		dst.Soulseek.MinUploadSpeed = partial.Soulseek.MinUploadSpeed
 	}
 	if partial.Deezer.ARL != "" {

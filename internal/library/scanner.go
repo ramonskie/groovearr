@@ -14,6 +14,9 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
+// TrackNumRE matches leading track numbers like "01 - Title" or "1. Title".
+var TrackNumRE = regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
+
 // Scanner walks directories and imports audio files into the library store.
 type Scanner struct {
 	store Store
@@ -63,7 +66,12 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		stats.Scanned++
 
 		// Check if already imported (use absolute path).
-		existing, _ := s.store.GetTrackByFilePath(ctx, path)
+		existing, dbErr := s.store.GetTrackByFilePath(ctx, path)
+		if dbErr != nil {
+			log.Printf("scanner: GetTrackByFilePath %s: %v", path, dbErr)
+			stats.Errors++
+			return nil
+		}
 		if existing != nil {
 			stats.Skipped++
 			return nil
@@ -75,7 +83,12 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 
 		// Get or create artist.
 		var artistID int64
-		existingArtist, _ := s.store.GetArtistByName(ctx, artist)
+		existingArtist, dbErr := s.store.GetArtistByName(ctx, artist)
+		if dbErr != nil {
+			log.Printf("scanner: GetArtistByName %q: %v", artist, dbErr)
+			stats.Errors++
+			return nil
+		}
 		if existingArtist != nil {
 			artistID = existingArtist.ID
 		} else {
@@ -91,7 +104,12 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 
 		// Get or create album.
 		var albumID int64
-		albums, _ := s.store.SearchAlbums(ctx, album, 1)
+		albums, dbErr := s.store.SearchAlbums(ctx, album, 1)
+		if dbErr != nil {
+			log.Printf("scanner: SearchAlbums %q: %v", album, dbErr)
+			stats.Errors++
+			return nil
+		}
 		found := false
 		for _, al := range albums {
 			if strings.EqualFold(al.Title, album) && al.ArtistID == artistID {
@@ -160,8 +178,7 @@ func parsePath(path string) (track, artist, album string) {
 	title := strings.TrimSuffix(filename, filepath.Ext(filename))
 
 	// Try to extract track number prefix.
-	trackNumPattern := regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
-	if m := trackNumPattern.FindStringSubmatch(title); m != nil {
+	if m := TrackNumRE.FindStringSubmatch(title); m != nil {
 		title = m[2]
 	}
 
