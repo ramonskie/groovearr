@@ -8,9 +8,10 @@ build/
 *.db
 
 # Downloads / media
-downloads/
-music/
-playlists/
+/downloads/
+/music/
+/playlists/
+.opencode/
 
 # Temporary files
 .tmp/

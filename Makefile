@@ -1,12 +1,25 @@
-.PHONY: all build test vet lint run dev clean cover
+.PHONY: all build test vet lint run dev clean cover setup-ui build-ui
 
 BINARY := groovearr
 CMD    := ./cmd/groovearr
 BUILD  := ./build
 
+# UI build
+UI_DIR := ./ui
+
 GOPATH  := $(shell go env GOPATH)
 GO      := go
 GOTOOL  := $(GOPATH)/bin
+
+# ─── UI Build ──────────────────────────────────────────────────
+
+setup-ui:
+	@echo "==> Installing UI dependencies..."
+	cd $(UI_DIR) && npm ci
+
+build-ui: setup-ui
+	@echo "==> Building UI..."
+	cd $(UI_DIR) && npm run build
 
 # ─── Default ──────────────────────────────────────────────────
 
@@ -14,13 +27,13 @@ all: vet test build
 
 # ─── Build ────────────────────────────────────────────────────
 
-build:
+build: build-ui
 	@echo "==> Building $(BINARY)..."
 	$(GO) build -o $(BUILD)/$(BINARY) $(CMD)
 	@echo "    Built: $(BUILD)/$(BINARY)"
 
 # Force rebuild (also replays go:embed when static files change)
-rebuild:
+rebuild: build-ui
 	@echo "==> Rebuilding $(BINARY) (forced)..."
 	$(GO) build -a -o $(BUILD)/$(BINARY) $(CMD)
 	@echo "    Rebuilt: $(BUILD)/$(BINARY)"
@@ -71,10 +84,13 @@ run: build
 	@echo "==> Starting $(BINARY)..."
 	$(BUILD)/$(BINARY)
 
-# Development mode: rebuilds on start, verbose config
-dev:
-	@echo "==> Starting $(BINARY) (dev mode)..."
-	$(GO) build -a -o $(BUILD)/$(BINARY) $(CMD)
+# Development mode: rebuilds on start, verbose config, Vite dev server.
+dev: build-ui
+	@echo "==> Starting Vite dev server + $(BINARY)..." && \
+	trap 'kill %1 2>/dev/null; echo "  Vite stopped."' EXIT INT TERM && \
+	cd $(UI_DIR) && npm run dev & \
+	sleep 2 && \
+	$(GO) build -a -o $(BUILD)/$(BINARY) $(CMD) && \
 	GROOVEARR_CONFIG=./config.json $(BUILD)/$(BINARY)
 
 # ─── Clean ────────────────────────────────────────────────────
@@ -82,6 +98,8 @@ dev:
 clean:
 	@echo "==> Cleaning..."
 	rm -rf $(BUILD)
+	rm -rf $(UI_DIR)/dist
+	rm -rf $(UI_DIR)/node_modules
 	rm -f coverage.out coverage.html
 	@echo "    Done."
 

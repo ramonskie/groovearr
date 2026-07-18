@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"embed"
 	"encoding/json"
 	"fmt"
 	"io/fs"
@@ -14,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ramonskie/groovearr"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
@@ -22,9 +22,6 @@ import (
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/playlist"
 )
-
-//go:embed static/*
-var staticFS embed.FS
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
@@ -51,9 +48,11 @@ func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator
 	mux := http.NewServeMux()
 
 	// Web UI — serve embedded static files with no-cache for development.
-	staticContent, err := fs.Sub(staticFS, "static")
+	// The embedded files are produced by `make build-ui` (Vite).  If the ui/dist/
+	// directory is empty or missing, the Go binary was built without the UI.
+	staticContent, err := fs.Sub(groovearr.UIFiles, "ui/dist")
 	if err != nil {
-		log.Fatalf("embedded static files: %v", err)
+		log.Fatalf("embedded UI files missing — run: make build-ui && go build ./cmd/groovearr: %v", err)
 	}
 	mux.Handle("GET /", noCache(http.FileServer(http.FS(staticContent))))
 
