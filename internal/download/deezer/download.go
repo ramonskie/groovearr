@@ -51,11 +51,12 @@ const minFileSize = 100 * 1024 // 100KB
 
 // DownloadClient implements download.Plugin for Deezer downloads.
 type DownloadClient struct {
-	cfg     config.DeezerConfig
-	dlPath  string
-	client  *http.Client
+	cfg    config.DeezerConfig
+	dlPath string
+	client *http.Client
 
-	mu            sync.Mutex
+	authMu        sync.Mutex   // serializes authenticate calls
+	tokenMu       sync.RWMutex // protects apiToken, licenseToken, userID, authenticated
 	authenticated bool
 	apiToken      string
 	licenseToken  string
@@ -279,14 +280,19 @@ func (c *DownloadClient) ClearCompleted(ctx context.Context) error {
 
 // Connected returns true if authentication has succeeded.
 func (c *DownloadClient) Connected() bool {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	return c.isAuthenticated()
+}
+
+// isAuthenticated reads the auth flag under the token lock.
+func (c *DownloadClient) isAuthenticated() bool {
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
 	return c.authenticated
 }
 
 // ensureAuth authenticates if not already done. Safe to call before any API operation.
 func (c *DownloadClient) ensureAuth() error {
-	if c.Connected() {
+	if c.isAuthenticated() {
 		return nil
 	}
 	return c.authenticate()
@@ -295,8 +301,13 @@ func (c *DownloadClient) ensureAuth() error {
 // ─── Authentication ─────────────────────────────────────────────────
 
 func (c *DownloadClient) authenticate() error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	c.authMu.Lock()
+	defer c.authMu.Unlock()
+
+	// Double-check: might have been authenticated between lock acquisition.
+	if c.isAuthenticated() {
+		return nil
+	}
 
 	if c.cfg.ARL == "" {
 		return fmt.Errorf("deezer: ARL token not set")
@@ -320,12 +331,14 @@ func (c *DownloadClient) authenticate() error {
 		return fmt.Errorf("deezer auth: USER_ID is 0 — ARL may be expired")
 	}
 
+	c.tokenMu.Lock()
 	c.userID = int(uid)
 	c.apiToken, _ = resp["checkForm"].(string)
 	if opts, ok := user["OPTIONS"].(map[string]any); ok {
 		c.licenseToken, _ = opts["license_token"].(string)
 	}
 	c.authenticated = true
+	c.tokenMu.Unlock()
 
 	return nil
 }
@@ -462,9 +475,9 @@ func (c *DownloadClient) downloadAndDecrypt(downloadID, trackID, url, outPath st
 // ─── Media URL ──────────────────────────────────────────────────────
 
 func (c *DownloadClient) getMediaURL(trackToken string) (string, string) {
-	c.mu.Lock()
+	c.tokenMu.RLock()
 	licenseToken := c.licenseToken
-	c.mu.Unlock()
+	c.tokenMu.RUnlock()
 
 	if licenseToken == "" {
 		return "", ""
@@ -533,9 +546,13 @@ func (c *DownloadClient) gwCall(method string, params map[string]any) (map[strin
 	q := u.Query()
 	q.Set("method", method)
 	q.Set("api_version", "1.0")
-	apiToken := "null"
-	if c.apiToken != "" {
-		apiToken = c.apiToken
+
+	c.tokenMu.RLock()
+	apiToken := c.apiToken
+	c.tokenMu.RUnlock()
+
+	if apiToken == "" {
+		apiToken = "null"
 	}
 	q.Set("api_token", apiToken)
 	u.RawQuery = q.Encode()
