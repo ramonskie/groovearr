@@ -13,7 +13,7 @@ import (
 )
 
 func TestParsePath_ArtistAlbumTrack(t *testing.T) {
-	track, artist, album := parsePath("Daft Punk/Random Access Memories (2013)/01 - Get Lucky.flac")
+	artist, album, track := ParseFileMetadata("Daft Punk/Random Access Memories (2013)/01 - Get Lucky.flac")
 	if artist != "Daft Punk" {
 		t.Errorf("artist = %q, want Daft Punk", artist)
 	}
@@ -26,7 +26,7 @@ func TestParsePath_ArtistAlbumTrack(t *testing.T) {
 }
 
 func TestParsePath_NoYear(t *testing.T) {
-	track, artist, album := parsePath("Queen/Greatest Hits/Bohemian Rhapsody.mp3")
+	artist, album, track := ParseFileMetadata("Queen/Greatest Hits/Bohemian Rhapsody.mp3")
 	if artist != "Queen" {
 		t.Errorf("artist = %q, want Queen", artist)
 	}
@@ -39,14 +39,14 @@ func TestParsePath_NoYear(t *testing.T) {
 }
 
 func TestParsePath_TrackNumberPrefix(t *testing.T) {
-	track, _, _ := parsePath("Artist/Album/05 Song Title.flac")
+	_, _, track := ParseFileMetadata("Artist/Album/05 Song Title.flac")
 	if track != "Song Title" {
 		t.Errorf("track = %q, want Song Title (stripped number)", track)
 	}
 }
 
 func TestParsePath_NoAlbum(t *testing.T) {
-	track, artist, album := parsePath("Artist/Song.mp3")
+	artist, album, track := ParseFileMetadata("Artist/Song.mp3")
 	if artist != "Artist" {
 		t.Errorf("artist = %q, want Artist", artist)
 	}
@@ -59,7 +59,7 @@ func TestParsePath_NoAlbum(t *testing.T) {
 }
 
 func TestParsePath_SingleFile(t *testing.T) {
-	track, artist, album := parsePath("song.mp3")
+	artist, album, track := ParseFileMetadata("song.mp3")
 	if artist != "Unknown Artist" {
 		t.Errorf("artist = %q, want Unknown Artist", artist)
 	}
@@ -83,7 +83,7 @@ func TestParsePath_FlatArtistTrack(t *testing.T) {
 		{"SingleArtist.flac", "SingleArtist", "Unknown Artist", "Unknown Album"},
 	}
 	for _, tt := range tests {
-		track, artist, album := parsePath(tt.path)
+		artist, album, track := ParseFileMetadata(tt.path)
 		if track != tt.wantTrack {
 			t.Errorf("%s: track = %q, want %q", tt.path, track, tt.wantTrack)
 		}

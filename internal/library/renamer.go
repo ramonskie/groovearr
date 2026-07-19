@@ -81,7 +81,7 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 		}
 	}
 	if artist == "" {
-		artist, album, title = parseMetadataFromFilename(filepath.Base(filePath))
+		artist, album, title = ParseFlatFilename(filepath.Base(filePath))
 	}
 	if artist == "" {
 		return filePath, nil

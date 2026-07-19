@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -101,7 +100,7 @@ func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) 
 	// Fall back to file path parsing using the full path so directory
 	// structure (Artist/Album/Track) is preserved.
 	if artist == "" || album == "" || title == "" {
-		title, artist, album = parsePath(record.FilePath)
+		artist, album, title = library.ParseFileMetadata(record.FilePath)
 	}
 
 	if artist == "" {
@@ -166,79 +165,4 @@ func (h *LibraryImporterHandler) upsertAlbum(ctx context.Context, artistID int64
 	return id, nil
 }
 
-// parsePath extracts artist and title from a filename path.
-func parsePath(path string) (track, artist, album string) {
-	dir := filepath.Dir(path)
-	filename := filepath.Base(path)
-	title := strings.TrimSuffix(filename, filepath.Ext(filename))
 
-	// Strip track number prefix.
-	if m := regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`).FindStringSubmatch(title); m != nil {
-		title = m[2]
-	}
-
-	parts := splitPath(dir)
-
-	// Filter out disc directories.
-	discPattern := regexp.MustCompile(`^(?i)(cd|disc)\s*\d+$`)
-	filtered := parts[:0]
-	for _, p := range parts {
-		if !discPattern.MatchString(p) {
-			filtered = append(filtered, p)
-		}
-	}
-	parts = filtered
-	parts = append(parts, title)
-
-	switch {
-	case len(parts) >= 3:
-		artist = parts[0]
-		album = regexp.MustCompile(`\s*\(\d{4}\)\s*$`).ReplaceAllString(parts[1], "")
-		album = strings.TrimSpace(album)
-		track = parts[2]
-	case len(parts) == 2:
-		if strings.Contains(parts[0], " - ") {
-			ap := strings.SplitN(parts[0], " - ", 2)
-			artist = ap[0]
-			album = ap[1]
-		} else {
-			artist = parts[0]
-			album = "Unknown Album"
-		}
-		track = parts[1]
-	default:
-		if strings.Contains(title, " - ") {
-			flatParts := strings.SplitN(title, " - ", 3)
-			switch len(flatParts) {
-			case 3:
-				artist = strings.TrimSpace(flatParts[0])
-				album = strings.TrimSpace(flatParts[1])
-				track = strings.TrimSpace(flatParts[2])
-			case 2:
-				artist = strings.TrimSpace(flatParts[0])
-				album = "Unknown Album"
-				track = strings.TrimSpace(flatParts[1])
-			}
-		} else {
-			artist = "Unknown Artist"
-			album = "Unknown Album"
-			track = parts[0]
-		}
-	}
-
-	return track, artist, album
-}
-
-func splitPath(p string) []string {
-	p = strings.ReplaceAll(p, "\\", "/")
-	parts := strings.Split(p, "/")
-	var result []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "." {
-			continue
-		}
-		result = append(result, part)
-	}
-	return result
-}

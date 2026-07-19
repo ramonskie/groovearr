@@ -127,7 +127,7 @@ func TestPathResolver_AlbumType(t *testing.T) {
 }
 
 func TestParsePath_MultiDisc(t *testing.T) {
-	track, artist, album := parsePath("Pink Floyd/The Wall/CD2/05 - Another Brick.flac")
+	artist, album, track := ParseFileMetadata("Pink Floyd/The Wall/CD2/05 - Another Brick.flac")
 	if artist != "Pink Floyd" {
 		t.Errorf("artist = %q, want Pink Floyd", artist)
 	}
@@ -141,7 +141,7 @@ func TestParsePath_MultiDisc(t *testing.T) {
 
 func TestParsePath_Disc1(t *testing.T) {
 	// CD1 should also be filtered.
-	track, artist, album := parsePath("Beatles/Abbey Road/CD1/01 - Come Together.mp3")
+	artist, album, track := ParseFileMetadata("Beatles/Abbey Road/CD1/01 - Come Together.mp3")
 	if artist != "Beatles" {
 		t.Errorf("artist = %q, want Beatles", artist)
 	}

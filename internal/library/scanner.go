@@ -161,7 +161,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 				genres = splitGenres(tags.Genre)
 			}
 		} else {
-			trackTitle, artistName, albumTitle = parsePath(relPath)
+			artistName, albumTitle, trackTitle = ParseFileMetadata(relPath)
 		}
 
 		// Get or create artist.
@@ -258,99 +258,6 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		return nil
 	})
 	return stats, err
-}
-
-// parsePath extracts artist, album, and track title from a file path.
-// Handles common patterns:
-//
-//	Artist/Album/TrackNumber - Title.ext
-//	Artist - Album/TrackNumber - Title.ext
-//	Artist/Album (Year)/TrackNumber Title.ext
-//
-// Flat filenames (no directory structure) fall back to parsing " - " separators:
-//
-//	Artist - Title.ext          → artist=Artist, album=Unknown Album, track=Title
-//	Artist - Album - Title.ext  → artist=Artist, album=Album, track=Title
-func parsePath(path string) (track, artist, album string) {
-	dir := filepath.Dir(path)
-	filename := filepath.Base(path)
-	title := strings.TrimSuffix(filename, filepath.Ext(filename))
-
-	// Try to extract track number prefix.
-	if m := TrackNumRE.FindStringSubmatch(title); m != nil {
-		title = m[2]
-	}
-
-	parts := splitPath(dir)
-
-	// Filter out disc directories (CD1, Disc 2, etc.).
-	discPattern := regexp.MustCompile(`^(?i)(cd|disc)\s*\d+$`)
-	filtered := parts[:0]
-	for _, p := range parts {
-		if !discPattern.MatchString(p) {
-			filtered = append(filtered, p)
-		}
-	}
-	parts = filtered
-
-	parts = append(parts, title)
-
-	switch {
-	case len(parts) >= 3:
-		// Artist/Album/Track or Artist - Album/Track
-		artist = parts[0]
-		// Remove year from album.
-		album = regexp.MustCompile(`\s*\(\d{4}\)\s*$`).ReplaceAllString(parts[1], "")
-		album = strings.TrimSpace(album)
-		track = parts[2]
-	case len(parts) == 2:
-		// Could be Artist - Album or Artist/Track
-		if strings.Contains(parts[0], " - ") {
-			ap := strings.SplitN(parts[0], " - ", 2)
-			artist = ap[0]
-			album = ap[1]
-		} else {
-			artist = parts[0]
-			album = "Unknown Album"
-		}
-		track = parts[1]
-	default:
-		// Flat file: try "Artist - Title" or "Artist - Album - Title" patterns.
-		if strings.Contains(title, " - ") {
-			flatParts := strings.SplitN(title, " - ", 3)
-			switch len(flatParts) {
-			case 3:
-				artist = strings.TrimSpace(flatParts[0])
-				album = strings.TrimSpace(flatParts[1])
-				track = strings.TrimSpace(flatParts[2])
-			case 2:
-				artist = strings.TrimSpace(flatParts[0])
-				album = "Unknown Album"
-				track = strings.TrimSpace(flatParts[1])
-			}
-		} else {
-			artist = "Unknown Artist"
-			album = "Unknown Album"
-			track = parts[0]
-		}
-	}
-
-	return track, artist, album
-}
-
-func splitPath(p string) []string {
-	// Normalize separators.
-	p = strings.ReplaceAll(p, "\\", "/")
-	parts := strings.Split(p, "/")
-	var result []string
-	for _, part := range parts {
-		part = strings.TrimSpace(part)
-		if part == "" || part == "." {
-			continue
-		}
-		result = append(result, part)
-	}
-	return result
 }
 
 // FormatHumanSize returns a human-readable file size.
