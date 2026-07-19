@@ -106,6 +106,12 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 
 	targetPath := filepath.Join(r.root, resolved+"."+ext)
 
+	// Normalize to absolute path so downstream consumers (scanner, store,
+	// GetTrackByFilePath) all compare against the same canonical form.
+	if abs, err := filepath.Abs(targetPath); err == nil {
+		targetPath = abs
+	}
+
 	// If source and target are the same, nothing to do.
 	if filepath.Clean(filePath) == filepath.Clean(targetPath) {
 		return filePath, nil
