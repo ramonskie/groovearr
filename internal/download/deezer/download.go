@@ -537,6 +537,31 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 		r.Size = totalSize
 	})
 
+	// Sniff the first chunk to detect whether the stream is encrypted.
+	// Deezer serves both encrypted (BF_CBC_STRIPE) and unencrypted streams
+	// depending on region/format. Decrypting plain audio corrupts the header.
+	firstN, firstReadErr := io.ReadFull(resp.Body, buf)
+	plain := isAudioHeader(buf[:firstN])
+	if firstReadErr != nil && firstReadErr != io.ErrUnexpectedEOF && firstReadErr != io.EOF {
+		return fmt.Errorf("read response: %w", firstReadErr)
+	}
+	if firstN > 0 {
+		chunk := buf[:firstN]
+		if !plain && chunkIndex%3 == 0 && firstN == chunkSize {
+			if decrypted, err := blowfishDecrypt(chunk, key); err == nil {
+				chunk = decrypted
+			}
+		}
+		if _, err := f.Write(chunk); err != nil {
+			return fmt.Errorf("write file: %w", err)
+		}
+		downloaded += int64(firstN)
+		chunkIndex++
+	}
+	if firstReadErr != nil {
+		// Short file (single chunk). Validate size check below.
+	}
+
 	for {
 		// Check for cancellation between chunks.
 		if ctx.Err() != nil {
@@ -548,8 +573,8 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 		if n > 0 {
 			chunk := buf[:n]
 
-			// Decrypt every 3rd chunk.
-			if chunkIndex%3 == 0 && n == chunkSize {
+			// Decrypt every 3rd chunk only when the stream is actually encrypted.
+			if !plain && chunkIndex%3 == 0 && n == chunkSize {
 				decrypted, err := blowfishDecrypt(chunk, key)
 				if err == nil {
 					chunk = decrypted
@@ -719,6 +744,25 @@ func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[s
 
 // ─── Blowfish decryption ────────────────────────────────────────────
 
+// isAudioHeader checks whether the first bytes look like a known audio format.
+// Returns true for valid FLAC (fLaC magic) or MP3 (0xFFEx/0xFFFx sync).
+// Encrypted (BF_CBC_STRIPE) streams have random first bytes → returns false.
+func isAudioHeader(data []byte) bool {
+	if len(data) < 4 {
+		return false
+	}
+	// FLAC: "fLaC" magic bytes.
+	if string(data[:4]) == "fLaC" {
+		return true
+	}
+	// MP3: frame sync — first byte 0xFF, second byte top 3 bits set.
+	if data[0] == 0xFF && len(data) >= 2 && (data[1]&0xE0) == 0xE0 {
+		return true
+	}
+	return false
+}
+
+// deriveBlowfishKey derives a 16-byte Blowfish key from a Deezer track ID.
 func deriveBlowfishKey(trackID string) []byte {
 	hash := md5.Sum([]byte(trackID))
 	hexStr := hex.EncodeToString(hash[:])
