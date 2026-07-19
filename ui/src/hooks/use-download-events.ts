@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import type { DownloadRecord } from "../api/types";
 import { useDownloadStore } from "../stores/download-poll";
 
@@ -23,6 +24,7 @@ export function useDownloadEvents() {
   // Use getState() to access stable action references — avoids re-running the
   // effect when store state (records/activeCount) changes.
   const storeRef = useRef(useDownloadStore.getState());
+  const queryClient = useQueryClient();
 
   // Refresh ref on each render so callbacks always see latest actions.
   storeRef.current = useDownloadStore.getState();
@@ -48,6 +50,12 @@ export function useDownloadEvents() {
       storeRef.current.stopPolling();
     };
 
+    es.addEventListener("download_queued", (e: MessageEvent) => {
+      handleEvent(e, (r) => storeRef.current.upsertRecord(r));
+    });
+    es.addEventListener("download_stateChanged", (e: MessageEvent) => {
+      handleEvent(e, (r) => storeRef.current.upsertRecord(r));
+    });
     es.addEventListener("download_progress", (e: MessageEvent) => {
       handleEvent(e, (r) => storeRef.current.upsertRecord(r));
     });
@@ -59,6 +67,7 @@ export function useDownloadEvents() {
     });
     es.addEventListener("import_completed", (e: MessageEvent) => {
       handleEvent(e, (r) => storeRef.current.upsertRecord(r));
+      queryClient.invalidateQueries({ queryKey: ["library"] });
     });
 
     es.onerror = () => {

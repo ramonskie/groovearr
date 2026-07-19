@@ -161,6 +161,8 @@ export interface DownloadRecord {
 
 /** SSE event type names broadcast from the backend via GET /api/events. */
 export type DownloadEventType =
+  | "download_queued"
+  | "download_stateChanged"
   | "download_progress"
   | "download_completed"
   | "download_failed"
