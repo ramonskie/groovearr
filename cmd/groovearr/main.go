@@ -154,6 +154,7 @@ func main() {
 		<-sigCh
 		log.Println("shutting down...")
 		hbCancel()
+		workerPool.Shutdown()
 		srv.Shutdown(context.Background())
 	}()
 

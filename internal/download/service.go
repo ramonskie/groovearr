@@ -20,6 +20,9 @@ type WorkerPool interface {
 
 	// Cancel stops an in-progress download by cancelling its context.
 	Cancel(downloadID string)
+
+	// Shutdown gracefully stops all workers and waits for them to exit.
+	Shutdown()
 }
 
 // DownloadMeta carries track metadata supplied at queue time.
