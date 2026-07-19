@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -119,12 +120,9 @@ func (h *CoverArtHandler) updateAlbumThumb(ctx context.Context, albumDir string)
 	return fmt.Errorf("no matching artist for %s - %s", artistName, albumTitle)
 }
 
-// extractAlbumTitle strips the year suffix from a directory name.
+var yearSuffixRE = regexp.MustCompile(`\s*\(\d{4}\)\s*$`)
+
+// extractAlbumTitle strips a "(YYYY)" year suffix from a directory name.
 func extractAlbumTitle(dirName string) string {
-	for i := len(dirName) - 2; i > 0; i-- {
-		if dirName[i] == '(' {
-			return dirName[:i-1]
-		}
-	}
-	return dirName
+	return yearSuffixRE.ReplaceAllString(dirName, "")
 }
