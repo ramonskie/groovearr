@@ -22,6 +22,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/sanitize"
 	"github.com/ramonskie/groovearr/internal/download"
 
 	"golang.org/x/crypto/blowfish"
@@ -473,7 +474,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		ext = ".flac"
 	}
 
-	safeName := sanitizeFilename(displayName)
+	safeName := sanitize.FileName(displayName)
 	outPath := filepath.Join(c.dlPath, safeName+ext)
 
 	// Download and decrypt.
@@ -778,23 +779,6 @@ func (c *DownloadClient) updateRecord(downloadID string, fn func(*domain.Downloa
 	if r, ok := c.downloads[downloadID]; ok {
 		fn(r)
 	}
-}
-
-func sanitizeFilename(name string) string {
-	replacer := strings.NewReplacer(
-		"<", "", ">", "", ":", "", "\"", "",
-		"/", "", "\\", "", "|", "", "?", "", "*", "",
-	)
-	name = replacer.Replace(name)
-	name = strings.TrimSpace(name)
-	name = strings.Trim(name, ".")
-	if len(name) > 200 {
-		name = name[:200]
-	}
-	if name == "" {
-		name = "unknown"
-	}
-	return name
 }
 
 func indexOf(slice []string, item string) int {

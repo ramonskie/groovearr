@@ -144,40 +144,6 @@ func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (
 func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) { return nil, nil }
 func (m *mockStore) Close() error                                                                { return nil }
 
-func TestParseFilenameMeta(t *testing.T) {
-	tests := []struct {
-		input           string
-		wantArtist, wantAlbum, wantTitle string
-	}{
-		{"Artist - Title", "Artist", "", "Title"},
-		{"Artist - Album - Title", "Artist", "Album", "Title"},
-		{"SingleWord", "", "", "SingleWord"},
-		{"  Spaces  -  Clean  ", "Spaces", "", "Clean"},
-		{"", "", "", ""},
-	}
-	for _, tt := range tests {
-		artist, album, title := parseFilenameMeta(tt.input)
-		if artist != tt.wantArtist || album != tt.wantAlbum || title != tt.wantTitle {
-			t.Errorf("parseFilenameMeta(%q) = (%q, %q, %q), want (%q, %q, %q)",
-				tt.input, artist, album, title, tt.wantArtist, tt.wantAlbum, tt.wantTitle)
-		}
-	}
-}
-
-func TestSanitizePath(t *testing.T) {
-	tests := []struct{ input, want string }{
-		{"hello", "hello"},
-		{"a/b:c", "a_b_c"},
-		{"rock*pop?top\"song<best>classic|mix", "rock_pop_top_song_best_classic_mix"},
-	}
-	for _, tt := range tests {
-		got := sanitizePath(tt.input)
-		if got != tt.want {
-			t.Errorf("sanitizePath(%q) = %q, want %q", tt.input, got, tt.want)
-		}
-	}
-}
-
 func TestCopyFile(t *testing.T) {
 	dir := t.TempDir()
 	src := dir + "/src.txt"

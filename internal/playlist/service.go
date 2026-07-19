@@ -17,6 +17,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
+	"github.com/ramonskie/groovearr/internal/sanitize"
 )
 
 // Service orchestrates playlist import and sync.
@@ -355,7 +356,7 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 	}
 
 	// Create playlist directory.
-	playlistDir := filepath.Join(root, sanitizePath(playlist.Name))
+	playlistDir := filepath.Join(root, sanitize.DirName(playlist.Name))
 	if err := os.MkdirAll(playlistDir, 0o755); err != nil {
 		log.Printf("playlist: mkdir %s: %v", playlistDir, err)
 		return
@@ -550,26 +551,6 @@ func (s *Service) findInLibrary(ctx context.Context, info TrackInfo) int64 {
 	}
 
 	return 0
-}
-
-// sanitizePath removes characters unsafe for directory names.
-func sanitizePath(name string) string {
-	replacer := strings.NewReplacer("/", "_", "\\", "_", ":", "_", "*", "_", "?", "_", "\"", "_", "<", "_", ">", "_", "|", "_")
-	return replacer.Replace(name)
-}
-
-// parseFilenameMeta extracts artist and title from a "Artist - Title" formatted string.
-func parseFilenameMeta(s string) (artist, album, title string) {
-	s = strings.TrimSpace(s)
-	parts := strings.SplitN(s, " - ", 3)
-	switch len(parts) {
-	case 3:
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
-	case 2:
-		return strings.TrimSpace(parts[0]), "", strings.TrimSpace(parts[1])
-	default:
-		return "", "", s
-	}
 }
 
 // copyFile copies src to dst.

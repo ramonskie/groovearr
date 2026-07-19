@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+
+	"github.com/ramonskie/groovearr/internal/sanitize"
 )
 
 // PathResolver expands a folder template into filesystem-safe paths.
@@ -58,9 +60,9 @@ func (r *PathResolver) Resolve(args ResolveArgs) string {
 	result := r.template
 
 	// Sanitize values for filesystem safety (remove / \ : * ? " < > |).
-	artist := sanitizePathSegment(args.Artist)
-	album := sanitizePathSegment(args.Album)
-	title := sanitizePathSegment(args.Title)
+	artist := sanitize.PathSegment(args.Artist)
+	album := sanitize.PathSegment(args.Album)
+	title := sanitize.PathSegment(args.Title)
 
 	result = strings.ReplaceAll(result, "{artist}", artist)
 	result = strings.ReplaceAll(result, "{album}", album)
@@ -113,24 +115,6 @@ func (r *PathResolver) Resolve(args ResolveArgs) string {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────
-
-// sanitizePathSegment replaces characters invalid in filesystem paths.
-func sanitizePathSegment(s string) string {
-	if s == "" {
-		return "Unknown"
-	}
-	// Replace forward/backslash with dash to avoid nested directories.
-	s = strings.ReplaceAll(s, "/", "-")
-	s = strings.ReplaceAll(s, "\\", "-")
-	// Strip other invalid chars.
-	for _, ch := range []string{":", "*", "?", "\"", "<", ">", "|"} {
-		s = strings.ReplaceAll(s, ch, "")
-	}
-	// Collapse multiple spaces.
-	spaceRE := regexp.MustCompile(`\s+`)
-	s = spaceRE.ReplaceAllString(s, " ")
-	return strings.TrimSpace(s)
-}
 
 // replacePaddedToken handles tokens like {track:02} or {track:02d}.
 func replacePaddedToken(result, prefix string, value int) string {
