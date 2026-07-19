@@ -344,7 +344,8 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 	log.Printf("playlist: synced %q — %d tracks", p.Name, p.TrackCount)
 
 	// Build playlist folder.
-	go s.buildPlaylistFolder(ctx, playlistID)
+	// Uses background context — the caller may cancel ctx after SyncPlaylist returns.
+	go s.buildPlaylistFolder(context.Background(), playlistID)
 	return nil
 }
 
