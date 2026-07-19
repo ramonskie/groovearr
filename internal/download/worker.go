@@ -231,6 +231,7 @@ func (p *workerPoolImpl) pollUntilComplete(serviceID string, plugin Plugin, dp D
 
 // failJob transitions a download to the failed state and publishes events.
 func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
+	log.Printf("worker: download %s FAILED: %s", downloadID, errMsg)
 	_ = p.store.Update(p.ctx, &domain.DownloadRecord{
 		ID:    downloadID,
 		State: domain.DownloadFailed,

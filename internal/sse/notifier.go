@@ -30,6 +30,7 @@ func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator) *SSENotifier {
 	bus.Subscribe(events.TopicDownloadCompleted, n.onDownloadCompleted)
 	bus.Subscribe(events.TopicDownloadFailed, n.onDownloadFailed)
 	bus.Subscribe(events.TopicImportCompleted, n.onImportCompleted)
+	bus.Subscribe(events.TopicImportFailed, n.onImportFailed)
 
 	return n
 }
@@ -81,6 +82,14 @@ func (n *SSENotifier) onImportCompleted(ctx context.Context, event any) {
 		return
 	}
 	n.broadcastRecord(record, "import_completed")
+}
+
+func (n *SSENotifier) onImportFailed(ctx context.Context, event any) {
+	record, ok := event.(*domain.DownloadRecord)
+	if !ok {
+		return
+	}
+	n.broadcastRecord(record, "import_failed")
 }
 
 // Handle implements download.ImportHandler. When the notifier is placed in the
