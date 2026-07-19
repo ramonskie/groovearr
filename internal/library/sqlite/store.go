@@ -509,6 +509,26 @@ func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, erro
 }
 
 func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title string, year int, genres []string) (int64, error) {
+	// Exact match first — SearchAlbums uses LIKE and a hard limit of 10,
+	// which can miss the correct album if 10+ similar titles exist.
+	row := s.db.QueryRowContext(ctx,
+		albumSelect+" WHERE artist_id=? AND LOWER(title)=LOWER(?) LIMIT 1",
+		artistID, title)
+	al, err := scanAlbum(row)
+	if err != nil {
+		return 0, err
+	}
+	if al != nil {
+		if al.Year == 0 && year != 0 {
+			al.Year = year
+			if _, err := s.UpsertAlbum(ctx, al); err != nil {
+				log.Printf("store: update album year for %q: %v", title, err)
+			}
+		}
+		return al.ID, nil
+	}
+
+	// Fallback: fuzzy search via LIKE for near matches.
 	albums, err := s.SearchAlbums(ctx, title, 10)
 	if err != nil {
 		return 0, err
@@ -524,6 +544,7 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 			return al.ID, nil
 		}
 	}
+
 	return s.UpsertAlbum(ctx, &domain.Album{
 		ArtistID:  artistID,
 		Title:     title,
