@@ -97,7 +97,8 @@ type ImportResult struct {
 }
 
 // ImportPlaylist imports a playlist from a source: saves tracks and links existing library matches.
-// Does NOT trigger downloads — use DownloadMissing for that.
+// Imports playlist metadata and tracks from a source.
+// On first import, unmatched tracks are automatically queued for download.
 func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string) (*ImportResult, error) {
 	src := s.srcReg.Get(sourceName)
 	if src == nil {
@@ -155,6 +156,15 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 
 	// Build playlist folder from linked tracks (background context — outlives request).
 	go s.buildPlaylistFolder(context.Background(), playlistRecord.ID)
+
+	// Auto-trigger downloads for unmatched tracks on first import.
+	if result.Unmatched > 0 {
+		go func() {
+			if _, err := s.DownloadMissing(context.Background(), playlistRecord.ID); err != nil {
+				log.Printf("playlist: auto-download %q: %v", playlistRecord.Name, err)
+			}
+		}()
+	}
 
 	return result, nil
 }
