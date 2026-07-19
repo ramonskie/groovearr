@@ -148,9 +148,12 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 		p.cancelMu.Unlock()
 	}()
 
-	// Transition state: queued → downloading.
-	if err := p.updateStoreState(downloadID, domain.DownloadDownloading); err != nil {
+	// Transition state: queued → downloading atomically.
+	if ok, err := p.store.TransitionState(jobCtx, downloadID, domain.DownloadQueued, domain.DownloadDownloading); err != nil {
 		log.Printf("worker: state update failed for %s: %v", downloadID, err)
+		return
+	} else if !ok {
+		log.Printf("worker: download %s state changed before worker start, skipping", downloadID)
 		return
 	}
 	p.publishRecord(downloadID, domain.DownloadDownloading, events.TopicDownloadStateChanged)
@@ -178,7 +181,6 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 	}
 
 	// State already transitioned to DownloadImportPending inside pollUntilComplete.
-	// Only publish the event — don't call updateStoreState which would blank file_path.
 	p.publishRecord(downloadID, domain.DownloadImportPending, events.TopicDownloadCompleted)
 }
 
@@ -273,14 +275,6 @@ func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
 		Error: errMsg,
 	})
 	p.publishRecord(downloadID, domain.DownloadFailed, events.TopicDownloadFailed)
-}
-
-// updateStoreState persists a state change to the store.
-func (p *workerPoolImpl) updateStoreState(downloadID string, state domain.DownloadState) error {
-	return p.store.Update(p.ctx, &domain.DownloadRecord{
-		ID:    downloadID,
-		State: state,
-	})
 }
 
 // publishRecord fires a lifecycle event with a minimal download record.
