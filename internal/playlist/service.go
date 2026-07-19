@@ -8,6 +8,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -174,7 +175,7 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		}
 
 		// Search across all configured sources for a match and queue it.
-		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
+		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.DurationMs, "", playlistID)
 		if dlErr != nil {
 			log.Printf("playlist: download %s - %s: %v", pt.Artist, pt.Title, dlErr)
 			continue
@@ -221,7 +222,7 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 
 // findAndQueueDownload searches across configured sources for a matching track
 // and queues the best candidate via the download service.
-func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string) (downloadID, sourceName string, confidence float64, err error) {
+func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string, playlistID int64) (downloadID, sourceName string, confidence float64, err error) {
 	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
 		return s.cfgFn().Quality
 	})
@@ -241,6 +242,7 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string
 		Album:       best.Track.Album,
 		Title:       best.Track.Title,
 		TrackNumber: best.Track.TrackNumber,
+		PlaylistID:  strconv.FormatInt(playlistID, 10),
 	})
 	if dlErr != nil {
 		return "", "", best.Score, fmt.Errorf("queue download: %w", dlErr)

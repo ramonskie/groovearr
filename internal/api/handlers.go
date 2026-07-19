@@ -450,8 +450,28 @@ func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
 	if tracks == nil {
 		tracks = []domain.Track{}
 	}
+
+	// Exclude tracks that live under the playlist path — playlist files
+	// are managed by buildPlaylistFolder and shouldn't appear in the library view.
+	cfg := s.cfg.Get()
+	if cfg.Library.PlaylistPath != "" {
+		absPlaylist, _ := filepath.Abs(cfg.Library.PlaylistPath)
+		tracks = filterByPath(tracks, absPlaylist)
+	}
+
 	_ = offset
 	writeJSON(w, http.StatusOK, tracks)
+}
+
+// filterByPath removes tracks whose FilePath starts with excludeRoot.
+func filterByPath(tracks []domain.Track, excludeRoot string) []domain.Track {
+	out := tracks[:0]
+	for _, t := range tracks {
+		if t.FilePath == "" || !strings.HasPrefix(t.FilePath, excludeRoot) {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
