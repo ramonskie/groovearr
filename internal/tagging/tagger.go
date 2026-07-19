@@ -10,8 +10,7 @@ import (
 	"strings"
 
 	"github.com/bogem/id3v2/v2"
-	flac "github.com/go-flac/go-flac"
-	"github.com/go-flac/flacpicture"
+	flac "github.com/go-flac/go-flac/v2"
 )
 
 // WriteTags writes ID3v2 or Vorbis comment tags to the file at path based on
@@ -68,6 +67,7 @@ func writeFLACTags(path, artist, album, title, coverPath string) error {
 	if err != nil {
 		return fmt.Errorf("flac parse: %w", err)
 	}
+	defer f.Close()
 
 	tags := map[string]string{
 		"ARTIST": artist,
@@ -77,7 +77,7 @@ func writeFLACTags(path, artist, album, title, coverPath string) error {
 	setVorbisComments(f, tags)
 
 	if data, err := os.ReadFile(coverPath); err == nil {
-		_ = addFLACCover(f, data) // non-fatal
+		_ = setFLACCover(f, data) // non-fatal
 	}
 
 	if err := f.Save(path); err != nil {
@@ -126,18 +126,41 @@ func marshalVorbisComment(vendor string, tags map[string]string) []byte {
 	return buf
 }
 
-func addFLACCover(f *flac.File, imgData []byte) error {
-	pic, err := flacpicture.NewFromImageData(
-		flacpicture.PictureTypeFrontCover,
-		"Front cover",
-		imgData,
-		"image/jpeg",
-	)
-	if err != nil {
-		return err
-	}
-	picMeta := pic.Marshal()
+// setFLACCover replaces any existing picture blocks and embeds a front cover.
+// Implements FLAC METADATA_BLOCK_PICTURE per the FLAC spec (section 7).
+func setFLACCover(f *flac.File, imgData []byte) error {
+	// Build picture block: type(4) + mime_len(4) + mime + desc_len(4) + desc +
+	// width(4) + height(4) + color_depth(4) + colors_used(4) + data_len(4) + data.
+	picBuf := make([]byte, 4+4+len("image/jpeg")+4+len("Front cover")+4+4+4+4+4+len(imgData))
+	off := 0
+	binary.BigEndian.PutUint32(picBuf[off:], 3) // Front cover
+	off += 4
+	mime := "image/jpeg"
+	binary.BigEndian.PutUint32(picBuf[off:], uint32(len(mime)))
+	off += 4
+	copy(picBuf[off:], mime)
+	off += len(mime)
+	desc := "Front cover"
+	binary.BigEndian.PutUint32(picBuf[off:], uint32(len(desc)))
+	off += 4
+	copy(picBuf[off:], desc)
+	off += len(desc)
+	// width, height, color depth, colors used — 0 means "not specified"
+	binary.BigEndian.PutUint32(picBuf[off:], 0)
+	off += 4
+	binary.BigEndian.PutUint32(picBuf[off:], 0)
+	off += 4
+	binary.BigEndian.PutUint32(picBuf[off:], 0)
+	off += 4
+	binary.BigEndian.PutUint32(picBuf[off:], 0)
+	off += 4
+	binary.BigEndian.PutUint32(picBuf[off:], uint32(len(imgData)))
+	off += 4
+	copy(picBuf[off:], imgData)
 
+	picBlock := &flac.MetaDataBlock{Type: flac.Picture, Data: picBuf}
+
+	// Remove existing picture blocks.
 	meta := f.Meta[:0]
 	for _, m := range f.Meta {
 		if m.Type != flac.Picture {
@@ -145,6 +168,6 @@ func addFLACCover(f *flac.File, imgData []byte) error {
 		}
 	}
 	f.Meta = meta
-	f.Meta = append(f.Meta, &picMeta)
+	f.Meta = append(f.Meta, picBlock)
 	return nil
 }
