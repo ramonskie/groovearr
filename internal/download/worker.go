@@ -147,11 +147,8 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 		return
 	}
 
-	// Transition to importPending. CompletedDownloadService picks up from here.
-	if err := p.updateStoreState(downloadID, domain.DownloadImportPending); err != nil {
-		log.Printf("worker: failed to mark %s completed: %v", downloadID, err)
-		return
-	}
+	// State already transitioned to DownloadImportPending inside pollUntilComplete.
+	// Only publish the event — don't call updateStoreState which would blank file_path.
 	p.publishRecord(downloadID, domain.DownloadImportPending, events.TopicDownloadCompleted)
 }
 
