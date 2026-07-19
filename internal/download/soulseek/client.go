@@ -20,6 +20,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 )
 
@@ -192,7 +193,7 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 		ID:         downloadID,
 		SourceName: pluginName,
 		Filename:   filename,
-		State:      domain.DownloadInitializing,
+		State:      domain.DownloadQueued,
 	}
 	c.downloadsMu.Lock()
 	c.downloads[downloadID] = record
@@ -308,6 +309,21 @@ func (c *Client) ClearCompleted(ctx context.Context) error {
 
 // Connected returns true if configured (Soulseek has no separate auth step).
 func (c *Client) Connected() bool { return c.IsConfigured() }
+
+// GetProgress implements download.DownloadProgressor by delegating to the
+// slskd API for current transfer state.
+func (c *Client) GetProgress(ctx context.Context, downloadID string) (*download.Progress, error) {
+	status, err := c.GetDownloadStatus(ctx, downloadID)
+	if err != nil {
+		return nil, err
+	}
+	return &download.Progress{
+		DownloadID:  downloadID,
+		Transferred: status.Transferred,
+		Total:       status.Size,
+		Speed:       status.Speed,
+	}, nil
+}
 
 // doRequest makes an HTTP request to slskd's /api/v0/ endpoint.
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, body io.Reader) (json.RawMessage, error) {
@@ -600,15 +616,13 @@ func parseState(s string) domain.DownloadState {
 	lower := strings.ToLower(s)
 	switch {
 	case strings.Contains(lower, "completed") || strings.Contains(lower, "succeeded"):
-		return domain.DownloadSucceeded
+		return domain.DownloadImported
 	case strings.Contains(lower, "errored") || strings.Contains(lower, "failed"):
-		return domain.DownloadErrored
-	case strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled"):
-		return domain.DownloadCancelled
-	case strings.Contains(lower, "aborted"):
-		return domain.DownloadAborted
+		return domain.DownloadFailed
+	case strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled") || strings.Contains(lower, "aborted"):
+		return domain.DownloadIgnored
 	case strings.Contains(lower, "initializing") || strings.Contains(lower, "queued"):
-		return domain.DownloadInitializing
+		return domain.DownloadQueued
 	default:
 		return domain.DownloadDownloading
 	}

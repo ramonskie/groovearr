@@ -42,6 +42,12 @@ func (s *Store) Close() error {
 	return s.db.Close()
 }
 
+// DB returns the underlying *sql.DB so that other packages (e.g. download)
+// can share the same SQLite connection.
+func (s *Store) DB() *sql.DB {
+	return s.db
+}
+
 // ─── Schema ──────────────────────────────────────────────────────────
 
 func (s *Store) migrate() error {
@@ -174,6 +180,52 @@ func (s *Store) migrate() error {
 			}
 		}
 		version = 2
+	}
+
+	// Version 3: download pipeline persistence.
+	if version < 3 {
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS downloads (
+				id TEXT PRIMARY KEY,
+				source_name TEXT NOT NULL DEFAULT '',
+				filename TEXT NOT NULL DEFAULT '',
+				display_name TEXT NOT NULL DEFAULT '',
+				state TEXT NOT NULL DEFAULT 'initializing',
+				progress REAL NOT NULL DEFAULT 0,
+				size INTEGER NOT NULL DEFAULT 0,
+				transferred INTEGER NOT NULL DEFAULT 0,
+				speed INTEGER NOT NULL DEFAULT 0,
+				file_path TEXT NOT NULL DEFAULT '',
+				error TEXT NOT NULL DEFAULT '',
+				track_id TEXT NOT NULL DEFAULT '',
+				cover_url TEXT NOT NULL DEFAULT '',
+				artist TEXT NOT NULL DEFAULT '',
+				album TEXT NOT NULL DEFAULT '',
+				title TEXT NOT NULL DEFAULT '',
+				track_number INTEGER NOT NULL DEFAULT 0,
+				disc_number INTEGER NOT NULL DEFAULT 0,
+				year INTEGER NOT NULL DEFAULT 0,
+				retry_count INTEGER NOT NULL DEFAULT 0,
+				playlist_id TEXT NOT NULL DEFAULT '',
+				created_at TEXT NOT NULL DEFAULT (datetime('now')),
+				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)`,
+			`CREATE TABLE IF NOT EXISTS download_events (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+				event_type TEXT NOT NULL,
+				payload TEXT NOT NULL DEFAULT '{}',
+				created_at TEXT NOT NULL DEFAULT (datetime('now'))
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_downloads_state ON downloads(state)`,
+			`CREATE INDEX IF NOT EXISTS idx_downloads_playlist_id ON downloads(playlist_id)`,
+		}
+		for _, stmt := range statements {
+			if _, err := s.db.Exec(stmt); err != nil {
+				return fmt.Errorf("migration v3: %w", err)
+			}
+		}
+		version = 3
 	}
 
 	// Record current version.

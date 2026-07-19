@@ -55,3 +55,23 @@ type SearchPlugin interface {
 	// SearchWithProgress is like Search but invokes the callback as results arrive.
 	SearchWithProgress(ctx context.Context, query string, cb func(tracks []domain.TrackResult, albums []domain.AlbumResult, responseCount int)) ([]domain.TrackResult, []domain.AlbumResult, error)
 }
+
+// Progress holds live download progress for a single download.
+type Progress struct {
+	DownloadID  string
+	Transferred int64 // bytes downloaded so far
+	Total       int64 // total file size in bytes
+	Speed       int64 // bytes per second
+}
+
+// DownloadProgressor is an optional interface for plugins that can report
+// live download progress. Workers poll GetProgress to emit progress events.
+// Plugins that do not implement this will have their downloads tracked via
+// periodic GetDownloadStatus calls instead.
+type DownloadProgressor interface {
+	Plugin
+
+	// GetProgress returns the current progress of a download.
+	// downloadID is the plugin-specific identifier returned by Plugin.Download.
+	GetProgress(ctx context.Context, downloadID string) (*Progress, error)
+}

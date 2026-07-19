@@ -1,24 +1,60 @@
 package domain
 
+import (
+	"encoding/json"
+	"time"
+)
+
 // DownloadState tracks the lifecycle of a single download.
 type DownloadState string
 
 const (
-	DownloadInitializing DownloadState = "initializing"
-	DownloadDownloading  DownloadState = "downloading"
-	DownloadSucceeded    DownloadState = "succeeded"
-	DownloadErrored      DownloadState = "errored"
-	DownloadCancelled    DownloadState = "cancelled"
-	DownloadAborted      DownloadState = "aborted"
+	DownloadQueued        DownloadState = "queued"
+	DownloadDownloading   DownloadState = "downloading"
+	DownloadImportPending DownloadState = "importPending"
+	DownloadImporting     DownloadState = "importing"
+	DownloadImported      DownloadState = "imported"
+	DownloadFailedPending DownloadState = "failedPending"
+	DownloadFailed        DownloadState = "failed"
+	DownloadIgnored       DownloadState = "ignored"
 )
 
-// TerminalStates returns true if the state is final (no more progress expected).
+// Terminal returns true if the state is final (no more progress expected).
 func (s DownloadState) Terminal() bool {
 	switch s {
-	case DownloadSucceeded, DownloadErrored, DownloadCancelled, DownloadAborted:
+	case DownloadImported, DownloadFailed, DownloadIgnored:
 		return true
 	}
 	return false
+}
+
+// IsRetryable returns true if the download can be retried from this state.
+func (s DownloadState) IsRetryable() bool {
+	return s == DownloadFailed
+}
+
+// ─── Event types ────────────────────────────────────────────────────
+
+// DownloadEventType classifies a download lifecycle event.
+type DownloadEventType string
+
+const (
+	EventQueued         DownloadEventType = "queued"
+	EventProgress       DownloadEventType = "progress"
+	EventCompleted      DownloadEventType = "completed"
+	EventFailed         DownloadEventType = "failed"
+	EventImportStarted  DownloadEventType = "importStarted"
+	EventImportCompleted DownloadEventType = "importCompleted"
+	EventRetry          DownloadEventType = "retry"
+)
+
+// DownloadEvent represents a discrete event in a download's lifecycle.
+type DownloadEvent struct {
+	ID         string            `json:"id"`
+	DownloadID string            `json:"download_id"`
+	Type       DownloadEventType `json:"type"`
+	Payload    json.RawMessage   `json:"payload,omitempty"`
+	Timestamp  time.Time         `json:"timestamp"`
 }
 
 // DownloadRecord holds the live state of a single download task.
@@ -34,8 +70,11 @@ type DownloadRecord struct {
 	Speed       int64         `json:"speed"` // bytes/sec
 	FilePath    string        `json:"file_path,omitempty"`
 	Error       string        `json:"error,omitempty"`
+	Username    string        `json:"username,omitempty"`  // source-specific username for download
 	TrackID     string        `json:"track_id,omitempty"` // source-specific ID
 	CoverURL    string        `json:"cover_url,omitempty"` // album cover image URL
+	PlaylistID  string        `json:"playlist_id,omitempty"`  // playlist this download belongs to
+	LibraryTrackID int64      `json:"library_track_id,omitempty"` // imported library track ID
 
 	// Track metadata for post-download organization.
 	Artist      string `json:"artist,omitempty"`

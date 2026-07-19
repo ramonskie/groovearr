@@ -22,6 +22,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
 
 	"golang.org/x/crypto/blowfish"
 )
@@ -226,7 +227,7 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 		Filename:    filename,
 		DisplayName: displayName,
 		TrackID:     trackID,
-		State:       domain.DownloadInitializing,
+		State:       domain.DownloadQueued,
 	}
 
 	c.downloadsMu.Lock()
@@ -275,7 +276,7 @@ func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, 
 	c.downloadsMu.Lock()
 	r, ok := c.downloads[downloadID]
 	if ok {
-		r.State = domain.DownloadCancelled
+		r.State = domain.DownloadIgnored
 		r.Error = ""
 	}
 	if remove {
@@ -314,6 +315,23 @@ func (c *DownloadClient) ClearCompleted(ctx context.Context) error {
 // Connected returns true if authentication has succeeded.
 func (c *DownloadClient) Connected() bool {
 	return c.isAuthenticated()
+}
+
+// GetProgress implements download.DownloadProgressor by retrieving the current
+// transfer state from the in-memory download map.
+func (c *DownloadClient) GetProgress(ctx context.Context, downloadID string) (*download.Progress, error) {
+	c.downloadsMu.RLock()
+	defer c.downloadsMu.RUnlock()
+	r, ok := c.downloads[downloadID]
+	if !ok {
+		return nil, fmt.Errorf("deezer: download %s not found", downloadID)
+	}
+	return &download.Progress{
+		DownloadID:  downloadID,
+		Transferred: r.Transferred,
+		Total:       r.Size,
+		Speed:       r.Speed,
+	}, nil
 }
 
 // isAuthenticated reads the auth flag under the token lock.
@@ -478,7 +496,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		if r.State.Terminal() {
 			return // cancelled or errored during download
 		}
-		r.State = domain.DownloadSucceeded
+		r.State = domain.DownloadImported
 		r.Progress = 100.0
 		r.FilePath = outPath
 	})
@@ -749,7 +767,7 @@ func (c *DownloadClient) setError(downloadID, msg string) {
 		if r.State.Terminal() {
 			return // already cancelled — don't overwrite
 		}
-		r.State = domain.DownloadErrored
+		r.State = domain.DownloadFailed
 		r.Error = msg
 	})
 }
