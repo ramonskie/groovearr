@@ -227,7 +227,8 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			}
 
 			// Sync progress back to our store record.
-			_ = p.store.Update(p.ctx, &domain.DownloadRecord{
+			// Uses job-level ctx so the update is skipped when the download is cancelled.
+			_ = p.store.Update(ctx, &domain.DownloadRecord{
 				ID:          serviceID,
 				State:       domain.DownloadDownloading,
 				Progress:    status.Progress,
@@ -251,7 +252,8 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			switch {
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
-					_ = p.store.Update(p.ctx, &domain.DownloadRecord{
+					// Uses job-level ctx so the transition is skipped when cancelled.
+					_ = p.store.Update(ctx, &domain.DownloadRecord{
 						ID:       serviceID,
 						FilePath: lastFilePath,
 						State:    domain.DownloadImportPending,
