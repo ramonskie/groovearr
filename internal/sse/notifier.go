@@ -26,6 +26,7 @@ type SSENotifier struct {
 func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator) *SSENotifier {
 	n := &SSENotifier{hub: hub}
 
+	bus.Subscribe(events.TopicDownloadStateChanged, n.onStateChanged)
 	bus.Subscribe(events.TopicDownloadProgress, n.onProgress)
 	bus.Subscribe(events.TopicDownloadCompleted, n.onDownloadCompleted)
 	bus.Subscribe(events.TopicDownloadFailed, n.onDownloadFailed)
@@ -50,6 +51,14 @@ func (n *SSENotifier) broadcastRecord(record *domain.DownloadRecord, eventType s
 		Data:      data,
 		Timestamp: time.Now(),
 	})
+}
+
+func (n *SSENotifier) onStateChanged(ctx context.Context, event any) {
+	record, ok := event.(*domain.DownloadRecord)
+	if !ok {
+		return
+	}
+	n.broadcastRecord(record, "download_stateChanged")
 }
 
 func (n *SSENotifier) onProgress(ctx context.Context, event any) {

@@ -5,6 +5,7 @@ package tagging
 import (
 	"encoding/binary"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
@@ -64,6 +65,19 @@ func writeID3v2(path, artist, album, title, coverPath string) error {
 }
 
 func writeFLACTags(path, artist, album, title, coverPath string) error {
+	// Quick pre-check: verify FLAC magic bytes before attempting a full parse.
+	// Deezer downloads sometimes produce files that go-flac can't handle.
+	fh, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	magic := make([]byte, 4)
+	n, _ := io.ReadFull(fh, magic)
+	fh.Close()
+	if n < 4 || string(magic) != "fLaC" {
+		return nil // not a valid FLAC file, skip silently
+	}
+
 	f, err := flac.ParseFile(path)
 	if err != nil {
 		return fmt.Errorf("flac parse: %w", err)

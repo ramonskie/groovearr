@@ -34,6 +34,11 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 	existing, err := h.libStore.GetTrackByFilePath(ctx, record.FilePath)
 	if err == nil && existing != nil {
 		record.LibraryTrackID = existing.ID
+		// Update size from filesystem so SSE completion shows real numbers.
+		if fi, err := os.Stat(record.FilePath); err == nil {
+			record.Size = fi.Size()
+			record.Transferred = fi.Size()
+		}
 		return nil
 	}
 
@@ -44,6 +49,10 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 	if err != nil {
 		return fmt.Errorf("library importer: stat file: %w", err)
 	}
+
+	// Update download record with actual file size for SSE completion event.
+	record.Size = fi.Size()
+	record.Transferred = fi.Size()
 
 	track := &domain.Track{
 		Title:       trackTitle,
