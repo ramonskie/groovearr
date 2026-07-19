@@ -212,7 +212,9 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 		s.syncMu.Unlock()
 	}()
 
-	if err := s.SyncPlaylist(context.Background(), playlistID); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if err := s.SyncPlaylist(ctx, playlistID); err != nil {
 		log.Printf("playlist: background sync %d failed: %v", playlistID, err)
 	}
 }
