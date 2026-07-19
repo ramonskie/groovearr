@@ -219,79 +219,21 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 // findAndQueueDownload searches across configured sources for a matching track
 // and queues the best candidate via the download service.
 func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string) (downloadID, sourceName string, confidence float64, err error) {
-	const minConfidence = 0.55
+	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
+		return s.cfgFn().Quality
+	})
 
-	query := title
-	if artist != "" {
-		query = artist + " " + title
+	best, err := orch.FindBestMatch(ctx, title, artist, durationMs, excludeSource)
+	if err != nil {
+		return "", "", 0, err
 	}
 
-	var candidates []download.Candidate
-	for _, p := range s.downloadReg.Configured() {
-		if p.Name() == excludeSource {
-			continue
-		}
-		searchTracks, _, searchErr := p.Search(ctx, query)
-		if searchErr != nil {
-			log.Printf("playlist: search %s for %q: %v", p.Name(), query, searchErr)
-			continue
-		}
-		for _, t := range searchTracks {
-			sourceArtists := []string{}
-			if artist != "" {
-				sourceArtists = []string{artist}
-			}
-			candidateArtists := []string{}
-			if t.Artist != "" {
-				candidateArtists = []string{t.Artist}
-			}
-			if t.Username != "" {
-				candidateArtists = append(candidateArtists, t.Username)
-			}
-			score, _ := s.matcher.ScoreTrackMatch(
-				title, sourceArtists, durationMs,
-				t.Title, candidateArtists, t.Duration,
-			)
-			if score >= minConfidence {
-				candidates = append(candidates, download.Candidate{Track: t, SourceName: p.Name(), Score: score})
-			}
-		}
-	}
-
-	if len(candidates) == 0 {
-		return "", "", 0, fmt.Errorf("no matching track found for %s - %s", artist, title)
-	}
-
-	// Apply quality filter.
-	candidates = download.FilterByQuality(candidates, s.cfgFn().Quality)
-	if len(candidates) == 0 {
-		qc := s.cfgFn().Quality
-		return "", "", 0, fmt.Errorf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
-			qc.PreferredFormat, qc.MinBitrate)
-	}
-
-	best := candidates[0]
-	for _, c := range candidates[1:] {
-		if c.Score > best.Score {
-			best = c
-		}
-	}
-
-	// Normalize deezer source name.
-	downloadSource := best.SourceName
 	username := best.Track.Username
 	if best.SourceName == "deezer" {
-		dl := s.downloadReg.Get("deezer")
-		if dl == nil {
-			dl = s.downloadReg.Get("deezer_dl")
-		}
-		if dl != nil {
-			downloadSource = dl.Name()
-			username = dl.Name()
-		}
+		username = best.SourceName
 	}
 
-	id, dlErr := s.downloadSvc.Queue(ctx, downloadSource, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+	id, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
 		Artist:      best.Track.Artist,
 		Album:       best.Track.Album,
 		Title:       best.Track.Title,

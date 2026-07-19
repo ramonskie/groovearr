@@ -77,6 +77,78 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 	return allTracks, allAlbums, nil
 }
 
+// FindBestMatch searches all configured sources for tracks matching the given
+// metadata, scores candidates, applies quality filters, and returns the best
+// candidate. Excludes results from excludeSource. Returns an error if no
+// candidates meet the confidence threshold or quality constraints.
+func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, durationMs int64, excludeSource string) (*Candidate, error) {
+	const minConfidence = 0.55
+
+	query := title
+	if artist != "" {
+		query = artist + " " + title
+	}
+
+	var candidates []Candidate
+	for _, p := range o.registry.Configured() {
+		if p.Name() == excludeSource {
+			continue
+		}
+		searchTracks, _, searchErr := p.Search(ctx, query)
+		if searchErr != nil {
+			log.Printf("orchestrator: search %s for %q: %v", p.Name(), query, searchErr)
+			continue
+		}
+		for _, t := range searchTracks {
+			sourceArtists := []string{}
+			if artist != "" {
+				sourceArtists = []string{artist}
+			}
+			candidateArtists := []string{}
+			if t.Artist != "" {
+				candidateArtists = []string{t.Artist}
+			}
+			if t.Username != "" {
+				candidateArtists = append(candidateArtists, t.Username)
+			}
+			score, _ := o.matcher.ScoreTrackMatch(
+				title, sourceArtists, durationMs,
+				t.Title, candidateArtists, t.Duration,
+			)
+			if score >= minConfidence {
+				candidates = append(candidates, Candidate{Track: t, SourceName: p.Name(), Score: score})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("no matching track found across sources (min confidence %.0f%%)", minConfidence*100)
+	}
+
+	candidates = FilterByQuality(candidates, o.qualityConfig())
+	if len(candidates) == 0 {
+		qc := o.qualityConfig()
+		return nil, fmt.Errorf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
+			qc.PreferredFormat, qc.MinBitrate)
+	}
+
+	best := &candidates[0]
+	for i := range candidates[1:] {
+		if candidates[i+1].Score > best.Score {
+			best = &candidates[i+1]
+		}
+	}
+
+	// Normalize Deezer source name.
+	if best.SourceName == "deezer" {
+		if dl := o.registry.Get("deezer"); dl != nil {
+			best.SourceName = dl.Name()
+		}
+	}
+
+	return best, nil
+}
+
 // Candidate is a search result with match score used by FilterByQuality
 // and download-best selection.
 type Candidate struct {
