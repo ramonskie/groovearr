@@ -158,13 +158,13 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	err := s.cfg.Update(func(cfg *config.Config) error {
 		// Merge partial onto a copy first to validate, then apply to live config.
 		merged := *cfg
-		mergeConfig(&merged, &partial)
+		merged.Merge(&partial)
 
 		if errs := merged.Validate(); len(errs) > 0 {
 			return &validationError{errs}
 		}
 
-		mergeConfig(cfg, &partial)
+		cfg.Merge(&partial)
 		return nil
 	})
 
@@ -798,56 +798,4 @@ func noCache(next http.Handler) http.Handler {
 		w.Header().Set("Expires", "0")
 		next.ServeHTTP(w, r)
 	})
-}
-
-// mergeConfig copies non-zero fields from partial into dst.
-// Extracted from handleUpdateConfig so validation can preview the merge result.
-func mergeConfig(dst, partial *config.Config) {
-	if partial.Soulseek.SlskdURL != "" {
-		dst.Soulseek.SlskdURL = partial.Soulseek.SlskdURL
-	}
-	if partial.Soulseek.APIKey != "" {
-		dst.Soulseek.APIKey = partial.Soulseek.APIKey
-	}
-	if partial.Soulseek.SearchTimeout > 0 {
-		dst.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
-	}
-	if partial.Soulseek.MinUploadSpeed > 0 {
-		dst.Soulseek.MinUploadSpeed = partial.Soulseek.MinUploadSpeed
-	}
-	if partial.Deezer.ARL != "" {
-		dst.Deezer.ARL = partial.Deezer.ARL
-	}
-	if partial.Deezer.Quality != "" {
-		dst.Deezer.Quality = partial.Deezer.Quality
-	}
-	if partial.Deezer.AccessToken != "" {
-		dst.Deezer.AccessToken = partial.Deezer.AccessToken
-	}
-	if partial.Deezer.AllowFallback != nil {
-		dst.Deezer.AllowFallback = partial.Deezer.AllowFallback
-	}
-
-	if partial.Library.DownloadPath != "" {
-		dst.Library.DownloadPath = partial.Library.DownloadPath
-	}
-	if partial.Library.FolderTemplate != "" {
-		dst.Library.FolderTemplate = partial.Library.FolderTemplate
-	}
-	if partial.Library.LibraryPath != "" {
-		dst.Library.LibraryPath = partial.Library.LibraryPath
-	}
-	if partial.Library.PlaylistPath != "" {
-		dst.Library.PlaylistPath = partial.Library.PlaylistPath
-	}
-	if partial.Library.PlaylistTemplate != "" {
-		dst.Library.PlaylistTemplate = partial.Library.PlaylistTemplate
-	}
-
-	if partial.Quality.PreferredFormat != "" {
-		dst.Quality.PreferredFormat = partial.Quality.PreferredFormat
-	}
-	if partial.Quality.MinBitrate > 0 {
-		dst.Quality.MinBitrate = partial.Quality.MinBitrate
-	}
 }

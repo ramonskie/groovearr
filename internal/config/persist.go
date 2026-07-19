@@ -51,19 +51,17 @@ func (p *Persistence) reload() error {
 		return err
 	}
 
-	data, err := os.ReadFile(p.path)
+	cfg, err := readConfigFile(p.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			p.cfg = DefaultConfig()
-			return p.save()
-		}
 		return err
 	}
 
-	cfg := DefaultConfig()
-	if err := json.Unmarshal(data, &cfg); err != nil {
-		return err
+	// If the file didn't exist, readConfigFile returned defaults — persist them.
+	if _, statErr := os.Stat(p.path); os.IsNotExist(statErr) {
+		p.cfg = cfg
+		return p.save()
 	}
+
 	p.cfg = cfg
 	return nil
 }

@@ -126,41 +126,66 @@ func (c Config) Validate() []string {
 	return errs
 }
 
-// Load reads config from a JSON file, falling back to defaults for missing fields.
-func Load(path string) (Config, error) {
-	cfg := DefaultConfig()
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return cfg, nil // use defaults
-		}
-		return cfg, err
+// Merge copies non-zero fields from partial into c.
+func (c *Config) Merge(partial *Config) {
+	if partial.Soulseek.SlskdURL != "" {
+		c.Soulseek.SlskdURL = partial.Soulseek.SlskdURL
+	}
+	if partial.Soulseek.APIKey != "" {
+		c.Soulseek.APIKey = partial.Soulseek.APIKey
+	}
+	if partial.Soulseek.SearchTimeout > 0 {
+		c.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
+	}
+	if partial.Soulseek.MinUploadSpeed > 0 {
+		c.Soulseek.MinUploadSpeed = partial.Soulseek.MinUploadSpeed
+	}
+	if partial.Deezer.ARL != "" {
+		c.Deezer.ARL = partial.Deezer.ARL
+	}
+	if partial.Deezer.Quality != "" {
+		c.Deezer.Quality = partial.Deezer.Quality
+	}
+	if partial.Deezer.AccessToken != "" {
+		c.Deezer.AccessToken = partial.Deezer.AccessToken
+	}
+	if partial.Deezer.AllowFallback != nil {
+		c.Deezer.AllowFallback = partial.Deezer.AllowFallback
 	}
 
-	if err := json.Unmarshal(data, &cfg); err != nil {
+	if partial.Library.DownloadPath != "" {
+		c.Library.DownloadPath = partial.Library.DownloadPath
+	}
+	if partial.Library.FolderTemplate != "" {
+		c.Library.FolderTemplate = partial.Library.FolderTemplate
+	}
+	if partial.Library.LibraryPath != "" {
+		c.Library.LibraryPath = partial.Library.LibraryPath
+	}
+	if partial.Library.PlaylistPath != "" {
+		c.Library.PlaylistPath = partial.Library.PlaylistPath
+	}
+	if partial.Library.PlaylistTemplate != "" {
+		c.Library.PlaylistTemplate = partial.Library.PlaylistTemplate
+	}
+
+	if partial.Quality.PreferredFormat != "" {
+		c.Quality.PreferredFormat = partial.Quality.PreferredFormat
+	}
+	if partial.Quality.MinBitrate > 0 {
+		c.Quality.MinBitrate = partial.Quality.MinBitrate
+	}
+}
+
+// Load reads config from a JSON file, falling back to defaults for missing fields.
+func Load(path string) (Config, error) {
+	cfg, err := readConfigFile(path)
+	if err != nil {
 		return cfg, err
 	}
 
 	// Expand relative paths.
-	if cfg.Library.DownloadPath != "" && !filepath.IsAbs(cfg.Library.DownloadPath) {
-		abs, err := filepath.Abs(cfg.Library.DownloadPath)
-		if err == nil {
-			cfg.Library.DownloadPath = abs
-		}
-	}
-	if cfg.Library.LibraryPath != "" && !filepath.IsAbs(cfg.Library.LibraryPath) {
-		abs, err := filepath.Abs(cfg.Library.LibraryPath)
-		if err == nil {
-			cfg.Library.LibraryPath = abs
-		}
-	}
-	if cfg.Library.PlaylistPath != "" && !filepath.IsAbs(cfg.Library.PlaylistPath) {
-		abs, err := filepath.Abs(cfg.Library.PlaylistPath)
-		if err == nil {
-			cfg.Library.PlaylistPath = abs
-		}
-	}
+	expandPaths(&cfg)
 
 	// Log validation warnings at startup.
 	if errs := cfg.Validate(); len(errs) > 0 {
@@ -171,4 +196,40 @@ func Load(path string) (Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// readConfigFile reads a JSON config file, merging onto DefaultConfig.
+// Returns DefaultConfig if the file does not exist.
+func readConfigFile(path string) (Config, error) {
+	cfg := DefaultConfig()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return cfg, nil
+		}
+		return cfg, err
+	}
+	if err := json.Unmarshal(data, &cfg); err != nil {
+		return cfg, err
+	}
+	return cfg, nil
+}
+
+// expandPaths converts relative library paths to absolute.
+func expandPaths(cfg *Config) {
+	if cfg.Library.DownloadPath != "" && !filepath.IsAbs(cfg.Library.DownloadPath) {
+		if abs, err := filepath.Abs(cfg.Library.DownloadPath); err == nil {
+			cfg.Library.DownloadPath = abs
+		}
+	}
+	if cfg.Library.LibraryPath != "" && !filepath.IsAbs(cfg.Library.LibraryPath) {
+		if abs, err := filepath.Abs(cfg.Library.LibraryPath); err == nil {
+			cfg.Library.LibraryPath = abs
+		}
+	}
+	if cfg.Library.PlaylistPath != "" && !filepath.IsAbs(cfg.Library.PlaylistPath) {
+		if abs, err := filepath.Abs(cfg.Library.PlaylistPath); err == nil {
+			cfg.Library.PlaylistPath = abs
+		}
+	}
 }
