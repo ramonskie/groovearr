@@ -56,6 +56,7 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 	}
 
 	if record.State != domain.DownloadImportPending {
+		log.Printf("importer: download %s state=%q (want importPending), skipping import chain", record.ID, record.State)
 		return
 	}
 
@@ -92,6 +93,8 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 			return
 		}
 	}
+
+	log.Printf("importer: download %s import chain complete (state=%s)", record.ID, record.State)
 
 	// All handlers succeeded.
 	record.State = domain.DownloadImported

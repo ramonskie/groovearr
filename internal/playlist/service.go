@@ -361,6 +361,20 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 
 	cfg := s.cfgFn()
 	root := cfg.Library.PlaylistPath
+
+	linkedCount := 0
+	for _, pt := range tracks {
+		if pt.TrackID != nil {
+			linkedCount++
+		}
+	}
+	log.Printf("playlist: build folder %q → %s — %d/%d tracks linked",
+		playlist.Name, root, linkedCount, len(tracks))
+
+	if root == "" {
+		log.Printf("playlist: build folder %q skipped — playlist_path not configured", playlist.Name)
+		return
+	}
 	template := cfg.Library.PlaylistTemplate
 	if template == "" {
 		template = "{position:02d} {artist} - {title}"

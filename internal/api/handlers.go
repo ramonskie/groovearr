@@ -95,6 +95,9 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 	// SSE endpoint for real-time download progress.
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
+	// Debug endpoint — full download state for troubleshooting.
+	mux.HandleFunc("GET /api/debug/download/{id}", s.handleDebugDownload)
+
 	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
 }
@@ -766,6 +769,49 @@ func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// ─── Debug ────────────────────────────────────────────────────────────
+
+// handleDebugDownload returns the full download record state including
+// library track and playlist link info for troubleshooting.
+func (s *Server) handleDebugDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	dl, err := s.downloadSvc.GetStatus(r.Context(), id)
+	if err != nil || dl == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("download %q not found", id))
+		return
+	}
+
+	info := map[string]any{
+		"download":    dl,
+		"state":       dl.State,
+		"terminal":    dl.State.Terminal(),
+		"playlist_id": dl.PlaylistID,
+		"library_track_id": dl.LibraryTrackID,
+	}
+
+	// Fetch linked library track if present.
+	if dl.LibraryTrackID != 0 {
+		if track, err := s.store.GetTrack(r.Context(), dl.LibraryTrackID); err == nil && track != nil {
+			info["library_track"] = track
+		}
+	}
+
+	// Fetch playlist link if present.
+	if dl.PlaylistID != "" {
+		if pid, err := strconv.ParseInt(dl.PlaylistID, 10, 64); err == nil {
+			if pl, err := s.store.GetPlaylist(r.Context(), pid); err == nil && pl != nil {
+				info["playlist"] = pl
+			}
+			if pts, err := s.store.GetPlaylistTracks(r.Context(), pid); err == nil {
+				info["playlist_tracks"] = pts
+			}
+		}
+	}
+
+	writeJSON(w, http.StatusOK, info)
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
