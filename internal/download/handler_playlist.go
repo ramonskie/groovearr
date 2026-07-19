@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 
@@ -70,6 +71,10 @@ func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *domain.Downl
 		}
 	}
 	_ = linked
+
+	if !linked {
+		log.Printf("playlist linker: no match for %s - %s in playlist %d", track.Title, artist.Name, playlistID)
+	}
 
 	return nil
 }
