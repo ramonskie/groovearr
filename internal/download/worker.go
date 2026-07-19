@@ -260,7 +260,12 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 }
 
 // failJob transitions a download to the failed state and publishes events.
+// If the download is already in a terminal state (e.g., cancelled), it is a no-op.
 func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
+	record, err := p.store.Get(p.ctx, downloadID)
+	if err == nil && record != nil && record.State.Terminal() {
+		return // already terminal, don't overwrite
+	}
 	log.Printf("worker: download %s FAILED: %s", downloadID, errMsg)
 	_ = p.store.Update(p.ctx, &domain.DownloadRecord{
 		ID:    downloadID,
