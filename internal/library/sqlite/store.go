@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log"
 	"strings"
 	"time"
 
@@ -516,7 +517,9 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 		if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
 			if al.Year == 0 && year != 0 {
 				al.Year = year
-				s.UpsertAlbum(ctx, &al)
+				if _, err := s.UpsertAlbum(ctx, &al); err != nil {
+					log.Printf("store: update album year for %q: %v", title, err)
+				}
 			}
 			return al.ID, nil
 		}

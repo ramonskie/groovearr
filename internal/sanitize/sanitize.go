@@ -24,6 +24,7 @@ func FileName(s string) string {
 	}
 	s = spaceRE.ReplaceAllString(s, " ")
 	s = strings.TrimSpace(s)
+	s = strings.Trim(s, ".")
 	if s == "" {
 		return "unknown"
 	}
@@ -36,7 +37,11 @@ func PathSegment(s string) string {
 	if s == "" {
 		return "Unknown"
 	}
-	return FileName(s)
+	result := FileName(s)
+	if result == "unknown" {
+		return "Unknown"
+	}
+	return result
 }
 
 // DirName makes a string safe for use as a directory name by replacing
