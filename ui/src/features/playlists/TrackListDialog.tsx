@@ -1,6 +1,7 @@
 import type { FC } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X, Check, ArrowDown, Loader2, Clock } from "lucide-react";
+import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import { usePlaylist, useDeletePlaylist } from "../../hooks/use-playlists";
 import type { PlaylistTrackDownloadStatus } from "../../api/types";
@@ -21,7 +22,7 @@ interface TrackListDialogProps {
 
 const STATUS_BADGE: Record<
   PlaylistTrackDownloadStatus,
-  { variant: "success" | "warning" | "error" | "muted"; icon: FC<{ size?: number; className?: string }>; label: string }
+  { variant: "success" | "warning" | "error" | "muted"; icon: LucideIcon; label: string }
 > = {
   linked: { variant: "success", icon: Check, label: "Linked" },
   downloading: { variant: "warning", icon: Loader2, label: "Downloading" },
