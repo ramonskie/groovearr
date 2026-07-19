@@ -191,6 +191,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 	defer ticker.Stop()
 
 	var lastFilePath string
+	var errCount int
 
 	for {
 		select {
@@ -208,9 +209,14 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			// Check terminal state via the plugin's status API.
 			status, err := plugin.GetDownloadStatus(ctx, pluginID)
 			if err != nil {
-				log.Printf("worker: status check for %s: %v", serviceID, err)
+				errCount++
+				if errCount >= 30 {
+					return fmt.Errorf("status check failed %d times: %w", errCount, err)
+				}
+				log.Printf("worker: status check for %s (attempt %d): %v", serviceID, errCount, err)
 				continue
 			}
+			errCount = 0
 			if status == nil {
 				continue
 			}

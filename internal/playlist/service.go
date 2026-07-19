@@ -347,9 +347,6 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 
 	cfg := s.cfgFn()
 	root := cfg.Library.PlaylistPath
-	if root == "" {
-		root = "./playlists"
-	}
 	template := cfg.Library.PlaylistTemplate
 	if template == "" {
 		template = "{position:02d} {artist} - {title}"

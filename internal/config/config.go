@@ -155,6 +155,12 @@ func Load(path string) (Config, error) {
 			cfg.Library.LibraryPath = abs
 		}
 	}
+	if cfg.Library.PlaylistPath != "" && !filepath.IsAbs(cfg.Library.PlaylistPath) {
+		abs, err := filepath.Abs(cfg.Library.PlaylistPath)
+		if err == nil {
+			cfg.Library.PlaylistPath = abs
+		}
+	}
 
 	// Log validation warnings at startup.
 	if errs := cfg.Validate(); len(errs) > 0 {
