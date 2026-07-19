@@ -253,10 +253,19 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
 					// Uses job-level ctx so the transition is skipped when cancelled.
+					// Sync plugin-enriched metadata (cover_url, artist, etc.) that
+					// was set after the initial Insert.
 					_ = p.store.Update(ctx, &domain.DownloadRecord{
-						ID:       serviceID,
-						FilePath: lastFilePath,
-						State:    domain.DownloadImportPending,
+						ID:          serviceID,
+						FilePath:    lastFilePath,
+						State:       domain.DownloadImportPending,
+						CoverURL:    status.CoverURL,
+						Artist:      status.Artist,
+						Album:       status.Album,
+						Title:       status.Title,
+						TrackNumber: status.TrackNumber,
+						DiscNumber:  status.DiscNumber,
+						Year:        status.Year,
 					})
 				}
 				return nil

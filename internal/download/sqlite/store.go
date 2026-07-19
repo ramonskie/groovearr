@@ -59,8 +59,7 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 	return nil
 }
 
-// Update atomically modifies the mutable fields of a download record:
-// state, progress, size, transferred, speed, file_path, and error.
+// Update atomically modifies the mutable fields of a download record.
 // The record is identified by its ID field.
 func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -68,10 +67,15 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET
 			state=?, progress=?, size=?, transferred=?,
-			speed=?, file_path=?, error=?, updated_at=?
+			speed=?, file_path=?, error=?, cover_url=?,
+			artist=?, album=?, title=?,
+			track_number=?, disc_number=?, year=?,
+			updated_at=?
 		WHERE id=?`,
 		r.State, r.Progress, r.Size, r.Transferred,
-		r.Speed, r.FilePath, r.Error,
+		r.Speed, r.FilePath, r.Error, r.CoverURL,
+		r.Artist, r.Album, r.Title,
+		r.TrackNumber, r.DiscNumber, r.Year,
 		now, r.ID,
 	)
 	if err != nil {
