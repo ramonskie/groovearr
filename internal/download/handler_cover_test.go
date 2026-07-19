@@ -152,6 +152,36 @@ func (m *mockLibStore) GetPlaylistTracks(ctx context.Context, playlistID int64) 
 
 func (m *mockLibStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error { return nil }
 func (m *mockLibStore) Close() error                                                      { return nil }
+func (m *mockLibStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
+	// Get or create artist (like real store does).
+	existingArtist, _ := m.GetArtistByName(ctx, artistName)
+	if existingArtist == nil {
+		m.UpsertArtist(ctx, &domain.Artist{Name: artistName})
+		existingArtist, _ = m.GetArtistByName(ctx, artistName)
+	}
+	// Get or create album.
+	albums, _ := m.SearchAlbums(ctx, albumTitle, 10)
+	var albumID int64
+	for _, al := range albums {
+		if al.Title == albumTitle && al.ArtistID == existingArtist.ID {
+			albumID = al.ID
+			break
+		}
+	}
+	if albumID == 0 {
+		m.UpsertAlbum(ctx, &domain.Album{ArtistID: existingArtist.ID, Title: albumTitle, Year: albumYear, AlbumType: domain.AlbumTypeAlbum})
+		albums, _ = m.SearchAlbums(ctx, albumTitle, 10)
+		for _, al := range albums {
+			if al.Title == albumTitle && al.ArtistID == existingArtist.ID {
+				albumID = al.ID
+				break
+			}
+		}
+	}
+	track.ArtistID = existingArtist.ID
+	track.AlbumID = albumID
+	return m.UpsertTrack(ctx, track)
+}
 
 func TestCoverArtHandler_DownloadsCover(t *testing.T) {
 	// Start test HTTP server serving a fake image.

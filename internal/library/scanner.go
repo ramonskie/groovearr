@@ -164,72 +164,6 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 			artistName, albumTitle, trackTitle = ParseFileMetadata(relPath)
 		}
 
-		// Get or create artist.
-		var artistID int64
-		existingArtist, dbErr := s.store.GetArtistByName(ctx, artistName)
-		if dbErr != nil {
-			log.Printf("scanner: GetArtistByName %q: %v", artistName, dbErr)
-			stats.Errors++
-			return nil
-		}
-		if existingArtist != nil {
-			artistID = existingArtist.ID
-		} else {
-			a := &domain.Artist{Name: artistName}
-			id, err := s.store.UpsertArtist(ctx, a)
-			if err != nil {
-				log.Printf("scanner: upsert artist %q: %v", artistName, err)
-				stats.Errors++
-				return nil
-			}
-			artistID = id
-		}
-
-		// Get or create album.
-		var albumID int64
-		albums, dbErr := s.store.SearchAlbums(ctx, albumTitle, 1)
-		if dbErr != nil {
-			log.Printf("scanner: SearchAlbums %q: %v", albumTitle, dbErr)
-			stats.Errors++
-			return nil
-		}
-		found := false
-		for _, al := range albums {
-			if strings.EqualFold(al.Title, albumTitle) && al.ArtistID == artistID {
-				albumID = al.ID
-				found = true
-				break
-			}
-		}
-		if !found {
-			a := &domain.Album{
-				ArtistID:  artistID,
-				Title:     albumTitle,
-				Year:      albumYear,
-				Genres:    genres,
-				AlbumType: domain.AlbumTypeAlbum,
-			}
-			id, err := s.store.UpsertAlbum(ctx, a)
-			if err != nil {
-				log.Printf("scanner: upsert album %q: %v", albumTitle, err)
-				stats.Errors++
-				return nil
-			}
-			albumID = id
-		} else if albumYear != 0 {
-			// Update album year if we have one and album already exists.
-			for i := range albums {
-				if albums[i].ID == albumID && albums[i].Year == 0 {
-					albums[i].Year = albumYear
-					if _, err := s.store.UpsertAlbum(ctx, &albums[i]); err != nil {
-						log.Printf("scanner: update album year %q: %v", albumTitle, err)
-						stats.Errors++
-					}
-					break
-				}
-			}
-		}
-
 		// Get file info.
 		fi, err := d.Info()
 		if err != nil {
@@ -237,22 +171,20 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 			return nil
 		}
 
-		// Create track record.
-		t := &domain.Track{
-			AlbumID:     albumID,
-			ArtistID:    artistID,
+		// Import track via shared pipeline.
+		trackID, err := s.store.ImportTrack(ctx, &domain.Track{
 			Title:       trackTitle,
 			TrackNumber: trackNumber,
 			DiscNumber:  discNumber,
 			FilePath:    path,
 			FileSize:    fi.Size(),
-		}
-
-		if _, err := s.store.UpsertTrack(ctx, t); err != nil {
-			log.Printf("scanner: upsert track %q: %v", trackTitle, err)
+		}, artistName, albumTitle, albumYear, genres)
+		if err != nil {
+			log.Printf("scanner: import track %q: %v", path, err)
 			stats.Errors++
 			return nil
 		}
+		_ = trackID
 
 		stats.Imported++
 		return nil

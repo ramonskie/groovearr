@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
@@ -40,28 +39,13 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 
 	trackTitle, artistName, albumTitle := h.extractMetadata(record)
 
-	// Get or create artist.
-	artistID, err := h.upsertArtist(ctx, artistName)
-	if err != nil {
-		return fmt.Errorf("library importer: artist: %w", err)
-	}
-
-	// Get or create album.
-	albumID, err := h.upsertAlbum(ctx, artistID, albumTitle, record.Year)
-	if err != nil {
-		return fmt.Errorf("library importer: album: %w", err)
-	}
-
 	// Get file info for size.
 	fi, err := os.Stat(record.FilePath)
 	if err != nil {
 		return fmt.Errorf("library importer: stat file: %w", err)
 	}
 
-	// Create track record (renamer guarantees absolute file paths).
 	track := &domain.Track{
-		AlbumID:     albumID,
-		ArtistID:    artistID,
 		Title:       trackTitle,
 		TrackNumber: record.TrackNumber,
 		DiscNumber:  record.DiscNumber,
@@ -81,9 +65,9 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 		}
 	}
 
-	trackID, err := h.libStore.UpsertTrack(ctx, track)
+	trackID, err := h.libStore.ImportTrack(ctx, track, artistName, albumTitle, record.Year, nil)
 	if err != nil {
-		return fmt.Errorf("library importer: upsert track: %w", err)
+		return fmt.Errorf("library importer: import track: %w", err)
 	}
 
 	record.LibraryTrackID = trackID
@@ -92,22 +76,19 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 
 // extractMetadata pulls artist/album/title from the record and file path.
 func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) (title, artist, album string) {
-	// Use record metadata if available.
 	artist = record.Artist
 	album = record.Album
 	title = record.Title
 
-	// Fall back to file path parsing using the full path so directory
-	// structure (Artist/Album/Track) is preserved.
 	if artist == "" || album == "" || title == "" {
 		artist, album, title = library.ParseFileMetadata(record.FilePath)
 	}
 
 	if artist == "" {
-		artist = "Unknown Artist"
+		artist = library.DefaultArtistName
 	}
 	if album == "" {
-		album = "Unknown Album"
+		album = library.DefaultAlbumTitle
 	}
 	if title == "" {
 		title = filepath.Base(record.FilePath)
@@ -115,54 +96,3 @@ func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) 
 
 	return title, artist, album
 }
-
-// upsertArtist finds or creates an artist record.
-func (h *LibraryImporterHandler) upsertArtist(ctx context.Context, name string) (int64, error) {
-	existing, err := h.libStore.GetArtistByName(ctx, name)
-	if err != nil {
-		return 0, err
-	}
-	if existing != nil {
-		return existing.ID, nil
-	}
-
-	id, err := h.libStore.UpsertArtist(ctx, &domain.Artist{Name: name})
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
-}
-
-// upsertAlbum finds or creates an album record for the given artist.
-func (h *LibraryImporterHandler) upsertAlbum(ctx context.Context, artistID int64, title string, year int) (int64, error) {
-	albums, err := h.libStore.SearchAlbums(ctx, title, 1)
-	if err != nil {
-		return 0, err
-	}
-
-	for _, al := range albums {
-		if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
-			if al.Year == 0 && year != 0 {
-				al.Year = year
-				if _, err := h.libStore.UpsertAlbum(ctx, &al); err != nil {
-					return 0, err
-				}
-			}
-			return al.ID, nil
-		}
-	}
-
-	album := &domain.Album{
-		ArtistID:  artistID,
-		Title:     title,
-		Year:      year,
-		AlbumType: domain.AlbumTypeAlbum,
-	}
-	id, err := h.libStore.UpsertAlbum(ctx, album)
-	if err != nil {
-		return 0, err
-	}
-	return id, nil
-}
-
-

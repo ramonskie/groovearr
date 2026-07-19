@@ -32,6 +32,11 @@ type Store interface {
 	GetTrackByFilePath(ctx context.Context, filePath string) (*domain.Track, error)
 	DeleteTrack(ctx context.Context, id int64) error
 
+	// ImportTrack creates artist/album/track records for a single file in
+	// a single atomic pipeline, returning the new track ID. Used by both
+	// the filesystem scanner and the download import handler.
+	ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error)
+
 	// External ID lookups.
 	GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error)
 	GetAlbumByExternalID(ctx context.Context, service, externalID string) (*domain.Album, error)

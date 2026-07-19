@@ -478,6 +478,58 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) error {
 	return err
 }
 
+// ImportTrack creates or updates artist and album records, then inserts
+// the track. Returns the track ID. Used by both scanner and download handler.
+func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
+	artistID, err := s.getOrCreateArtist(ctx, artistName)
+	if err != nil {
+		return 0, fmt.Errorf("import artist: %w", err)
+	}
+
+	albumID, err := s.getOrCreateAlbum(ctx, artistID, albumTitle, albumYear, genres)
+	if err != nil {
+		return 0, fmt.Errorf("import album: %w", err)
+	}
+
+	track.ArtistID = artistID
+	track.AlbumID = albumID
+	return s.UpsertTrack(ctx, track)
+}
+
+func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, error) {
+	existing, err := s.GetArtistByName(ctx, name)
+	if err != nil {
+		return 0, err
+	}
+	if existing != nil {
+		return existing.ID, nil
+	}
+	return s.UpsertArtist(ctx, &domain.Artist{Name: name})
+}
+
+func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title string, year int, genres []string) (int64, error) {
+	albums, err := s.SearchAlbums(ctx, title, 10)
+	if err != nil {
+		return 0, err
+	}
+	for _, al := range albums {
+		if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
+			if al.Year == 0 && year != 0 {
+				al.Year = year
+				s.UpsertAlbum(ctx, &al)
+			}
+			return al.ID, nil
+		}
+	}
+	return s.UpsertAlbum(ctx, &domain.Album{
+		ArtistID:  artistID,
+		Title:     title,
+		Year:      year,
+		Genres:    genres,
+		AlbumType: domain.AlbumTypeAlbum,
+	})
+}
+
 // ─── External ID lookups ─────────────────────────────────────────────
 
 func (s *Store) GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error) {

@@ -347,6 +347,9 @@ func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistT
 func (m *mockStore) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error) { return nil, nil }
 func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error                      { return nil }
 func (m *mockStore) Close() error                                                                          { return nil }
+func (m *mockStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
+	return m.UpsertTrack(ctx, track)
+}
 
 // minimalFLAC creates a valid minimal FLAC file with Vorbis comments.
 // The file contains enough structure for dhowden/tag to parse artist, album,

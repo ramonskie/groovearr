@@ -143,6 +143,9 @@ func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) 
 func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error) { return nil, nil }
 func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) { return nil, nil }
 func (m *mockStore) Close() error                                                                { return nil }
+func (m *mockStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
+	return m.UpsertTrack(ctx, track)
+}
 
 func TestCopyFile(t *testing.T) {
 	dir := t.TempDir()
