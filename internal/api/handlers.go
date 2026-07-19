@@ -19,29 +19,38 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
 	"github.com/ramonskie/groovearr/internal/download/soulseek"
+	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/playlist"
+	"github.com/ramonskie/groovearr/internal/sse"
 )
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
 	cfg         *config.Persistence
-	orch        *download.Orchestrator
+	registry    *download.Registry
 	store       library.Store
 	scanner     *library.Scanner
-	postProc    *download.PostProcessor
+	downloadSvc *download.DownloadService
+	eventBus    events.IEventAggregator
+	sseHub      *sse.SSEHub
+	matcher     *matching.Engine
 	playlistSvc *playlist.Service
 	httpSrv     *http.Server
 }
 
 // NewServer creates an HTTP server with all routes wired.
-func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator, store library.Store, scanner *library.Scanner, postProc *download.PostProcessor, playlistSvc *playlist.Service) *Server {
+func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub) *Server {
 	s := &Server{
 		cfg:         cfg,
-		orch:        orch,
+		registry:    registry,
 		store:       store,
 		scanner:     scanner,
-		postProc:    postProc,
+		downloadSvc: downloadSvc,
+		eventBus:    eventBus,
+		sseHub:      sseHub,
+		matcher:     matching.New(),
 		playlistSvc: playlistSvc,
 	}
 
@@ -82,6 +91,9 @@ func NewServer(addr string, cfg *config.Persistence, orch *download.Orchestrator
 	mux.HandleFunc("POST /api/playlists/{id}/download-missing", s.handleDownloadMissing)
 	mux.HandleFunc("POST /api/playlists/{id}/sync", s.handleSyncPlaylist)
 	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
+
+	// SSE endpoint for real-time download progress.
+	mux.HandleFunc("GET /api/events", s.handleEvents)
 
 	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
@@ -193,10 +205,10 @@ type validationError struct {
 func (e *validationError) Error() string { return "validation failed" }
 
 func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
-	names := s.orch.Registry().Names()
+	names := s.registry.Names()
 	sources := make([]map[string]any, 0, len(names))
 	for _, name := range names {
-		p := s.orch.Registry().Get(name)
+		p := s.registry.Get(name)
 		cfg := p.IsConfigured()
 		status := "not_configured"
 		if cfg {
@@ -217,7 +229,7 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	source := r.PathValue("source")
-	p := s.orch.Registry().Get(source)
+	p := s.registry.Get(source)
 	if p == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "source not found"})
 		return
@@ -250,9 +262,46 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	tracks, albums, err := s.orch.Search(ctx, req.Source, req.Query)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+
+	// Resolve source: specific plugin, "hybrid" (all configured), or "" (first configured).
+	var tracks []domain.TrackResult
+	var albums []domain.AlbumResult
+	var searchErr error
+
+	if req.Source != "" && req.Source != "hybrid" {
+		p := s.registry.Get(req.Source)
+		if p == nil {
+			writeJSON(w, http.StatusNotFound, map[string]string{"error": fmt.Sprintf("source %q not found", req.Source)})
+			return
+		}
+		if !p.IsConfigured() {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": fmt.Sprintf("source %q not configured", req.Source)})
+			return
+		}
+		tracks, albums, searchErr = p.Search(ctx, req.Query)
+	} else {
+		plugins := s.registry.Configured()
+		if len(plugins) == 0 {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "no download sources configured"})
+			return
+		}
+		if req.Source == "hybrid" {
+			for _, p := range plugins {
+				t, a, err := p.Search(ctx, req.Query)
+				if err != nil {
+					log.Printf("api: search %s failed: %v", p.Name(), err)
+					continue
+				}
+				tracks = append(tracks, t...)
+				albums = append(albums, a...)
+			}
+		} else {
+			tracks, albums, searchErr = plugins[0].Search(ctx, req.Query)
+		}
+	}
+
+	if searchErr != nil {
+		writeError(w, http.StatusInternalServerError, searchErr)
 		return
 	}
 	if tracks == nil {
@@ -287,29 +336,30 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-	id, err := s.orch.Download(ctx, req.Source, req.Username, req.Filename, req.Size)
+	id, err := s.downloadSvc.Queue(ctx, req.Source, req.Username, req.Filename, req.Size, download.DownloadMeta{
+		Artist:      req.Artist,
+		Album:       req.Album,
+		Title:       req.Title,
+		TrackNumber: req.TrackNumber,
+		DiscNumber:  req.DiscNumber,
+		Year:        req.Year,
+	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
-	}
-
-	// Store metadata from the request for post-download renaming.
-	if req.Artist != "" || req.Title != "" {
-		s.orch.SetDownloadMeta(id, req.Artist, req.Album, req.Title,
-			req.TrackNumber, req.DiscNumber, req.Year)
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]string{"download_id": id})
 }
 
 // handleDownloadBest searches across configured sources for a matching track
-// and downloads the best candidate. Used for cross-source fallback on album downloads.
+// and queues the best candidate via the download service.
 func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title         string `json:"title"`
 		Artist        string `json:"artist"`
 		Duration      int64  `json:"duration"`       // milliseconds (optional, 0 = neutral)
-		ExcludeSource string `json:"exclude_source"`  // source to skip (the one that just failed)
+		ExcludeSource string `json:"exclude_source"` // source to skip (the one that just failed)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -320,54 +370,133 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	const minConfidence = 0.55
 	ctx := r.Context()
-	id, source, confidence, err := s.orch.DownloadBest(ctx, req.Title, req.Artist, req.Duration, req.ExcludeSource)
+
+	query := req.Title
+	if req.Artist != "" {
+		query = req.Artist + " " + req.Title
+	}
+
+	var candidates []download.Candidate
+	for _, p := range s.registry.Configured() {
+		if p.Name() == req.ExcludeSource {
+			continue
+		}
+		searchTracks, _, searchErr := p.Search(ctx, query)
+		if searchErr != nil {
+			log.Printf("api: downloadBest search %s for %q: %v", p.Name(), query, searchErr)
+			continue
+		}
+		for _, t := range searchTracks {
+			sourceArtists := []string{}
+			if req.Artist != "" {
+				sourceArtists = []string{req.Artist}
+			}
+			candidateArtists := []string{}
+			if t.Artist != "" {
+				candidateArtists = []string{t.Artist}
+			}
+			if t.Username != "" {
+				candidateArtists = append(candidateArtists, t.Username)
+			}
+			score, _ := s.matcher.ScoreTrackMatch(
+				req.Title, sourceArtists, req.Duration,
+				t.Title, candidateArtists, t.Duration,
+			)
+			if score >= minConfidence {
+				candidates = append(candidates, download.Candidate{Track: t, SourceName: p.Name(), Score: score})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("no matching track found across sources (min confidence %.0f%%)", minConfidence*100),
+		})
+		return
+	}
+
+	// Apply quality filter.
+	qc := s.cfg.Get().Quality
+	candidates = download.FilterByQuality(candidates, qc)
+	if len(candidates) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{
+			"error": fmt.Sprintf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
+				qc.PreferredFormat, qc.MinBitrate),
+		})
+		return
+	}
+
+	// Pick best score.
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.Score > best.Score {
+			best = c
+		}
+	}
+
+	// Normalize source for deezer downloads.
+	downloadSource := best.SourceName
+	username := best.Track.Username
+	if best.SourceName == "deezer" {
+		dl := s.registry.Get("deezer")
+		if dl == nil {
+			dl = s.registry.Get("deezer_dl")
+		}
+		if dl != nil {
+			downloadSource = dl.Name()
+			username = dl.Name()
+		}
+	}
+
+	id, err := s.downloadSvc.Queue(ctx, downloadSource, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+		Artist:      best.Track.Artist,
+		Album:       best.Track.Album,
+		Title:       best.Track.Title,
+		TrackNumber: best.Track.TrackNumber,
+	})
 	if err != nil {
-		writeError(w, http.StatusNotFound, err)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("queue download: %v", err)})
 		return
 	}
 
 	writeJSON(w, http.StatusAccepted, map[string]any{
 		"download_id": id,
-		"source":      source,
-		"confidence":  confidence,
+		"source":      best.SourceName,
+		"confidence":  best.Score,
 	})
 }
 
 func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	downloads := s.orch.GetDownloads(ctx)
+	downloads, err := s.downloadSvc.List(ctx)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
 	if downloads == nil {
 		downloads = []domain.DownloadRecord{}
 	}
-
-	// Run post-download hooks (e.g., file renaming).
-	if s.postProc != nil {
-		before := make(map[string]string, len(downloads))
-		for _, d := range downloads {
-			before[d.ID] = d.FilePath
-		}
-
-		s.postProc.ProcessDownloads(ctx, downloads)
-
-		// Record path overrides so the orchestrator serves corrected paths on next poll.
-		for _, d := range downloads {
-			if newPath := d.FilePath; newPath != "" && newPath != before[d.ID] {
-				s.orch.SetDownloadPath(d.ID, newPath)
-			}
-		}
-	}
-
 	writeJSON(w, http.StatusOK, downloads)
 }
 
 func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if err := s.orch.CancelDownload(r.Context(), id); err != nil {
-		writeError(w, http.StatusNotFound, err)
+	if err := s.downloadSvc.Cancel(r.Context(), id); err != nil {
+		if strings.Contains(err.Error(), "not found") {
+			writeError(w, http.StatusNotFound, err)
+		} else {
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// handleEvents serves SSE stream for real-time download events.
+func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
+	s.sseHub.ServeHTTP(w, r)
 }
 
 // ─── Library handlers ────────────────────────────────────────────────
@@ -686,7 +815,7 @@ func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {
 func (s *Server) reloadSoulseek() {
 	cfg := s.cfg.Get()
 	slskd := soulseek.New(cfg.Soulseek, cfg.Library.DownloadPath)
-	if err := s.orch.Registry().Replace("soulseek", slskd); err != nil {
+	if err := s.registry.Replace("soulseek", slskd); err != nil {
 		log.Printf("reload soulseek: %v", err)
 	}
 }
@@ -694,7 +823,7 @@ func (s *Server) reloadSoulseek() {
 func (s *Server) reloadDeezer() {
 	cfg := s.cfg.Get()
 	dl := deezerdl.NewDownloadClient(cfg.Deezer, cfg.Library.DownloadPath)
-	if err := s.orch.Registry().Replace("deezer", dl); err != nil {
+	if err := s.registry.Replace("deezer", dl); err != nil {
 		log.Printf("reload deezer: %v", err)
 	}
 }

@@ -10,14 +10,16 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
 	"github.com/ramonskie/groovearr/internal/download/soulseek"
+	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
+	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	deezerpl "github.com/ramonskie/groovearr/internal/playlist/deezer"
+	"github.com/ramonskie/groovearr/internal/sse"
 )
 
 func main() {
@@ -34,13 +36,16 @@ func main() {
 
 	// Library store (SQLite).
 	dbPath := filepath.Join(filepath.Dir(configPath), "library.db")
-	store, err := sqlite.New(dbPath)
+	libStore, err := sqlite.New(dbPath)
 	if err != nil {
 		log.Fatalf("library db: %v", err)
 	}
-	defer store.Close()
+	defer libStore.Close()
 
-	scanner := library.NewScanner(store)
+	scanner := library.NewScanner(libStore)
+
+	// Download store (SQLite — shares the library db connection).
+	dlStore := dlsqlite.New(libStore.DB())
 
 	// Build plugin registry.
 	registry := download.NewRegistry()
@@ -66,17 +71,52 @@ func main() {
 		log.Printf("register deezer download: %v (continuing without deezer)", err)
 	}
 
-	// Download orchestrator.
-	orch := download.NewOrchestrator(registry, func() config.QualityConfig {
-		return cfg.Get().Quality
-	})
+	// Event bus — decouples workers, importers, and SSE notifier.
+	eventBus := events.NewInMemoryEventBus()
 
-	// Post-download processor: renames files into organized library structure,
-	// then fetches cover art for the album directory, then writes audio tags.
-	postProc := download.NewPostProcessor(
-		newRenamerHook(cfg),
-		library.NewCoverHook(store),
-		library.NewTagWriterHook(),
+	// Download service — queues downloads and dispatches to workers.
+	downloadSvc := download.NewDownloadService(dlStore, eventBus)
+
+	// Worker pool — picks up queued downloads and drives state machine.
+	workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus)
+
+	// Wire the pipeline: DownloadService → WorkerPool.
+	downloadSvc.SetWorkerPool(workerPool)
+
+	// Build the import handler chain for completed downloads.
+	renamerCfg := func() (template, root string) {
+		c := cfg.Get()
+		template = c.Library.FolderTemplate
+		root = c.Library.LibraryPath
+		if root == "" {
+			root = c.Library.DownloadPath
+		}
+		return
+	}
+
+	folderTemplate, libraryRoot := renamerCfg()
+	renamer := library.NewRenamer(folderTemplate, libraryRoot)
+
+	// SSE hub — broadcasts real-time download progress to connected clients.
+	sseHub := sse.NewSSEHub()
+	hbCtx, hbCancel := context.WithCancel(context.Background())
+	sseHub.StartHeartbeat(hbCtx)
+
+	// SSE notifier subscribes to event bus topics and translates them into SSE
+	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
+	sseNotifier := sse.NewSSENotifier(sseHub, eventBus)
+
+	// Completed download service subscribes to TopicDownloadCompleted on the
+	// event bus and runs import handlers sequentially on each download.
+	download.NewCompletedDownloadService(
+		dlStore,
+		eventBus,
+		download.NewFileRenamerHandler(renamer, dlStore),
+		download.NewCoverArtHandler(libStore),
+		download.NewTagWriterHandler(),
+		download.NewLibraryImporterHandler(libStore),
+		download.NewPlaylistLinkerHandler(libStore),
+		sseNotifier,
 	)
 
 	// Playlist service (Deezer via ARL).
@@ -85,7 +125,7 @@ func main() {
 		deezerPlaylistSrc := deezerpl.NewPlaylistSource(deezer)
 		playlistReg.Register(deezerPlaylistSrc)
 	}
-	playlistSvc := playlist.NewService(playlistReg, store, orch, func() config.Config {
+	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
 	})
 
@@ -95,7 +135,7 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, orch, store, scanner, postProc, playlistSvc)
+	srv := api.NewServer(addr, cfg, registry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub)
 
 	log.Printf("groovearr starting")
 	log.Printf("  config:   %s", configPath)
@@ -113,36 +153,11 @@ func main() {
 	go func() {
 		<-sigCh
 		log.Println("shutting down...")
+		hbCancel()
 		srv.Shutdown(context.Background())
 	}()
 
 	if err := srv.ListenAndServe(); err != nil {
 		log.Fatalf("server: %v", err)
-	}
-}
-
-// newRenamerHook creates a post-download hook that renames files using the configured
-// folder template. It reads the latest config on each call so template changes take effect
-// without restart. Files are moved from the download staging area to the library root.
-func newRenamerHook(cfg *config.Persistence) download.PostDownloadHook {
-	return func(ctx context.Context, record domain.DownloadRecord) (string, error) {
-		c := cfg.Get()
-		template := c.Library.FolderTemplate
-		root := c.Library.LibraryPath
-		if root == "" {
-			root = c.Library.DownloadPath // backward compat
-		}
-		renamer := library.NewRenamer(template, root)
-
-		// Use metadata carried through from search results.
-		meta := library.FileMeta{
-			Artist:   record.Artist,
-			Album:    record.Album,
-			Title:    record.Title,
-			Year:     record.Year,
-			TrackNum: record.TrackNumber,
-			DiscNum:  record.DiscNumber,
-		}
-		return renamer.Rename(record.FilePath, meta)
 	}
 }

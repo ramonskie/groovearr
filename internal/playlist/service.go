@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
@@ -20,32 +21,37 @@ import (
 
 // Service orchestrates playlist import and sync.
 type Service struct {
-	registry *Registry
-	store    library.Store
-	orch     *download.Orchestrator
-	matcher  *matching.Engine
-	cfgFn    func() config.Config
+	srcReg      *Registry
+	store       library.Store
+	downloadReg *download.Registry
+	downloadSvc *download.DownloadService
+	matcher     *matching.Engine
+	cfgFn       func() config.Config
+	syncMu      sync.Mutex
+	syncing     map[int64]bool // playlistIDs currently being synced
 }
 
 // NewService creates a playlist service.
-func NewService(registry *Registry, store library.Store, orch *download.Orchestrator, cfgFn func() config.Config) *Service {
+func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config) *Service {
 	return &Service{
-		registry: registry,
-		store:    store,
-		orch:     orch,
-		matcher:  matching.New(),
-		cfgFn:    cfgFn,
+		srcReg:      srcReg,
+		store:       store,
+		downloadReg: downloadReg,
+		downloadSvc: downloadSvc,
+		matcher:     matching.New(),
+		cfgFn:       cfgFn,
+		syncing:     make(map[int64]bool),
 	}
 }
 
 // Sources returns all registered playlist sources.
 func (s *Service) Sources() []Source {
-	return s.registry.Configured()
+	return s.srcReg.Configured()
 }
 
 // BrowseSource fetches all playlists from a source and marks which are already imported.
 func (s *Service) BrowseSource(ctx context.Context, sourceName string) ([]SourcePlaylistItem, error) {
-	src := s.registry.Get(sourceName)
+	src := s.srcReg.Get(sourceName)
 	if src == nil {
 		return nil, fmt.Errorf("playlist source %q not found", sourceName)
 	}
@@ -91,7 +97,7 @@ type ImportResult struct {
 // ImportPlaylist imports a playlist from a source: saves tracks and links existing library matches.
 // Does NOT trigger downloads — use DownloadMissing for that.
 func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string) (*ImportResult, error) {
-	src := s.registry.Get(sourceName)
+	src := s.srcReg.Get(sourceName)
 	if src == nil {
 		return nil, fmt.Errorf("playlist source %q not found", sourceName)
 	}
@@ -112,11 +118,6 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 	}
 
 	result := &ImportResult{Playlist: playlistRecord}
-
-	// Mark as synced.
-	now := time.Now().UTC().Format(time.RFC3339)
-	playlistRecord.SyncedAt = now
-	s.store.UpsertPlaylist(ctx, playlistRecord)
 
 	if err := s.store.DeletePlaylistTracks(ctx, playlistRecord.ID); err != nil {
 		return nil, fmt.Errorf("clear playlist tracks: %w", err)
@@ -170,16 +171,137 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		if pt.TrackID != nil {
 			continue
 		}
-		_, _, _, dlErr := s.orch.DownloadBest(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
+
+		// Search across all configured sources for a match and queue it.
+		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
 		if dlErr != nil {
 			log.Printf("playlist: download %s - %s: %v", pt.Artist, pt.Title, dlErr)
 			continue
 		}
+		_ = id
 		queued++
 	}
 
 	log.Printf("playlist: download missing: queued %d tracks", queued)
+
+	// Trigger background sync — waits for downloads, re-links, builds playlist folder.
+	if queued > 0 {
+		go s.syncPlaylistGuarded(playlistID)
+	}
+
 	return queued, nil
+}
+
+// syncPlaylistGuarded runs SyncPlaylist with a per-playlist mutex to prevent
+// concurrent syncs of the same playlist (e.g., from double-click or overlapping
+// auto-sync).
+func (s *Service) syncPlaylistGuarded(playlistID int64) {
+	s.syncMu.Lock()
+	if s.syncing[playlistID] {
+		s.syncMu.Unlock()
+		log.Printf("playlist: sync %d already in progress, skipping", playlistID)
+		return
+	}
+	s.syncing[playlistID] = true
+	s.syncMu.Unlock()
+
+	defer func() {
+		s.syncMu.Lock()
+		delete(s.syncing, playlistID)
+		s.syncMu.Unlock()
+	}()
+
+	if err := s.SyncPlaylist(context.Background(), playlistID); err != nil {
+		log.Printf("playlist: background sync %d failed: %v", playlistID, err)
+	}
+}
+
+// findAndQueueDownload searches across configured sources for a matching track
+// and queues the best candidate via the download service.
+func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string) (downloadID, sourceName string, confidence float64, err error) {
+	const minConfidence = 0.55
+
+	query := title
+	if artist != "" {
+		query = artist + " " + title
+	}
+
+	var candidates []download.Candidate
+	for _, p := range s.downloadReg.Configured() {
+		if p.Name() == excludeSource {
+			continue
+		}
+		searchTracks, _, searchErr := p.Search(ctx, query)
+		if searchErr != nil {
+			log.Printf("playlist: search %s for %q: %v", p.Name(), query, searchErr)
+			continue
+		}
+		for _, t := range searchTracks {
+			sourceArtists := []string{}
+			if artist != "" {
+				sourceArtists = []string{artist}
+			}
+			candidateArtists := []string{}
+			if t.Artist != "" {
+				candidateArtists = []string{t.Artist}
+			}
+			if t.Username != "" {
+				candidateArtists = append(candidateArtists, t.Username)
+			}
+			score, _ := s.matcher.ScoreTrackMatch(
+				title, sourceArtists, durationMs,
+				t.Title, candidateArtists, t.Duration,
+			)
+			if score >= minConfidence {
+				candidates = append(candidates, download.Candidate{Track: t, SourceName: p.Name(), Score: score})
+			}
+		}
+	}
+
+	if len(candidates) == 0 {
+		return "", "", 0, fmt.Errorf("no matching track found for %s - %s", artist, title)
+	}
+
+	// Apply quality filter.
+	candidates = download.FilterByQuality(candidates, s.cfgFn().Quality)
+	if len(candidates) == 0 {
+		qc := s.cfgFn().Quality
+		return "", "", 0, fmt.Errorf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
+			qc.PreferredFormat, qc.MinBitrate)
+	}
+
+	best := candidates[0]
+	for _, c := range candidates[1:] {
+		if c.Score > best.Score {
+			best = c
+		}
+	}
+
+	// Normalize deezer source name.
+	downloadSource := best.SourceName
+	username := best.Track.Username
+	if best.SourceName == "deezer" {
+		dl := s.downloadReg.Get("deezer")
+		if dl == nil {
+			dl = s.downloadReg.Get("deezer_dl")
+		}
+		if dl != nil {
+			downloadSource = dl.Name()
+			username = dl.Name()
+		}
+	}
+
+	id, dlErr := s.downloadSvc.Queue(ctx, downloadSource, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+		Artist:      best.Track.Artist,
+		Album:       best.Track.Album,
+		Title:       best.Track.Title,
+		TrackNumber: best.Track.TrackNumber,
+	})
+	if dlErr != nil {
+		return "", "", best.Score, fmt.Errorf("queue download: %w", dlErr)
+	}
+
+	return id, best.SourceName, best.Score, nil
 }
 
 // ─── Sync (re-link) ───────────────────────────────────────────────────
@@ -191,8 +313,14 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 		return errors.New("playlist not found")
 	}
 
+	// Wait for any in-progress downloads to complete before scanning.
+	if err := s.waitForDownloads(ctx); err != nil {
+		log.Printf("playlist: download wait: %v", err)
+		// Continue anyway — scanner will pick up whatever is already done.
+	}
+
 	// Refresh track list from source (catches reordering, additions, removals).
-	src := s.registry.Get(p.Source)
+	src := s.srcReg.Get(p.Source)
 	if src != nil {
 		trackInfos, _, fetchErr := src.GetPlaylistTracks(ctx, p.SourcePlaylistID)
 		if fetchErr == nil && len(trackInfos) > 0 {
@@ -354,6 +482,41 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
+
+// waitForDownloads polls the download service until all downloads reach a terminal state,
+// or until the context is cancelled or a timeout is reached.
+func (s *Service) waitForDownloads(ctx context.Context) error {
+	const (
+		pollInterval = 2 * time.Second
+		maxWait      = 5 * time.Minute
+	)
+	deadline := time.Now().Add(maxWait)
+
+	for {
+		downloads, err := s.downloadSvc.List(ctx)
+		if err != nil {
+			return err
+		}
+		pending := false
+		for _, d := range downloads {
+			if !d.State.Terminal() {
+				pending = true
+				break
+			}
+		}
+		if !pending {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return errors.New("timed out waiting for downloads")
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(pollInterval):
+		}
+	}
+}
 
 // upsertPlaylist finds or creates a playlist record.
 func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int) (*domain.Playlist, error) {
