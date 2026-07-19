@@ -32,8 +32,16 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 		return fmt.Errorf("library importer: no file path for %s", record.ID)
 	}
 
+	// Resolve to absolute for consistent deduplication with scanner.
+	absPath := record.FilePath
+	if !filepath.IsAbs(absPath) {
+		if resolved, err := filepath.Abs(absPath); err == nil {
+			absPath = resolved
+		}
+	}
+
 	// Check if already imported by file path.
-	existing, err := h.libStore.GetTrackByFilePath(ctx, record.FilePath)
+	existing, err := h.libStore.GetTrackByFilePath(ctx, absPath)
 	if err == nil && existing != nil {
 		record.LibraryTrackID = existing.ID
 		return nil
@@ -59,14 +67,14 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 		return fmt.Errorf("library importer: stat file: %w", err)
 	}
 
-	// Create track record.
+	// Create track record (absPath already resolved above).
 	track := &domain.Track{
 		AlbumID:     albumID,
 		ArtistID:    artistID,
 		Title:       trackTitle,
 		TrackNumber: record.TrackNumber,
 		DiscNumber:  record.DiscNumber,
-		FilePath:    record.FilePath,
+		FilePath:    absPath,
 		FileSize:    fi.Size(),
 	}
 
