@@ -6,7 +6,7 @@ import {
   useClearCompleted,
 } from "../../hooks/use-downloads";
 import { useScanLibrary } from "../../hooks/use-library";
-import { useDownloadPollStore } from "../../stores/download-poll";
+import { useDownloadEvents } from "../../hooks/use-download-events";
 import { toast } from "sonner";
 import Button from "../../components/Button";
 import Spinner from "../../components/Spinner";
@@ -16,34 +16,34 @@ import DownloadItem from "./DownloadItem";
 // ─── Constants ──────────────────────────────────────────────────────
 
 const COMPLETED_STATES = new Set<DownloadState>([
-  "succeeded",
-  "errored",
-  "cancelled",
-  "aborted",
+  "imported",
+  "failed",
+  "ignored",
 ]);
 
 // ─── Component ──────────────────────────────────────────────────────
 
 function DownloadsPage() {
-  const { data: downloads, isLoading, isError, error } = useDownloads();
+  const {
+    data: downloads,
+    isLoading,
+    isError,
+    error,
+    sseActive,
+    sseStatus,
+  } = useDownloads();
   const cancelMutation = useCancelDownload();
   const clearCompleted = useClearCompleted();
   const scanLibrary = useScanLibrary();
 
-  const { startPolling, stopPolling, setActiveCount } = useDownloadPollStore();
+  // Activate SSE connection.
+  useDownloadEvents();
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
 
-  // Track which succeeded downloads we have already triggered a scan for
+  // Track which succeeded downloads we have already triggered a scan for.
   const scannedIds = useRef<Set<string>>(new Set());
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ─── Polling control (mount / unmount) ────────────────────────────
-
-  useEffect(() => {
-    startPolling();
-    return () => stopPolling();
-  }, [startPolling, stopPolling]);
 
   // ─── Cleanup scan timer on unmount ────────────────────────────────
 
@@ -53,34 +53,20 @@ function DownloadsPage() {
     };
   }, []);
 
-  // ─── Active count badge ───────────────────────────────────────────
-
-  useEffect(() => {
-    if (!downloads) return;
-    const active = downloads.filter(
-      (d) => !COMPLETED_STATES.has(d.state),
-    ).length;
-    setActiveCount(active);
-  }, [downloads, setActiveCount]);
-
   // ─── Auto-scan on completion (debounced 30 s) ─────────────────────
 
   useEffect(() => {
-    if (!downloads) return;
+    if (!downloads || downloads.length === 0) return;
 
     const newlySucceeded = downloads.filter(
-      (d) => d.state === "succeeded" && !scannedIds.current.has(d.id),
+      (d) => d.state === "imported" && !scannedIds.current.has(d.id),
     );
 
     if (newlySucceeded.length > 0) {
-      // New downloads completed — reset the debounce timer
       if (scanTimer.current) clearTimeout(scanTimer.current);
       scanTimer.current = setTimeout(() => {
-        // Mark all currently-succeeded IDs as scanned so they are not re-processed.
-        // Intentionally includes pre-existing succeeded downloads from before this
-        // session — we only auto-scan once per download ID per page load.
         for (const d of downloads) {
-          if (d.state === "succeeded") scannedIds.current.add(d.id);
+          if (d.state === "imported") scannedIds.current.add(d.id);
         }
         scanLibrary.mutate(undefined, {
           onSuccess: (stats) => {
@@ -96,7 +82,6 @@ function DownloadsPage() {
         });
       }, 30_000);
     }
-    // NOTE: no cleanup returned — the timer must survive across poll ticks
   }, [downloads, scanLibrary]);
 
   // ─── Cancel single download ───────────────────────────────────────
@@ -188,7 +173,24 @@ function DownloadsPage() {
     <div>
       {/* Header */}
       <div className="mb-6 flex items-center justify-between">
-        <h1 className="text-2xl font-bold text-white">Downloads</h1>
+        <div className="flex items-center gap-3">
+          <h1 className="text-2xl font-bold text-white">Downloads</h1>
+          <span
+            className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-xs ${
+              sseActive
+                ? "bg-green-900/50 text-green-400"
+                : "bg-yellow-900/50 text-yellow-400"
+            }`}
+            title={`SSE: ${sseStatus}`}
+          >
+            <span
+              className={`inline-block h-1.5 w-1.5 rounded-full ${
+                sseStatus === "connected" ? "bg-green-400" : "bg-yellow-400"
+              }`}
+            />
+            {sseStatus === "connected" ? "Live" : "Polling"}
+          </span>
+        </div>
         {hasFinished && (
           <Button
             variant="ghost"

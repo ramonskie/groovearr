@@ -1,8 +1,9 @@
 import type { FC } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import { X, Check, ArrowDown } from "lucide-react";
+import { X, Check, ArrowDown, Loader2, Clock } from "lucide-react";
 import { toast } from "sonner";
 import { usePlaylist, useDeletePlaylist } from "../../hooks/use-playlists";
+import type { PlaylistTrackDownloadStatus } from "../../api/types";
 import Button from "../../components/Button";
 import Spinner from "../../components/Spinner";
 import Badge from "../../components/Badge";
@@ -15,6 +16,20 @@ interface TrackListDialogProps {
   /** When true, shows a danger "Remove Playlist" button at the bottom. */
   confirmRemove?: boolean;
 }
+
+// ─── Download status badge mapping ──────────────────────────────────
+
+const STATUS_BADGE: Record<
+  PlaylistTrackDownloadStatus,
+  { variant: "success" | "warning" | "error" | "muted"; icon: FC<{ size?: number; className?: string }>; label: string }
+> = {
+  linked: { variant: "success", icon: Check, label: "Linked" },
+  downloading: { variant: "warning", icon: Loader2, label: "Downloading" },
+  queued: { variant: "muted", icon: Clock, label: "Queued" },
+  unmatched: { variant: "muted", icon: ArrowDown, label: "Unmatched" },
+};
+
+// ─── Component ──────────────────────────────────────────────────────
 
 const TrackListDialog: FC<TrackListDialogProps> = ({
   playlistId,
@@ -74,37 +89,38 @@ const TrackListDialog: FC<TrackListDialogProps> = ({
               </p>
             ) : (
               <ul className="space-y-2">
-                {tracks.map((track, idx) => (
-                  <li
-                    key={`${track.source_track_id}-${idx}`}
-                    className="flex items-center gap-3 rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
-                  >
-                    <span className="w-6 shrink-0 text-right text-xs text-slate-500">
-                      {track.position}
-                    </span>
-                    <div className="min-w-0 flex-1">
-                      <p className="truncate text-sm text-white">
-                        {track.title}
-                      </p>
-                      <p className="truncate text-xs text-slate-400">
-                        {track.artist}
-                      </p>
-                    </div>
-                    {track.linked ? (
-                      <Badge variant="success">
-                        <Check size={12} className="mr-1" />
-                        Linked
-                      </Badge>
-                    ) : (
-                      <span
-                        className="text-yellow-500"
-                        title="Unmatched — no library match"
-                      >
-                        <ArrowDown size={14} />
+                {tracks.map((track, idx) => {
+                  const status = track.download_status ?? "unmatched";
+                  const badge = STATUS_BADGE[status];
+                  const Icon = badge.icon;
+                  const animate = status === "downloading";
+
+                  return (
+                    <li
+                      key={`${track.source_track_id}-${idx}`}
+                      className="flex items-center gap-3 rounded-md border border-slate-800 bg-slate-950 px-3 py-2"
+                    >
+                      <span className="w-6 shrink-0 text-right text-xs text-slate-500">
+                        {track.position}
                       </span>
-                    )}
-                  </li>
-                ))}
+                      <div className="min-w-0 flex-1">
+                        <p className="truncate text-sm text-white">
+                          {track.title}
+                        </p>
+                        <p className="truncate text-xs text-slate-400">
+                          {track.artist}
+                        </p>
+                      </div>
+                      <Badge variant={badge.variant}>
+                        <Icon
+                          size={12}
+                          className={`mr-1 ${animate ? "animate-spin" : ""}`}
+                        />
+                        {badge.label}
+                      </Badge>
+                    </li>
+                  );
+                })}
               </ul>
             )}
           </div>

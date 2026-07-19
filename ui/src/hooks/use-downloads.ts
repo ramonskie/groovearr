@@ -1,3 +1,4 @@
+import { useEffect } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getDownloads,
@@ -5,7 +6,7 @@ import {
   downloadBest,
   cancelDownload,
 } from "../api/client";
-import { useDownloadPollStore } from "../stores/download-poll";
+import { useDownloadStore } from "../stores/download-poll";
 import type {
   DownloadRequest,
   DownloadBestRequest,
@@ -14,14 +15,45 @@ import type {
 
 // ─── Query ──────────────────────────────────────────────────────────
 
+/**
+ * Hydrates the zustand download store with initial data from the API and keeps
+ * it refreshed via polling when SSE is disconnected.
+ *
+ * Returns the **live** records from the zustand store (updated by SSE events),
+ * plus loading/error state from the query.
+ */
 export function useDownloads() {
-  const pollingActive = useDownloadPollStore((s) => s.pollingActive);
-  return useQuery({
+  const pollingActive = useDownloadStore((s) => s.pollingActive);
+  const records = useDownloadStore((s) => s.records);
+  const setRecords = useDownloadStore((s) => s.setRecords);
+  const sseStatus = useDownloadStore((s) => s.sseStatus);
+
+  const query = useQuery({
     queryKey: ["downloads"] as const,
     queryFn: getDownloads,
     refetchInterval: pollingActive ? 2000 : false,
+    // Only poll when SSE is down.
     enabled: true,
+    // Don't refetch on window focus — polling/SSE handles freshness.
+    refetchOnWindowFocus: false,
   });
+
+  // Sync query results into the store (initial load + polling fallback).
+  useEffect(() => {
+    if (query.data) {
+      setRecords(query.data);
+    }
+  }, [query.data, setRecords]);
+
+  const downloads: DownloadRecord[] = Object.values(records);
+
+  return {
+    ...query,
+    data: downloads,
+    /** True when SSE is the live-update path (connected). */
+    sseActive: sseStatus === "connected",
+    sseStatus,
+  };
 }
 
 // ─── Mutations ──────────────────────────────────────────────────────
@@ -48,9 +80,11 @@ export function useStartBestDownload() {
 
 export function useCancelDownload() {
   const queryClient = useQueryClient();
+  const removeRecord = useDownloadStore((s) => s.removeRecord);
   return useMutation({
     mutationFn: (id: string) => cancelDownload(id),
-    onSuccess: () => {
+    onSuccess: (_data, id) => {
+      removeRecord(id);
       queryClient.invalidateQueries({ queryKey: ["downloads"] });
     },
   });
@@ -58,16 +92,16 @@ export function useCancelDownload() {
 
 // ─── Clear completed ────────────────────────────────────────────────
 
-const COMPLETED_STATES = new Set(["succeeded", "errored", "cancelled", "aborted"]);
+const COMPLETED_STATES = new Set(["imported", "failed", "ignored"]);
 
 export function useClearCompleted() {
   const queryClient = useQueryClient();
+  const records = useDownloadStore((s) => s.records);
 
   return useMutation({
     mutationFn: async () => {
-      // Fetch current downloads and cancel each completed one
-      const downloads: DownloadRecord[] = await getDownloads();
-      const toCancel = downloads.filter((d) => COMPLETED_STATES.has(d.state));
+      const arr = Object.values(records);
+      const toCancel = arr.filter((d) => COMPLETED_STATES.has(d.state));
       await Promise.allSettled(toCancel.map((d) => cancelDownload(d.id)));
     },
     onSuccess: () => {

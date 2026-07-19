@@ -54,10 +54,9 @@ const VALID_PAGES = new Set<string>([
 ]);
 
 const TERMINAL_STATES = new Set<DownloadState>([
-  "succeeded",
-  "errored",
-  "cancelled",
-  "aborted",
+  "imported",
+  "failed",
+  "ignored",
 ]);
 
 function pathToPage(pathname: string): PageName {

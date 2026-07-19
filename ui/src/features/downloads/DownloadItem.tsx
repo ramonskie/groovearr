@@ -31,19 +31,27 @@ const STATE_BADGE: Record<
   DownloadState,
   { variant: "success" | "warning" | "error" | "muted"; label: string }
 > = {
-  initializing: { variant: "muted", label: "Initializing" },
+  queued: { variant: "muted", label: "Queued" },
   downloading: { variant: "muted", label: "Downloading" },
-  succeeded: { variant: "success", label: "Succeeded" },
-  errored: { variant: "error", label: "Errored" },
-  cancelled: { variant: "muted", label: "Cancelled" },
-  aborted: { variant: "warning", label: "Aborted" },
+  importPending: { variant: "warning", label: "Pending Import" },
+  importing: { variant: "warning", label: "Importing" },
+  imported: { variant: "success", label: "Imported" },
+  failedPending: { variant: "warning", label: "Retrying" },
+  failed: { variant: "error", label: "Failed" },
+  ignored: { variant: "muted", label: "Ignored" },
 };
 
 const TERMINAL_STATES: Set<DownloadState> = new Set([
-  "succeeded",
-  "errored",
-  "cancelled",
-  "aborted",
+  "imported",
+  "failed",
+  "ignored",
+]);
+
+const SHOW_PROGRESS_STATES: Set<DownloadState> = new Set([
+  "queued",
+  "downloading",
+  "importPending",
+  "importing",
 ]);
 
 // ─── Component ──────────────────────────────────────────────────────
@@ -55,6 +63,7 @@ const DownloadItem: FC<DownloadItemProps> = ({
 }) => {
   const badge = STATE_BADGE[download.state];
   const isTerminal = TERMINAL_STATES.has(download.state);
+  const showProgress = SHOW_PROGRESS_STATES.has(download.state);
 
   return (
     <Card className="mb-3">
@@ -84,7 +93,9 @@ const DownloadItem: FC<DownloadItemProps> = ({
         </div>
 
         {/* Progress bar */}
-        <DownloadProgressBar percentage={download.progress} />
+        {showProgress && (
+          <DownloadProgressBar percentage={download.progress} />
+        )}
 
         {/* Stats row */}
         <div className="flex items-center gap-4 text-xs text-slate-400">

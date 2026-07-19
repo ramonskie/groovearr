@@ -1,3 +1,4 @@
+import { useMemo } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getPlaylists,
@@ -9,8 +10,11 @@ import {
   syncPlaylist,
   deletePlaylist,
 } from "../api/client";
+import { useDownloadStore } from "../stores/download-poll";
 import type {
   ImportPlaylistRequest,
+  PlaylistTrack,
+  PlaylistTrackDownloadStatus,
 } from "../api/types";
 
 // ─── Queries ────────────────────────────────────────────────────────
@@ -23,11 +27,38 @@ export function usePlaylists() {
 }
 
 export function usePlaylist(id: number) {
-  return useQuery({
+  const records = useDownloadStore((s) => s.records);
+
+  const query = useQuery({
     queryKey: ["playlist", id] as const,
     queryFn: () => getPlaylist(id),
     enabled: id > 0,
   });
+
+  // Attach per-track download status by matching active downloads to
+  // playlist track source_track_ids and artist+title.
+  const tracksWithStatus = useMemo<PlaylistTrack[]>(() => {
+    const tracks = query.data?.tracks ?? [];
+    if (tracks.length === 0) return tracks;
+
+    const downloads = Object.values(records);
+
+    return tracks.map((track): PlaylistTrack => {
+      if (track.linked) {
+        return { ...track, download_status: "linked" as const };
+      }
+
+      const status = computeTrackDownloadStatus(track, downloads);
+      return { ...track, download_status: status };
+    });
+  }, [query.data?.tracks, records]);
+
+  return {
+    ...query,
+    data: query.data
+      ? { ...query.data, tracks: tracksWithStatus }
+      : undefined,
+  };
 }
 
 export function usePlaylistSources() {
@@ -85,4 +116,49 @@ export function useDeletePlaylist() {
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
     },
   });
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────
+
+/**
+ * Determine a playlist track's download status by matching it against
+ * active download records. Matches on source_track_id or artist+title.
+ */
+function computeTrackDownloadStatus(
+  track: PlaylistTrack,
+  downloads: { id: string; state: string; title?: string; artist?: string; display_name?: string; track_id?: string }[],
+): PlaylistTrackDownloadStatus {
+  const trackKey = `${track.artist ?? ""}|${track.title ?? ""}`.toLowerCase();
+
+  for (const d of downloads) {
+    // Match by track_id if set.
+    if (d.track_id && d.track_id === track.source_track_id) {
+      return downloadStateToStatus(d.state);
+    }
+    // Match by artist+title.
+    const dKey = `${d.artist ?? ""}|${d.title ?? ""}`.toLowerCase();
+    if (dKey === trackKey) {
+      return downloadStateToStatus(d.state);
+    }
+    // Fuzzy: check display_name contains title.
+    if (d.display_name?.toLowerCase().includes(track.title.toLowerCase())) {
+      return downloadStateToStatus(d.state);
+    }
+  }
+
+  return "unmatched";
+}
+
+function downloadStateToStatus(state: string): PlaylistTrackDownloadStatus {
+  switch (state) {
+    case "queued":
+      return "queued";
+    case "downloading":
+    case "importPending":
+    case "importing":
+    case "imported":
+      return "downloading"; // In-progress stages show as "downloading"
+    default:
+      return "unmatched";
+  }
 }

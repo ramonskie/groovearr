@@ -126,12 +126,14 @@ export interface SearchResponse {
 // ─── Downloads ─────────────────────────────────────────────────────
 
 export type DownloadState =
-  | "initializing"
+  | "queued"
   | "downloading"
-  | "succeeded"
-  | "errored"
-  | "cancelled"
-  | "aborted";
+  | "importPending"
+  | "importing"
+  | "imported"
+  | "failedPending"
+  | "failed"
+  | "ignored";
 
 export interface DownloadRecord {
   id: string;
@@ -147,6 +149,30 @@ export interface DownloadRecord {
   error?: string;
   track_id?: string;
   cover_url?: string;
+  playlist_id?: string;
+  library_track_id?: number;
+  artist?: string;
+  album?: string;
+  title?: string;
+  track_number?: number;
+  disc_number?: number;
+  year?: number;
+}
+
+/** SSE event type names broadcast from the backend via GET /api/events. */
+export type DownloadEventType =
+  | "download_progress"
+  | "download_completed"
+  | "download_failed"
+  | "import_completed"
+  | "heartbeat";
+
+/** Parsed SSE event payload matching the backend SSEEvent shape. */
+export interface DownloadEvent {
+  id: string;
+  type: DownloadEventType;
+  data: DownloadRecord;
+  timestamp: string;
 }
 
 export interface DownloadRequest {
@@ -274,6 +300,13 @@ export interface Playlist {
   updated_at: string;
 }
 
+/** Per-track download status derived from the download pipeline. */
+export type PlaylistTrackDownloadStatus =
+  | "linked"
+  | "downloading"
+  | "queued"
+  | "unmatched";
+
 export interface PlaylistTrack {
   playlist_id: number;
   position: number;
@@ -286,6 +319,8 @@ export interface PlaylistTrack {
   isrc?: string;
   /** Convenience: true when track_id is non-null (linked to library). */
   linked: boolean;
+  /** Per-track download status derived from active downloads matching this track. */
+  download_status?: PlaylistTrackDownloadStatus;
 }
 
 export interface PlaylistDetailResponse {
