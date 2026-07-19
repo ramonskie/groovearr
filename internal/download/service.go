@@ -17,6 +17,9 @@ import (
 type WorkerPool interface {
 	// Submit enqueues a download record for processing by an available worker.
 	Submit(ctx context.Context, record *domain.DownloadRecord) error
+
+	// Cancel stops an in-progress download by cancelling its context.
+	Cancel(downloadID string)
 }
 
 // DownloadMeta carries track metadata supplied at queue time.
@@ -116,8 +119,8 @@ func (s *DownloadService) List(ctx context.Context) ([]domain.DownloadRecord, er
 	return s.store.List(ctx)
 }
 
-// Cancel transitions a download to the "ignored" state regardless of its
-// current state and fires a state-changed event.
+// Cancel transitions a download to the "ignored" state, cancels the
+// in-progress worker goroutine, and fires a state-changed event.
 func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -129,6 +132,15 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 
 	if record.State.Terminal() {
 		return nil // already terminal — idempotent
+	}
+
+	// Cancel the in-progress worker goroutine first so it doesn't
+	// overwrite the ignored state when it completes/fails.
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool != nil {
+		pool.Cancel(id)
 	}
 
 	record.State = domain.DownloadIgnored

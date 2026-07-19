@@ -34,6 +34,9 @@ type workerPoolImpl struct {
 	ctx            context.Context
 	cancel         context.CancelFunc
 	wg             sync.WaitGroup
+
+	cancelMu  sync.Mutex
+	cancels   map[string]context.CancelFunc // per-download cancellation
 }
 
 // NewWorkerPool creates a worker pool that runs up to maxWorkers concurrent
@@ -53,6 +56,7 @@ func NewWorkerPool(maxWorkers int, registry *Registry, store DownloadStore, bus 
 		bus:            bus,
 		ctx:            ctx,
 		cancel:         cancel,
+		cancels:        make(map[string]context.CancelFunc),
 	}
 	for i := 0; i < maxWorkers; i++ {
 		p.wg.Add(1)
@@ -97,6 +101,20 @@ func (p *workerPoolImpl) Submit(ctx context.Context, record *domain.DownloadReco
 	}
 }
 
+// Cancel stops an in-progress download by cancelling its per-job context.
+func (p *workerPoolImpl) Cancel(downloadID string) {
+	p.cancelMu.Lock()
+	cancel, ok := p.cancels[downloadID]
+	if ok {
+		delete(p.cancels, downloadID)
+	}
+	p.cancelMu.Unlock()
+
+	if ok {
+		cancel()
+	}
+}
+
 // Shutdown gracefully stops the pool: cancels in-flight downloads (via the
 // pool-level context), drains remaining queued jobs by discarding them, and
 // waits for all workers to exit.
@@ -118,6 +136,18 @@ func (p *workerPoolImpl) worker() {
 func (p *workerPoolImpl) processJob(job *DownloadJob) {
 	downloadID := job.DownloadID
 
+	// Create a per-job cancellable context so Cancel() can stop this download.
+	jobCtx, jobCancel := context.WithCancel(p.ctx)
+	p.cancelMu.Lock()
+	p.cancels[downloadID] = jobCancel
+	p.cancelMu.Unlock()
+	defer func() {
+		jobCancel()
+		p.cancelMu.Lock()
+		delete(p.cancels, downloadID)
+		p.cancelMu.Unlock()
+	}()
+
 	// Transition state: queued → downloading.
 	if err := p.updateStoreState(downloadID, domain.DownloadDownloading); err != nil {
 		log.Printf("worker: state update failed for %s: %v", downloadID, err)
@@ -134,7 +164,7 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 
 	// Start the plugin-specific download. The plugin returns its own internal ID
 	// which we use for subsequent status and progress queries.
-	pluginDownloadID, err := plugin.Download(p.ctx, job.Username, job.Filename, job.FileSize)
+	pluginDownloadID, err := plugin.Download(jobCtx, job.Username, job.Filename, job.FileSize)
 	if err != nil {
 		p.failJob(downloadID, fmt.Sprintf("plugin download: %v", err))
 		return
@@ -142,7 +172,7 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 
 	// Poll until the plugin reports a terminal state.
 	dp, _ := plugin.(DownloadProgressor)
-	if err := p.pollUntilComplete(downloadID, plugin, dp, pluginDownloadID); err != nil {
+	if err := p.pollUntilComplete(jobCtx, downloadID, plugin, dp, pluginDownloadID); err != nil {
 		p.failJob(downloadID, err.Error())
 		return
 	}
@@ -154,7 +184,7 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 
 // pollUntilComplete periodically checks the plugin for download status.
 // Returns nil on success, error on failure/cancellation.
-func (p *workerPoolImpl) pollUntilComplete(serviceID string, plugin Plugin, dp DownloadProgressor, pluginID string) error {
+func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string, plugin Plugin, dp DownloadProgressor, pluginID string) error {
 	ticker := time.NewTicker(progressPollInterval)
 	defer ticker.Stop()
 
@@ -162,19 +192,19 @@ func (p *workerPoolImpl) pollUntilComplete(serviceID string, plugin Plugin, dp D
 
 	for {
 		select {
-		case <-p.ctx.Done():
+		case <-ctx.Done():
 			return fmt.Errorf("download cancelled")
 		case <-ticker.C:
 			// If the plugin supports DownloadProgressor, get high-resolution progress.
 			if dp != nil {
-				prog, err := dp.GetProgress(p.ctx, pluginID)
+				prog, err := dp.GetProgress(ctx, pluginID)
 				if err == nil && prog != nil {
 					p.fireProgress(serviceID, 0, prog.Transferred, prog.Total, prog.Speed)
 				}
 			}
 
 			// Check terminal state via the plugin's status API.
-			status, err := plugin.GetDownloadStatus(p.ctx, pluginID)
+			status, err := plugin.GetDownloadStatus(ctx, pluginID)
 			if err != nil {
 				log.Printf("worker: status check for %s: %v", serviceID, err)
 				continue

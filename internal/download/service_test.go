@@ -183,6 +183,8 @@ func (p *mockWorkerPool) Submit(ctx context.Context, record *domain.DownloadReco
 	return nil
 }
 
+func (p *mockWorkerPool) Cancel(downloadID string) {}
+
 func (p *mockWorkerPool) submitted() []string {
 	p.mu.Lock()
 	defer p.mu.Unlock()
