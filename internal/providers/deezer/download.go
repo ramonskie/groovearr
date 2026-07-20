@@ -20,10 +20,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
-	"github.com/ramonskie/groovearr/internal/sanitize"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/playlist"
+	"github.com/ramonskie/groovearr/internal/sanitize"
 
 	"golang.org/x/crypto/blowfish"
 )
@@ -54,7 +54,7 @@ const minFileSize = 100 * 1024 // 100KB
 
 // DownloadClient implements download.Plugin for Deezer downloads.
 type DownloadClient struct {
-	cfg    config.DeezerConfig
+	cfg    DeezerConfig
 	dlPath string
 	client *http.Client
 
@@ -75,7 +75,7 @@ type DownloadClient struct {
 }
 
 // NewDownloadClient creates a Deezer download client.
-func NewDownloadClient(cfg config.DeezerConfig, downloadPath string) *DownloadClient {
+func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
 	jar, _ := cookiejar.New(nil)
 	u, _ := url.Parse("https://www.deezer.com")
 	jar.SetCookies(u, []*http.Cookie{{
@@ -803,6 +803,62 @@ func blowfishDecrypt(data, key []byte) ([]byte, error) {
 	}
 
 	return dst, nil
+}
+
+// ─── Playlist Adapter ─────────────────────────────────────────────────
+
+// playlistSourceAdapter adapts DownloadClient to playlist.Source.
+// Lives in the providers/deezer package alongside the download client to avoid
+// circular imports between download and playlist packages.
+type playlistSourceAdapter struct {
+	client *DownloadClient
+}
+
+func (a *playlistSourceAdapter) Name() string       { return downloadPluginName }
+func (a *playlistSourceAdapter) DisplayName() string { return downloadDisplayName }
+func (a *playlistSourceAdapter) IsConfigured() bool  { return a.client.IsConfigured() }
+
+func (a *playlistSourceAdapter) GetUserPlaylists(ctx context.Context) ([]playlist.PlaylistInfo, error) {
+	raw, err := a.client.GetUserPlaylists(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]playlist.PlaylistInfo, len(raw))
+	for i, p := range raw {
+		out[i] = playlist.PlaylistInfo{
+			SourceID:    p.ID,
+			Name:        strings.TrimSpace(p.Title),
+			Description: strings.TrimSpace(p.Description),
+			TrackCount:  p.TrackCount,
+		}
+	}
+	return out, nil
+}
+
+func (a *playlistSourceAdapter) GetPlaylistTracks(ctx context.Context, sourceID string) ([]playlist.TrackInfo, string, error) {
+	raw, name, err := a.client.GetPlaylistTracks(ctx, sourceID)
+	if err != nil {
+		return nil, "", err
+	}
+	out := make([]playlist.TrackInfo, len(raw))
+	for i, t := range raw {
+		durMs, _ := strconv.ParseInt(t.Duration, 10, 64)
+		out[i] = playlist.TrackInfo{
+			SourceTrackID: t.ID,
+			Title:         strings.TrimSpace(t.Title),
+			Artist:        strings.TrimSpace(t.Artist),
+			Album:         strings.TrimSpace(t.Album),
+			DurationMs:    durMs * 1000,
+			ISRC:          strings.TrimSpace(t.ISRC),
+		}
+	}
+	return out, name, nil
+}
+
+// PlaylistSource returns a playlist.Source wrapping this download client.
+// Satisfies playlist.PlaylistSourceProvider.
+func (c *DownloadClient) PlaylistSource() playlist.Source {
+	return &playlistSourceAdapter{client: c}
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────

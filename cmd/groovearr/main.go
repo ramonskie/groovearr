@@ -11,14 +11,14 @@ import (
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/download"
-	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
-	"github.com/ramonskie/groovearr/internal/download/soulseek"
+	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
+	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
 	"github.com/ramonskie/groovearr/internal/playlist"
-	deezerpl "github.com/ramonskie/groovearr/internal/playlist/deezer"
+	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
 
@@ -61,14 +61,14 @@ func main() {
 		}
 	}
 
-	slskd := soulseek.New(currentCfg.Soulseek, currentCfg.Library.DownloadPath)
-	if err := registry.Register(slskd); err != nil {
-		log.Fatalf("register soulseek: %v", err)
-	}
+	// Register plugin factories.
+	registry.RegisterFactory(soulseek.Factory)
+	registry.RegisterFactory(deezer.Factory)
 
-	deezer := deezerdl.NewDownloadClient(currentCfg.Deezer, currentCfg.Library.DownloadPath)
-	if err := registry.Register(deezer, "deezer_dl"); err != nil {
-		log.Printf("register deezer download: %v (continuing without deezer)", err)
+	// Initialize all plugins from config.
+	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath}
+	if err := registry.InitAll(currentCfg.Sources, resources); err != nil {
+		log.Printf("init plugins: %v", err)
 	}
 
 	// Event bus — decouples workers, importers, and SSE notifier.
@@ -119,11 +119,14 @@ func main() {
 		sseNotifier,
 	)
 
-	// Playlist service (Deezer via ARL).
+	// Playlist service — auto-register plugins that provide playlist sources.
 	playlistReg := playlist.NewRegistry()
-	if deezer.IsConfigured() {
-		deezerPlaylistSrc := deezerpl.NewPlaylistSource(deezer)
-		playlistReg.Register(deezerPlaylistSrc)
+	for _, p := range registry.All() {
+		if psp, ok := p.(playlist.PlaylistSourceProvider); ok {
+			if p.IsConfigured() {
+				playlistReg.Register(psp.PlaylistSource())
+			}
+		}
 	}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
@@ -143,8 +146,10 @@ func main() {
 	log.Printf("  download: %s", currentCfg.Library.DownloadPath)
 	log.Printf("  library:  %s", currentCfg.Library.LibraryPath)
 	log.Printf("  listening on %s", addr)
-	if currentCfg.Soulseek.SlskdURL != "" {
-		log.Printf("  slskd:    %s", currentCfg.Soulseek.SlskdURL)
+	for _, name := range registry.Names() {
+		if p := registry.Get(name); p != nil {
+			log.Printf("  source:   %s", p.DisplayName())
+		}
 	}
 
 	// Graceful shutdown.

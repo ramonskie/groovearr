@@ -50,13 +50,10 @@ func TestRegistryRegister(t *testing.T) {
 
 func TestRegistryGet(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek"}, "slskd")
+	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek"})
 
 	if p := r.Get("soulseek"); p == nil {
 		t.Error("Get by canonical name returned nil")
-	}
-	if p := r.Get("slskd"); p == nil {
-		t.Error("Get by alias returned nil")
 	}
 	if p := r.Get("nonexistent"); p != nil {
 		t.Error("Get nonexistent should return nil")

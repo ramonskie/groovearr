@@ -70,10 +70,7 @@ func (s *Store) migrate() error {
 			genres TEXT,
 			summary TEXT,
 			thumb_url TEXT,
-			spotify_id TEXT,
-			itunes_id TEXT,
-			deezer_id TEXT,
-			musicbrainz_id TEXT,
+			external_ids TEXT DEFAULT '{}',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
@@ -90,12 +87,7 @@ func (s *Store) migrate() error {
 			thumb_url TEXT,
 			album_type TEXT DEFAULT 'album',
 			release_date TEXT,
-			spotify_id TEXT,
-			itunes_id TEXT,
-			deezer_id TEXT,
-			musicbrainz_id TEXT,
-			tidal_id TEXT,
-			qobuz_id TEXT,
+			external_ids TEXT DEFAULT '{}',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE
@@ -111,12 +103,7 @@ func (s *Store) migrate() error {
 			file_path TEXT,
 			bitrate INTEGER,
 			file_size INTEGER,
-			spotify_id TEXT,
-			itunes_id TEXT,
-			deezer_id TEXT,
-			musicbrainz_id TEXT,
-			tidal_id TEXT,
-			qobuz_id TEXT,
+			external_ids TEXT DEFAULT '{}',
 			acoustid TEXT,
 			isrc TEXT,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
@@ -128,10 +115,6 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path)`,
-		`CREATE INDEX IF NOT EXISTS idx_artists_spotify ON artists(spotify_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_artists_deezer ON artists(deezer_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_albums_spotify ON albums(spotify_id)`,
-		`CREATE INDEX IF NOT EXISTS idx_tracks_spotify ON tracks(spotify_id)`,
 	}
 
 	for _, stmt := range statements {
@@ -229,6 +212,67 @@ func (s *Store) migrate() error {
 		version = 3
 	}
 
+	// Version 4: migrate individual external-id columns to JSON column.
+	// Requires SQLite >= 3.35.0 (2021-03-12) for ALTER TABLE DROP COLUMN support.
+	// On older SQLite versions this migration will fail — upgrade your SQLite driver.
+	if version < 4 {
+		// Drop old indices that reference columns being removed.
+		for _, stmt := range []string{
+			`DROP INDEX IF EXISTS idx_artists_spotify`,
+			`DROP INDEX IF EXISTS idx_artists_deezer`,
+			`DROP INDEX IF EXISTS idx_albums_spotify`,
+			`DROP INDEX IF EXISTS idx_tracks_spotify`,
+		} {
+			s.db.Exec(stmt) // ignore errors — indices may not exist
+		}
+
+		// Drop old per-source ID columns from pre-v4 databases.
+		// Fresh v1 databases already use external_ids; DROP COLUMN errors
+		// for missing columns on fresh DBs are non-fatal.
+		dropColumn := func(table, col string) error {
+			_, err := s.db.Exec("ALTER TABLE " + table + " DROP COLUMN " + col)
+			if err != nil && !strings.Contains(err.Error(), "no such column") {
+				return fmt.Errorf("migration v4: drop %s.%s: %w (requires SQLite >= 3.35.0)", table, col, err)
+			}
+			return nil
+		}
+
+		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id"} {
+			if err := dropColumn("artists", col); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec("ALTER TABLE artists ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("migration v4: add artists.external_ids: %w", err)
+			}
+		}
+
+		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id", "tidal_id", "qobuz_id"} {
+			if err := dropColumn("albums", col); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec("ALTER TABLE albums ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("migration v4: add albums.external_ids: %w", err)
+			}
+		}
+
+		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id", "tidal_id", "qobuz_id"} {
+			if err := dropColumn("tracks", col); err != nil {
+				return err
+			}
+		}
+		if _, err := s.db.Exec("ALTER TABLE tracks ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
+			if !strings.Contains(err.Error(), "duplicate column name") {
+				return fmt.Errorf("migration v4: add tracks.external_ids: %w", err)
+			}
+		}
+
+		version = 4
+	}
+
 	// Record current version.
 	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
 		return fmt.Errorf("migration: clear version: %w", err)
@@ -243,28 +287,26 @@ func (s *Store) migrate() error {
 
 func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64, error) {
 	genresJSON, _ := json.Marshal(artist.Genres)
+	extIDsJSON, _ := json.Marshal(artist.ExternalIDs)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	if artist.ID != 0 {
 		_, err := s.db.ExecContext(ctx, `
 			UPDATE artists SET name=?, genres=?, summary=?, thumb_url=?,
-			spotify_id=?, itunes_id=?, deezer_id=?, musicbrainz_id=?,
-			updated_at=?
+			external_ids=?, updated_at=?
 			WHERE id=?`,
 			artist.Name, string(genresJSON), artist.Summary, artist.ThumbURL,
-			artist.SpotifyID, artist.ITunesID, artist.DeezerID, artist.MusicBrainzID,
-			now, artist.ID,
+			string(extIDsJSON), now, artist.ID,
 		)
 		return artist.ID, err
 	}
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO artists (name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		artist.Name, string(genresJSON), artist.Summary, artist.ThumbURL,
-		artist.SpotifyID, artist.ITunesID, artist.DeezerID, artist.MusicBrainzID,
-		now, now,
+		string(extIDsJSON), now, now,
 	)
 	if err != nil {
 		return 0, err
@@ -289,8 +331,7 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			created_at, updated_at
+			external_ids, created_at, updated_at
 		FROM artists WHERE id=?`, id)
 	return scanArtist(row)
 }
@@ -298,8 +339,7 @@ func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error)
 func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			created_at, updated_at
+			external_ids, created_at, updated_at
 		FROM artists WHERE name=?`, name)
 	return scanArtist(row)
 }
@@ -307,8 +347,7 @@ func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artis
 func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			created_at, updated_at
+			external_ids, created_at, updated_at
 		FROM artists ORDER BY name LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		return nil, err
@@ -320,8 +359,7 @@ func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Ar
 func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			created_at, updated_at
+			external_ids, created_at, updated_at
 		FROM artists WHERE name LIKE ? ORDER BY name LIMIT ?`,
 		"%"+query+"%", limit)
 	if err != nil {
@@ -335,19 +373,18 @@ func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]d
 
 func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, error) {
 	genresJSON, _ := json.Marshal(album.Genres)
+	extIDsJSON, _ := json.Marshal(album.ExternalIDs)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	if album.ID != 0 {
 		_, err := s.db.ExecContext(ctx, `
 			UPDATE albums SET artist_id=?, title=?, year=?, genres=?, track_count=?,
 			duration=?, thumb_url=?, album_type=?, release_date=?,
-			spotify_id=?, itunes_id=?, deezer_id=?, musicbrainz_id=?,
-			tidal_id=?, qobuz_id=?, updated_at=?
+			external_ids=?, updated_at=?
 			WHERE id=?`,
 			album.ArtistID, album.Title, album.Year, string(genresJSON), album.TrackCount,
 			album.Duration, album.ThumbURL, album.AlbumType, album.ReleaseDate,
-			album.SpotifyID, album.ITunesID, album.DeezerID, album.MusicBrainzID,
-			album.TidalID, album.QobuzID, now, album.ID,
+			string(extIDsJSON), now, album.ID,
 		)
 		return album.ID, err
 	}
@@ -355,13 +392,11 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO albums (artist_id, title, year, genres, track_count,
 			duration, thumb_url, album_type, release_date,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			tidal_id, qobuz_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		album.ArtistID, album.Title, album.Year, string(genresJSON), album.TrackCount,
 		album.Duration, album.ThumbURL, album.AlbumType, album.ReleaseDate,
-		album.SpotifyID, album.ITunesID, album.DeezerID, album.MusicBrainzID,
-		album.TidalID, album.QobuzID, now, now,
+		string(extIDsJSON), now, now,
 	)
 	if err != nil {
 		return 0, err
@@ -370,11 +405,7 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 }
 
 func (s *Store) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
-	row := s.db.QueryRowContext(ctx, `
-		SELECT id, artist_id, title, year, genres, track_count, duration, thumb_url,
-			album_type, release_date, spotify_id, itunes_id, deezer_id,
-			musicbrainz_id, tidal_id, qobuz_id, created_at, updated_at
-		FROM albums WHERE id=?`, id)
+	row := s.db.QueryRowContext(ctx, albumSelect+" WHERE id=?", id)
 	return scanAlbum(row)
 }
 
@@ -400,19 +431,18 @@ func (s *Store) SearchAlbums(ctx context.Context, query string, limit int) ([]do
 // ─── Tracks ──────────────────────────────────────────────────────────
 
 func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, error) {
+	extIDsJSON, _ := json.Marshal(track.ExternalIDs)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	if track.ID != 0 {
 		_, err := s.db.ExecContext(ctx, `
 			UPDATE tracks SET album_id=?, artist_id=?, title=?, track_number=?,
 			disc_number=?, duration=?, file_path=?, bitrate=?, file_size=?,
-			spotify_id=?, itunes_id=?, deezer_id=?, musicbrainz_id=?,
-			tidal_id=?, qobuz_id=?, acoustid=?, isrc=?, updated_at=?
+			external_ids=?, acoustid=?, isrc=?, updated_at=?
 			WHERE id=?`,
 			track.AlbumID, track.ArtistID, track.Title, track.TrackNumber,
 			track.DiscNumber, track.Duration, track.FilePath, track.Bitrate, track.FileSize,
-			track.SpotifyID, track.ITunesID, track.DeezerID, track.MusicBrainzID,
-			track.TidalID, track.QobuzID, track.AcoustID, track.ISRC,
+			string(extIDsJSON), track.AcoustID, track.ISRC,
 			now, track.ID,
 		)
 		return track.ID, err
@@ -421,13 +451,11 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tracks (album_id, artist_id, title, track_number,
 			disc_number, duration, file_path, bitrate, file_size,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			tidal_id, qobuz_id, acoustid, isrc, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, acoustid, isrc, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		track.AlbumID, track.ArtistID, track.Title, track.TrackNumber,
 		track.DiscNumber, track.Duration, track.FilePath, track.Bitrate, track.FileSize,
-		track.SpotifyID, track.ITunesID, track.DeezerID, track.MusicBrainzID,
-		track.TidalID, track.QobuzID, track.AcoustID, track.ISRC,
+		string(extIDsJSON), track.AcoustID, track.ISRC,
 		now, now,
 	)
 	if err != nil {
@@ -557,58 +585,44 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 // ─── External ID lookups ─────────────────────────────────────────────
 
 func (s *Store) GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error) {
-	col := externalIDColumn(service)
-	if col == "" {
-		return nil, fmt.Errorf("unsupported service: %s", service)
-	}
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, genres, summary, thumb_url,
-			spotify_id, itunes_id, deezer_id, musicbrainz_id,
-			created_at, updated_at
-		FROM artists WHERE `+col+`=?`, externalID)
+			external_ids, created_at, updated_at
+		FROM artists WHERE json_extract(external_ids, ?) = ?`,
+		"$."+service, externalID)
 	return scanArtist(row)
 }
 
 func (s *Store) GetAlbumByExternalID(ctx context.Context, service, externalID string) (*domain.Album, error) {
-	col := externalIDColumn(service)
-	if col == "" {
-		return nil, fmt.Errorf("unsupported service: %s", service)
-	}
 	row := s.db.QueryRowContext(ctx,
-		albumSelect+" WHERE "+col+"=?", externalID)
+		albumSelect+" WHERE json_extract(external_ids, ?) = ?",
+		"$."+service, externalID)
 	return scanAlbum(row)
 }
 
 func (s *Store) GetTrackByExternalID(ctx context.Context, service, externalID string) (*domain.Track, error) {
-	col := externalIDColumn(service)
-	if col == "" {
-		return nil, fmt.Errorf("unsupported service: %s", service)
-	}
 	row := s.db.QueryRowContext(ctx,
-		trackSelect+" WHERE "+col+"=?", externalID)
+		trackSelect+" WHERE json_extract(external_ids, ?) = ?",
+		"$."+service, externalID)
 	return scanTrack(row)
 }
 
 // ─── Internal scan helpers ───────────────────────────────────────────
 
 const albumSelect = `SELECT id, artist_id, title, year, genres, track_count, duration, thumb_url,
-	album_type, release_date, spotify_id, itunes_id, deezer_id,
-	musicbrainz_id, tidal_id, qobuz_id, created_at, updated_at
+	album_type, release_date, external_ids, created_at, updated_at
 	FROM albums`
 
 const trackSelect = `SELECT id, album_id, artist_id, title, track_number, disc_number,
 	duration, file_path, bitrate, file_size,
-	spotify_id, itunes_id, deezer_id, musicbrainz_id,
-	tidal_id, qobuz_id, acoustid, isrc, created_at, updated_at
+	external_ids, acoustid, isrc, created_at, updated_at
 	FROM tracks`
 
 func scanArtist(row *sql.Row) (*domain.Artist, error) {
 	var a domain.Artist
-	var genresJSON string
-	var createdAt, updatedAt string
+	var genresJSON, extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
-		&a.SpotifyID, &a.ITunesID, &a.DeezerID, &a.MusicBrainzID,
-		&createdAt, &updatedAt)
+		&extIDsJSON, &createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -616,6 +630,9 @@ func scanArtist(row *sql.Row) (*domain.Artist, error) {
 		return nil, err
 	}
 	json.Unmarshal([]byte(genresJSON), &a.Genres)
+	if extIDsJSON != "" {
+		json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
+	}
 	a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &a, nil
@@ -625,13 +642,15 @@ func scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 	var artists []domain.Artist
 	for rows.Next() {
 		var a domain.Artist
-		var genresJSON, createdAt, updatedAt string
+		var genresJSON, extIDsJSON, createdAt, updatedAt string
 		if err := rows.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
-			&a.SpotifyID, &a.ITunesID, &a.DeezerID, &a.MusicBrainzID,
-			&createdAt, &updatedAt); err != nil {
+			&extIDsJSON, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(genresJSON), &a.Genres)
+		if extIDsJSON != "" {
+			json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
+		}
 		a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 		artists = append(artists, a)
@@ -641,12 +660,10 @@ func scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 
 func scanAlbum(row *sql.Row) (*domain.Album, error) {
 	var a domain.Album
-	var genresJSON, createdAt, updatedAt string
-	var albumType string
+	var genresJSON, extIDsJSON, createdAt, updatedAt, albumType string
 	err := row.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON, &a.TrackCount,
 		&a.Duration, &a.ThumbURL, &albumType, &a.ReleaseDate,
-		&a.SpotifyID, &a.ITunesID, &a.DeezerID, &a.MusicBrainzID,
-		&a.TidalID, &a.QobuzID, &createdAt, &updatedAt)
+		&extIDsJSON, &createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -654,6 +671,9 @@ func scanAlbum(row *sql.Row) (*domain.Album, error) {
 		return nil, err
 	}
 	json.Unmarshal([]byte(genresJSON), &a.Genres)
+	if extIDsJSON != "" {
+		json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
+	}
 	a.AlbumType = domain.AlbumType(albumType)
 	a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
@@ -664,14 +684,16 @@ func scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 	var albums []domain.Album
 	for rows.Next() {
 		var a domain.Album
-		var genresJSON, createdAt, updatedAt, albumType string
+		var genresJSON, extIDsJSON, createdAt, updatedAt, albumType string
 		if err := rows.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON,
 			&a.TrackCount, &a.Duration, &a.ThumbURL, &albumType, &a.ReleaseDate,
-			&a.SpotifyID, &a.ITunesID, &a.DeezerID, &a.MusicBrainzID,
-			&a.TidalID, &a.QobuzID, &createdAt, &updatedAt); err != nil {
+			&extIDsJSON, &createdAt, &updatedAt); err != nil {
 			return nil, err
 		}
 		json.Unmarshal([]byte(genresJSON), &a.Genres)
+		if extIDsJSON != "" {
+			json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
+		}
 		a.AlbumType = domain.AlbumType(albumType)
 		a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
@@ -682,17 +704,19 @@ func scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 
 func scanTrack(row *sql.Row) (*domain.Track, error) {
 	var t domain.Track
-	var createdAt, updatedAt string
+	var extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 		&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
-		&t.SpotifyID, &t.ITunesID, &t.DeezerID, &t.MusicBrainzID,
-		&t.TidalID, &t.QobuzID, &t.AcoustID, &t.ISRC,
+		&extIDsJSON, &t.AcoustID, &t.ISRC,
 		&createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
+	}
+	if extIDsJSON != "" {
+		json.Unmarshal([]byte(extIDsJSON), &t.ExternalIDs)
 	}
 	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
@@ -703,38 +727,21 @@ func scanTracks(rows *sql.Rows) ([]domain.Track, error) {
 	var tracks []domain.Track
 	for rows.Next() {
 		var t domain.Track
-		var createdAt, updatedAt string
+		var extIDsJSON, createdAt, updatedAt string
 		if err := rows.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 			&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
-			&t.SpotifyID, &t.ITunesID, &t.DeezerID, &t.MusicBrainzID,
-			&t.TidalID, &t.QobuzID, &t.AcoustID, &t.ISRC,
+			&extIDsJSON, &t.AcoustID, &t.ISRC,
 			&createdAt, &updatedAt); err != nil {
 			return nil, err
+		}
+		if extIDsJSON != "" {
+			json.Unmarshal([]byte(extIDsJSON), &t.ExternalIDs)
 		}
 		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 		tracks = append(tracks, t)
 	}
 	return tracks, rows.Err()
-}
-
-func externalIDColumn(service string) string {
-	switch strings.ToLower(service) {
-	case "spotify":
-		return "spotify_id"
-	case "itunes", "apple":
-		return "itunes_id"
-	case "deezer":
-		return "deezer_id"
-	case "musicbrainz":
-		return "musicbrainz_id"
-	case "tidal":
-		return "tidal_id"
-	case "qobuz":
-		return "qobuz_id"
-	default:
-		return ""
-	}
 }
 
 // ─── Playlist CRUD ────────────────────────────────────────────────────

@@ -27,13 +27,8 @@ type Album struct {
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
 
-	// External service IDs.
-	SpotifyID     string `json:"spotify_id,omitempty"`
-	ITunesID      string `json:"itunes_id,omitempty"`
-	DeezerID      string `json:"deezer_id,omitempty"`
-	MusicBrainzID string `json:"musicbrainz_id,omitempty"`
-	TidalID       string `json:"tidal_id,omitempty"`
-	QobuzID       string `json:"qobuz_id,omitempty"`
+	// External service IDs (keyed by source name, e.g., "spotify", "musicbrainz").
+	ExternalIDs map[string]string `json:"external_ids,omitempty"`
 
 	// Release date from external source.
 	ReleaseDate string `json:"release_date,omitempty"`

@@ -17,12 +17,11 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
-	deezerdl "github.com/ramonskie/groovearr/internal/download/deezer"
-	"github.com/ramonskie/groovearr/internal/download/soulseek"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/playlist"
+	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
 
@@ -142,13 +141,7 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
-	cfg := s.cfg.Get()
-	// Mask API key partially.
-	if cfg.Soulseek.APIKey != "" && len(cfg.Soulseek.APIKey) > 4 {
-		masked := cfg.Soulseek.APIKey
-		cfg.Soulseek.APIKey = masked[:2] + strings.Repeat("*", len(masked)-4) + masked[len(masked)-2:]
-	}
-	writeJSON(w, http.StatusOK, cfg)
+	writeJSON(w, http.StatusOK, s.cfg.Get().Mask())
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
@@ -183,12 +176,16 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rebuild clients with new config.
-	s.reloadSoulseek()
-	s.reloadDeezer()
+	// Rebuild all configured plugins with new config.
+	updated := s.cfg.Get()
+	resources := plugin.PluginResources{DownloadPath: updated.Library.DownloadPath}
+	for name := range updated.Sources {
+		if err := s.registry.Rebuild(name, updated.Sources[name], resources); err != nil {
+			log.Printf("reload %s: %v", name, err)
+		}
+	}
 
 	// Ensure required directories exist.
-	updated := s.cfg.Get()
 	for _, p := range []string{updated.Library.DownloadPath, updated.Library.LibraryPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
@@ -387,9 +384,6 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	username := best.Track.Username
-	if best.SourceName == "deezer" {
-		username = best.SourceName // normalized by FindBestMatch
-	}
 
 	id, err := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
 		Artist:      best.Track.Artist,
@@ -815,22 +809,6 @@ func (s *Server) handleDebugDownload(w http.ResponseWriter, r *http.Request) {
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────
-
-func (s *Server) reloadSoulseek() {
-	cfg := s.cfg.Get()
-	slskd := soulseek.New(cfg.Soulseek, cfg.Library.DownloadPath)
-	if err := s.registry.Replace("soulseek", slskd); err != nil {
-		log.Printf("reload soulseek: %v", err)
-	}
-}
-
-func (s *Server) reloadDeezer() {
-	cfg := s.cfg.Get()
-	dl := deezerdl.NewDownloadClient(cfg.Deezer, cfg.Library.DownloadPath)
-	if err := s.registry.Replace("deezer", dl); err != nil {
-		log.Printf("reload deezer: %v", err)
-	}
-}
 
 // parsePagination extracts q, offset, and limit from query parameters.
 // Defaults: q="", offset=0, limit=200.

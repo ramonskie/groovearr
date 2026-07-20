@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
@@ -87,7 +86,7 @@ type Artist struct {
 
 // Client provides access to Deezer's public metadata API.
 type Client struct {
-	cfg         config.DeezerConfig
+	cfg         DeezerConfig
 	httpClient  *http.Client
 	accessToken string
 
@@ -97,7 +96,7 @@ type Client struct {
 }
 
 // New creates a Deezer metadata API client.
-func New(cfg config.DeezerConfig) *Client {
+func New(cfg DeezerConfig) *Client {
 	return &Client{
 		cfg:         cfg,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
@@ -316,7 +315,7 @@ func (t Track) ToTrackResult(quality string) domain.TrackResult {
 
 	return domain.TrackResult{
 		SearchResult: domain.SearchResult{
-			Username:        "deezer_dl",
+			Username:        "",
 			Filename:        fmt.Sprintf("%d||%s - %s", t.ID, artistName, t.Title),
 			Size:            estSize,
 			Bitrate:         bitrate,

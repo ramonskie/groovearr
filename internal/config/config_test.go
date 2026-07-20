@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,17 +11,13 @@ import (
 
 func TestDefaultConfig(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.Soulseek.SlskdURL != "" {
-		t.Error("default slskd_url should be empty")
+
+	if len(cfg.Sources) != 0 {
+		t.Errorf("default Sources should be empty, got %d entries", len(cfg.Sources))
 	}
+
 	if cfg.Library.DownloadPath != "./downloads" {
 		t.Errorf("default download_path = %q, want ./downloads", cfg.Library.DownloadPath)
-	}
-	if cfg.Deezer.Quality != "flac" {
-		t.Errorf("default deezer quality = %q, want flac", cfg.Deezer.Quality)
-	}
-	if cfg.Deezer.ARL != "" {
-		t.Error("default deezer ARL should be empty")
 	}
 }
 
@@ -27,7 +25,6 @@ func TestPersistenceLoadOrCreate(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	// First load creates defaults.
 	p, err := LoadOrCreate(path)
 	if err != nil {
 		t.Fatal(err)
@@ -37,32 +34,39 @@ func TestPersistenceLoadOrCreate(t *testing.T) {
 		t.Errorf("download_path = %q", cfg.Library.DownloadPath)
 	}
 
-	// Update and verify persistence.
+	soulseekJSON := `{"slskd_url":"http://slskd:5030","api_key":"secret123"}`
+	deezerJSON := `{"arl":"arl_token"}`
+
 	err = p.Update(func(cfg *Config) error {
-		cfg.Soulseek.SlskdURL = "http://slskd:5030"
-		cfg.Soulseek.APIKey = "secret123"
-		cfg.Deezer.ARL = "arl_token"
+		cfg.Sources["soulseek"] = json.RawMessage(soulseekJSON)
+		cfg.Sources["deezer"] = json.RawMessage(deezerJSON)
 		return nil
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	// Reload from disk.
 	p2, err := LoadOrCreate(path)
 	if err != nil {
 		t.Fatal(err)
 	}
 	cfg2 := p2.Get()
-	if cfg2.Soulseek.SlskdURL != "http://slskd:5030" {
-		t.Errorf("slskd_url = %q", cfg2.Soulseek.SlskdURL)
+
+	checkSource := func(t *testing.T, got json.RawMessage, wantCompact string, label string) {
+		t.Helper()
+		var gotBuf, wantBuf bytes.Buffer
+		if err := json.Compact(&gotBuf, got); err != nil {
+			t.Fatalf("%s: invalid saved JSON: %v", label, err)
+		}
+		if err := json.Compact(&wantBuf, []byte(wantCompact)); err != nil {
+			t.Fatalf("%s: invalid expected JSON: %v", label, err)
+		}
+		if gotBuf.String() != wantBuf.String() {
+			t.Errorf("%s source = %s, want %s", label, gotBuf.String(), wantBuf.String())
+		}
 	}
-	if cfg2.Soulseek.APIKey != "secret123" {
-		t.Errorf("api_key = %q", cfg2.Soulseek.APIKey)
-	}
-	if cfg2.Deezer.ARL != "arl_token" {
-		t.Errorf("arl = %q", cfg2.Deezer.ARL)
-	}
+	checkSource(t, cfg2.Sources["soulseek"], soulseekJSON, "soulseek")
+	checkSource(t, cfg2.Sources["deezer"], deezerJSON, "deezer")
 }
 
 func TestPersistenceUpdate(t *testing.T) {
@@ -71,20 +75,21 @@ func TestPersistenceUpdate(t *testing.T) {
 
 	p, _ := LoadOrCreate(path)
 
-	// Multiple updates should accumulate.
-	_ = p.Update(func(cfg *Config) error { cfg.Soulseek.SlskdURL = "url1"; return nil })
-	_ = p.Update(func(cfg *Config) error { cfg.Soulseek.APIKey = "key1"; return nil })
-	_ = p.Update(func(cfg *Config) error { cfg.Deezer.Quality = "mp3_320"; return nil })
+	_ = p.Update(func(cfg *Config) error {
+		cfg.Sources["soulseek"] = json.RawMessage(`{"slskd_url":"url1"}`)
+		return nil
+	})
+	_ = p.Update(func(cfg *Config) error {
+		cfg.Sources["deezer"] = json.RawMessage(`{"quality":"mp3_320"}`)
+		return nil
+	})
 
 	cfg := p.Get()
-	if cfg.Soulseek.SlskdURL != "url1" {
-		t.Errorf("slskd_url = %q", cfg.Soulseek.SlskdURL)
+	if string(cfg.Sources["soulseek"]) != `{"slskd_url":"url1"}` {
+		t.Errorf("soulseek source = %s", cfg.Sources["soulseek"])
 	}
-	if cfg.Soulseek.APIKey != "key1" {
-		t.Errorf("api_key = %q", cfg.Soulseek.APIKey)
-	}
-	if cfg.Deezer.Quality != "mp3_320" {
-		t.Errorf("quality = %q", cfg.Deezer.Quality)
+	if string(cfg.Sources["deezer"]) != `{"quality":"mp3_320"}` {
+		t.Errorf("deezer source = %s", cfg.Sources["deezer"])
 	}
 }
 
@@ -92,7 +97,6 @@ func TestPersistenceDefaultsAfterCorrupt(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "config.json")
 
-	// Write corrupt JSON.
 	os.WriteFile(path, []byte("{not json}"), 0644)
 
 	p, err := LoadOrCreate(path)
@@ -107,52 +111,6 @@ func TestValidateDefaults(t *testing.T) {
 	errs := cfg.Validate()
 	if len(errs) > 0 {
 		t.Errorf("default config should be valid, got: %v", errs)
-	}
-}
-
-func TestValidateBadURL(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Soulseek.SlskdURL = "not-a-url!!!"
-	errs := cfg.Validate()
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e, "slskd_url") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected slskd_url error, got: %v", errs)
-	}
-}
-
-func TestValidateBadDeezerQuality(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Deezer.ARL = "token123"
-	cfg.Deezer.Quality = "wav"
-	errs := cfg.Validate()
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e, "deezer.quality") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected deezer.quality error, got: %v", errs)
-	}
-}
-
-func TestValidateSearchTimeout(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Soulseek.SearchTimeout = 0
-	errs := cfg.Validate()
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e, "search_timeout") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected search_timeout error, got: %v", errs)
 	}
 }
 
@@ -186,15 +144,43 @@ func TestValidateNoTemplateTokens(t *testing.T) {
 	}
 }
 
-func TestValidateEmptyARLNoQualityCheck(t *testing.T) {
-	// When ARL is empty, bad quality should not be flagged since Deezer isn't configured.
+func TestValidateInvalidSourceJSON(t *testing.T) {
 	cfg := DefaultConfig()
-	cfg.Deezer.ARL = ""
-	cfg.Deezer.Quality = "wav"
+	cfg.Sources["bad"] = json.RawMessage(`{not valid json}`)
 	errs := cfg.Validate()
+	found := false
 	for _, e := range errs {
-		if strings.Contains(e, "deezer.quality") {
-			t.Errorf("quality check should be skipped when ARL is empty, got: %v", errs)
+		if strings.Contains(e, "sources.bad") {
+			found = true
 		}
+	}
+	if !found {
+		t.Errorf("expected sources.bad error, got: %v", errs)
+	}
+}
+
+func TestValidateValidSourceJSON(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.Sources["soulseek"] = json.RawMessage(`{"slskd_url":"http://localhost:5030"}`)
+	errs := cfg.Validate()
+	if len(errs) > 0 {
+		t.Errorf("valid source JSON should not produce errors, got: %v", errs)
+	}
+}
+
+func TestMergeSources(t *testing.T) {
+	cfg := DefaultConfig()
+	partial := Config{
+		Sources: map[string]json.RawMessage{
+			"soulseek": json.RawMessage(`{"slskd_url":"http://slskd:5030"}`),
+		},
+		Library: LibraryConfig{DownloadPath: "/new/path"},
+	}
+	cfg.Merge(&partial)
+	if string(cfg.Sources["soulseek"]) != `{"slskd_url":"http://slskd:5030"}` {
+		t.Errorf("sources.soulseek not merged, got: %s", cfg.Sources["soulseek"])
+	}
+	if cfg.Library.DownloadPath != "/new/path" {
+		t.Errorf("library.download_path not merged, got %s", cfg.Library.DownloadPath)
 	}
 }

@@ -213,7 +213,7 @@ func TestStore_ExternalIDLookups(t *testing.T) {
 
 	ctx := context.Background()
 
-	_, err = store.UpsertArtist(ctx, &domain.Artist{Name: "Ext Artist", SpotifyID: "spotify:123"})
+	_, err = store.UpsertArtist(ctx, &domain.Artist{Name: "Ext Artist", ExternalIDs: map[string]string{"spotify": "spotify:123"}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,10 +229,13 @@ func TestStore_ExternalIDLookups(t *testing.T) {
 		t.Errorf("name = %q", a.Name)
 	}
 
-	// Unknown service returns error.
-	_, err = store.GetArtistByExternalID(ctx, "unknown", "id")
-	if err == nil {
-		t.Error("expected error for unknown service")
+	// Unknown service now accepted (no whitelist) — returns nil for not found.
+	a2, err := store.GetArtistByExternalID(ctx, "unknown", "id")
+	if err != nil {
+		t.Errorf("unknown service should not error: %v", err)
+	}
+	if a2 != nil {
+		t.Error("expected nil for unknown service with no match")
 	}
 }
 

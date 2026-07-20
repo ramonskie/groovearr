@@ -64,14 +64,10 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 
 	// Copy external IDs from record to track.
 	if record.TrackID != "" {
-		switch record.SourceName {
-		case "deezer":
-			track.DeezerID = record.TrackID
-		case "spotify":
-			track.SpotifyID = record.TrackID
-		case "tidal":
-			track.TidalID = record.TrackID
+		if track.ExternalIDs == nil {
+			track.ExternalIDs = make(map[string]string)
 		}
+		track.ExternalIDs[record.SourceName] = record.TrackID
 	}
 
 	trackID, err := h.libStore.ImportTrack(ctx, track, artistName, albumTitle, record.Year, nil)

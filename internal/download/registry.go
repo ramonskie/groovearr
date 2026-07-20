@@ -1,115 +1,91 @@
 package download
 
 import (
-	"fmt"
-	"sync"
+	"encoding/json"
+	"log"
+
+	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
-// Registry holds all registered download plugins and provides name-based lookup.
-// Plugins are registered by name; duplicates are rejected.
+// Registry is a type-safe wrapper around plugin.Registry for download capabilities.
+// It ensures Get/All/Configured return download.Plugin (not plugin.BasePlugin),
+// so callers don't need type assertions everywhere.
 type Registry struct {
-	mu      sync.RWMutex
-	plugins map[string]Plugin       // canonical name → plugin
-	aliases map[string]string       // alias → canonical name
-	names   []string                // insertion order
+	inner *plugin.Registry
 }
 
-// NewRegistry creates an empty plugin registry.
+// NewRegistry creates a registry for download plugins.
 func NewRegistry() *Registry {
-	return &Registry{
-		plugins: make(map[string]Plugin),
-		aliases: make(map[string]string),
-	}
+	return &Registry{inner: plugin.NewRegistry()}
 }
 
-// Register adds a plugin under its canonical name and optional aliases.
-// Aliases allow legacy names (e.g. "deezer_dl" → "deezer") to resolve correctly.
-func (r *Registry) Register(p Plugin, aliases ...string) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
+// Inner returns the underlying plugin.Registry for capability-based queries,
+// playlist wiring, and other cross-domain access.
+func (r *Registry) Inner() *plugin.Registry { return r.inner }
 
-	name := p.Name()
-	if _, exists := r.plugins[name]; exists {
-		return fmt.Errorf("download plugin %q already registered", name)
-	}
-	r.plugins[name] = p
-	r.names = append(r.names, name)
-	for _, alias := range aliases {
-		if alias == name {
-			continue
-		}
-		if _, exists := r.aliases[alias]; exists {
-			return fmt.Errorf("download plugin alias %q already registered", alias)
-		}
-		r.aliases[alias] = name
-	}
-	return nil
-}
+// Register adds a download plugin. Duplicates are rejected.
+func (r *Registry) Register(p Plugin) error { return r.inner.Register(p) }
 
-// Get returns the plugin for a canonical name or alias. Returns nil if not found.
+// Get returns a download plugin by canonical name, or nil.
 func (r *Registry) Get(name string) Plugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	if p, ok := r.plugins[name]; ok {
+	bp := r.inner.Get(name)
+	if p, ok := bp.(Plugin); ok {
 		return p
 	}
-	if canonical, ok := r.aliases[name]; ok {
-		return r.plugins[canonical]
+	if bp != nil {
+		log.Printf("registry: plugin %q does not implement download.Plugin", name)
 	}
 	return nil
 }
 
 // Names returns canonical names in registration order.
-func (r *Registry) Names() []string {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
+func (r *Registry) Names() []string { return r.inner.Names() }
 
-	out := make([]string, len(r.names))
-	copy(out, r.names)
-	return out
-}
-
-// All returns all registered plugins in registration order.
+// All returns all registered download plugins in registration order.
+// Non-download plugins are silently skipped with a warning log.
 func (r *Registry) All() []Plugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	out := make([]Plugin, 0, len(r.names))
-	for _, name := range r.names {
-		if p, ok := r.plugins[name]; ok {
+	bps := r.inner.All()
+	out := make([]Plugin, 0, len(bps))
+	for _, bp := range bps {
+		if p, ok := bp.(Plugin); ok {
 			out = append(out, p)
+		} else {
+			log.Printf("registry: plugin %q does not implement download.Plugin, skipping", bp.Name())
 		}
 	}
 	return out
 }
 
-// Replace swaps an existing plugin under its canonical name.
-// Returns an error if the name is not already registered.
-func (r *Registry) Replace(name string, p Plugin) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if _, exists := r.plugins[name]; !exists {
-		return fmt.Errorf("download plugin %q not registered", name)
-	}
-	r.plugins[name] = p
-	return nil
-}
-
-// Configured returns plugins that report IsConfigured() == true.
+// Configured returns download plugins where IsConfigured() == true.
+// Non-download plugins are silently skipped with a warning log.
 func (r *Registry) Configured() []Plugin {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-
-	var out []Plugin
-	for _, name := range r.names {
-		p, ok := r.plugins[name]
-		if !ok {
-			continue
-		}
-		if p.IsConfigured() {
+	bps := r.inner.Configured()
+	out := make([]Plugin, 0, len(bps))
+	for _, bp := range bps {
+		if p, ok := bp.(Plugin); ok {
 			out = append(out, p)
+		} else {
+			log.Printf("registry: configured plugin %q does not implement download.Plugin, skipping", bp.Name())
 		}
 	}
 	return out
+}
+
+// Replace swaps an existing download plugin under its canonical name.
+func (r *Registry) Replace(name string, p Plugin) error { return r.inner.Replace(name, p) }
+
+// RegisterFactory registers a plugin factory for deferred construction.
+func (r *Registry) RegisterFactory(f plugin.PluginFactory) error {
+	return r.inner.RegisterFactory(f)
+}
+
+// InitAll creates and registers plugins from all registered factories
+// using the provided sources config map.
+func (r *Registry) InitAll(sources map[string]json.RawMessage, resources plugin.PluginResources) error {
+	return r.inner.InitAll(sources, resources)
+}
+
+// Rebuild tears down an existing plugin and recreates it with new config.
+func (r *Registry) Rebuild(name string, rawCfg json.RawMessage, resources plugin.PluginResources) error {
+	return r.inner.Rebuild(name, rawCfg, resources)
 }

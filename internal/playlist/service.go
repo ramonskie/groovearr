@@ -243,9 +243,6 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string
 	}
 
 	username := best.Track.Username
-	if best.SourceName == "deezer" {
-		username = best.SourceName
-	}
 
 	id, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
 		Artist:      best.Track.Artist,

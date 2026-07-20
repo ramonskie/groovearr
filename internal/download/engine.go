@@ -139,13 +139,6 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, 
 		}
 	}
 
-	// Normalize Deezer source name.
-	if best.SourceName == "deezer" {
-		if dl := o.registry.Get("deezer"); dl != nil {
-			best.SourceName = dl.Name()
-		}
-	}
-
 	return best, nil
 }
 

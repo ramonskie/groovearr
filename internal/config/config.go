@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"net/url"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -14,26 +13,9 @@ import (
 
 // Config holds all application settings.
 type Config struct {
-	Soulseek SoulseekConfig `json:"soulseek"`
-	Deezer   DeezerConfig   `json:"deezer"`
-	Library  LibraryConfig  `json:"library"`
-	Quality  QualityConfig  `json:"quality"`
-}
-
-// SoulseekConfig holds slskd connection settings.
-type SoulseekConfig struct {
-	SlskdURL       string `json:"slskd_url"`       // e.g. "http://localhost:5030"
-	APIKey         string `json:"api_key"`          // X-API-Key for slskd
-	SearchTimeout  int    `json:"search_timeout"`   // seconds, default: 60
-	MinUploadSpeed int    `json:"min_upload_speed"` // Mbps, default: 0
-}
-
-// DeezerConfig holds Deezer API and download settings.
-type DeezerConfig struct {
-	ARL           string `json:"arl"`            // browser cookie token
-	Quality       string `json:"quality"`        // flac, mp3_320, mp3_128
-	AllowFallback *bool  `json:"allow_fallback"` // try lower quality if preferred unavailable (nil = true)
-	AccessToken   string `json:"access_token"`   // OAuth token for user data (optional)
+	Sources map[string]json.RawMessage `json:"sources"`
+	Library LibraryConfig              `json:"library"`
+	Quality QualityConfig              `json:"quality"`
 }
 
 // LibraryConfig holds music library paths.
@@ -51,22 +33,13 @@ type QualityConfig struct {
 	MinBitrate      int    `json:"min_bitrate"`      // kbps, 0 = no minimum
 }
 
-var validQualities = map[string]bool{"flac": true, "mp3_320": true, "mp3_128": true}
 var validFormats = map[string]bool{"flac": true, "mp3": true, "any": true}
 var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
-	allowFallback := true
 	return Config{
-		Soulseek: SoulseekConfig{
-			SlskdURL:      "",
-			SearchTimeout: 60,
-		},
-		Deezer: DeezerConfig{
-			Quality:       "flac",
-			AllowFallback: &allowFallback,
-		},
+		Sources: make(map[string]json.RawMessage),
 		Library: LibraryConfig{
 			DownloadPath:     "./downloads",
 			LibraryPath:      "./music",
@@ -85,23 +58,11 @@ func DefaultConfig() Config {
 func (c Config) Validate() []string {
 	var errs []string
 
-	// Soulseek URL (optional — only validate if set).
-	if c.Soulseek.SlskdURL != "" {
-		u, err := url.Parse(c.Soulseek.SlskdURL)
-		if err != nil || u.Scheme == "" || u.Host == "" {
-			errs = append(errs, fmt.Sprintf("soulseek.slskd_url: must be a valid absolute URL (e.g. http://localhost:5030), got %q", c.Soulseek.SlskdURL))
+	// Sources: validate each entry is structurally valid JSON.
+	for name, raw := range c.Sources {
+		if !json.Valid(raw) {
+			errs = append(errs, fmt.Sprintf("sources.%s: invalid JSON", name))
 		}
-	}
-	if c.Soulseek.SearchTimeout < 1 {
-		errs = append(errs, "soulseek.search_timeout: must be >= 1 second")
-	}
-	if c.Soulseek.MinUploadSpeed < 0 {
-		errs = append(errs, "soulseek.min_upload_speed: must be >= 0")
-	}
-
-	// Deezer quality.
-	if c.Deezer.ARL != "" && c.Deezer.Quality != "" && !validQualities[c.Deezer.Quality] {
-		errs = append(errs, fmt.Sprintf("deezer.quality: must be one of flac, mp3_320, mp3_128 (got %q)", c.Deezer.Quality))
 	}
 
 	// Library.
@@ -128,29 +89,14 @@ func (c Config) Validate() []string {
 
 // Merge copies non-zero fields from partial into c.
 func (c *Config) Merge(partial *Config) {
-	if partial.Soulseek.SlskdURL != "" {
-		c.Soulseek.SlskdURL = partial.Soulseek.SlskdURL
+	// Sources: merge entries, overwriting existing keys with non-empty values.
+	if c.Sources == nil {
+		c.Sources = make(map[string]json.RawMessage)
 	}
-	if partial.Soulseek.APIKey != "" {
-		c.Soulseek.APIKey = partial.Soulseek.APIKey
-	}
-	if partial.Soulseek.SearchTimeout > 0 {
-		c.Soulseek.SearchTimeout = partial.Soulseek.SearchTimeout
-	}
-	if partial.Soulseek.MinUploadSpeed > 0 {
-		c.Soulseek.MinUploadSpeed = partial.Soulseek.MinUploadSpeed
-	}
-	if partial.Deezer.ARL != "" {
-		c.Deezer.ARL = partial.Deezer.ARL
-	}
-	if partial.Deezer.Quality != "" {
-		c.Deezer.Quality = partial.Deezer.Quality
-	}
-	if partial.Deezer.AccessToken != "" {
-		c.Deezer.AccessToken = partial.Deezer.AccessToken
-	}
-	if partial.Deezer.AllowFallback != nil {
-		c.Deezer.AllowFallback = partial.Deezer.AllowFallback
+	for key, raw := range partial.Sources {
+		if len(raw) > 0 && string(raw) != "null" && string(raw) != "{}" {
+			c.Sources[key] = raw
+		}
 	}
 
 	if partial.Library.DownloadPath != "" {
@@ -213,6 +159,57 @@ func readConfigFile(path string) (Config, error) {
 		return cfg, err
 	}
 	return cfg, nil
+}
+
+// Mask returns a copy of Config with sensitive fields masked.
+// Recognized sensitive keys: api_key, token, secret, arl, password, key, api_secret.
+func (c Config) Mask() Config {
+	masked := c
+	masked.Sources = make(map[string]json.RawMessage, len(c.Sources))
+	for name, raw := range c.Sources {
+		masked.Sources[name] = maskSensitiveJSON(raw)
+	}
+	return masked
+}
+
+// maskSensitiveJSON recursively masks values for known sensitive keys.
+func maskSensitiveJSON(raw json.RawMessage) json.RawMessage {
+	var data map[string]any
+	if err := json.Unmarshal(raw, &data); err != nil {
+		return raw
+	}
+	maskMap(data)
+	result, _ := json.Marshal(data)
+	return result
+}
+
+func maskMap(m map[string]any) {
+	for k, v := range m {
+		lower := strings.ToLower(k)
+		if isSensitiveKey(lower) {
+			if s, ok := v.(string); ok && len(s) > 4 {
+				m[k] = s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
+			}
+		}
+		if nested, ok := v.(map[string]any); ok {
+			maskMap(nested)
+		}
+	}
+}
+
+var sensitiveKeys = map[string]bool{
+	"api_key": true, "token": true, "secret": true, "arl": true,
+	"password": true, "key": true, "api_secret": true,
+	"access_token": true, "license_token": true,
+}
+
+func isSensitiveKey(k string) bool {
+	for sk := range sensitiveKeys {
+		if k == sk || strings.Contains(k, "_"+sk) || strings.Contains(k, sk+"_") {
+			return true
+		}
+	}
+	return false
 }
 
 // expandPaths converts relative library paths to absolute.

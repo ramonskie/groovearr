@@ -13,11 +13,8 @@ type Artist struct {
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 
-	// External service IDs.
-	SpotifyID     string `json:"spotify_id,omitempty"`
-	ITunesID      string `json:"itunes_id,omitempty"`
-	DeezerID      string `json:"deezer_id,omitempty"`
-	MusicBrainzID string `json:"musicbrainz_id,omitempty"`
+	// External service IDs (keyed by source name, e.g., "spotify", "musicbrainz").
+	ExternalIDs map[string]string `json:"external_ids,omitempty"`
 }
 
 // ArtistImage represents a cached artist image URL from a specific source.

@@ -1,26 +1,20 @@
-// Package download defines the plugin contract and registry for download sources.
+// Package download defines the download-specific plugin contract and orchestrator.
+// Base plugin interfaces live in internal/plugin; this package extends them
+// with download-specific methods (Search, Download, etc.).
 package download
 
 import (
 	"context"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
-// Plugin is the interface every download source must implement.
-// Sources include Soulseek (slskd), Deezer, Tidal, Qobuz, YouTube, etc.
+// Plugin extends plugin.BasePlugin with download-specific methods.
+// Every download plugin must implement this. Sources include Soulseek, Deezer,
+// Tidal, Qobuz, YouTube, etc.
 type Plugin interface {
-	// Name returns the canonical source name (e.g. "soulseek", "deezer").
-	Name() string
-
-	// DisplayName returns a human-readable label (e.g. "Soulseek", "Deezer").
-	DisplayName() string
-
-	// IsConfigured returns true if this source has valid credentials/settings.
-	IsConfigured() bool
-
-	// CheckConnection probes the source's API for reachability.
-	CheckConnection(ctx context.Context) error
+	plugin.BasePlugin
 
 	// Search queries the source and returns matching tracks and albums.
 	Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error)
@@ -41,10 +35,6 @@ type Plugin interface {
 
 	// ClearCompleted removes all terminal-state downloads from tracking.
 	ClearCompleted(ctx context.Context) error
-
-	// Connected returns true if the source has been verified (auth/tested).
-	// Optional: plugins that don't implement this always show as "configured" after setup.
-	Connected() bool
 }
 
 // SearchPlugin extends Plugin for sources that support progress callbacks during search.

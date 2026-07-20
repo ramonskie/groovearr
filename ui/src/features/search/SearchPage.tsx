@@ -37,7 +37,7 @@ function SearchPage() {
 
   const handleTrackDownload = useCallback(
     (track: TrackResult) => {
-      const downloadSource = track.username === "deezer_dl" ? "deezer" : source || "soulseek";
+      const downloadSource = source || "";
 
       startDownload.mutate(
         {
@@ -68,7 +68,7 @@ function SearchPage() {
     async (_album: AlbumResult, tracks: TrackResult[]) => {
       const results = [];
       for (const track of tracks) {
-        const downloadSource = track.username === "deezer_dl" ? "deezer" : source || "soulseek";
+        const downloadSource = source || "";
         try {
           const result = await startDownload.mutateAsync({
             source: downloadSource,

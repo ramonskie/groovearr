@@ -220,12 +220,7 @@ export interface Track {
   file_size?: number;
   created_at: string;
   updated_at: string;
-  spotify_id?: string;
-  itunes_id?: string;
-  deezer_id?: string;
-  musicbrainz_id?: string;
-  tidal_id?: string;
-  qobuz_id?: string;
+  external_ids?: Record<string, string>;
   acoustid?: string;
   isrc?: string;
 }
@@ -238,10 +233,7 @@ export interface Artist {
   thumb_url?: string;
   created_at: string;
   updated_at: string;
-  spotify_id?: string;
-  itunes_id?: string;
-  deezer_id?: string;
-  musicbrainz_id?: string;
+  external_ids?: Record<string, string>;
 }
 
 export interface Album {
@@ -256,12 +248,7 @@ export interface Album {
   album_type?: "album" | "single" | "ep" | "compilation" | "live";
   created_at: string;
   updated_at: string;
-  spotify_id?: string;
-  itunes_id?: string;
-  deezer_id?: string;
-  musicbrainz_id?: string;
-  tidal_id?: string;
-  qobuz_id?: string;
+  external_ids?: Record<string, string>;
   release_date?: string;
 }
 

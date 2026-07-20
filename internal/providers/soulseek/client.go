@@ -19,7 +19,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
@@ -28,9 +27,17 @@ import (
 const pluginName = "soulseek"
 const displayName = "Soulseek"
 
+// SoulseekConfig holds slskd connection and search parameters.
+type SoulseekConfig struct {
+	SlskdURL       string `json:"slskd_url"`
+	APIKey         string `json:"api_key"`
+	SearchTimeout  int    `json:"search_timeout"`
+	MinUploadSpeed int    `json:"min_upload_speed"`
+}
+
 // Client implements download.Plugin for Soulseek via slskd REST API.
 type Client struct {
-	cfg      config.SoulseekConfig
+	cfg      SoulseekConfig
 	dlPath   string // download staging directory (not from Soulseek config)
 	baseURL  string
 	apiKey   string
@@ -43,18 +50,23 @@ type Client struct {
 	downloadUsernames map[string]string                 // downloadID → username
 }
 
-// New creates a Soulseek client with the given config and download path.
-func New(cfg config.SoulseekConfig, downloadPath string) *Client {
+// New creates a Soulseek client from a raw JSON config blob and download path.
+// The raw config is unmarshalled into a local SoulseekConfig.
+func New(cfg json.RawMessage, downloadPath string) (*Client, error) {
+	var sc SoulseekConfig
+	if err := json.Unmarshal(cfg, &sc); err != nil {
+		return nil, fmt.Errorf("soulseek: invalid config: %w", err)
+	}
 	return &Client{
-		cfg:            cfg,
+		cfg:            sc,
 		dlPath:         downloadPath,
-		baseURL:        strings.TrimRight(cfg.SlskdURL, "/"),
-		apiKey:         cfg.APIKey,
+		baseURL:        strings.TrimRight(sc.SlskdURL, "/"),
+		apiKey:         sc.APIKey,
 		client:         &http.Client{Timeout: 120 * time.Second},
 		activeSearches: make(map[string]context.CancelFunc),
 		downloads:         make(map[string]*domain.DownloadRecord),
 		downloadUsernames: make(map[string]string),
-	}
+	}, nil
 }
 
 // Name returns the canonical plugin name.
