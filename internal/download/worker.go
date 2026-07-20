@@ -37,6 +37,9 @@ type workerPoolImpl struct {
 
 	cancelMu  sync.Mutex
 	cancels   map[string]context.CancelFunc // per-download cancellation
+
+	pluginSemMu    sync.Mutex
+	pluginSemaphores map[string]chan struct{} // per-plugin concurrency gates
 }
 
 // NewWorkerPool creates a worker pool that runs up to maxWorkers concurrent
@@ -49,14 +52,15 @@ func NewWorkerPool(maxWorkers int, registry *Registry, store DownloadStore, bus 
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &workerPoolImpl{
-		maxWorkers:     maxWorkers,
-		jobQueue:       make(chan *DownloadJob, maxWorkers*2),
-		pluginRegistry: registry,
-		store:          store,
-		bus:            bus,
-		ctx:            ctx,
-		cancel:         cancel,
-		cancels:        make(map[string]context.CancelFunc),
+		maxWorkers:       maxWorkers,
+		jobQueue:         make(chan *DownloadJob, maxWorkers*2),
+		pluginRegistry:   registry,
+		store:            store,
+		bus:              bus,
+		ctx:              ctx,
+		cancel:           cancel,
+		cancels:          make(map[string]context.CancelFunc),
+		pluginSemaphores: make(map[string]chan struct{}),
 	}
 	for i := 0; i < maxWorkers; i++ {
 		p.wg.Add(1)
@@ -148,6 +152,25 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 		p.cancelMu.Unlock()
 	}()
 
+	// Resolve the source plugin.
+	plugin := p.pluginRegistry.Get(job.SourceName)
+	if plugin == nil {
+		p.failJob(downloadID, fmt.Sprintf("plugin %q not found", job.SourceName))
+		return
+	}
+
+	// Acquire per-plugin concurrency slot if the plugin has a limit.
+	if cl, ok := plugin.(ConcurrencyLimited); ok && cl.MaxConcurrentDownloads() > 0 {
+		sem := p.getPluginSemaphore(plugin.Name(), cl.MaxConcurrentDownloads())
+		select {
+		case sem <- struct{}{}:
+		case <-jobCtx.Done():
+			p.failJob(downloadID, "download cancelled while queued")
+			return
+		}
+		defer func() { <-sem }()
+	}
+
 	// Transition state: queued → downloading atomically.
 	if ok, err := p.store.TransitionState(jobCtx, downloadID, domain.DownloadQueued, domain.DownloadDownloading); err != nil {
 		log.Printf("worker: state update failed for %s: %v", downloadID, err)
@@ -157,13 +180,6 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 		return
 	}
 	p.publishRecord(downloadID, domain.DownloadDownloading, events.TopicDownloadStateChanged)
-
-	// Resolve the source plugin.
-	plugin := p.pluginRegistry.Get(job.SourceName)
-	if plugin == nil {
-		p.failJob(downloadID, fmt.Sprintf("plugin %q not found", job.SourceName))
-		return
-	}
 
 	// Start the plugin-specific download. The plugin returns its own internal ID
 	// which we use for subsequent status and progress queries.
@@ -185,10 +201,13 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 }
 
 // pollUntilComplete periodically checks the plugin for download status.
-// Returns nil on success, error on failure/cancellation.
+// Returns nil on success, error on failure/cancellation/timeout.
 func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string, plugin Plugin, dp DownloadProgressor, pluginID string) error {
 	ticker := time.NewTicker(progressPollInterval)
 	defer ticker.Stop()
+
+	const downloadTimeout = 10 * time.Minute
+	deadline := time.After(downloadTimeout)
 
 	var lastFilePath string
 	var errCount int
@@ -197,6 +216,8 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 		select {
 		case <-ctx.Done():
 			return fmt.Errorf("download cancelled")
+		case <-deadline:
+			return fmt.Errorf("download timed out after %v", downloadTimeout)
 		case <-ticker.C:
 			// If the plugin supports DownloadProgressor, get high-resolution progress.
 			if dp != nil {
@@ -310,6 +331,20 @@ func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
 	})
 
 	p.publishRecord(downloadID, domain.DownloadFailed, events.TopicDownloadFailed)
+}
+
+// getPluginSemaphore returns or lazily creates a bounded channel for the given
+// plugin. Used to limit concurrent downloads per plugin (e.g., Deezer limits to 2
+// to avoid CDN throttling).
+func (p *workerPoolImpl) getPluginSemaphore(name string, max int) chan struct{} {
+	p.pluginSemMu.Lock()
+	defer p.pluginSemMu.Unlock()
+	if sem, ok := p.pluginSemaphores[name]; ok {
+		return sem
+	}
+	sem := make(chan struct{}, max)
+	p.pluginSemaphores[name] = sem
+	return sem
 }
 
 // publishRecord fires a lifecycle event with a minimal download record.

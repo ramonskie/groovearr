@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -56,7 +57,11 @@ const minFileSize = 100 * 1024 // 100KB
 type DownloadClient struct {
 	cfg    DeezerConfig
 	dlPath string
-	client *http.Client
+	client *http.Client // API calls (30s timeout)
+
+	// downloadClient has no timeout — file downloads may take many minutes.
+	// ReadIdleTimeout on the transport kills stalled connections after 30s of inactivity.
+	downloadClient *http.Client
 
 	authMu        sync.Mutex   // serializes authenticate calls
 	tokenMu       sync.RWMutex // protects apiToken, licenseToken, userID, authenticated
@@ -84,18 +89,36 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
 		Path:  "/",
 	}})
 
+	downloadHeaders := map[string]string{
+		"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+		"Accept-Language": "en-US,en;q=0.9",
+		"Accept":          "application/json, text/plain, */*",
+		"Referer":         "https://www.deezer.com/",
+	}
+
 	return &DownloadClient{
-		cfg:       cfg,
-		dlPath:    downloadPath,
+		cfg:    cfg,
+		dlPath: downloadPath,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Jar:     jar,
 			Transport: &headerTransport{
-				headers: map[string]string{
-					"User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-					"Accept-Language": "en-US,en;q=0.9",
-					"Accept":          "application/json, text/plain, */*",
-					"Referer":         "https://www.deezer.com/",
+				headers:   downloadHeaders,
+				transport: http.DefaultTransport,
+			},
+		},
+		downloadClient: &http.Client{
+			Jar: jar,
+			Transport: &headerTransport{
+				headers: downloadHeaders,
+				transport: &http.Transport{
+					Proxy:                 http.ProxyFromEnvironment,
+					DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+					ForceAttemptHTTP2:     true,
+					MaxIdleConns:          100,
+					IdleConnTimeout:       90 * time.Second,
+					TLSHandshakeTimeout:   10 * time.Second,
+					ExpectContinueTimeout: 1 * time.Second,
 				},
 			},
 		},
@@ -106,7 +129,8 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
 
 // headerTransport adds default headers to every request.
 type headerTransport struct {
-	headers map[string]string
+	headers   map[string]string
+	transport http.RoundTripper
 }
 
 func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -115,7 +139,32 @@ func (t *headerTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 			req.Header.Set(k, v)
 		}
 	}
-	return http.DefaultTransport.RoundTrip(req)
+	return t.transport.RoundTrip(req)
+}
+
+// stallTimeoutReader wraps an io.Reader and returns an error if a Read
+// call blocks longer than timeout. Used to detect stalled CDN connections.
+type stallTimeoutReader struct {
+	r       io.Reader
+	timeout time.Duration
+}
+
+func (s *stallTimeoutReader) Read(p []byte) (int, error) {
+	type result struct {
+		n   int
+		err error
+	}
+	ch := make(chan result, 1)
+	go func() {
+		n, err := s.r.Read(p)
+		ch <- result{n, err}
+	}()
+	select {
+	case res := <-ch:
+		return res.n, res.err
+	case <-time.After(s.timeout):
+		return 0, fmt.Errorf("read stalled after %v", s.timeout)
+	}
 }
 
 // Name returns the canonical plugin name.
@@ -128,6 +177,9 @@ func (c *DownloadClient) DisplayName() string { return downloadDisplayName }
 func (c *DownloadClient) IsConfigured() bool {
 	return c.cfg.ARL != ""
 }
+
+// MaxConcurrentDownloads limits Deezer to 2 concurrent downloads to avoid CDN throttling.
+func (c *DownloadClient) MaxConcurrentDownloads() int { return 2 }
 
 // UserID returns the authenticated Deezer user ID, or 0 if not authenticated.
 func (c *DownloadClient) UserID() int {
@@ -237,9 +289,9 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 
 	log.Printf("deezer: download queued %s (%s)", downloadID, displayName)
 
-	// Use background context — the HTTP request context dies when the handler returns.
-	// Cancellation is handled via CancelDownload which calls the stored cancel func.
-	dlCtx, cancel := context.WithCancel(context.Background())
+	// Derive from the worker's context so cancellation propagates.
+	// Also store our own cancel for plugin-level CancelDownload() calls.
+	dlCtx, cancel := context.WithCancel(ctx)
 	c.cancelMu.Lock()
 	c.cancelFuncs[downloadID] = cancel
 	c.cancelMu.Unlock()
@@ -269,7 +321,8 @@ func (c *DownloadClient) GetDownloadStatus(ctx context.Context, downloadID strin
 	if !ok {
 		return nil, fmt.Errorf("deezer: download %s not found", downloadID)
 	}
-	return r, nil
+	rec := *r // return a copy to avoid data race with download goroutine
+	return &rec, nil
 }
 
 // CancelDownload cancels an active download by cancelling its context.
@@ -509,7 +562,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 	if err != nil {
 		return fmt.Errorf("create request: %w", err)
 	}
-	resp, err := c.client.Do(req)
+	resp, err := c.downloadClient.Do(req)
 	if err != nil {
 		return fmt.Errorf("download request failed: %w", err)
 	}
@@ -526,6 +579,9 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 	}
 	defer f.Close()
 
+	// Wrap the body so stalled reads time out after 30s.
+	body := &stallTimeoutReader{r: resp.Body, timeout: 30 * time.Second}
+
 	var downloaded int64
 	totalSize := resp.ContentLength
 	startTime := time.Now()
@@ -540,7 +596,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 	// Sniff the first chunk to detect whether the stream is encrypted.
 	// Deezer serves both encrypted (BF_CBC_STRIPE) and unencrypted streams
 	// depending on region/format. Decrypting plain audio corrupts the header.
-	firstN, firstReadErr := io.ReadFull(resp.Body, buf)
+	firstN, firstReadErr := io.ReadFull(body, buf)
 	plain := isAudioHeader(buf[:firstN])
 	if firstReadErr != nil && firstReadErr != io.ErrUnexpectedEOF && firstReadErr != io.EOF {
 		return fmt.Errorf("read response: %w", firstReadErr)
@@ -569,7 +625,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 			return ctx.Err()
 		}
 
-		n, readErr := io.ReadFull(resp.Body, buf)
+		n, readErr := io.ReadFull(body, buf)
 		if n > 0 {
 			chunk := buf[:n]
 

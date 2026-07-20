@@ -65,3 +65,15 @@ type DownloadProgressor interface {
 	// downloadID is the plugin-specific identifier returned by Plugin.Download.
 	GetProgress(ctx context.Context, downloadID string) (*Progress, error)
 }
+
+// ConcurrencyLimited is an optional interface for plugins that want to limit
+// concurrent downloads. The worker pool checks this before dispatching a job;
+// if the plugin is at capacity, the job stays in the queue until a slot opens.
+// Return 0 for no limit (default).
+type ConcurrencyLimited interface {
+	Plugin
+
+	// MaxConcurrentDownloads returns the maximum number of concurrent downloads
+	// allowed for this plugin. The worker pool enforces this limit globally.
+	MaxConcurrentDownloads() int
+}
