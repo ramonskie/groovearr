@@ -593,17 +593,15 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 		r.Size = totalSize
 	})
 
-	// Sniff the first chunk to detect whether the stream is encrypted.
-	// Deezer serves both encrypted (BF_CBC_STRIPE) and unencrypted streams
-	// depending on region/format. Decrypting plain audio corrupts the header.
+	// Read and process chunks. Every 3rd chunk is encrypted with Blowfish CBC.
+	// Deezer always uses BF_CBC_STRIPE for all quality formats.
 	firstN, firstReadErr := io.ReadFull(body, buf)
-	plain := isAudioHeader(buf[:firstN])
 	if firstReadErr != nil && firstReadErr != io.ErrUnexpectedEOF && firstReadErr != io.EOF {
 		return fmt.Errorf("read response: %w", firstReadErr)
 	}
 	if firstN > 0 {
 		chunk := buf[:firstN]
-		if !plain && chunkIndex%3 == 0 && firstN == chunkSize {
+		if chunkIndex%3 == 0 && firstN == chunkSize {
 			if decrypted, err := blowfishDecrypt(chunk, key); err == nil {
 				chunk = decrypted
 			}
@@ -629,8 +627,8 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 		if n > 0 {
 			chunk := buf[:n]
 
-			// Decrypt every 3rd chunk only when the stream is actually encrypted.
-			if !plain && chunkIndex%3 == 0 && n == chunkSize {
+			// Decrypt every 3rd chunk (BF_CBC_STRIPE pattern).
+			if chunkIndex%3 == 0 && n == chunkSize {
 				decrypted, err := blowfishDecrypt(chunk, key)
 				if err == nil {
 					chunk = decrypted
@@ -838,7 +836,7 @@ func blowfishDecrypt(data, key []byte) ([]byte, error) {
 	iv := []byte{0, 1, 2, 3, 4, 5, 6, 7}
 	dst := make([]byte, len(data))
 
-	// CBC mode: XOR with previous ciphertext (or IV for first block), then decrypt.
+	// CBC mode decryption: Decrypt(ciphertext) XOR previous_ciphertext (or IV).
 	prev := iv
 	blockSize := blowfish.BlockSize // 8 bytes
 	for i := 0; i < len(data); i += blockSize {
@@ -847,14 +845,14 @@ func blowfishDecrypt(data, key []byte) ([]byte, error) {
 			end = len(data)
 		}
 
-		// XOR with previous block.
-		xored := make([]byte, blockSize)
-		copy(xored, data[i:end])
-		for j := 0; j < blockSize && j < len(xored); j++ {
-			xored[j] ^= prev[j]
-		}
+		// Decrypt the current ciphertext block.
+		var decrypted [8]byte
+		cipher.Decrypt(decrypted[:], data[i:end])
 
-		cipher.Decrypt(dst[i:end], xored)
+		// XOR decrypted block with previous ciphertext (CBC mode).
+		for j := 0; j < blockSize && j < len(decrypted); j++ {
+			dst[i+j] = decrypted[j] ^ prev[j]
+		}
 		prev = data[i:end]
 	}
 
