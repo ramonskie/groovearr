@@ -2,6 +2,7 @@ package plugin
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 )
@@ -124,10 +125,13 @@ func (r *Registry) RegisterFactory(f PluginFactory) error {
 // InitAll creates and registers plugins from all registered factories using
 // the provided sources config map. Sources whose key does not match any
 // registered factory are skipped without error.
+// Individual factory failures are collected and returned as a joined error;
+// successful plugins continue to be registered.
 func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginResources) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
+	var errs []error
 	for name, rawCfg := range sources {
 		f, ok := r.factories[name]
 		if !ok {
@@ -135,13 +139,18 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 		}
 		p, err := f.Create(rawCfg, resources)
 		if err != nil {
-			return fmt.Errorf("plugin %q: create: %w", name, err)
+			errs = append(errs, fmt.Errorf("plugin %q: create: %w", name, err))
+			continue
 		}
 		if _, exists := r.plugins[name]; exists {
-			return fmt.Errorf("plugin %q already registered", name)
+			errs = append(errs, fmt.Errorf("plugin %q already registered", name))
+			continue
 		}
 		r.plugins[name] = p
 		r.names = append(r.names, name)
+	}
+	if len(errs) > 0 {
+		return fmt.Errorf("init plugins: %w", errors.Join(errs...))
 	}
 	return nil
 }

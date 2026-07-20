@@ -50,8 +50,10 @@ func main() {
 	// Download store (SQLite — shares the library db connection).
 	dlStore := dlsqlite.New(libStore.DB())
 
-	// Build plugin registry.
-	registry := download.NewRegistry()
+	// Plugin registry — one shared instance for all capability domains.
+	// Factories declare capabilities (e.g. "download", "metadata", "playlist");
+	// typed wrappers filter by capability for domain-specific access.
+	pluginReg := plugin.NewRegistry()
 
 	currentCfg := cfg.Get()
 
@@ -64,15 +66,21 @@ func main() {
 		}
 	}
 
-	// Register plugin factories.
-	registry.RegisterFactory(soulseek.Factory)
-	registry.RegisterFactory(deezer.Factory)
+	// Register all plugin factories.
+	pluginReg.RegisterFactory(soulseek.Factory)
+	pluginReg.RegisterFactory(deezer.Factory)
+	pluginReg.RegisterFactory(musicbrainz.Factory)
+	pluginReg.RegisterFactory(coverartarchive.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath}
-	if err := registry.InitAll(currentCfg.Sources, resources); err != nil {
+	if err := pluginReg.InitAll(currentCfg.Sources, resources); err != nil {
 		log.Printf("init plugins: %v", err)
 	}
+
+	// Typed registries share the same inner plugin.Registry.
+	registry := download.NewRegistryFrom(pluginReg)
+	mdRegistry := metadata.NewRegistryFrom(pluginReg)
 
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus()
@@ -108,21 +116,6 @@ func main() {
 	// SSE notifier subscribes to event bus topics and translates them into SSE
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus)
-
-	// Metadata provider registry — enriches library with ISRC, genres,
-	// cover art, and external IDs from free metadata services.
-	mdRegistry := metadata.NewRegistry()
-	mdRegistry.RegisterFactory(musicbrainz.Factory)
-	mdRegistry.RegisterFactory(coverartarchive.Factory)
-	if err := mdRegistry.InitAll(currentCfg.Sources, resources); err != nil {
-		log.Printf("warning: some metadata providers failed to initialize: %v", err)
-	}
-	for _, name := range mdRegistry.Names() {
-		p := mdRegistry.Get(name)
-		if p != nil && p.IsConfigured() {
-			log.Printf("  metadata:  %s", name)
-		}
-	}
 
 	// Completed download service subscribes to TopicDownloadCompleted on the
 	// event bus and runs import handlers sequentially on each download.
@@ -168,6 +161,11 @@ func main() {
 	for _, name := range registry.Names() {
 		if p := registry.Get(name); p != nil {
 			log.Printf("  source:   %s", p.DisplayName())
+		}
+	}
+	for _, name := range mdRegistry.Names() {
+		if p := mdRegistry.Get(name); p != nil && p.IsConfigured() {
+			log.Printf("  metadata: %s", p.DisplayName())
 		}
 	}
 	for _, src := range playlistReg.Configured() {

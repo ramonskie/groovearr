@@ -19,6 +19,12 @@ func NewRegistry() *Registry {
 	return &Registry{inner: plugin.NewRegistry()}
 }
 
+// NewRegistryFrom wraps an existing plugin.Registry with metadata type-safety.
+// Multiple typed registries can share the same inner Registry for capability-based routing.
+func NewRegistryFrom(inner *plugin.Registry) *Registry {
+	return &Registry{inner: inner}
+}
+
 // Inner returns the underlying plugin.Registry for capability-based queries
 // and cross-domain access.
 func (r *Registry) Inner() *plugin.Registry { return r.inner }
