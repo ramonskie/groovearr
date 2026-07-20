@@ -30,6 +30,7 @@ type Store interface {
 	GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error)
 	SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error)
 	GetTrackByFilePath(ctx context.Context, filePath string) (*domain.Track, error)
+	GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error)
 	DeleteTrack(ctx context.Context, id int64) error
 
 	// ImportTrack creates artist/album/track records for a single file in

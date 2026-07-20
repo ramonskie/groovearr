@@ -497,6 +497,18 @@ func (s *Store) SearchTracks(ctx context.Context, query string, limit int) ([]do
 	return scanTracks(rows)
 }
 
+func (s *Store) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) {
+	if isrc == "" {
+		return nil, nil
+	}
+	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE isrc = ?", isrc)
+	t, err := scanTrack(row)
+	if err != nil {
+		return nil, err
+	}
+	return t, nil
+}
+
 func (s *Store) GetTrackByFilePath(ctx context.Context, filePath string) (*domain.Track, error) {
 	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE file_path=?", filePath)
 	return scanTrack(row)

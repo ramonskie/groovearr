@@ -334,6 +334,7 @@ func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.
 	}
 	return nil, nil
 }
+func (m *mockStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) { return nil, nil }
 func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error                                   { return nil }
 func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) { return nil, nil }
 func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error)   { return nil, nil }

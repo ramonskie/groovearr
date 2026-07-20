@@ -201,7 +201,7 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		}
 
 		// Search across all configured sources for a match and queue it.
-		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.DurationMs, "", playlistID)
+		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.DurationMs, "", playlistID, pt.ISRC)
 		if dlErr != nil {
 			log.Printf("playlist: download %s - %s: %v", pt.Artist, pt.Title, dlErr)
 			continue
@@ -248,7 +248,7 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 
 // findAndQueueDownload searches across configured sources for a matching track
 // and queues the best candidate via the download service.
-func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string, playlistID int64) (downloadID, sourceName string, confidence float64, err error) {
+func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string, durationMs int64, excludeSource string, playlistID int64, isrc string) (downloadID, sourceName string, confidence float64, err error) {
 	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
 		return s.cfgFn().Quality
 	})
@@ -265,6 +265,7 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist string
 		Album:       best.Track.Album,
 		Title:       best.Track.Title,
 		TrackNumber: best.Track.TrackNumber,
+		ISRC:        isrc,
 		PlaylistID:  strconv.FormatInt(playlistID, 10),
 	})
 	if dlErr != nil {
@@ -314,6 +315,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 					SourceTrackID: info.SourceTrackID,
 					Title: info.Title, Artist: info.Artist,
 					Album: info.Album, DurationMs: info.DurationMs,
+					ISRC: info.ISRC,
 				}
 				if trackID := s.findInLibrary(ctx, info); trackID != 0 {
 					pt.TrackID = &trackID
@@ -344,6 +346,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 			SourceTrackID: tracks[i].SourceTrackID,
 			Title: tracks[i].Title, Artist: tracks[i].Artist,
 			DurationMs: tracks[i].DurationMs,
+			ISRC: tracks[i].ISRC,
 		}
 		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
 			tracks[i].TrackID = &trackID
@@ -548,7 +551,20 @@ func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceNa
 
 // findInLibrary searches the library for a matching track.
 func (s *Service) findInLibrary(ctx context.Context, info TrackInfo) int64 {
-	tracks, err := s.store.SearchTracks(ctx, info.Title, 20)
+	// ISRC is the most reliable identifier — try it first.
+	if info.ISRC != "" {
+		if t, err := s.store.GetTrackByISRC(ctx, info.ISRC); err == nil && t != nil {
+			return t.ID
+		}
+	}
+
+	// Title search with normalized query — strip common annotations that
+	// differ between source metadata and library titles.
+	query := info.Title
+	if idx := strings.IndexAny(query, "(-["); idx > 0 {
+		query = strings.TrimSpace(query[:idx])
+	}
+	tracks, err := s.store.SearchTracks(ctx, query, 20)
 	if err != nil {
 		return 0
 	}

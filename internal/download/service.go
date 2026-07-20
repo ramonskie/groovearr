@@ -34,6 +34,7 @@ type DownloadMeta struct {
 	DiscNumber  int
 	Year        int
 	TrackID     string
+	ISRC        string
 	CoverURL    string
 	PlaylistID  string
 }
@@ -85,6 +86,7 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 		State:       domain.DownloadQueued,
 		Size:        fileSize,
 		TrackID:     meta.TrackID,
+		ISRC:        meta.ISRC,
 		CoverURL:    meta.CoverURL,
 		PlaylistID:  meta.PlaylistID,
 		Artist:      meta.Artist,

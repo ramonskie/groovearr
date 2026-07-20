@@ -119,6 +119,7 @@ func (m *mockLibStore) GetTrackByFilePath(ctx context.Context, filePath string) 
 	}
 	return nil, nil
 }
+func (m *mockLibStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) { return nil, nil }
 
 func (m *mockLibStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
 

@@ -60,6 +60,7 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 		DiscNumber:  record.DiscNumber,
 		FilePath:    record.FilePath,
 		FileSize:    fi.Size(),
+		ISRC:        record.ISRC,
 	}
 
 	// Copy external IDs from record to track.
