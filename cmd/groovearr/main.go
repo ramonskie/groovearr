@@ -13,10 +13,13 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
+	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
+	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/sse"
@@ -106,6 +109,21 @@ func main() {
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus)
 
+	// Metadata provider registry — enriches library with ISRC, genres,
+	// cover art, and external IDs from free metadata services.
+	mdRegistry := metadata.NewRegistry()
+	mdRegistry.RegisterFactory(musicbrainz.Factory)
+	mdRegistry.RegisterFactory(coverartarchive.Factory)
+	if err := mdRegistry.InitAll(currentCfg.Sources, resources); err != nil {
+		log.Printf("warning: some metadata providers failed to initialize: %v", err)
+	}
+	for _, name := range mdRegistry.Names() {
+		p := mdRegistry.Get(name)
+		if p != nil && p.IsConfigured() {
+			log.Printf("  metadata:  %s", name)
+		}
+	}
+
 	// Completed download service subscribes to TopicDownloadCompleted on the
 	// event bus and runs import handlers sequentially on each download.
 	download.NewCompletedDownloadService(
@@ -115,6 +133,7 @@ func main() {
 		download.NewCoverArtHandler(libStore),
 		download.NewTagWriterHandler(),
 		download.NewLibraryImporterHandler(libStore),
+		download.NewMetadataEnrichmentHandler(mdRegistry, libStore),
 		download.NewPlaylistLinkerHandler(libStore),
 		sseNotifier,
 	)
