@@ -20,6 +20,9 @@ export const settingsFormSchema = z.object({
   deezer_arl: z.string().optional(),
   deezer_quality: z.enum(["flac", "mp3_320", "mp3_128"]).optional(),
 
+  // MusicBrainz
+  musicbrainz_email: z.string().optional(),
+
   // Library
   library_path: z.string().optional(),
   folder_template: z.string().optional(),
@@ -37,6 +40,7 @@ export const settingsDefaults: SettingsFormValues = {
   slskd_api_key: "",
   deezer_arl: "",
   deezer_quality: "flac",
+  musicbrainz_email: "",
   library_path: "",
   folder_template: "",
   playlist_path: "",

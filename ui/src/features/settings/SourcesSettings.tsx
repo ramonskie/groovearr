@@ -2,6 +2,7 @@ import { useSources } from "../../hooks/use-config";
 import Spinner from "../../components/Spinner";
 import SoulseekSection from "./SoulseekSection";
 import DeezerSection from "./DeezerSection";
+import MusicBrainzSection from "./MusicBrainzSection";
 
 export default function SourcesSettings() {
   const { data: sources, isLoading } = useSources();
@@ -16,11 +17,13 @@ export default function SourcesSettings() {
 
   const soulseekSource = sources?.find((s) => s.name === "soulseek");
   const deezerSource = sources?.find((s) => s.name === "deezer");
+  const mbSource = sources?.find((s) => s.name === "musicbrainz");
 
   return (
     <div>
       <SoulseekSection source={soulseekSource} />
       <DeezerSection source={deezerSource} />
+      <MusicBrainzSection source={mbSource} />
     </div>
   );
 }

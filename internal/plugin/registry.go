@@ -155,6 +155,27 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 	return nil
 }
 
+// InitRemaining creates plugins with their factory DefaultConfig() for any
+// registered factory that hasn't been instantiated yet (e.g., sources not
+// present in the config file). Useful for optional plugins that should be
+// available even without explicit configuration.
+func (r *Registry) InitRemaining(resources PluginResources) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	for name, f := range r.factories {
+		if _, exists := r.plugins[name]; exists {
+			continue
+		}
+		p, err := f.Create(f.DefaultConfig(), resources)
+		if err != nil {
+			continue
+		}
+		r.plugins[name] = p
+		r.names = append(r.names, name)
+	}
+}
+
 // Rebuild tears down an existing plugin and recreates it with new config.
 func (r *Registry) Rebuild(name string, rawCfg json.RawMessage, resources PluginResources) error {
 	r.mu.Lock()

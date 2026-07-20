@@ -77,6 +77,8 @@ func main() {
 	if err := pluginReg.InitAll(currentCfg.Sources, resources); err != nil {
 		log.Printf("init plugins: %v", err)
 	}
+	// Create plugins not in config file using their defaults.
+	pluginReg.InitRemaining(resources)
 
 	// Typed registries share the same inner plugin.Registry.
 	registry := download.NewRegistryFrom(pluginReg)
@@ -150,7 +152,7 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, registry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub)
+	srv := api.NewServer(addr, cfg, registry, mdRegistry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub)
 
 	log.Printf("groovearr starting")
 	log.Printf("  config:   %s", configPath)

@@ -20,6 +20,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/sse"
@@ -29,6 +30,7 @@ import (
 type Server struct {
 	cfg         *config.Persistence
 	registry    *download.Registry
+	mdRegistry  *metadata.Registry
 	store       library.Store
 	scanner     *library.Scanner
 	downloadSvc *download.DownloadService
@@ -40,10 +42,11 @@ type Server struct {
 }
 
 // NewServer creates an HTTP server with all routes wired.
-func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub) *Server {
+func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub) *Server {
 	s := &Server{
 		cfg:         cfg,
 		registry:    registry,
+		mdRegistry:  mdRegistry,
 		store:       store,
 		scanner:     scanner,
 		downloadSvc: downloadSvc,
@@ -210,31 +213,51 @@ type validationError struct {
 func (e *validationError) Error() string { return "validation failed" }
 
 func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
-	names := s.registry.Names()
-	sources := make([]map[string]any, 0, len(names))
-	for _, name := range names {
-		p := s.registry.Get(name)
-		cfg := p.IsConfigured()
-		status := "not_configured"
-		if cfg {
-			status = "configured"
-			if p.Connected() {
-				status = "connected"
-			}
+	var sources []map[string]any
+
+	// Collect from download registry.
+	for _, name := range s.registry.Names() {
+		if p := s.registry.Get(name); p != nil {
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected()))
 		}
-		sources = append(sources, map[string]any{
-			"name":         name,
-			"display_name": p.DisplayName(),
-			"configured":   cfg,
-			"status":       status,
-		})
 	}
+
+	// Collect from metadata registry.
+	for _, name := range s.mdRegistry.Names() {
+		if p := s.mdRegistry.Get(name); p != nil {
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected()))
+		}
+	}
+
 	writeJSON(w, http.StatusOK, sources)
+}
+
+func sourceEntry(name, displayName string, configured, connected bool) map[string]any {
+	status := "not_configured"
+	if configured {
+		status = "configured"
+		if connected {
+			status = "connected"
+		}
+	}
+	return map[string]any{
+		"name":         name,
+		"display_name": displayName,
+		"configured":   configured,
+		"status":       status,
+	}
 }
 
 func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	source := r.PathValue("source")
-	p := s.registry.Get(source)
+
+	// Check both registries.
+	var p plugin.BasePlugin
+	if dp := s.registry.Get(source); dp != nil {
+		p = dp
+	} else if mp := s.mdRegistry.Get(source); mp != nil {
+		p = mp
+	}
 	if p == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "source not found"})
 		return

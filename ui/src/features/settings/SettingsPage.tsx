@@ -41,12 +41,14 @@ export default function SettingsPage() {
     if (config) {
       const slskd = config.sources?.soulseek ?? {};
       const dz = config.sources?.deezer ?? {};
+      const mb = config.sources?.musicbrainz ?? {};
       form.reset({
         download_path: config.library.download_path ?? "",
         slskd_url: (slskd as Record<string, string>).slskd_url ?? "",
         slskd_api_key: (slskd as Record<string, string>).api_key ?? "",
         deezer_arl: (dz as Record<string, string>).arl ?? "",
         deezer_quality: ((dz as Record<string, string>).quality as "flac" | "mp3_320" | "mp3_128") ?? "flac",
+        musicbrainz_email: (mb as Record<string, string>).email ?? "",
         library_path: config.library.library_path ?? "",
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
@@ -67,6 +69,9 @@ export default function SettingsPage() {
           deezer: {
             arl: values.deezer_arl ?? "",
             quality: values.deezer_quality ?? "flac",
+          },
+          musicbrainz: {
+            email: values.musicbrainz_email ?? "",
           },
         },
         library: {
