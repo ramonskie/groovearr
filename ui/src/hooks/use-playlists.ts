@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useEffect, useRef } from "react";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import {
   getPlaylists,
@@ -28,11 +28,28 @@ export function usePlaylists() {
 
 export function usePlaylist(id: number) {
   const records = useDownloadStore((s) => s.records);
+  const queryClient = useQueryClient();
+  const prevCompleted = useRef<Set<string>>(new Set());
+
+  // Invalidate playlist query when a download with playlist_id completes,
+  // so track status (linked/unmatched) updates without manual refresh.
+  useEffect(() => {
+    const downloads = Object.values(records);
+    for (const d of downloads) {
+      if (!d.playlist_id || !d.state) continue;
+      const key = `${d.id}|${d.state}`;
+      if (d.state === "imported" && !prevCompleted.current.has(d.id)) {
+        prevCompleted.current.add(d.id);
+        queryClient.invalidateQueries({ queryKey: ["playlist", Number(d.playlist_id)] });
+      }
+    }
+  }, [records, queryClient]);
 
   const query = useQuery({
     queryKey: ["playlist", id] as const,
     queryFn: () => getPlaylist(id),
     enabled: id > 0,
+    refetchInterval: 5000, // poll for track linking updates
   });
 
   // Attach per-track download status by matching active downloads to
@@ -44,7 +61,7 @@ export function usePlaylist(id: number) {
     const downloads = Object.values(records);
 
     return tracks.map((track): PlaylistTrack => {
-      if (track.linked) {
+      if (track.track_id != null) {
         return { ...track, download_status: "linked" as const };
       }
 
@@ -156,8 +173,9 @@ function downloadStateToStatus(state: string): PlaylistTrackDownloadStatus {
     case "downloading":
     case "importPending":
     case "importing":
+      return "downloading";
     case "imported":
-      return "downloading"; // In-progress stages show as "downloading"
+      return "linked";
     default:
       return "unmatched";
   }
