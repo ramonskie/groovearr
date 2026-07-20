@@ -1,0 +1,41 @@
+services:
+  slskd:
+    image: slskd/slskd:latest
+    container_name: groovearr-slskd
+    environment:
+      SLSKD_REMOTE_CONFIGURATION: "true"
+      SLSKD_HTTP_PORT: "5030"
+      SLSKD_HTTPS_DISABLED: "true"
+      SLSKD_SLSK_LISTEN_PORT: "50301"
+      SLSKD_SHARED_DIR: /downloads
+      SLSKD_APP_DIR: /app
+    volumes:
+      - ./slskd.yml:/app/slskd.yml:Z
+      - slskd-data:/app
+      - downloads:/downloads
+      - music:/music
+    ports:
+      - "5030:5030"
+      - "50301:50301"
+    restart: unless-stopped
+
+  groovearr:
+    build: .
+    container_name: groovearr
+    environment:
+      GROOVEARR_CONFIG: /config/config.json
+      GROOVEARR_ADDR: ":8008"
+    volumes:
+      - ./config.docker.json:/config/config.json:Z
+      - downloads:/downloads
+      - music:/music
+      - playlists:/playlists
+    ports:
+      - "8008:8008"
+    restart: unless-stopped
+
+volumes:
+  slskd-data:
+  downloads:
+  music:
+  playlists:

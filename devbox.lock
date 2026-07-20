@@ -1,0 +1,57 @@
+{
+  "lockfile_version": "1",
+  "packages": {
+    "github:NixOS/nixpkgs/nixpkgs-unstable": {
+      "last_modified": "2026-07-20T05:30:19Z",
+      "resolved": "github:NixOS/nixpkgs/a16c3fde2ffeab7f6326f50f460aaffde7ae066d?lastModified=1784525419"
+    },
+    "miniupnpc@latest": {
+      "last_modified": "2026-07-08T21:13:06Z",
+      "resolved": "github:NixOS/nixpkgs/389ed85304b281ca7f306cf8a1eb4378651ca44e#miniupnpc",
+      "source": "devbox-search",
+      "version": "2.3.3",
+      "systems": {
+        "aarch64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/38rb6y4m058ndvb9w9icbb6pgkzalqj7-miniupnpc-2.3.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/38rb6y4m058ndvb9w9icbb6pgkzalqj7-miniupnpc-2.3.3"
+        },
+        "aarch64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/8ac7cimgiasg7axrm5bfa7hvv1k2rj0k-miniupnpc-2.3.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/8ac7cimgiasg7axrm5bfa7hvv1k2rj0k-miniupnpc-2.3.3"
+        },
+        "x86_64-darwin": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/fg2p08iyxrchal0gn3j43jv3zcn7p8i6-miniupnpc-2.3.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/fg2p08iyxrchal0gn3j43jv3zcn7p8i6-miniupnpc-2.3.3"
+        },
+        "x86_64-linux": {
+          "outputs": [
+            {
+              "name": "out",
+              "path": "/nix/store/5kx09hc0xjd8k4fbb5nm647cvb36bz0l-miniupnpc-2.3.3",
+              "default": true
+            }
+          ],
+          "store_path": "/nix/store/5kx09hc0xjd8k4fbb5nm647cvb36bz0l-miniupnpc-2.3.3"
+        }
+      }
+    }
+  }
+}

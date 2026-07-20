@@ -1,5 +1,8 @@
 # Secrets & config
 config.json
+config.docker.json
+.env
+slskd.yml
 
 # Build artifacts
 build/

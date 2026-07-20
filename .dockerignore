@@ -1,0 +1,33 @@
+# Build artifacts
+build/
+ui/dist/
+ui/node_modules/
+
+# Runtime data (mounted as volumes)
+downloads/
+music/
+playlists/
+*.db
+config.json
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# AI agent
+.opencode/
+.tmp/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test coverage
+coverage.out
+coverage.html
