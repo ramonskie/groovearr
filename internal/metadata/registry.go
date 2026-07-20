@@ -2,7 +2,6 @@ package metadata
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -38,9 +37,6 @@ func (r *Registry) Get(name string) Provider {
 	if p, ok := bp.(Provider); ok {
 		return p
 	}
-	if bp != nil {
-		log.Printf("registry: plugin %q does not implement metadata.Provider", name)
-	}
 	return nil
 }
 
@@ -48,30 +44,26 @@ func (r *Registry) Get(name string) Provider {
 func (r *Registry) Names() []string { return r.inner.Names() }
 
 // All returns all registered metadata providers in registration order.
-// Non-metadata plugins are silently skipped with a warning log.
+// Non-metadata plugins are silently skipped.
 func (r *Registry) All() []Provider {
 	bps := r.inner.All()
 	out := make([]Provider, 0, len(bps))
 	for _, bp := range bps {
 		if p, ok := bp.(Provider); ok {
 			out = append(out, p)
-		} else {
-			log.Printf("registry: plugin %q does not implement metadata.Provider, skipping", bp.Name())
 		}
 	}
 	return out
 }
 
 // Configured returns metadata providers where IsConfigured() == true.
-// Non-metadata plugins are silently skipped with a warning log.
+// Non-metadata plugins are silently skipped.
 func (r *Registry) Configured() []Provider {
 	bps := r.inner.Configured()
 	out := make([]Provider, 0, len(bps))
 	for _, bp := range bps {
 		if p, ok := bp.(Provider); ok {
 			out = append(out, p)
-		} else {
-			log.Printf("registry: configured plugin %q does not implement metadata.Provider, skipping", bp.Name())
 		}
 	}
 	return out

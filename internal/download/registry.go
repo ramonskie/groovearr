@@ -2,7 +2,6 @@ package download
 
 import (
 	"encoding/json"
-	"log"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -38,9 +37,6 @@ func (r *Registry) Get(name string) Plugin {
 	if p, ok := bp.(Plugin); ok {
 		return p
 	}
-	if bp != nil {
-		log.Printf("registry: plugin %q does not implement download.Plugin", name)
-	}
 	return nil
 }
 
@@ -48,30 +44,26 @@ func (r *Registry) Get(name string) Plugin {
 func (r *Registry) Names() []string { return r.inner.Names() }
 
 // All returns all registered download plugins in registration order.
-// Non-download plugins are silently skipped with a warning log.
+// Non-download plugins are silently skipped.
 func (r *Registry) All() []Plugin {
 	bps := r.inner.All()
 	out := make([]Plugin, 0, len(bps))
 	for _, bp := range bps {
 		if p, ok := bp.(Plugin); ok {
 			out = append(out, p)
-		} else {
-			log.Printf("registry: plugin %q does not implement download.Plugin, skipping", bp.Name())
 		}
 	}
 	return out
 }
 
 // Configured returns download plugins where IsConfigured() == true.
-// Non-download plugins are silently skipped with a warning log.
+// Non-download plugins are silently skipped.
 func (r *Registry) Configured() []Plugin {
 	bps := r.inner.Configured()
 	out := make([]Plugin, 0, len(bps))
 	for _, bp := range bps {
 		if p, ok := bp.(Plugin); ok {
 			out = append(out, p)
-		} else {
-			log.Printf("registry: configured plugin %q does not implement download.Plugin, skipping", bp.Name())
 		}
 	}
 	return out
