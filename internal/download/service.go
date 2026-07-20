@@ -79,6 +79,7 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 	record := &domain.DownloadRecord{
 		ID:          id,
 		SourceName:  sourceName,
+		Username:    username,
 		Filename:    filename,
 		DisplayName: displayName,
 		State:       domain.DownloadQueued,

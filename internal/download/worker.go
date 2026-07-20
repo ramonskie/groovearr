@@ -249,6 +249,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			// import" — this is the PLUGIN's internal state, not the pipeline's
 			// final state. After we see this, we transition to DownloadImportPending
 			// and CompletedDownloadService takes over.
+			log.Printf("worker: %s state=%s progress=%.0f%%", serviceID, status.State, status.Progress)
 			switch {
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {

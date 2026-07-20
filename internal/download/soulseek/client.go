@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"net/url"
 	"path"
@@ -232,9 +233,34 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*domain.DownloadRecord, error) {
 	resp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads/"+url.PathEscape(downloadID), nil)
 	if err != nil {
+		// Single-transfer endpoint may 404 for completed/errored transfers.
+		// Try the list endpoint to find the terminal state.
+		log.Printf("soulseek: single-transfer 404 for %s, trying list fallback", downloadID)
+		if listResp, listErr := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil); listErr == nil {
+			raw := string(listResp)
+			if len(raw) > 200 {
+				raw = raw[:200]
+			}
+			log.Printf("soulseek: list resp: %s", raw)
+			records := parseDownloadStatus(listResp, c.dlPath)
+			log.Printf("soulseek: list fallback returned %d records", len(records))
+			for _, rec := range records {
+				log.Printf("soulseek: list record id=%s state=%s (looking for %s)", rec.ID, rec.State, downloadID)
+				if rec.ID == downloadID {
+					log.Printf("soulseek: FOUND match! state=%s", rec.State)
+					c.cacheRecord(&rec)
+					return &rec, nil
+				}
+			}
+			log.Printf("soulseek: download %s not found in list (checked %d records)", downloadID, len(records))
+		} else {
+			log.Printf("soulseek: list fallback failed: %v", listErr)
+		}
+		// Not in list either — use cached record if available.
 		c.downloadsMu.RLock()
 		defer c.downloadsMu.RUnlock()
 		if r, ok := c.downloads[downloadID]; ok {
+			log.Printf("soulseek: returning cached record for %s (state=%s)", downloadID, r.State)
 			return r, nil
 		}
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
@@ -246,11 +272,16 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dom
 	}
 	record := records[0]
 
-	c.downloadsMu.Lock()
-	c.downloads[record.ID] = &record
-	c.downloadsMu.Unlock()
+	c.cacheRecord(&record)
 
 	return &record, nil
+}
+
+// cacheRecord stores a download record in the in-memory cache.
+func (c *Client) cacheRecord(r *domain.DownloadRecord) {
+	c.downloadsMu.Lock()
+	c.downloads[r.ID] = r
+	c.downloadsMu.Unlock()
 }
 
 // CancelDownload cancels an active download. Tries multiple endpoint formats for slskd compatibility.
@@ -382,17 +413,18 @@ func extractID(raw json.RawMessage) string {
 }
 
 func extractDownloadID(raw json.RawMessage, fallback string) string {
-	// Try dict.
+	// slskd returns: {"enqueued":[{"id":"...","filename":"..."}],"failed":[]}
 	var m map[string]any
 	if json.Unmarshal(raw, &m) == nil {
-		if id, ok := m["id"]; ok {
-			return fmt.Sprint(id)
+		if enqueued, ok := m["enqueued"].([]any); ok && len(enqueued) > 0 {
+			if entry, ok := enqueued[0].(map[string]any); ok {
+				if id, ok := entry["id"]; ok {
+					return fmt.Sprint(id)
+				}
+			}
 		}
-	}
-	// Try list.
-	var arr []map[string]any
-	if json.Unmarshal(raw, &arr) == nil && len(arr) > 0 {
-		if id, ok := arr[0]["id"]; ok {
+		// Flat id field (some slskd versions).
+		if id, ok := m["id"]; ok {
 			return fmt.Sprint(id)
 		}
 	}
@@ -576,13 +608,14 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 				State            string  `json:"state"`
 				Size             int64   `json:"size"`
 				BytesTransferred int64   `json:"bytesTransferred"`
-				AverageSpeed     int64   `json:"averageSpeed"`
+				AverageSpeed     float64 `json:"averageSpeed"`
 				PercentComplete  float64 `json:"percentComplete"`
 			} `json:"files"`
 		} `json:"directories"`
 	}
 
 	if err := json.Unmarshal(raw, &users); err != nil {
+		log.Printf("soulseek: parseDownloadStatus unmarshal error: %v", err)
 		return nil
 	}
 
@@ -602,7 +635,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 					Progress:    f.PercentComplete,
 					Size:        f.Size,
 					Transferred: f.BytesTransferred,
-					Speed:       f.AverageSpeed,
+					Speed:       int64(f.AverageSpeed),
 					FilePath:    filePath,
 				})
 			}
@@ -615,12 +648,12 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 func parseState(s string) domain.DownloadState {
 	lower := strings.ToLower(s)
 	switch {
-	case strings.Contains(lower, "completed") || strings.Contains(lower, "succeeded"):
-		return domain.DownloadImported
-	case strings.Contains(lower, "errored") || strings.Contains(lower, "failed"):
+	case strings.Contains(lower, "errored") || strings.Contains(lower, "failed") || strings.Contains(lower, "rejected"):
 		return domain.DownloadFailed
 	case strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled") || strings.Contains(lower, "aborted"):
 		return domain.DownloadIgnored
+	case strings.Contains(lower, "completed") || strings.Contains(lower, "succeeded"):
+		return domain.DownloadImported
 	case strings.Contains(lower, "initializing") || strings.Contains(lower, "queued"):
 		return domain.DownloadQueued
 	default:

@@ -3,6 +3,7 @@ package library
 
 import (
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -123,12 +124,40 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 		return filePath, fmt.Errorf("mkdir %s: %w", dir, err)
 	}
 
-	// Move the file.
+	// Move the file. Falls back to copy+delete on cross-device errors (e.g. Docker volumes).
 	if err := os.Rename(filePath, targetPath); err != nil {
-		return filePath, fmt.Errorf("rename %s → %s: %w", filePath, targetPath, err)
+		if strings.Contains(err.Error(), "cross-device") {
+			// Copy + delete for cross-filesystem moves (Docker volumes).
+			if copyErr := copyFile(filePath, targetPath); copyErr != nil {
+				return filePath, fmt.Errorf("copy %s → %s: %w", filePath, targetPath, copyErr)
+			}
+			os.Remove(filePath)
+		} else {
+			return filePath, fmt.Errorf("rename %s → %s: %w", filePath, targetPath, err)
+		}
 	}
 
 	return targetPath, nil
+}
+
+// copyFile copies a file from src to dst.
+func copyFile(src, dst string) error {
+	s, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer s.Close()
+
+	d, err := os.Create(dst)
+	if err != nil {
+		return err
+	}
+	defer d.Close()
+
+	if _, err := io.Copy(d, s); err != nil {
+		return err
+	}
+	return d.Sync()
 }
 
 // ScanMetadata extracts metadata from a domain.Track and its linked Artist/Album.

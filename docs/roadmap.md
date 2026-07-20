@@ -5,14 +5,32 @@
 
 ---
 
+## Architecture Philosophy
+
+Groovearr uses a **plugin-first** architecture. Download sources and metadata providers
+are equal peers behind common interfaces. No single source is privileged.
+
+**Two paths to a complete library:**
+
+| Path | Download | Metadata (covers, ISRC, tags) | Cost |
+|------|----------|------------------------------|------|
+| **Free** | slskd (Soulseek P2P) | MusicBrainz / Cover Art Archive / Last.fm | $0 |
+| **Premium** | Deezer ARL (+ Spotify later) | Built-in (rich metadata from streaming APIs) | ~$12/mo |
+
+The plugin system supports mixing: use slskd for downloads + Deezer ARL for metadata,
+or go fully free with slskd + MusicBrainz. Each path should produce an equally complete
+library (covers, tags, organized files).
+
+---
+
 ## Tier 0: MVP — Already Implemented
 
 | # | Feature | Status | Notes |
 |---|---------|--------|-------|
-| 1 | Search via Soulseek (slskd) | ✅ | REST API polling, album grouping |
-| 2 | Download via Soulseek | ✅ | Transfer tracking, cancel, clear |
+| 1 | Search via slskd (Soulseek P2P) | ✅ | REST API polling, album grouping |
+| 2 | Download via slskd | ✅ | Transfer tracking, cancel, clear |
 | 3 | Search Deezer metadata | ✅ | Public API, advanced query syntax |
-| 4 | Download via Deezer (ARL) | ✅ | Blowfish decrypt, quality fallback |
+| 4 | Download via Deezer (ARL — premium) | ✅ | Blowfish decrypt, quality fallback. Requires paid Deezer account. |
 | 5 | Quality-based result scoring | ✅ | Format + bitrate + upload speed |
 | 6 | Track metadata matching | ✅ | Bigram + version aware + CJK |
 | 7 | Library DB (artists/albums/tracks) | ✅ | SQLite, 3 tables, external ID cols |
@@ -23,7 +41,7 @@
 | 12 | Cancel/clear downloads | ✅ | Per-plugin cancel + remove |
 | 13 | Config management | ✅ | JSON persistence, thread-safe, UI |
 | 14 | Plugin architecture | ✅ | Interface + registry + aliases |
-| 15 | Web UI (embedded SPA) | ✅ | Vanilla JS, all pages, no framework |
+| 15 | Web UI (embedded SPA) | ✅ | React + TypeScript, all pages |
 
 ---
 
@@ -34,9 +52,9 @@ Small but impactful fixes to what's already built.
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
 | 16 | **Post-download file renaming** — apply `folder_template` via `PathResolver` after download completes | ✅ Done | S | PathResolver (done) |
-| 17 | **Cover art download hook** — post-processing hook fetches album/artist covers from Deezer, caches as `cover.jpg` in album dir, populates `thumb_url` in DB | ✅ Done | M | PostProcessor (done), Deezer API (done) |
+| 17 | **Cover art download hook** — post-processing hook fetches album/artist covers, caches as `cover.jpg` in album dir, populates `thumb_url` in DB. Currently only Deezer provides `CoverURL` — needs free metadata providers (see Tier 1.5) for slskd-only users. | ✅ Done | M | PostProcessor (done), Deezer API (done) |
 | 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | ✅ Done | M | `dhowden/tag` |
-| 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | ✅ Done | L | `bogem/id3v2`, `go-flac/flacpicture` |
+| 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | ✅ Done | L | `bogem/id3v2`, `go-flac` |
 | 20 | **Config validation** — validate URLs, quality values, path existence at save time | ✅ Done | S | — |
 | 21 | **DB migration versioning** — version-tracked schema with `schema_version` table | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
@@ -45,50 +63,29 @@ Small but impactful fixes to what's already built.
 | 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | ✅ Done | M | — |
 | 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | ✅ Done | M | Cover art hook |
 
-### #17 Cover Art Hook — Implementation Plan
+---
 
-**Architecture**: A `PostDownloadHook` registered after the renamer hook. Runs in the same `ProcessDownloads` call.
+## Tier 1.5: Metadata Providers — Free-Tier Backbone
 
-**Gaps to close**:
-1. `TrackResult` discards Deezer album/artist IDs during search → download. Need to carry `CoverURL` (or DeezerAlbumID) through to the `DownloadRecord`.
-2. `DownloadRecord` has no cover/image field. Add `CoverURL string`.
-3. Deezer `song.getData` response contains album/artist IDs but they're not extracted.
-4. `thumb_url` columns exist in DB but never written. Store needs an `UpdateAlbumThumb` method (or use existing `UpsertAlbum`).
+Metadata plugins are separate from download plugins. A download source provides files;
+a metadata provider enriches them with covers, ISRC codes, genres, and external IDs.
+This tier enables the fully free path (slskd + free metadata = complete library).
 
-**Hook flow**:
-```
-download completes (FilePath set by plugin)
-  → renamer hook: moves file to library root
-  → cover hook:
-      1. Read DownloadRecord.CoverURL (set by plugin at download time)
-      2. If empty, skip (Soulseek doesn't provide covers)
-      3. Parse artist/album from file path
-      4. GET cover URL → write to album_dir/cover.jpg
-      5. Update albums.thumb_url via store
-      6. (Optional) fetch artist picture, update artists.thumb_url
-```
+| # | Feature | Priority | Effort | Dependencies |
+|---|---------|----------|--------|--------------|
+| 27 | **Metadata provider plugin interface** — `MetadataProvider` interface (separate from `download.Plugin`): `SearchCover(artist, album) *CoverResult`, `EnrichTrack(track) *Metadata`. Registry-based, config-driven. | 🔴 High | M | Plugin architecture (done) |
+| 28 | **Cover Art Archive provider** — free cover art via MusicBrainz Cover Art Archive. Search by MBID or artist+album. No auth required. Fills `CoverURL` for slskd downloads. | 🔴 High | M | Metadata provider interface, MusicBrainz ID lookup |
+| 29 | **MusicBrainz metadata provider** — artist/album/release IDs, track listings, AcoustID fingerprinting. Backbone of free-tier metadata. | 🔴 High | L | Metadata provider interface |
+| 30 | **iTunes Search API provider** — free cover art + metadata fallback. No auth, good for mainstream releases not in CAA. | 🟡 Medium | S | Metadata provider interface |
+| 31 | **Metadata enrichment pipeline** — background workers that run metadata plugins against new library additions. Post-import hook that queries all registered metadata providers. | 🔴 High | M | Metadata provider interface + registry |
+| 32 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | 🟡 Medium | M | Metadata provider interface, Last.fm API key |
 
-**Cache strategy**: `cover.jpg` stored in the album directory. No separate cache directory needed — the album folder IS the cache. If `cover.jpg` already exists, skip download.
-
-**Deezer data available**:
-| Source | Field | Size |
-|--------|-------|------|
-| Public API `Track.Album.CoverXL` | 1000×1000 | From search results |
-| Public API `Artist.PictureXL` | 1000×1000 | From search results |
-| Private API `song.getData` | Album/artist IDs | During download |
-
-**Files to create/modify**:
-| File | Change |
-|------|--------|
-| `internal/domain/download.go` | Add `CoverURL` to `DownloadRecord` |
-| `internal/domain/search.go` | Add `CoverURL` to `TrackResult` |
-| `internal/download/deezer/api.go` | `Track.ToTrackResult()` carries CoverURL |
-| `internal/download/deezer/download.go` | `Download()` copies CoverURL from search result to record |
-| `internal/library/cover.go` | New: `CoverHook` implementing `PostDownloadHook` |
-| `internal/api/handlers.go` | New `GET /api/covers/{albumID}` proxy endpoint |
-| `internal/library/sqlite/store.go` | `UpdateAlbumThumb(albumID, url)` |
-| `cmd/groovearr/main.go` | Register cover hook in PostProcessor |
-| `internal/api/static/index.html` | `<img>` tags in library views |
+**Goal**: After Tier 1.5, a user with only slskd configured gets:
+- ✅ Cover art (`cover.jpg` in album dirs)
+- ✅ Artist images and bios
+- ✅ ISRC codes for dedup
+- ✅ Genre tags
+- ✅ Album grouping by MusicBrainz release ID
 
 ---
 
@@ -98,14 +95,14 @@ Plugin interface makes adding new sources straightforward.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 26 | **YouTube downloads** — via yt-dlp subprocess or API wrapper | 🟡 Medium | L | `yt-dlp` binary or Go yt-dlp lib |
-| 27 | **Tidal downloads** — OAuth device auth, search + download + quality selection | 🟡 Medium | L | Tidal API (`tidalapi` port) |
-| 28 | **Qobuz downloads** — REST API auth, search + download | 🟢 Low | L | Qobuz API |
-| 29 | **SoundCloud downloads** — yt-dlp extractor or direct API | 🟢 Low | M | — |
-| 30 | **Torrent downloads (Prowlarr)** — Prowlarr API → qBittorrent/Transmission | 🟢 Low | L | Prowlarr + torrent client |
-| 31 | **Usenet downloads (Prowlarr)** — Prowlarr → SABnzbd/NZBGet | 🟢 Low | L | Prowlarr + usenet client |
-| 32 | **Lidarr integration** — use Lidarr as download source via its API | 🟢 Low | M | Lidarr instance |
-| 33 | **Direct URL download** — paste Tidal/Qobuz track URLs directly | 🟢 Low | S | Tidal/Qobuz clients |
+| 33 | **YouTube downloads** — via yt-dlp subprocess or API wrapper | 🟡 Medium | L | `yt-dlp` binary or Go yt-dlp lib |
+| 34 | **Tidal downloads** — OAuth device auth, search + download + quality selection | 🟡 Medium | L | Tidal API (`tidalapi` port) |
+| 35 | **Qobuz downloads** — REST API auth, search + download | 🟢 Low | L | Qobuz API |
+| 36 | **SoundCloud downloads** — yt-dlp extractor or direct API | 🟢 Low | M | — |
+| 37 | **Torrent downloads (Prowlarr)** — Prowlarr API → qBittorrent/Transmission | 🟢 Low | L | Prowlarr + torrent client |
+| 38 | **Usenet downloads (Prowlarr)** — Prowlarr → SABnzbd/NZBGet | 🟢 Low | L | Prowlarr + usenet client |
+| 39 | **Lidarr integration** — use Lidarr as download source via its API | 🟢 Low | M | Lidarr instance |
+| 40 | **Direct URL download** — paste Tidal/Qobuz track URLs directly | 🟢 Low | S | Tidal/Qobuz clients |
 
 ---
 
@@ -115,13 +112,13 @@ Auto-sync library state with external media servers.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 34 | **Plex integration** — scan library, detect missing tracks, trigger refresh | 🔴 High | L | Plex API |
-| 35 | **Jellyfin integration** — same as Plex but against Jellyfin API | 🟡 Medium | L | Jellyfin API |
-| 36 | **Navidrome integration** — Subsonic API for library sync | 🟡 Medium | L | Subsonic API |
-| 37 | **Library duplicate detection** — SHA256 content hash, filename fuzzy match | 🟡 Medium | M | File scanner |
-| 38 | **Library issues dashboard** — show missing tracks, dupes, stale files, tag mismatches | 🟢 Low | L | Scanner + store |
-| 39 | **Listening stats page** — play counts, top artists, recent additions | 🟢 Low | M | Plex/Jellyfin play history |
-| 40 | **M3U playlist export** — export library playlists as .m3u files | 🟢 Low | S | — |
+| 41 | **Plex integration** — scan library, detect missing tracks, trigger refresh | 🟡 Medium | L | Plex API |
+| 42 | **Jellyfin integration** — same as Plex but against Jellyfin API | 🟡 Medium | L | Jellyfin API |
+| 43 | **Navidrome integration** — Subsonic API for library sync | 🟡 Medium | L | Subsonic API |
+| 44 | **Library duplicate detection** — SHA256 content hash, filename fuzzy match | 🟡 Medium | M | File scanner |
+| 45 | **Library issues dashboard** — show missing tracks, dupes, stale files, tag mismatches | 🟢 Low | L | Scanner + store |
+| 46 | **Listening stats page** — play counts, top artists, recent additions | 🟢 Low | M | Plex/Jellyfin play history |
+| 47 | **M3U playlist export** — export library playlists as .m3u files | 🟢 Low | S | — |
 
 ---
 
@@ -131,33 +128,31 @@ Spotify integration for playlist import/sync, artist following, and discovery.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 41 | **Spotify OAuth** — login flow, token refresh, scoped access | 🟡 In Progress | M | Playlist framework |
-| 42 | **Deezer playlist import** — import playlists via ARL, download tracks, separate playlist folder | ✅ Done | M | Playlist framework |
-| 43 | **Playlist sync** — refresh, discover missing, download pipeline | 🟡 In Progress | L | Playlist service |
-| 44 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
-| 45 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
-| 46 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
-| 47 | **Wishlist / retry queue** — failed downloads go to wishlist for auto-retry | 🟡 Medium | M | Download pipeline |
-| 48 | **Discovery pool** — AI-curated recommendations from Spotify/Deezer/Last.fm | 🟢 Low | L | Multiple APIs |
-| 49 | **Personalized playlists** — Daily Mix, Discover Weekly, Release Radar sync | 🟢 Low | L | Spotify OAuth |
-| 50 | **Beatport charts** — top charts imported for discovery | 🟢 Low | M | Web scraping |
+| 48 | **Spotify OAuth** — login flow, token refresh, scoped access | 🟡 In Progress | M | Playlist framework |
+| 49 | **Deezer playlist import** — import playlists via ARL, download tracks, separate playlist folder | ✅ Done | M | Playlist framework |
+| 50 | **Playlist sync** — refresh, discover missing, download pipeline | 🟡 In Progress | L | Playlist service |
+| 51 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
+| 52 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
+| 53 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
+| 54 | **Wishlist / retry queue** — failed downloads go to wishlist for auto-retry | 🟡 Medium | M | Download pipeline |
+| 55 | **Discovery pool** — AI-curated recommendations from Spotify/Deezer/Last.fm | 🟢 Low | L | Multiple APIs |
+| 56 | **Personalized playlists** — Daily Mix, Discover Weekly, Release Radar sync | 🟢 Low | L | Spotify OAuth |
+| 57 | **Beatport charts** — top charts imported for discovery | 🟢 Low | M | Web scraping |
 
 ---
 
 ## Tier 5: Metadata Enrichment
 
-Rich metadata from external services to improve library quality.
+Rich metadata from external services. Reprioritized — free services (MusicBrainz, CAA, Last.fm)
+moved to Tier 1.5 as foundational infrastructure. Remaining items are premium/nice-to-have.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 51 | **Last.fm scrobbling** — scrobble plays, fetch similar artists/tags | 🟡 Medium | M | Last.fm API |
-| 52 | **ListenBrainz scrobbling** — open alternative to Last.fm | 🟢 Low | M | ListenBrainz API |
-| 53 | **Genius lyrics** — fetch + embed lyrics into audio files | 🟡 Medium | L | Genius API |
-| 54 | **MusicBrainz metadata** — artist/album/release IDs, AcoustID fingerprinting | 🟡 Medium | L | MusicBrainz API + `fpcalc` |
-| 55 | **Discogs metadata** — release info, catalog numbers | 🟢 Low | M | Discogs API |
-| 56 | **iTunes metadata** — additional external IDs + artwork | 🟢 Low | M | iTunes Search API |
-| 57 | **AudioDB metadata** — artist images, bios, genre tags | 🟢 Low | S | AudioDB API |
-| 58 | **Metadata enrichment pipeline** — background workers for all sources, priority queue | 🟢 Low | L | All metadata clients |
+| 58 | **Last.fm scrobbling** — scrobble plays, fetch similar artists/tags | 🟡 Medium | M | Last.fm API |
+| 59 | **ListenBrainz scrobbling** — open alternative to Last.fm | 🟢 Low | M | ListenBrainz API |
+| 60 | **Genius lyrics** — fetch + embed lyrics into audio files | 🟢 Low | L | Genius API |
+| 61 | **Discogs metadata** — release info, catalog numbers | 🟢 Low | M | Discogs API |
+| 62 | **AudioDB metadata** — artist images, bios, genre tags | 🟢 Low | S | AudioDB API |
 
 ---
 
@@ -167,13 +162,13 @@ Scheduled background tasks for hands-off operation.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 59 | **Automation engine** — cron-like scheduler for background tasks | 🟡 Medium | L | Task queue |
-| 60 | **Playlist auto-sync** — scheduled playlist refresh + download | 🟡 Medium | M | Automation + playlists |
-| 61 | **Watchlist auto-scan** — scheduled watchlist check for new releases | 🟡 Medium | M | Automation + watchlist |
-| 62 | **Wishlist auto-process** — scheduled retry of failed downloads | 🟡 Medium | M | Automation + wishlist |
-| 63 | **Library auto-scan** — scheduled filesystem scan for new/missing files | 🟡 Medium | S | Automation + scanner |
-| 64 | **Personalized playlist auto-refresh** — scheduled Daily Mix/Discover Weekly sync | 🟢 Low | M | Automation + Spotify |
-| 65 | **Cleanup tasks** — auto-remove completed downloads, duplicate cleanup | 🟢 Low | M | Automation + library |
+| 63 | **Automation engine** — cron-like scheduler for background tasks | 🟡 Medium | L | Task queue |
+| 64 | **Playlist auto-sync** — scheduled playlist refresh + download | 🟡 Medium | M | Automation + playlists |
+| 65 | **Watchlist auto-scan** — scheduled watchlist check for new releases | 🟡 Medium | M | Automation + watchlist |
+| 66 | **Wishlist auto-process** — scheduled retry of failed downloads | 🟡 Medium | M | Automation + wishlist |
+| 67 | **Library auto-scan** — scheduled filesystem scan for new/missing files | 🟡 Medium | S | Automation + scanner |
+| 68 | **Personalized playlist auto-refresh** — scheduled Daily Mix/Discover Weekly sync | 🟢 Low | M | Automation + Spotify |
+| 69 | **Cleanup tasks** — auto-remove completed downloads, duplicate cleanup | 🟢 Low | M | Automation + library |
 
 ---
 
@@ -183,18 +178,18 @@ Deployment, security, and operational concerns.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 66 | **Authentication** — login gate, reverse proxy support, API keys | 🔴 High | L | — |
-| 67 | **Multi-profile support** — separate libraries/configs per profile | 🟢 Low | L | Auth |
-| 68 | **Setup wizard** — first-run guided config | 🟡 Medium | M | — |
-| 69 | **Docker image** — Dockerfile + docker-compose with slskd | 🟡 Medium | M | — |
-| 70 | **Systemd service** — service file + install target | 🟡 Medium | S | — |
-| 71 | **Download queue prioritization** — priority tiers, bandwidth limits | 🟢 Low | L | Download engine refactor |
-| 72 | **Resume partial downloads** — checkpoint + resume for large files | 🟢 Low | L | Download engine refactor |
-| 73 | **Lossy conversion** — transcode FLAC → MP3 via ffmpeg for Plex | 🟢 Low | M | ffmpeg binary |
-| 74 | **ReplayGain scanning** — loudness analysis + tag writing | 🟢 Low | L | Audio analysis lib |
-| 75 | **Content quarantine** — import safety review before adding to library | 🟢 Low | M | Library + UI |
-| 76 | **Public REST API v1** — documented, versioned API for external tools | 🟢 Low | L | Auth + API spec |
-| 77 | **Custom scripts** — user-defined automation scripts | 🟢 Low | L | Automation engine |
+| 70 | **Authentication** — login gate, reverse proxy support, API keys | 🔴 High | L | — |
+| 71 | **Docker image + docker-compose with slskd** — one-command `docker compose up` for the free path. Enables quick test cycle: change code → rebuild → test. Primary deployment target. | 🔴 High | M | — |
+| 72 | **Multi-profile support** — separate libraries/configs per profile | 🟢 Low | L | Auth |
+| 73 | **Setup wizard** — first-run guided config (choose free/premium path) | 🟡 Medium | M | — |
+| 74 | **Systemd service** — service file + install target | 🟡 Medium | S | — |
+| 75 | **Download queue prioritization** — priority tiers, bandwidth limits | 🟢 Low | L | Download engine refactor |
+| 76 | **Resume partial downloads** — checkpoint + resume for large files | 🟢 Low | L | Download engine refactor |
+| 77 | **Lossy conversion** — transcode FLAC → MP3 via ffmpeg for Plex | 🟢 Low | M | ffmpeg binary |
+| 78 | **ReplayGain scanning** — loudness analysis + tag writing | 🟢 Low | L | Audio analysis lib |
+| 79 | **Content quarantine** — import safety review before adding to library | 🟢 Low | M | Library + UI |
+| 80 | **Public REST API v1** — documented, versioned API for external tools | 🟢 Low | L | Auth + API spec |
+| 81 | **Custom scripts** — user-defined automation scripts | 🟢 Low | L | Automation engine |
 
 ---
 
@@ -204,22 +199,25 @@ Deployment, security, and operational concerns.
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
 | 1 | Core Quality | 11 features | ✅ 11/11 |
+| 1.5 | Metadata Providers | 6 features | ❌ 0/6 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
-| 4 | Playlists & Discovery | 10 features | ❌ 0/10 |
-| 5 | Metadata Enrichment | 8 features | ❌ 0/8 |
+| 4 | Playlists & Discovery | 10 features | 🟡 2 done, 8 remaining |
+| 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **78 features** | **28 done, 50 remaining** |
+| **Total** | | **81 features** | **28 done, 53 remaining** |
 
 ### Immediate Next Steps
 
-1. **Authentication** — basic login gate for API access — #66 (Tier 7, 🔴 High)
-2. **Plex integration** — scan library, detect missing tracks — #34 (Tier 3, 🔴 High)
-3. **Spotify OAuth + playlist import** — #41 (Tier 4, 🔴 High)
+1. **Docker image + compose** — `docker compose up` for one-command dev/test cycle (#71, Tier 7, 🔴 High)
+2. **Metadata provider plugin architecture** — interface + registry (#27, Tier 1.5, 🔴 High)
+3. **Cover Art Archive provider** — free cover art for slskd users (#28, Tier 1.5, 🔴 High)
+4. **MusicBrainz metadata provider** — free ISRC, album grouping, AcoustID (#29, Tier 1.5, 🔴 High)
+5. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
 
-### First Major Feature Block (Tier 3-4)
+### First Major Feature Block (Tier 1.5 + Tier 4)
 
-1. **Spotify OAuth + playlist import** — biggest user-facing gap
-2. **Plex media server integration** — library sync with external server
-3. **Playlist sync pipeline** — end-to-end Spotify → download → library
+1. **Metadata providers** — free-tier backbone: CAA + MusicBrainz + enrichment pipeline
+2. **Spotify OAuth + playlist import** — biggest user-facing premium feature gap (#48, Tier 4)
+3. **Playlist sync pipeline** — end-to-end Spotify → download → library (#50, Tier 4)
