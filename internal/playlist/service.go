@@ -51,6 +51,22 @@ func (s *Service) Sources() []Source {
 	return s.srcReg.Configured()
 }
 
+// RefreshSources rebuilds the playlist source registry from download plugins.
+// Call after config changes that may add/remove/modify playlist-capable sources.
+func (s *Service) RefreshSources(downloadReg *download.Registry) {
+	reg := NewRegistry()
+	for _, p := range downloadReg.All() {
+		if psp, ok := p.(PlaylistSourceProvider); ok {
+			if p.IsConfigured() {
+				if err := reg.Register(psp.PlaylistSource()); err != nil {
+					log.Printf("playlist: register %s: %v", p.Name(), err)
+				}
+			}
+		}
+	}
+	s.srcReg = reg
+}
+
 // BrowseSource fetches all playlists from a source and marks which are already imported.
 func (s *Service) BrowseSource(ctx context.Context, sourceName string) ([]SourcePlaylistItem, error) {
 	src := s.srcReg.Get(sourceName)

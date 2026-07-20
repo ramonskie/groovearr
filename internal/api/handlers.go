@@ -185,6 +185,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Re-register playlist sources from rebuilt plugins.
+	if s.playlistSvc != nil {
+		s.playlistSvc.RefreshSources(s.registry)
+	}
+
 	// Ensure required directories exist.
 	for _, p := range []string{updated.Library.DownloadPath, updated.Library.LibraryPath} {
 		if p != "" {

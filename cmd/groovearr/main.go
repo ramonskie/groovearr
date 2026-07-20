@@ -151,6 +151,12 @@ func main() {
 			log.Printf("  source:   %s", p.DisplayName())
 		}
 	}
+	for _, src := range playlistReg.Configured() {
+		log.Printf("  playlist: %s (%s)", src.Name(), src.DisplayName())
+	}
+	if len(playlistReg.Configured()) == 0 && len(registry.Names()) > 0 {
+		log.Printf("  playlist: no sources configured (add ARL token to sources.deezer)")
+	}
 
 	// Graceful shutdown.
 	sigCh := make(chan os.Signal, 1)
