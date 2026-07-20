@@ -65,6 +65,16 @@ type TrackMetadata struct {
 	ExternalIDs map[string]string `json:"external_ids,omitempty"` // keyed by source (e.g. "musicbrainz")
 }
 
+// CoverArtArchiveProvider is an optional interface for providers that can
+// resolve cover art by MusicBrainz MBID directly via the Cover Art Archive.
+// This allows bypassing artist+album search when an MBID is already known.
+type CoverArtArchiveProvider interface {
+	Provider
+
+	// SearchCoverByMBID looks up cover art by release or release group MBID.
+	SearchCoverByMBID(ctx context.Context, mbid string) (*CoverResult, error)
+}
+
 // ArtistMetadataProvider is an optional interface for providers that can
 // fetch richer artist information beyond a single image.
 type ArtistMetadataProvider interface {
