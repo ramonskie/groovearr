@@ -1,5 +1,4 @@
 import { z } from "zod";
-import type { ConfigUpdatePayload } from "../../api/types";
 
 // ─── Form schema (flat — matches UI fields) ────────────────────────
 
@@ -43,56 +42,6 @@ export const settingsDefaults: SettingsFormValues = {
   playlist_path: "",
   playlist_template: "",
 };
-
-// ─── Payload builders (flat form → nested ConfigUpdatePayload) ──────
-
-export function toGeneralPayload(
-  values: Pick<SettingsFormValues, "download_path">,
-): ConfigUpdatePayload {
-  return {
-    library: {
-      download_path: values.download_path ?? "",
-    },
-  };
-}
-
-export function toSoulseekPayload(
-  values: Pick<SettingsFormValues, "slskd_url" | "slskd_api_key">,
-): ConfigUpdatePayload {
-  return {
-    soulseek: {
-      slskd_url: values.slskd_url ?? "",
-      api_key: values.slskd_api_key ?? "",
-    },
-  };
-}
-
-export function toDeezerPayload(
-  values: Pick<SettingsFormValues, "deezer_arl" | "deezer_quality">,
-): ConfigUpdatePayload {
-  return {
-    deezer: {
-      arl: values.deezer_arl ?? "",
-      quality: values.deezer_quality ?? "flac",
-    },
-  };
-}
-
-export function toLibraryPayload(
-  values: Pick<
-    SettingsFormValues,
-    "library_path" | "folder_template" | "playlist_path" | "playlist_template"
-  >,
-): ConfigUpdatePayload {
-  return {
-    library: {
-      library_path: values.library_path ?? "",
-      folder_template: values.folder_template ?? "",
-      playlist_path: values.playlist_path ?? "",
-      playlist_template: values.playlist_template ?? "",
-    },
-  };
-}
 
 // ─── Source badge variant mapping ───────────────────────────────────
 

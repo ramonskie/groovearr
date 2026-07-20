@@ -34,16 +34,14 @@ export interface QualityConfig {
 }
 
 export interface Config {
-  soulseek: SoulseekConfig;
-  deezer: DeezerConfig;
+  sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
   quality: QualityConfig;
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
 export interface ConfigUpdatePayload {
-  soulseek?: Partial<SoulseekConfig>;
-  deezer?: Partial<DeezerConfig>;
+  sources?: Record<string, Record<string, unknown>>;
   library?: Partial<LibraryConfig>;
   quality?: Partial<QualityConfig>;
 }
