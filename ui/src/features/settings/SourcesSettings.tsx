@@ -1,15 +1,9 @@
 import { useSources } from "../../hooks/use-config";
-import type { ConfigUpdatePayload } from "../../api/types";
 import Spinner from "../../components/Spinner";
 import SoulseekSection from "./SoulseekSection";
 import DeezerSection from "./DeezerSection";
 
-interface Props {
-  onSave: (payload: ConfigUpdatePayload, section: string) => void;
-  isSaving: boolean;
-}
-
-export default function SourcesSettings({ onSave, isSaving }: Props) {
+export default function SourcesSettings() {
   const { data: sources, isLoading } = useSources();
 
   if (isLoading) {
@@ -25,16 +19,8 @@ export default function SourcesSettings({ onSave, isSaving }: Props) {
 
   return (
     <div>
-      <SoulseekSection
-        source={soulseekSource}
-        onSave={onSave}
-        isSaving={isSaving}
-      />
-      <DeezerSection
-        source={deezerSource}
-        onSave={onSave}
-        isSaving={isSaving}
-      />
+      <SoulseekSection source={soulseekSource} />
+      <DeezerSection source={deezerSource} />
     </div>
   );
 }

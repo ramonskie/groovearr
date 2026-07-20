@@ -1,9 +1,7 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { toast } from "sonner";
 import { useConfig, useUpdateConfig } from "../../hooks/use-config";
-import type { ConfigUpdatePayload } from "../../api/types";
 import SubTabs from "../../components/SubTabs";
 import Spinner from "../../components/Spinner";
 import {
@@ -23,6 +21,8 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
+const AUTO_SAVE_MS = 1000;
+
 export default function SettingsPage() {
   const [activeTab, setActiveTab] = useState<TabId>("general");
 
@@ -34,15 +34,19 @@ export default function SettingsPage() {
     defaultValues: settingsDefaults,
   });
 
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Pre-fill form when config loads
   useEffect(() => {
     if (config) {
+      const slskd = config.sources?.soulseek ?? {};
+      const dz = config.sources?.deezer ?? {};
       form.reset({
         download_path: config.library.download_path ?? "",
-        slskd_url: config.soulseek.slskd_url ?? "",
-        slskd_api_key: config.soulseek.api_key ?? "",
-        deezer_arl: config.deezer.arl ?? "",
-        deezer_quality: config.deezer.quality ?? "flac",
+        slskd_url: (slskd as Record<string, string>).slskd_url ?? "",
+        slskd_api_key: (slskd as Record<string, string>).api_key ?? "",
+        deezer_arl: (dz as Record<string, string>).arl ?? "",
+        deezer_quality: ((dz as Record<string, string>).quality as "flac" | "mp3_320" | "mp3_128") ?? "flac",
         library_path: config.library.library_path ?? "",
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
@@ -51,19 +55,41 @@ export default function SettingsPage() {
     }
   }, [config, form]);
 
-  const handleSave = useCallback(
-    (payload: ConfigUpdatePayload, section: string) => {
-      updateConfig.mutate(payload, {
-        onSuccess: () => {
-          toast.success(`${section} settings saved`);
+  // Auto-save on form change with debounce
+  const saveValues = useCallback(
+    (values: SettingsFormValues) => {
+      updateConfig.mutate({
+        sources: {
+          soulseek: {
+            slskd_url: values.slskd_url ?? "",
+            api_key: values.slskd_api_key ?? "",
+          },
+          deezer: {
+            arl: values.deezer_arl ?? "",
+            quality: values.deezer_quality ?? "flac",
+          },
         },
-        onError: (err) => {
-          toast.error(err instanceof Error ? err.message : "Failed to save settings");
+        library: {
+          download_path: values.download_path ?? "",
+          library_path: values.library_path ?? "",
+          folder_template: values.folder_template ?? "",
+          playlist_path: values.playlist_path ?? "",
+          playlist_template: values.playlist_template ?? "",
         },
       });
     },
     [updateConfig],
   );
+
+  useEffect(() => {
+    const sub = form.watch((values) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        saveValues(values as SettingsFormValues);
+      }, AUTO_SAVE_MS);
+    });
+    return () => sub.unsubscribe();
+  }, [form, saveValues]);
 
   if (isLoading) {
     return (
@@ -94,15 +120,9 @@ export default function SettingsPage() {
         />
 
         <div className="max-w-2xl">
-          {activeTab === "general" && (
-            <GeneralSettings onSave={handleSave} isSaving={updateConfig.isPending} />
-          )}
-          {activeTab === "sources" && (
-            <SourcesSettings onSave={handleSave} isSaving={updateConfig.isPending} />
-          )}
-          {activeTab === "library" && (
-            <LibrarySettings onSave={handleSave} isSaving={updateConfig.isPending} />
-          )}
+          {activeTab === "general" && <GeneralSettings />}
+          {activeTab === "sources" && <SourcesSettings />}
+          {activeTab === "library" && <LibrarySettings />}
         </div>
       </div>
     </FormProvider>
