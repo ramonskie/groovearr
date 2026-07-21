@@ -53,14 +53,14 @@ func TestRenamerRename(t *testing.T) {
 			t.Fatal(err)
 		}
 
+		// No tags, no metadata — file stays at original path.
 		newPath, err := r.Rename(src, FileMeta{})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		expected := filepath.Join(root, "Daft Punk/Unknown Album/00 - Get Lucky.mp3")
-		if newPath != expected {
-			t.Errorf("got %q, want %q", newPath, expected)
+		if newPath != src {
+			t.Errorf("expected file to stay at %q, got %q", src, newPath)
 		}
 	})
 
@@ -114,14 +114,14 @@ func TestRenamerRename(t *testing.T) {
 		src := filepath.Join(dir, "Daft Punk - Random Access Memories - Get Lucky.flac")
 		os.WriteFile(src, []byte("dummy"), 0o644)
 
+		// No tags, no metadata — file stays at original path.
 		newPath, err := r.Rename(src, FileMeta{})
 		if err != nil {
 			t.Fatal(err)
 		}
 
-		expected := filepath.Join(root, "Daft Punk/Random Access Memories/00 - Get Lucky.flac")
-		if newPath != expected {
-			t.Errorf("got %q, want %q", newPath, expected)
+		if newPath != src {
+			t.Errorf("expected file to stay at %q, got %q", src, newPath)
 		}
 	})
 }

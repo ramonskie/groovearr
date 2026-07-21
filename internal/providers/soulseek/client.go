@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -509,8 +510,18 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				continue
 			}
 
-			// Parse metadata from filename.
-			artist, trackTitle, trackNum := library.ParseArtistTitle(filename)
+			// Extract track number from filename (the only reliable field).
+			// Artist/Title come from discovery providers or playlist metadata,
+			// NOT from filename parsing.
+			trackNum := 0
+			trackTitle := filename
+			normalized := strings.ReplaceAll(filename, "\\", "/")
+			base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
+			if m := library.TrackNumRE.FindStringSubmatch(base); m != nil {
+				n, _ := strconv.Atoi(m[1])
+				trackNum = n
+				trackTitle = strings.TrimSpace(m[2])
+			}
 
 			durationSec, _ := fm["length"].(float64)
 			tr := domain.TrackResult{
@@ -527,7 +538,6 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				},
 				Title:       trackTitle,
 				TrackNumber: trackNum,
-				Artist:      artist,
 			}
 			tracks = append(tracks, tr)
 
@@ -562,7 +572,11 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 		}
 
 		// Parse artist, album title, and year from the album path.
-		albumArtist, albumTitle, albumYear := library.ParseAlbumDir(key.path)
+		// Since we no longer parse metadata from filenames, set these to empty.
+		// Album grouping still works — tracks are grouped by directory.
+		albumArtist := ""
+		albumTitle := key.path
+		albumYear := ""
 
 		albums = append(albums, domain.AlbumResult{
 			Username:        key.username,
