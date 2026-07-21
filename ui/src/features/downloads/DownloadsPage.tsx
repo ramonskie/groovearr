@@ -15,7 +15,9 @@ import DownloadItem from "./DownloadItem";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
-const COMPLETED_STATES = new Set<DownloadState>([
+type Tab = "pending" | "finished";
+
+const TERMINAL_STATES = new Set<DownloadState>([
   "imported",
   "failed",
   "ignored",
@@ -40,6 +42,8 @@ function DownloadsPage() {
   useDownloadEvents();
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
+  const [activeTab, setActiveTab] = useState<Tab>("pending");
+  const [showAllQueued, setShowAllQueued] = useState(false);
 
   // Track which succeeded downloads we have already triggered a scan for.
   const scannedIds = useRef<Set<string>>(new Set());
@@ -123,10 +127,10 @@ function DownloadsPage() {
 
   // ─── Derived data ─────────────────────────────────────────────────
 
-  const activeDownloads =
-    downloads?.filter((d) => !COMPLETED_STATES.has(d.state)) ?? [];
+  const pendingDownloads =
+    downloads?.filter((d) => !TERMINAL_STATES.has(d.state)) ?? [];
   const finishedDownloads =
-    downloads?.filter((d) => COMPLETED_STATES.has(d.state)) ?? [];
+    downloads?.filter((d) => TERMINAL_STATES.has(d.state)) ?? [];
   const hasFinished = finishedDownloads.length > 0;
 
   // ─── Loading state ────────────────────────────────────────────────
@@ -156,18 +160,10 @@ function DownloadsPage() {
     );
   }
 
-  // ─── Empty state ──────────────────────────────────────────────────
-
-  if (!downloads || downloads.length === 0) {
-    return (
-      <div>
-        <h1 className="mb-6 text-2xl font-bold text-white">Downloads</h1>
-        <p className="py-20 text-center text-slate-500">No active downloads</p>
-      </div>
-    );
-  }
-
   // ─── Main UI ──────────────────────────────────────────────────────
+
+  const pendingCount = pendingDownloads.length || undefined;
+  const finishedCount = finishedDownloads.length || undefined;
 
   return (
     <div>
@@ -203,43 +199,128 @@ function DownloadsPage() {
         )}
       </div>
 
-      {/* Active downloads */}
-      {activeDownloads.length > 0 && (
-        <div className="mb-6">
-          {activeDownloads.map((d) => (
-            <DownloadItem
-              key={d.id}
-              download={d}
-              onCancel={handleCancel}
-              isCancelling={cancellingId === d.id}
-            />
-          ))}
-        </div>
-      )}
+      {/* Tabs */}
+      <div className="mb-4 flex gap-1 border-b border-slate-700/50">
+        {([
+          ["pending", "Pending", pendingCount],
+          ["finished", "Finished", finishedCount],
+        ] as const).map(([tab, label, count]) => (
+          <button
+            key={tab}
+            type="button"
+            className={`flex items-center gap-1.5 px-4 py-2 text-sm font-medium transition-colors ${
+              activeTab === tab
+                ? "border-b-2 border-blue-500 text-white"
+                : "text-slate-400 hover:text-slate-300"
+            }`}
+            onClick={() => setActiveTab(tab)}
+          >
+            {label}
+            {count !== undefined && (
+              <span
+                className={`rounded-full px-1.5 text-xs ${
+                  activeTab === tab
+                    ? "bg-blue-500/20 text-blue-300"
+                    : "bg-slate-800 text-slate-400"
+                }`}
+              >
+                {count}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
 
-      {/* No-active message when only finished remain */}
-      {activeDownloads.length === 0 && hasFinished && (
-        <p className="py-16 text-center text-sm text-slate-500">
-          No active downloads
-        </p>
-      )}
+      {/* Pending tab: queue first, then active */}
+      {activeTab === "pending" && (() => {
+        const queued = pendingDownloads.filter(d => d.state === "queued");
+        const active = pendingDownloads.filter(d => d.state !== "queued");
 
-      {/* Finished downloads */}
-      {hasFinished && (
-        <div>
-          <h2 className="mb-3 text-sm font-semibold uppercase tracking-wide text-slate-400">
-            Finished
-          </h2>
-          {finishedDownloads.map((d) => (
-            <DownloadItem
-              key={d.id}
-              download={d}
-              onCancel={handleCancel}
-              isCancelling={false}
-            />
-          ))}
-        </div>
-      )}
+        if (queued.length === 0 && active.length === 0) {
+          return <p className="py-16 text-center text-sm text-slate-500">No pending downloads</p>;
+        }
+
+        return (
+          <div className="mb-6">
+            {active.length > 0 && (
+              <div className="mb-4">
+                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Active &mdash; {active.length} downloading
+                </h2>
+                {active.map((d) => (
+                  <DownloadItem
+                    key={d.id}
+                    download={d}
+                    onCancel={handleCancel}
+                    isCancelling={cancellingId === d.id}
+                  />
+                ))}
+              </div>
+            )}
+            {active.length > 0 && queued.length > 0 && (
+              <hr className="my-4 border-slate-700/50" />
+            )}
+            {queued.length > 0 && (() => {
+              const QUEUE_PREVIEW = 20;
+              const visible = showAllQueued ? queued : queued.slice(0, QUEUE_PREVIEW);
+              const collapsed = queued.length > QUEUE_PREVIEW && !showAllQueued;
+
+              return (
+                <div>
+                  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                    Queue &mdash; {queued.length} waiting
+                  </h2>
+                  {visible.map((d) => (
+                    <DownloadItem
+                      key={d.id}
+                      download={d}
+                      onCancel={handleCancel}
+                      isCancelling={cancellingId === d.id}
+                    />
+                  ))}
+                  {collapsed && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllQueued(true)}
+                      className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-300"
+                    >
+                      Show all {queued.length} queued items
+                    </button>
+                  )}
+                  {showAllQueued && queued.length > QUEUE_PREVIEW && (
+                    <button
+                      type="button"
+                      onClick={() => setShowAllQueued(false)}
+                      className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-300"
+                    >
+                      Show less
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        );
+      })()}
+
+      {/* Finished tab: terminal downloads */}
+      {activeTab === "finished" &&
+        (hasFinished ? (
+          <div>
+            {finishedDownloads.map((d) => (
+              <DownloadItem
+                key={d.id}
+                download={d}
+                onCancel={handleCancel}
+                isCancelling={false}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="py-16 text-center text-sm text-slate-500">
+            No finished downloads
+          </p>
+        ))}
     </div>
   );
 }

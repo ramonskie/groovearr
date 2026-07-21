@@ -34,6 +34,10 @@ export function useDownloads() {
     refetchInterval: pollingActive ? 2000 : false,
     // Only poll when SSE is down.
     enabled: true,
+    // Always refetch on mount — don't serve stale cached data.
+    staleTime: 0,
+    // Don't keep cache after unmount — fresh query on next mount.
+    gcTime: 0,
     // Don't refetch on window focus — polling/SSE handles freshness.
     refetchOnWindowFocus: false,
   });

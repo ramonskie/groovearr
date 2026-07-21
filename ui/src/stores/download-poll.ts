@@ -20,7 +20,6 @@ interface DownloadStoreState {
   // ── Polling controls ─────────────────────────────────────────────
   startPolling: () => void;
   stopPolling: () => void;
-  setActiveCount: (count: number) => void;
 
   // ── Event-driven record updates (SSE path) ───────────────────────
   /** Replace all records (initial load or polling refresh). */
@@ -56,10 +55,9 @@ export const useDownloadStore = create<DownloadStoreState>()((set) => ({
 
   startPolling: () => set({ pollingActive: true }),
   stopPolling: () => set({ pollingActive: false }),
-  setActiveCount: (count) => set({ activeCount: count }),
 
   setRecords: (records) =>
-    set((state) => {
+    set(() => {
       const map: Record<string, DownloadRecord> = {};
       for (const r of records) {
         map[r.id] = r;
