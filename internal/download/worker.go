@@ -292,7 +292,11 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 				}
 				return nil
 			case status.State == domain.DownloadFailed:
-				return fmt.Errorf("download failed: %s", status.Error)
+				reason := status.Error
+				if reason == "" {
+					reason = "peer offline or file unavailable"
+				}
+				return fmt.Errorf("download failed: %s", reason)
 			case status.State == domain.DownloadIgnored:
 				return fmt.Errorf("download cancelled")
 			}
