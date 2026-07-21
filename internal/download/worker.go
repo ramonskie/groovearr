@@ -251,7 +251,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			// Uses job-level ctx so the update is skipped when the download is cancelled.
 			_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadDownloading,
 				status.Progress, status.Size, status.Transferred, status.Speed,
-				lastFilePath)
+				lastFilePath, "")
 
 			// Fire progress event with status data (may be overwritten by dp above).
 			if dp == nil {
@@ -269,7 +269,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
 					_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadImportPending,
-						100, status.Size, status.Size, 0, lastFilePath)
+						100, status.Size, status.Size, 0, lastFilePath, status.CoverURL)
 				}
 				return nil
 			case status.State == domain.DownloadFailed:

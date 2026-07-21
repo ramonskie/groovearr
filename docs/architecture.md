@@ -136,13 +136,15 @@ SearchResult          TrackResult           AlbumResult
                │    ┌────▼────┐
                │    │importing│  Atomic CAS (TransitionState)
                │    └────┬────┘
-               │         │ Import handler chain (sequential):
-               │         │  1. FileRenamer → moves to library path
-               │         │  2. CoverArt → downloads cover.jpg
-               │         │  3. TagWriter → ID3/FLAC tags
-               │         │  4. LibraryImporter → artist→album→track in SQLite
-               │         │  5. PlaylistLinker → updates playlist_tracks
-               │         │  6. SSENotifier → broadcasts completion
+                │         │ Import handler chain (sequential):
+                │         │  1. TagValidator → verifies file tags match expected metadata
+                │         │  2. FileRenamer → moves to library path
+                │         │  3. CoverArt → downloads cover.jpg
+                │         │  4. TagWriter → ID3/FLAC tags
+                │         │  5. LibraryImporter → artist→album→track in SQLite
+                │         │  6. MetadataEnrichment → ISRC, genres, MBIDs
+                │         │  7. PlaylistLinker → updates playlist_tracks
+                │         │  8. SSENotifier → broadcasts completion
                │    ┌────▼────┐         ┌────────┐
                └───►│ failed  │         │imported│
                     └────┬────┘         └────────┘

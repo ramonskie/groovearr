@@ -18,7 +18,7 @@ type DownloadStore interface {
 
 	// UpdateProgress updates only progress and state fields without
 	// overwriting metadata (artist, album, title, etc.).
-	UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath string) error
+	UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error
 
 	// TransitionState atomically changes the download's state only if it
 	// currently matches oldState. Returns false if the state did not match

@@ -89,6 +89,35 @@ func readFileTags(path string) (*tagMeta, error) {
 	return meta, nil
 }
 
+// TagMeta holds metadata extracted from audio file tags (exported version of tagMeta).
+type TagMeta struct {
+	Artist   string
+	Album    string
+	Title    string
+	Year     int
+	TrackNum int
+	DiscNum  int
+	Genre    string
+}
+
+// ReadTags reads basic artist/title/album metadata from an audio file's ID3/FLAC tags.
+// Returns nil if the file has no usable tags.
+func ReadTags(path string) (*TagMeta, error) {
+	tm, err := readFileTags(path)
+	if err != nil || tm == nil {
+		return nil, err
+	}
+	return &TagMeta{
+		Artist:   tm.Artist,
+		Album:    tm.Album,
+		Title:    tm.Title,
+		Year:     tm.Year,
+		TrackNum: tm.TrackNum,
+		DiscNum:  tm.DiscNum,
+		Genre:    tm.Genre,
+	}, nil
+}
+
 // audioExtensions are file extensions recognized as audio.
 var audioExtensions = map[string]bool{
 	".mp3": true, ".flac": true, ".ogg": true, ".oga": true,

@@ -51,7 +51,7 @@ func (m *mockStore) Update(ctx context.Context, r *domain.DownloadRecord) error 
 	return nil
 }
 
-func (m *mockStore) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath string) error {
+func (m *mockStore) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	existing, ok := m.records[id]
@@ -65,6 +65,9 @@ func (m *mockStore) UpdateProgress(ctx context.Context, id string, state domain.
 	existing.Speed = speed
 	if filePath != "" {
 		existing.FilePath = filePath
+	}
+	if coverURL != "" {
+		existing.CoverURL = coverURL
 	}
 	return nil
 }

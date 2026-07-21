@@ -130,6 +130,7 @@ func main() {
 	download.NewCompletedDownloadService(
 		dlStore,
 		eventBus,
+		download.NewTagValidatorHandler(),
 		download.NewFileRenamerHandler(renamer, dlStore),
 		download.NewCoverArtHandler(libStore),
 		download.NewTagWriterHandler(),
