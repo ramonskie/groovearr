@@ -200,6 +200,14 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 		return "", fmt.Errorf("soulseek download: no download ID returned")
 	}
 
+	// If slskd returned the filename as fallback (non-JSON response), resolve
+	// the real UUID from the downloads list by matching the filename.
+	if downloadID == filename {
+		if realID := c.findDownloadIDByFilename(ctx, filename); realID != "" {
+			downloadID = realID
+		}
+	}
+
 	record := &domain.DownloadRecord{
 		ID:         downloadID,
 		SourceName: pluginName,
@@ -212,6 +220,36 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 	c.downloadsMu.Unlock()
 
 	return downloadID, nil
+}
+
+// findDownloadIDByFilename queries slskd's download list and returns the UUID
+// of the first download matching the given filename.
+func (c *Client) findDownloadIDByFilename(ctx context.Context, filename string) string {
+	listResp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil)
+	if err != nil {
+		return ""
+	}
+	var users []struct {
+		Directories []struct {
+			Files []struct {
+				ID       string `json:"id"`
+				Filename string `json:"filename"`
+			} `json:"files"`
+		} `json:"directories"`
+	}
+	if json.Unmarshal(listResp, &users) != nil {
+		return ""
+	}
+	for _, u := range users {
+		for _, d := range u.Directories {
+			for _, f := range d.Files {
+				if f.Filename == filename {
+					return f.ID
+				}
+			}
+		}
+	}
+	return ""
 }
 
 // GetDownloads returns all tracked downloads for this source.
