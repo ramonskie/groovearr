@@ -19,6 +19,16 @@ const (
 	DownloadIgnored       DownloadState = "ignored"
 )
 
+// PendingSourceName is the sentinel source value used by QueuePending
+// to indicate a record awaiting source resolution before dispatch.
+const PendingSourceName = "pending"
+
+// IsPendingSource returns true if the record was created via QueuePending
+// and has not yet been resolved to a real download source.
+func (r *DownloadRecord) IsPendingSource() bool {
+	return r.SourceName == PendingSourceName || r.Filename == ""
+}
+
 // Terminal returns true if the state is final (no more progress expected).
 func (s DownloadState) Terminal() bool {
 	switch s {

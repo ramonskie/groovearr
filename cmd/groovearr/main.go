@@ -103,6 +103,9 @@ func main() {
 	// Wire the pipeline: DownloadService → WorkerPool.
 	downloadSvc.SetWorkerPool(workerPool)
 
+	// Recover orphaned queued records from previous runs (pool-at-capacity rejects).
+	go downloadSvc.RecoverOrphans(context.Background())
+
 	// Build the import handler chain for completed downloads.
 	renamerCfg := func() (template, root string) {
 		c := cfg.Get()

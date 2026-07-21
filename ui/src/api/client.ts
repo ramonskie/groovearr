@@ -158,6 +158,14 @@ export function getDownloads(): Promise<DownloadRecord[]> {
   return request<DownloadRecord[]>("/api/downloads");
 }
 
+export function getDownloadsByState(
+  state: string,
+): Promise<DownloadRecord[]> {
+  return request<DownloadRecord[]>(
+    `/api/downloads?state=${encodeURIComponent(state)}`,
+  );
+}
+
 export function cancelDownload(id: string): Promise<CancelResponse> {
   return request<CancelResponse>(
     `/api/downloads/${encodeURIComponent(id)}`,

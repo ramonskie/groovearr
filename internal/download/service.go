@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
+	"log"
 	"math/rand"
 	"sync"
 	"time"
@@ -115,6 +116,101 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 	return id, nil
 }
 
+// QueuePending inserts a download record with metadata only (no resolved
+// source), fires the download:queued event, and does NOT dispatch to the
+// worker pool. The record is resolved later (search + update + dispatch) by
+// the caller — see playlist.resolvePendingDownloads.
+//
+// This enables batch-queuing all items first (visible in UI), then resolving
+// them in the background.
+func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (string, error) {
+	id := fmt.Sprintf("pending-%d-%04x", time.Now().UnixNano(), rand.Intn(0xffff))
+
+	displayName := meta.Artist + " - " + meta.Title
+
+	record := &domain.DownloadRecord{
+		ID:          id,
+		SourceName:  domain.PendingSourceName,
+		DisplayName: displayName,
+		State:       domain.DownloadQueued,
+		TrackID:     meta.TrackID,
+		ISRC:        meta.ISRC,
+		CoverURL:    meta.CoverURL,
+		PlaylistID:  meta.PlaylistID,
+		Artist:      meta.Artist,
+		Album:       meta.Album,
+		Title:       meta.Title,
+		TrackNumber: meta.TrackNumber,
+		DiscNumber:  meta.DiscNumber,
+		Year:        meta.Year,
+	}
+
+	if err := s.store.Insert(ctx, record); err != nil {
+		return "", fmt.Errorf("queue pending: %w", err)
+	}
+
+	s.bus.Publish(ctx, events.TopicDownloadQueued, record)
+	return id, nil
+}
+
+// UpdateDownload persists changes to an existing download record and fires
+// a state-changed event.
+func (s *DownloadService) UpdateDownload(ctx context.Context, record *domain.DownloadRecord) error {
+	if err := s.store.Update(ctx, record); err != nil {
+		return fmt.Errorf("update download: %w", err)
+	}
+	s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
+	return nil
+}
+
+// Dispatch submits a resolved download record to the worker pool.
+func (s *DownloadService) Dispatch(ctx context.Context, record *domain.DownloadRecord) error {
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool == nil {
+		return fmt.Errorf("dispatch: worker pool not set")
+	}
+	return pool.Submit(ctx, record)
+}
+
+// RecoverOrphans re-submits all download records stuck in "queued" state
+// to the worker pool. Called at startup to recover items that were inserted
+// into the DB but failed pool submission (e.g., pool was at capacity).
+func (s *DownloadService) RecoverOrphans(ctx context.Context) {
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool == nil {
+		return
+	}
+
+	queued, err := s.store.ListByState(ctx, domain.DownloadQueued)
+	if err != nil {
+		log.Printf("recover orphans: list failed: %v", err)
+		return
+	}
+	if len(queued) == 0 {
+		return
+	}
+
+	log.Printf("recover orphans: found %d queued records, re-submitting", len(queued))
+	recovered := 0
+	for _, r := range queued {
+		// Skip records queued via QueuePending — they have no source info
+		// and need resolution, not worker dispatch.
+		if r.IsPendingSource() {
+			continue
+		}
+		if err := pool.Submit(ctx, &r); err != nil {
+			log.Printf("recover orphans: re-submit %s failed: %v", r.ID, err)
+			continue
+		}
+		recovered++
+	}
+	log.Printf("recover orphans: recovered %d/%d", recovered, len(queued))
+}
+
 // GetStatus returns the current state of a download by ID.
 func (s *DownloadService) GetStatus(ctx context.Context, id string) (*domain.DownloadRecord, error) {
 	return s.store.Get(ctx, id)
@@ -123,6 +219,16 @@ func (s *DownloadService) GetStatus(ctx context.Context, id string) (*domain.Dow
 // List returns all download records ordered by creation time.
 func (s *DownloadService) List(ctx context.Context) ([]domain.DownloadRecord, error) {
 	return s.store.List(ctx)
+}
+
+// ListByState returns downloads filtered by a single state.
+func (s *DownloadService) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
+	return s.store.ListByState(ctx, state)
+}
+
+// ListActive returns all non-terminal downloads.
+func (s *DownloadService) ListActive(ctx context.Context) ([]domain.DownloadRecord, error) {
+	return s.store.ListActive(ctx)
 }
 
 // Cancel transitions a download to the "ignored" state, cancels the

@@ -33,6 +33,13 @@ type Service struct {
 	syncing     map[int64]bool // playlistIDs currently being synced
 }
 
+// pendingItem pairs a queued download record with its source playlist track
+// for background resolution.
+type pendingItem struct {
+	record *domain.DownloadRecord
+	track  domain.PlaylistTrack
+}
+
 // NewService creates a playlist service.
 func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config) *Service {
 	return &Service{
@@ -196,30 +203,96 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		return 0, err
 	}
 
-	queued := 0
+	// Phase 1: queue all unmatched tracks immediately (metadata only, no search).
+	// This makes them visible in the UI before the downloader starts processing.
+	var items []pendingItem
+	playlistIDStr := strconv.FormatInt(playlistID, 10)
+
 	for _, pt := range tracks {
 		if pt.TrackID != nil {
 			continue
 		}
-
-		// Search across all configured sources for a match and queue it.
-		id, _, _, dlErr := s.findAndQueueDownload(ctx, pt.Title, pt.Artist, pt.Album, pt.DurationMs, "", playlistID, pt.ISRC)
+		id, dlErr := s.downloadSvc.QueuePending(ctx, download.DownloadMeta{
+			Artist:      pt.Artist,
+			Album:       pt.Album,
+			Title:       pt.Title,
+			TrackNumber: pt.Position,
+			ISRC:        pt.ISRC,
+			PlaylistID:  playlistIDStr,
+		})
 		if dlErr != nil {
-			log.Printf("playlist: download %s - %s: %v", pt.Artist, pt.Title, dlErr)
+			log.Printf("playlist: queue pending %s - %s: %v", pt.Artist, pt.Title, dlErr)
 			continue
 		}
-		_ = id
-		queued++
+		// Fetch the record so we have the full DownloadRecord for resolution.
+		rec, _ := s.downloadSvc.GetStatus(ctx, id)
+		if rec == nil {
+			continue
+		}
+		items = append(items, pendingItem{record: rec, track: pt})
 	}
 
-	log.Printf("playlist: download missing: queued %d tracks", queued)
+	log.Printf("playlist: download missing: queued %d tracks (pending resolution)", len(items))
 
-	// Trigger background sync — waits for downloads, re-links, builds playlist folder.
-	if queued > 0 {
-		go s.syncPlaylistGuarded(playlistID)
+	// Phase 2: resolve and dispatch in background — search for matches one at a time
+	// and submit to the worker pool.
+	if len(items) > 0 {
+		go s.resolvePendingDownloads(items, playlistID)
 	}
 
-	return queued, nil
+	return len(items), nil
+}
+
+// resolvePendingDownloads searches for source matches for pending records
+// and dispatches them to the download pool.
+func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64) {
+	ctx := context.Background()
+	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
+		return s.cfgFn().Quality
+	})
+	resolved := 0
+
+	for _, item := range items {
+		rec := item.record
+		pt := item.track
+
+		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
+		if err != nil {
+			log.Printf("playlist: resolve %s - %s: %v", pt.Artist, pt.Title, err)
+			// Mark as failed so it doesn't appear as pending forever.
+			rec.State = domain.DownloadFailed
+			rec.Error = err.Error()
+			_ = s.downloadSvc.UpdateDownload(ctx, rec)
+			continue
+		}
+
+		// Update the pending record with resolved source info.
+		username := best.Track.Username
+		if username == "" {
+			username = best.SourceName
+		}
+		rec.SourceName = best.SourceName
+		rec.Username = username
+		rec.Filename = best.Track.Filename
+		rec.Size = best.Track.Size
+		rec.DisplayName = pt.Artist + " - " + pt.Title
+		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
+			log.Printf("playlist: update pending %s: %v", rec.ID, err)
+			continue
+		}
+
+		// Dispatch to worker pool.
+		if err := s.downloadSvc.Dispatch(ctx, rec); err != nil {
+			log.Printf("playlist: dispatch %s: %v", rec.ID, err)
+			continue
+		}
+		resolved++
+	}
+
+	log.Printf("playlist: resolved %d/%d downloads", resolved, len(items))
+	if resolved > 0 {
+		s.syncPlaylistGuarded(playlistID)
+	}
 }
 
 // syncPlaylistGuarded runs SyncPlaylist with a per-playlist mutex to prevent
