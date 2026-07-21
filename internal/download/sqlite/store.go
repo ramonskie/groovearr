@@ -89,6 +89,29 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 	return nil
 }
 
+// UpdateProgress updates only progress and state fields without overwriting
+// metadata (artist, album, title, etc.). Use during polling to avoid zeroing
+// out metadata set at queue time.
+func (s *Store) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE downloads SET
+			state=?, progress=?, size=?, transferred=?,
+			speed=?, file_path=?, updated_at=?
+		WHERE id=?`,
+		string(state), progress, size, transferred,
+		speed, filePath, now, id,
+	)
+	if err != nil {
+		return fmt.Errorf("download update progress: %w", err)
+	}
+	n, _ := result.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("download %q not found", id)
+	}
+	return nil
+}
+
 // TransitionState atomically changes the download's state only if it
 // currently matches oldState. Returns true if the transition occurred.
 func (s *Store) TransitionState(ctx context.Context, id string, oldState, newState domain.DownloadState) (bool, error) {

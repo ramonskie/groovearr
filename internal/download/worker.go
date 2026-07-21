@@ -247,17 +247,11 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 				lastFilePath = status.FilePath
 			}
 
-			// Sync progress back to our store record.
+			// Sync progress back to our store record without overwriting metadata.
 			// Uses job-level ctx so the update is skipped when the download is cancelled.
-			_ = p.store.Update(ctx, &domain.DownloadRecord{
-				ID:          serviceID,
-				State:       domain.DownloadDownloading,
-				Progress:    status.Progress,
-				Size:        status.Size,
-				Transferred: status.Transferred,
-				Speed:       status.Speed,
-				FilePath:    lastFilePath,
-			})
+			_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadDownloading,
+				status.Progress, status.Size, status.Transferred, status.Speed,
+				lastFilePath)
 
 			// Fire progress event with status data (may be overwritten by dp above).
 			if dp == nil {
@@ -274,21 +268,27 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			switch {
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
-					// Uses job-level ctx so the transition is skipped when cancelled.
-					// Sync plugin-enriched metadata (cover_url, artist, etc.) that
-					// was set after the initial Insert.
-					_ = p.store.Update(ctx, &domain.DownloadRecord{
-						ID:          serviceID,
-						FilePath:    lastFilePath,
-						State:       domain.DownloadImportPending,
-						CoverURL:    status.CoverURL,
-						Artist:      status.Artist,
-						Album:       status.Album,
-						Title:       status.Title,
-						TrackNumber: status.TrackNumber,
-						DiscNumber:  status.DiscNumber,
-						Year:        status.Year,
-					})
+					// Transition to importPending, preserving metadata set at queue time.
+					_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadImportPending,
+						100, status.Size, status.Size, 0, lastFilePath)
+
+					// Apply plugin-enriched metadata only if provided (non-empty).
+					if status.Artist != "" || status.Album != "" || status.Title != "" ||
+						status.CoverURL != "" || status.Year != 0 ||
+						status.TrackNumber != 0 || status.DiscNumber != 0 {
+						_ = p.store.Update(ctx, &domain.DownloadRecord{
+							ID:          serviceID,
+							FilePath:    lastFilePath,
+							State:       domain.DownloadImportPending,
+							CoverURL:    status.CoverURL,
+							Artist:      status.Artist,
+							Album:       status.Album,
+							Title:       status.Title,
+							TrackNumber: status.TrackNumber,
+							DiscNumber:  status.DiscNumber,
+							Year:        status.Year,
+						})
+					}
 				}
 				return nil
 			case status.State == domain.DownloadFailed:

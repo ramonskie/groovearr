@@ -49,6 +49,22 @@ func (m *mockDownloadStore) Update(ctx context.Context, r *domain.DownloadRecord
 	return nil
 }
 
+func (m *mockDownloadStore) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath string) error {
+	existing, ok := m.records[id]
+	if !ok {
+		return fmt.Errorf("not found")
+	}
+	existing.State = state
+	existing.Progress = progress
+	existing.Size = size
+	existing.Transferred = transferred
+	existing.Speed = speed
+	if filePath != "" {
+		existing.FilePath = filePath
+	}
+	return nil
+}
+
 func (m *mockDownloadStore) TransitionState(ctx context.Context, id string, oldState, newState domain.DownloadState) (bool, error) {
 	r, ok := m.records[id]
 	if !ok || r.State != oldState {

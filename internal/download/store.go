@@ -13,8 +13,12 @@ type DownloadStore interface {
 	Insert(ctx context.Context, record *domain.DownloadRecord) error
 
 	// Update atomically modifies mutable fields: state, progress, size,
-	// transferred, speed, file_path, and error.
+	// transferred, speed, file_path, error, and metadata.
 	Update(ctx context.Context, record *domain.DownloadRecord) error
+
+	// UpdateProgress updates only progress and state fields without
+	// overwriting metadata (artist, album, title, etc.).
+	UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath string) error
 
 	// TransitionState atomically changes the download's state only if it
 	// currently matches oldState. Returns false if the state did not match
