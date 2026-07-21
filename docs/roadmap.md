@@ -134,7 +134,7 @@ Spotify integration for playlist import/sync, artist following, and discovery.
 | 51 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
 | 52 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
 | 53 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
-| 54 | **Wishlist / retry queue** — failed downloads go to wishlist for auto-retry | 🟡 Medium | M | Download pipeline |
+| 54 | **Wishlist / retry queue** — download queue with Pending tab, batch queue-then-resolve pipeline, orphan recovery on restart | 🟡 In Progress | M | Two-phase QueuePending + resolvePendingDownloads, `/api/downloads?state=active` |
 | 55 | **Discovery pool** — AI-curated recommendations from Spotify/Deezer/Last.fm | 🟢 Low | L | Multiple APIs |
 | 56 | **Personalized playlists** — Daily Mix, Discover Weekly, Release Radar sync | 🟢 Low | L | Spotify OAuth |
 | 57 | **Beatport charts** — top charts imported for discovery | 🟢 Low | M | Web scraping |
@@ -213,9 +213,12 @@ Deployment, security, and operational concerns.
 | # | Component | Severity | Description |
 |---|-----------|----------|-------------|
 | B1 | Deezer | 🟡 Medium | **`Test Connection` false positive with invalid ARL.** `authenticate()` only checks `USER_ID != 0` after `deezer.getUserData`. An expired/malformed ARL may still return partial user data with a valid-looking `USER_ID`. Should also verify `license_token` is non-empty or call a protected endpoint to confirm premium access. |
-| B2 | Config (pre-existing) | 🟡 Medium | **Masked `client_secret` round-trip corruption.** `Config.Mask()` replaces `client_secret` with `cl****et`. The settings form loads this masked value, and auto-save writes it back, permanently corrupting the secret. Same bug affects Deezer `arl`. |
+| B2 | Config | ✅ Done | **Masked secret round-trip corruption.** `Merge()` now detects masked strings and preserves original values. Fixed in `internal/config/config.go:90-160`. |
 | B3 | Config (design) | 🟡 Medium | **`Merge()` replaces entire source objects.** Any field not sent by the frontend (e.g., `tokens`, `allow_fallback`) is lost on save. Server-managed fields like OAuth tokens can't coexist safely with user-editable config without deep-merge. |
-| B4 | Playlist / Download | 🟡 Medium | **`DownloadMissing` silently queues 0 when no downloader configured.** If all download sources are unavailable (expired ARL, slskd not running, Spotify metadata-only), unmatched playlist tracks are left in limbo with no feedback. Should error with "no download sources available" or queue tracks in a `no_downloader` state visible in the UI. |
+| B4 | Playlist / Download | ✅ Done | **Queued tracks now visible.** `DownloadMissing` uses two-phase batch-queue → background-resolve. `QueuePending` inserts all tracks immediately with `source=pending`. Pending tab shows queue via SSE. `RecoverOrphans` recovers stuck records on restart. |
+| B5 | Playlist / Download | 🟡 Medium | **Stuck pending detection.** Records with `source=pending` older than N minutes should be auto-failed or retried. Currently silently stick forever if resolver fails. |
+| B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
+| B7 | Download / UI | 🟢 Low | **Server-side pagination for download list.** `GET /api/downloads` returns all records. Large queues (1000+) should paginate with `?limit=` and `?offset=`. |
 
 ### Immediate Next Steps
 
