@@ -87,18 +87,20 @@ func (c Config) Validate() []string {
 	return errs
 }
 
-// Merge copies non-zero fields from partial into c.
+// Merge copies non-zero fields from partial into c, preserving original
+// values for sensitive fields (arl, token, secret, etc.) when partial
+// contains masked strings (i.e., came from Config.Mask()).
 func (c *Config) Merge(partial *Config) {
-	// Sources: merge entries, overwriting existing keys with non-empty values.
+	c.mergeFields(partial)
+
 	if c.Sources == nil {
 		c.Sources = make(map[string]json.RawMessage)
 	}
-	for key, raw := range partial.Sources {
-		if len(raw) > 0 && string(raw) != "null" && string(raw) != "{}" {
-			c.Sources[key] = raw
-		}
-	}
+	mergeSourcesPreservingSecrets(c.Sources, partial.Sources)
+}
 
+// mergeFields copies non-zero library and quality fields from partial into c.
+func (c *Config) mergeFields(partial *Config) {
 	if partial.Library.DownloadPath != "" {
 		c.Library.DownloadPath = partial.Library.DownloadPath
 	}
@@ -193,6 +195,92 @@ func maskMap(m map[string]any) {
 		}
 		if nested, ok := v.(map[string]any); ok {
 			maskMap(nested)
+		}
+	}
+}
+
+// isMaskedString detects a string that has been through maskSensitiveJSON:
+// first 2 chars visible + repeat("*", len-4) + last 2 chars visible.
+func isMaskedString(s string) bool {
+	if len(s) < 5 {
+		return false
+	}
+	for i := 2; i < len(s)-2; i++ {
+		if s[i] != '*' {
+			return false
+		}
+	}
+	return true
+}
+
+// mergeSourcesPreservingSecrets merges partial source configs into original,
+// skipping any sensitive key whose value in partial is a masked string.
+// This prevents the frontend from overwriting secrets with asterisks.
+func mergeSourcesPreservingSecrets(original, partial map[string]json.RawMessage) {
+	for key, partialRaw := range partial {
+		if len(partialRaw) == 0 || string(partialRaw) == "null" || string(partialRaw) == "{}" {
+			continue
+		}
+		origRaw, hasOrig := original[key]
+		if !hasOrig {
+			original[key] = partialRaw
+			continue
+		}
+		original[key] = mergeJSONPreservingSecrets(origRaw, partialRaw)
+	}
+}
+
+// mergeJSONPreservingSecrets deep-merges partial into original, preserving
+// original values for any key whose partial value is a masked string.
+func mergeJSONPreservingSecrets(orig, partial json.RawMessage) json.RawMessage {
+	var origMap, partialMap map[string]any
+	if json.Unmarshal(partial, &partialMap) != nil {
+		return partial
+	}
+	if json.Unmarshal(orig, &origMap) != nil {
+		return partial
+	}
+
+	for k, v := range partialMap {
+		lower := strings.ToLower(k)
+		if isSensitiveKey(lower) {
+			if s, ok := v.(string); ok && isMaskedString(s) {
+				// Keep original secret — don't overwrite with asterisks.
+				if origVal, exists := origMap[k]; exists {
+					partialMap[k] = origVal
+				}
+				continue
+			}
+		}
+		// Recurse into nested objects.
+		if nestedPartial, ok := v.(map[string]any); ok {
+			if nestedOrig, ok := origMap[k].(map[string]any); ok {
+				mergeMapPreservingSecrets(nestedOrig, nestedPartial)
+				partialMap[k] = nestedPartial
+			}
+		}
+	}
+
+	result, _ := json.Marshal(partialMap)
+	return result
+}
+
+// mergeMapPreservingSecrets merges partial into orig in-place, skipping masked secrets.
+func mergeMapPreservingSecrets(orig, partial map[string]any) {
+	for k, v := range partial {
+		lower := strings.ToLower(k)
+		if isSensitiveKey(lower) {
+			if s, ok := v.(string); ok && isMaskedString(s) {
+				if origVal, exists := orig[k]; exists {
+					partial[k] = origVal
+				}
+				continue
+			}
+		}
+		if nestedPartial, ok := v.(map[string]any); ok {
+			if nestedOrig, ok := orig[k].(map[string]any); ok {
+				mergeMapPreservingSecrets(nestedOrig, nestedPartial)
+			}
 		}
 	}
 }
