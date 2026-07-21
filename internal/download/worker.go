@@ -268,27 +268,8 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			switch {
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
-					// Transition to importPending, preserving metadata set at queue time.
 					_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadImportPending,
 						100, status.Size, status.Size, 0, lastFilePath)
-
-					// Apply plugin-enriched metadata only if provided (non-empty).
-					if status.Artist != "" || status.Album != "" || status.Title != "" ||
-						status.CoverURL != "" || status.Year != 0 ||
-						status.TrackNumber != 0 || status.DiscNumber != 0 {
-						_ = p.store.Update(ctx, &domain.DownloadRecord{
-							ID:          serviceID,
-							FilePath:    lastFilePath,
-							State:       domain.DownloadImportPending,
-							CoverURL:    status.CoverURL,
-							Artist:      status.Artist,
-							Album:       status.Album,
-							Title:       status.Title,
-							TrackNumber: status.TrackNumber,
-							DiscNumber:  status.DiscNumber,
-							Year:        status.Year,
-						})
-					}
 				}
 				return nil
 			case status.State == domain.DownloadFailed:
