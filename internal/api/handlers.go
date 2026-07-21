@@ -305,7 +305,7 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 
 	err := p.CheckConnection(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]any{"status": "configured", "error": err.Error()})
+		writeJSON(w, http.StatusBadGateway, map[string]any{"status": "configured", "error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "connected"})
@@ -469,7 +469,20 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
-	downloads, err := s.downloadSvc.List(ctx)
+	stateParam := r.URL.Query().Get("state")
+
+	var downloads []domain.DownloadRecord
+	var err error
+
+	switch stateParam {
+	case "":
+		downloads, err = s.downloadSvc.List(ctx)
+	case "active":
+		downloads, err = s.downloadSvc.ListActive(ctx)
+	default:
+		downloads, err = s.downloadSvc.ListByState(ctx, domain.DownloadState(stateParam))
+	}
+
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

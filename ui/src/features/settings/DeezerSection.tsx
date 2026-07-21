@@ -41,8 +41,12 @@ export default function DeezerSection({ source }: Props) {
   const handleTest = useCallback(async () => {
     setTestResult(null);
     try {
-      await testConnection.mutateAsync("deezer");
-      setTestResult({ ok: true, message: "✓ Connected" });
+      const result = await testConnection.mutateAsync("deezer");
+      if (result.error) {
+        setTestResult({ ok: false, message: result.error });
+      } else {
+        setTestResult({ ok: true, message: "✓ Connected" });
+      }
     } catch (err) {
       setTestResult({
         ok: false,
