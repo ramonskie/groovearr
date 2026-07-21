@@ -28,6 +28,10 @@ import type {
   DownloadMissingResponse,
   SyncPlaylistResponse,
   DeletePlaylistResponse,
+  DiscoverySearchResponse,
+  DiscoveryAlbum,
+  DiscoveryTrack,
+  DiscoveryAlbumDownloadResponse,
   ApiError,
 } from "./types";
 
@@ -238,5 +242,38 @@ export function deletePlaylist(
   return request<DeletePlaylistResponse>(
     `/api/playlists/${playlistId}`,
     { method: "DELETE" },
+  );
+}
+
+// ─── Discovery ────────────────────────────────────────────────────
+
+export function getDiscoveryProviders() {
+  return request<Array<{ name: string; display_name: string }>>(
+    "/api/discover/providers",
+  );
+}
+
+export function discoverySearch(query: string, type?: string) {
+  const params = new URLSearchParams({ q: query });
+  if (type) params.set("type", type);
+  return request<DiscoverySearchResponse>(`/api/discover/search?${params}`);
+}
+
+export function getArtistAlbums(artistId: string) {
+  return request<DiscoveryAlbum[]>(
+    `/api/discover/artists/${encodeURIComponent(artistId)}/albums`,
+  );
+}
+
+export function getAlbumTracks(albumId: string) {
+  return request<DiscoveryTrack[]>(
+    `/api/discover/albums/${encodeURIComponent(albumId)}/tracks`,
+  );
+}
+
+export function downloadAlbum(albumId: string) {
+  return request<DiscoveryAlbumDownloadResponse>(
+    `/api/discover/albums/${encodeURIComponent(albumId)}/download`,
+    { method: "POST" },
   );
 }

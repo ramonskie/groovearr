@@ -13,6 +13,7 @@ import { useDownloads } from "./hooks/use-downloads";
 import type { DownloadState } from "./api/types";
 
 export type PageName =
+  | "discover"
   | "search"
   | "downloads"
   | "library"
@@ -32,6 +33,9 @@ const PlaylistsPage = lazy(
 const SettingsPage = lazy(
   () => import("./features/settings/SettingsPage"),
 );
+const DiscoverPage = lazy(
+  () => import("./features/discover/DiscoverPage"),
+);
 
 // ─── Suspense fallback ───────────────────────────────────────────────
 
@@ -46,6 +50,7 @@ function PageFallback() {
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 const VALID_PAGES = new Set<string>([
+  "discover",
   "search",
   "downloads",
   "library",
@@ -60,7 +65,7 @@ const TERMINAL_STATES = new Set<DownloadState>([
 ]);
 
 function pathToPage(pathname: string): PageName {
-  const page = pathname.replace("/", "") || "search";
+  const page = pathname.replace("/", "") || "discover";
   return VALID_PAGES.has(page) ? (page as PageName) : "search";
 }
 
@@ -92,7 +97,8 @@ function AppShell() {
     <Layout sidebar={sidebar}>
       <Suspense fallback={<PageFallback />}>
         <Routes>
-          <Route index element={<Navigate to="/search" replace />} />
+          <Route index element={<Navigate to="/discover" replace />} />
+          <Route path="/discover" element={<DiscoverPage />} />
           <Route path="/search" element={<SearchPage />} />
           <Route path="/downloads" element={<DownloadsPage />} />
           <Route path="/library" element={<LibraryPage />} />

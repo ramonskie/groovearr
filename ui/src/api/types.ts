@@ -128,6 +128,53 @@ export interface SearchResponse {
   albums: AlbumResult[];
 }
 
+// ─── Discovery (metadata-first browse) ────────────────────────────
+
+export interface DiscoveryProvider {
+  name: string;
+  display_name: string;
+}
+
+export interface ArtistSummary {
+  provider_id: string;
+  name: string;
+  image_url?: string;
+  genres?: string[];
+}
+
+export interface DiscoveryAlbum {
+  provider_id: string;
+  provider_name: string;
+  artist_name: string;
+  title: string;
+  year?: number;
+  cover_url?: string;
+  track_count: number;
+  type: string; // "album", "single", "compilation", "ep"
+}
+
+export interface DiscoveryTrack {
+  provider_id: string;
+  artist_name: string;
+  album_title: string;
+  title: string;
+  track_number: number;
+  disc_number: number;
+  duration_ms: number;
+  isrc?: string;
+}
+
+export interface DiscoverySearchResponse {
+  artists?: ArtistSummary[];
+  albums?: DiscoveryAlbum[];
+}
+
+export interface DiscoveryAlbumDownloadResponse {
+  queued: number;
+  total: number;
+  errors: string[];
+}
+
 // ─── Downloads ─────────────────────────────────────────────────────
 
 export type DownloadState =
