@@ -4,17 +4,40 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
 )
 
+// oauthStates stores in-progress OAuth state parameters.
+// Avoids cookie SameSite/redirect issues across browsers.
+var (
+	oauthStates   = make(map[string]string) // state → verifier
+	oauthStatesMu sync.Mutex
+)
+
+func init() {
+	// Clean expired states periodically.
+	go func() {
+		for {
+			time.Sleep(5 * time.Minute)
+			oauthStatesMu.Lock()
+			for k := range oauthStates {
+				delete(oauthStates, k)
+			}
+			oauthStatesMu.Unlock()
+		}
+	}()
+}
+
 // RegisterOAuthRoutes adds Spotify OAuth login and callback endpoints to the given mux.
 // The rebuild callback is invoked after tokens are stored to recreate the spotify plugin
-// so it picks up the new access token and becomes "Connected".
-func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error) {
+// so it picks up the new access token. The verify callback is called after rebuild to
+// run CheckConnection so the UI reflects the new state.
+func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
 	mux.HandleFunc("GET /api/spotify/login", handleSpotifyLogin(cfg))
-	mux.HandleFunc("GET /api/spotify/callback", handleSpotifyCallback(cfg, rebuild))
+	mux.HandleFunc("GET /api/spotify/callback", handleSpotifyCallback(cfg, rebuild, verify))
 }
 
 // handleSpotifyLogin initiates the OAuth PKCE flow by redirecting the user
@@ -51,15 +74,10 @@ func handleSpotifyLogin(cfg *config.Persistence) http.HandlerFunc {
 		// The verifier value is also used as the OAuth state parameter for CSRF protection.
 		state := verifier
 
-		// Store the verifier in a cookie for callback validation.
-		http.SetCookie(w, &http.Cookie{
-			Name:     "spotify_oauth_state",
-			Value:    verifier,
-			Path:     "/api/spotify",
-			MaxAge:   600,
-			HttpOnly: true,
-			SameSite: http.SameSiteLaxMode,
-		})
+		// Store state in-memory (avoids SameSite cookie issues on redirect).
+		oauthStatesMu.Lock()
+		oauthStates[state] = verifier
+		oauthStatesMu.Unlock()
 
 		authURL := BuildAuthURL(spCfg.ClientID, spCfg.RedirectURI, challenge, state)
 		http.Redirect(w, r, authURL, http.StatusFound)
@@ -69,7 +87,7 @@ func handleSpotifyLogin(cfg *config.Persistence) http.HandlerFunc {
 // handleSpotifyCallback handles the OAuth callback from Spotify. It validates
 // the state parameter, exchanges the authorization code for tokens, and stores
 // them in the config.
-func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error) http.HandlerFunc {
+func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		state := r.URL.Query().Get("state")
@@ -84,13 +102,18 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 			return
 		}
 
-		// Validate state against the cookie stored during login.
-		cookie, err := r.Cookie("spotify_oauth_state")
-		if err != nil || cookie.Value != state {
+		// Validate state against the in-memory store.
+		oauthStatesMu.Lock()
+		verifier, ok := oauthStates[state]
+		if ok {
+			delete(oauthStates, state)
+		}
+		oauthStatesMu.Unlock()
+		if !ok {
+			log.Printf("spotify: CSRF check: unknown state %q", state)
 			http.Error(w, "invalid state — CSRF check failed", http.StatusForbidden)
 			return
 		}
-		verifier := cookie.Value
 
 		current := cfg.Get()
 		raw, ok := current.Sources["spotify"]
@@ -137,21 +160,17 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 			return
 		}
 
-		// Rebuild the spotify plugin so it picks up the new tokens.
+		// Rebuild the plugin so it picks up the new tokens.
 		updated := cfg.Get()
 		if raw, ok := updated.Sources["spotify"]; ok {
 			if err := rebuild("spotify", raw); err != nil {
 				log.Printf("spotify: plugin rebuild after OAuth: %v", err)
+			} else if verify != nil {
+				verify("spotify")
 			}
 		}
 
-		// Clear the state cookie and redirect to the frontend.
-		http.SetCookie(w, &http.Cookie{
-			Name:   "spotify_oauth_state",
-			Value:  "",
-			Path:   "/api/spotify",
-			MaxAge: -1,
-		})
-		http.Redirect(w, r, "/?spotify=connected", http.StatusFound)
+		// Redirect back to settings.
+		http.Redirect(w, r, "/settings?spotify=connected", http.StatusFound)
 	}
 }

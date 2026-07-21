@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
+import { useSearchParams } from "react-router-dom";
 import { useConfig, useUpdateConfig } from "../../hooks/use-config";
 import SubTabs from "../../components/SubTabs";
 import Spinner from "../../components/Spinner";
@@ -24,7 +25,10 @@ type TabId = (typeof TABS)[number]["id"];
 const AUTO_SAVE_MS = 1000;
 
 export default function SettingsPage() {
-  const [activeTab, setActiveTab] = useState<TabId>("general");
+  const [searchParams] = useSearchParams();
+  const [activeTab, setActiveTab] = useState<TabId>(
+    searchParams.get("spotify") === "connected" ? "sources" : "general"
+  );
 
   const { data: config, isLoading, error } = useConfig();
   const updateConfig = useUpdateConfig();

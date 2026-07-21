@@ -9,6 +9,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
@@ -166,6 +167,12 @@ func main() {
 			spotify.RegisterOAuthRoutes(mux, cfg, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath}
 				return registry.Rebuild(name, rawCfg, res)
+			}, func(name string) {
+				if p := registry.Get(name); p != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					p.CheckConnection(ctx)
+				}
 			})
 		},
 	)
