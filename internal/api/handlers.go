@@ -972,34 +972,43 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	// Merge artists: deduplicate by normalized name, keep from all providers.
-	artistMap := make(map[string]discovery.ArtistSummary)
-	for _, r := range results {
+	// Merge artists: collect all, then deduplicate by normalized name.
+	// Process providers in registration order for deterministic results.
+	var allArtists []discovery.ArtistSummary
+	for idx := range providers {
+		r := results[idx]
+		if r.err != nil {
+			log.Printf("discover: provider %s had errors, using partial results", providers[idx].Name())
+		}
 		for _, a := range r.artists {
-			key := normalizeKey(a.Name)
-			if _, ok := artistMap[key]; !ok {
-				artistMap[key] = a
-			}
+			allArtists = append(allArtists, a)
 		}
 	}
-	mergedArtists := make([]discovery.ArtistSummary, 0, len(artistMap))
-	for _, a := range artistMap {
-		mergedArtists = append(mergedArtists, a)
+	artistMap := make(map[string]discovery.ArtistSummary)
+	var mergedArtists []discovery.ArtistSummary
+	for _, a := range allArtists {
+		key := normalizeKey(a.Name)
+		if _, ok := artistMap[key]; !ok {
+			artistMap[key] = a
+			mergedArtists = append(mergedArtists, a)
+		}
 	}
 
-	// Merge albums: deduplicate by artist+title, keep first.
-	albumMap := make(map[string]discovery.AlbumResult)
-	for _, r := range results {
-		for _, a := range r.albums {
-			key := normalizeKey(a.ArtistName + "|" + a.Title)
-			if _, ok := albumMap[key]; !ok {
-				albumMap[key] = a
-			}
+	// Merge albums: collect all, then deduplicate.
+	var allAlbums []discovery.AlbumResult
+	for idx := range providers {
+		for _, a := range results[idx].albums {
+			allAlbums = append(allAlbums, a)
 		}
 	}
-	mergedAlbums := make([]discovery.AlbumResult, 0, len(albumMap))
-	for _, a := range albumMap {
-		mergedAlbums = append(mergedAlbums, a)
+	albumMap := make(map[string]discovery.AlbumResult)
+	var mergedAlbums []discovery.AlbumResult
+	for _, a := range allAlbums {
+		key := normalizeKey(a.ArtistName + "|" + a.Title)
+		if _, ok := albumMap[key]; !ok {
+			albumMap[key] = a
+			mergedAlbums = append(mergedAlbums, a)
+		}
 	}
 
 	log.Printf("discover: search results: %d artists, %d albums (from %d providers)", len(mergedArtists), len(mergedAlbums), len(providers))
@@ -1049,15 +1058,15 @@ func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	albums, err := providers[0].GetArtistAlbums(r.Context(), artistID, 50)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	ctx := r.Context()
+	for _, p := range providers {
+		albums, err := p.GetArtistAlbums(ctx, artistID, 50)
+		if err == nil && albums != nil {
+			writeJSON(w, http.StatusOK, albums)
+			return
+		}
 	}
-	if albums == nil {
-		albums = []discovery.AlbumResult{}
-	}
-	writeJSON(w, http.StatusOK, albums)
+	writeError(w, http.StatusNotFound, fmt.Errorf("artist %q not found on any provider", artistID))
 }
 
 func (s *Server) handleDiscoverAlbumTracks(w http.ResponseWriter, r *http.Request) {
@@ -1077,15 +1086,15 @@ func (s *Server) handleDiscoverAlbumTracks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	tracks, err := providers[0].GetAlbumTracks(r.Context(), albumID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+	ctx := r.Context()
+	for _, p := range providers {
+		tracks, err := p.GetAlbumTracks(ctx, albumID)
+		if err == nil && tracks != nil {
+			writeJSON(w, http.StatusOK, tracks)
+			return
+		}
 	}
-	if tracks == nil {
-		tracks = []discovery.TrackInfo{}
-	}
-	writeJSON(w, http.StatusOK, tracks)
+	writeError(w, http.StatusNotFound, fmt.Errorf("album %q not found on any provider", albumID))
 }
 
 func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Request) {
@@ -1106,10 +1115,16 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 	}
 
 	ctx := r.Context()
-	provider := providers[0]
-	tracks, err := provider.GetAlbumTracks(ctx, albumID)
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
+	var tracks []discovery.TrackInfo
+	for _, p := range providers {
+		t, err := p.GetAlbumTracks(ctx, albumID)
+		if err == nil && t != nil {
+			tracks = t
+			break
+		}
+	}
+	if tracks == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("album %q not found on any provider", albumID))
 		return
 	}
 
