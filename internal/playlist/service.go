@@ -126,9 +126,11 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 		return nil, fmt.Errorf("fetch playlist tracks: %w", err)
 	}
 
+	// Try to enrich with user playlist metadata (description, cover, owner).
+	// Non-fatal — free-mode sources may not support listing user playlists.
 	playlists, err := src.GetUserPlaylists(ctx)
 	if err != nil {
-		return nil, fmt.Errorf("fetch user playlists: %w", err)
+		playlists = nil
 	}
 
 	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos))

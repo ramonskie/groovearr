@@ -28,7 +28,7 @@ const PlaylistsPage: FC = () => {
           </Button>
           <Button variant="primary" size="sm" onClick={() => setImportOpen(true)}>
             <Plus size={14} className="mr-1" />
-            Import by ID
+            Import Playlist
           </Button>
         </div>
       </div>

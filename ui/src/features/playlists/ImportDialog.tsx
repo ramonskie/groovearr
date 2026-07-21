@@ -10,15 +10,44 @@ interface ImportDialogProps {
   onOpenChange: (open: boolean) => void;
 }
 
-/** Extract Deezer playlist numeric ID from a URL or raw ID string. */
-function extractDeezerId(input: string): string | null {
+interface ParsedPlaylist {
+  source: string;
+  id: string;
+}
+
+const urlPatterns: { source: string; pattern: RegExp; extract: (m: RegExpMatchArray) => string }[] = [
+  // Spotify: https://open.spotify.com/playlist/{id}?si=...
+  {
+    source: "spotify",
+    pattern: /open\.spotify\.com\/playlist\/([a-zA-Z0-9]+)/,
+    extract: (m) => m[1],
+  },
+  // Deezer: https://www.deezer.com/.../playlist/{id}/
+  {
+    source: "deezer",
+    pattern: /\/playlist\/(\d+)\//,
+    extract: (m) => m[1],
+  },
+];
+
+/** Parse a playlist URL or ID into its source and identifier. */
+function parsePlaylistURL(input: string): ParsedPlaylist | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
-  // e.g. https://www.deezer.com/us/playlist/123456789/
-  const match = trimmed.match(/\/playlist\/(\d+)\//);
-  if (match) return match[1];
-  // Raw numeric ID
-  if (/^\d+$/.test(trimmed)) return trimmed;
+
+  // Try known URL patterns first.
+  for (const { source, pattern, extract } of urlPatterns) {
+    const match = trimmed.match(pattern);
+    if (match) {
+      return { source, id: extract(match) };
+    }
+  }
+
+  // Fallback: raw numeric ID → Deezer.
+  if (/^\d+$/.test(trimmed)) {
+    return { source: "deezer", id: trimmed };
+  }
+
   return null;
 }
 
@@ -27,13 +56,13 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
   const importMutation = useImportPlaylist();
 
   const handleImport = () => {
-    const playlistId = extractDeezerId(input);
-    if (!playlistId) {
-      toast.error("Invalid Deezer playlist URL or ID");
+    const parsed = parsePlaylistURL(input);
+    if (!parsed) {
+      toast.error("Invalid playlist URL — expected a Spotify or Deezer playlist link, or a numeric Deezer ID");
       return;
     }
     importMutation.mutate(
-      { source: "deezer", playlist_id: playlistId },
+      { source: parsed.source, playlist_id: parsed.id },
       {
         onSuccess: (data) => {
           toast.success(
@@ -56,7 +85,7 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
         <Dialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-slate-800 bg-slate-900 p-6">
           <div className="mb-4 flex items-center justify-between">
             <Dialog.Title className="text-lg font-semibold text-white">
-              Import Deezer Playlist
+              Import Playlist
             </Dialog.Title>
             <Dialog.Close
               aria-label="Close"
@@ -68,22 +97,25 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
 
           <div className="mb-4">
             <label
-              htmlFor="deezer-import-input"
+              htmlFor="playlist-import-input"
               className="mb-1.5 block text-sm text-slate-400"
             >
-              Playlist URL or numeric ID
+              Playlist URL
             </label>
             <input
-              id="deezer-import-input"
+              id="playlist-import-input"
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="https://www.deezer.com/.../playlist/123456/ or 123456"
+              placeholder="https://open.spotify.com/playlist/... or https://www.deezer.com/.../playlist/.../"
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-purple-500 focus:outline-none"
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleImport();
               }}
             />
+            <p className="mt-1.5 text-xs text-slate-600">
+              Paste a Spotify or Deezer playlist URL. A numeric Deezer ID also works.
+            </p>
           </div>
 
           <div className="flex justify-end gap-2">

@@ -23,6 +23,12 @@ export const settingsFormSchema = z.object({
   // MusicBrainz
   musicbrainz_email: z.string().optional(),
 
+  // Spotify
+  spotify_mode: z.enum(["free", "dev"]).optional(),
+  spotify_client_id: z.string().optional(),
+  spotify_client_secret: z.string().optional(),
+  spotify_redirect_uri: z.string().optional(),
+
   // Library
   library_path: z.string().optional(),
   folder_template: z.string().optional(),
@@ -41,6 +47,10 @@ export const settingsDefaults: SettingsFormValues = {
   deezer_arl: "",
   deezer_quality: "flac",
   musicbrainz_email: "",
+  spotify_mode: "free",
+  spotify_client_id: "",
+  spotify_client_secret: "",
+  spotify_redirect_uri: "",
   library_path: "",
   folder_template: "",
   playlist_path: "",

@@ -42,6 +42,8 @@ export default function SettingsPage() {
       const slskd = config.sources?.soulseek ?? {};
       const dz = config.sources?.deezer ?? {};
       const mb = config.sources?.musicbrainz ?? {};
+      const sp = config.sources?.spotify ?? {};
+      const spCast = sp as { mode?: string; client_id?: string; client_secret?: string; redirect_uri?: string };
       form.reset({
         download_path: config.library.download_path ?? "",
         slskd_url: (slskd as Record<string, string>).slskd_url ?? "",
@@ -49,6 +51,10 @@ export default function SettingsPage() {
         deezer_arl: (dz as Record<string, string>).arl ?? "",
         deezer_quality: ((dz as Record<string, string>).quality as "flac" | "mp3_320" | "mp3_128") ?? "flac",
         musicbrainz_email: (mb as Record<string, string>).email ?? "",
+        spotify_mode: (spCast.mode as "free" | "dev") ?? "free",
+        spotify_client_id: spCast.client_id ?? "",
+        spotify_client_secret: spCast.client_secret ?? "",
+        spotify_redirect_uri: spCast.redirect_uri ?? "",
         library_path: config.library.library_path ?? "",
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
@@ -73,6 +79,14 @@ export default function SettingsPage() {
           musicbrainz: {
             email: values.musicbrainz_email ?? "",
           },
+          spotify: {
+            mode: values.spotify_mode ?? "free",
+            client_id: values.spotify_client_id ?? "",
+            client_secret: values.spotify_client_secret ?? "",
+            redirect_uri: values.spotify_redirect_uri ?? "",
+            // Preserve tokens obtained via OAuth — they are server-managed, not user-editable.
+            tokens: (config?.sources?.spotify as Record<string, unknown>)?.tokens ?? {},
+          },
         },
         library: {
           download_path: values.download_path ?? "",
@@ -83,7 +97,7 @@ export default function SettingsPage() {
         },
       });
     },
-    [updateConfig],
+    [updateConfig, config],
   );
 
   useEffect(() => {

@@ -41,8 +41,11 @@ type Server struct {
 	httpSrv     *http.Server
 }
 
-// NewServer creates an HTTP server with all routes wired.
-func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub) *Server {
+// PluginRouteRegistrar is called after all standard routes are registered,
+// giving plugins a chance to add their own HTTP endpoints.
+type PluginRouteRegistrar func(mux *http.ServeMux)
+
+func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:         cfg,
 		registry:    registry,
@@ -99,6 +102,11 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 
 	// Debug endpoint — full download state for troubleshooting.
 	mux.HandleFunc("GET /api/debug/download/{id}", s.handleDebugDownload)
+
+	// Let plugins register their own routes.
+	for _, register := range pluginRoutes {
+		register(mux)
+	}
 
 	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
 	return s
@@ -726,6 +734,7 @@ func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID)
 	if err != nil {
+		log.Printf("playlist: import %s/%s failed: %v", req.Source, req.PlaylistID, err)
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}

@@ -208,6 +208,15 @@ Deployment, security, and operational concerns.
 | 7 | Platform & Ops | 12 features | ❌ 0/12 |
 | **Total** | | **81 features** | **28 done, 53 remaining** |
 
+## Known Bugs
+
+| # | Component | Severity | Description |
+|---|-----------|----------|-------------|
+| B1 | Deezer | 🟡 Medium | **`Test Connection` false positive with invalid ARL.** `authenticate()` only checks `USER_ID != 0` after `deezer.getUserData`. An expired/malformed ARL may still return partial user data with a valid-looking `USER_ID`. Should also verify `license_token` is non-empty or call a protected endpoint to confirm premium access. |
+| B2 | Config (pre-existing) | 🟡 Medium | **Masked `client_secret` round-trip corruption.** `Config.Mask()` replaces `client_secret` with `cl****et`. The settings form loads this masked value, and auto-save writes it back, permanently corrupting the secret. Same bug affects Deezer `arl`. |
+| B3 | Config (design) | 🟡 Medium | **`Merge()` replaces entire source objects.** Any field not sent by the frontend (e.g., `tokens`, `allow_fallback`) is lost on save. Server-managed fields like OAuth tokens can't coexist safely with user-editable config without deep-merge. |
+| B4 | Playlist / Download | 🟡 Medium | **`DownloadMissing` silently queues 0 when no downloader configured.** If all download sources are unavailable (expired ARL, slskd not running, Spotify metadata-only), unmatched playlist tracks are left in limbo with no feedback. Should error with "no download sources available" or queue tracks in a `no_downloader` state visible in the UI. |
+
 ### Immediate Next Steps
 
 1. **Docker image + compose** — `docker compose up` for one-command dev/test cycle (#71, Tier 7, 🔴 High)

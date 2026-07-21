@@ -11,6 +11,17 @@
     "allow_fallback": true,
     "access_token": ""
   },
+  "spotify": {
+    "mode": "free",
+    "client_id": "",
+    "client_secret": "",
+    "redirect_uri": "http://localhost:8008/api/spotify/callback",
+    "tokens": {
+      "access_token": "",
+      "refresh_token": "",
+      "expires_at": 0
+    }
+  },
   "library": {
     "download_path": "./downloads",
     "library_path": "./music",

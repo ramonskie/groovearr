@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"log"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -15,6 +17,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
 	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
+	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
@@ -71,6 +74,7 @@ func main() {
 	pluginReg.RegisterFactory(deezer.Factory)
 	pluginReg.RegisterFactory(musicbrainz.Factory)
 	pluginReg.RegisterFactory(coverartarchive.Factory)
+	pluginReg.RegisterFactory(spotify.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath}
@@ -135,13 +139,15 @@ func main() {
 
 	// Playlist service — auto-register plugins that provide playlist sources.
 	playlistReg := playlist.NewRegistry()
-	for _, p := range registry.All() {
-		if psp, ok := p.(playlist.PlaylistSourceProvider); ok {
-			if p.IsConfigured() {
-				playlistReg.Register(psp.PlaylistSource())
+		for _, p := range registry.All() {
+			if psp, ok := p.(playlist.PlaylistSourceProvider); ok {
+				if p.IsConfigured() {
+					if ps := psp.PlaylistSource(); ps != nil {
+						playlistReg.Register(ps)
+					}
+				}
 			}
 		}
-	}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
 	})
@@ -152,7 +158,14 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, registry, mdRegistry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub)
+	srv := api.NewServer(addr, cfg, registry, mdRegistry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
+		func(mux *http.ServeMux) {
+			spotify.RegisterOAuthRoutes(mux, cfg, func(name string, rawCfg json.RawMessage) error {
+				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath}
+				return registry.Rebuild(name, rawCfg, res)
+			})
+		},
+	)
 
 	log.Printf("groovearr starting")
 	log.Printf("  config:   %s", configPath)
