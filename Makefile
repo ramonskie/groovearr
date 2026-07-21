@@ -41,8 +41,10 @@ rebuild: build-ui
 # ─── Test ─────────────────────────────────────────────────────
 
 test:
-	@echo "==> Running tests..."
+	@echo "==> Running Go tests..."
 	$(GO) test ./... -count=1
+	@echo "==> Running UI tests..."
+	cd ui && npm test
 
 test-race:
 	@echo "==> Running tests (-race)..."

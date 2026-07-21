@@ -72,7 +72,24 @@ export const useDownloadStore = create<DownloadStoreState>()((set) => ({
 
   upsertRecord: (record) =>
     set((state) => {
-      const next = { ...state.records, [record.id]: record };
+      const existing = state.records[record.id];
+      // Merge: SSE events carry only progress/state fields. Preserve
+      // existing metadata (display_name, source_name, artist, title, etc.)
+      // by having existing take priority, then explicitly applying the
+      // mutable fields that SSE events are intended to update.
+      const merged = existing
+        ? {
+            ...existing,
+            state: record.state || existing.state,
+            progress: record.progress,
+            size: record.size || existing.size,
+            transferred: record.transferred,
+            speed: record.speed,
+            file_path: record.file_path || existing.file_path,
+            error: record.error || existing.error,
+          }
+        : record;
+      const next = { ...state.records, [record.id]: merged };
       const arr = Object.values(next);
       return {
         records: next,
