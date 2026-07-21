@@ -73,16 +73,16 @@ This tier enables the fully free path (slskd + free metadata = complete library)
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 27 | **Metadata provider plugin interface** — `MetadataProvider` interface (separate from `download.Plugin`): `SearchCover(artist, album) *CoverResult`, `EnrichTrack(track) *Metadata`. Registry-based, config-driven. | 🔴 High | M | Plugin architecture (done) |
-| 28 | **Cover Art Archive provider** — free cover art via MusicBrainz Cover Art Archive. Search by MBID or artist+album. No auth required. Fills `CoverURL` for slskd downloads. | 🔴 High | M | Metadata provider interface, MusicBrainz ID lookup |
-| 29 | **MusicBrainz metadata provider** — artist/album/release IDs, track listings, AcoustID fingerprinting. Backbone of free-tier metadata. | 🔴 High | L | Metadata provider interface |
+| 27 | **Metadata provider plugin interface** — `MetadataProvider` interface (separate from `download.Plugin`): `SearchCover(artist, album) *CoverResult`, `EnrichTrack(track) *Metadata`. Registry-based, config-driven. Optional interfaces: `CoverArtArchiveProvider`, `ArtistMetadataProvider`, `LyricsProvider`. | ✅ Done | M | Plugin architecture (done) |
+| 28 | **Cover Art Archive provider** — free cover art via MusicBrainz Cover Art Archive. Search by MBID. No auth required. Fills `CoverURL` for slskd downloads. | ✅ Done | M | Metadata provider interface, MusicBrainz ID lookup |
+| 29 | **MusicBrainz metadata provider** — artist/album/release IDs, ISRC enrichment, genre/label/release-date via release lookup. Rate-limited API client (1 req/s). Backbone of free-tier metadata. | ✅ Done | L | Metadata provider interface |
 | 30 | **iTunes Search API provider** — free cover art + metadata fallback. No auth, good for mainstream releases not in CAA. | 🟡 Medium | S | Metadata provider interface |
-| 31 | **Metadata enrichment pipeline** — background workers that run metadata plugins against new library additions. Post-import hook that queries all registered metadata providers. | 🔴 High | M | Metadata provider interface + registry |
+| 31 | **Metadata enrichment pipeline** — `MetadataEnrichmentHandler` in download post-processing chain. Runs all configured metadata providers against imported tracks: cover art fetch (CAA), ISRC/genre/label enrichment (MusicBrainz), re-tagging with new metadata. | ✅ Done | M | Metadata provider interface + registry |
 | 32 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | 🟡 Medium | M | Metadata provider interface, Last.fm API key |
 
 **Goal**: After Tier 1.5, a user with only slskd configured gets:
 - ✅ Cover art (`cover.jpg` in album dirs)
-- ✅ Artist images and bios
+- ❌ Artist images and bios (needs Last.fm or iTunes provider)
 - ✅ ISRC codes for dedup
 - ✅ Genre tags
 - ✅ Album grouping by MusicBrainz release ID
@@ -128,13 +128,13 @@ Spotify integration for playlist import/sync, artist following, and discovery.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 48 | **Spotify OAuth** — login flow, token refresh, scoped access | 🟡 In Progress | M | Playlist framework |
+| 48 | **Spotify OAuth** — login flow (PKCE), token refresh (auto on 401), scoped access. Persists tokens to config, rebuilds plugin on connect. | ✅ Done | M | Playlist framework |
 | 49 | **Deezer playlist import** — import playlists via ARL, download tracks, separate playlist folder | ✅ Done | M | Playlist framework |
-| 50 | **Playlist sync** — refresh, discover missing, download pipeline | 🟡 In Progress | L | Playlist service |
+| 50 | **Playlist sync** — refresh (detect additions/removals/reordering), discover missing tracks (ISRC → fuzzy → unmatched), download pipeline (two-phase queue+resolve), playlist folder builder with cleanup | ✅ Done | L | Playlist service |
 | 51 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
 | 52 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
 | 53 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
-| 54 | **Wishlist / retry queue** — download queue with Pending tab, batch queue-then-resolve pipeline, orphan recovery on restart | 🟡 In Progress | M | Two-phase QueuePending + resolvePendingDownloads, `/api/downloads?state=active` |
+| 54 | **Wishlist / retry queue** — two-phase batch-queue pipeline (✅), Pending tab with Active/Queue sections (✅), orphan recovery on restart (✅). Missing: `POST /api/downloads/{id}/retry` endpoint, Retry button in UI, stuck pending auto-fail (#B5). | 🟡 In Progress | M | Retry endpoint + UI button |
 | 55 | **Discovery pool** — AI-curated recommendations from Spotify/Deezer/Last.fm | 🟢 Low | L | Multiple APIs |
 | 56 | **Personalized playlists** — Daily Mix, Discover Weekly, Release Radar sync | 🟢 Low | L | Spotify OAuth |
 | 57 | **Beatport charts** — top charts imported for discovery | 🟢 Low | M | Web scraping |
@@ -179,7 +179,7 @@ Deployment, security, and operational concerns.
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
 | 70 | **Authentication** — login gate, reverse proxy support, API keys | 🔴 High | L | — |
-| 71 | **Docker image + docker-compose with slskd** — one-command `docker compose up` for the free path. Enables quick test cycle: change code → rebuild → test. Primary deployment target. | 🔴 High | M | — |
+| 71 | **Docker image + docker-compose with slskd** — one-command `docker compose up` for the free path. Multi-stage build (golang → alpine), three named volumes, slskd sidecar. | ✅ Done | M | — |
 | 72 | **Multi-profile support** — separate libraries/configs per profile | 🟢 Low | L | Auth |
 | 73 | **Setup wizard** — first-run guided config (choose free/premium path) | 🟡 Medium | M | — |
 | 74 | **Systemd service** — service file + install target | 🟡 Medium | S | — |
@@ -199,20 +199,20 @@ Deployment, security, and operational concerns.
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
 | 1 | Core Quality | 11 features | ✅ 11/11 |
-| 1.5 | Metadata Providers | 6 features | ❌ 0/6 |
+| 1.5 | Metadata Providers | 6 features | 🟡 4/6 (27,28,29,31 done; 30,32 remain) |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
-| 4 | Playlists & Discovery | 10 features | 🟡 2 done, 8 remaining |
+| 4 | Playlists & Discovery | 10 features | 🟡 4 done, 6 remaining |
 | 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
 | 6 | Automation | 7 features | ❌ 0/7 |
-| 7 | Platform & Ops | 12 features | ❌ 0/12 |
-| **Total** | | **81 features** | **28 done, 53 remaining** |
+| 7 | Platform & Ops | 12 features | 🟡 1/12 (71 done; 70,72-81 remain) |
+| **Total** | | **81 features** | **32 done, 49 remaining** |
 
 ## Known Bugs
 
 | # | Component | Severity | Description |
 |---|-----------|----------|-------------|
-| B1 | Deezer | 🟡 Medium | **`Test Connection` false positive with invalid ARL.** `authenticate()` only checks `USER_ID != 0` after `deezer.getUserData`. An expired/malformed ARL may still return partial user data with a valid-looking `USER_ID`. Should also verify `license_token` is non-empty or call a protected endpoint to confirm premium access. |
+| B1 | Deezer | ✅ Done | **`Test Connection` false positive with invalid ARL.** Now verifies `license_token` is non-empty in addition to `USER_ID != 0`. Fixed in `internal/providers/deezer/authenticate.go`. |
 | B2 | Config | ✅ Done | **Masked secret round-trip corruption.** `Merge()` now detects masked strings and preserves original values. Fixed in `internal/config/config.go:90-160`. |
 | B3 | Config (design) | 🟡 Medium | **`Merge()` replaces entire source objects.** Any field not sent by the frontend (e.g., `tokens`, `allow_fallback`) is lost on save. Server-managed fields like OAuth tokens can't coexist safely with user-editable config without deep-merge. |
 | B4 | Playlist / Download | ✅ Done | **Queued tracks now visible.** `DownloadMissing` uses two-phase batch-queue → background-resolve. `QueuePending` inserts all tracks immediately with `source=pending`. Pending tab shows queue via SSE. `RecoverOrphans` recovers stuck records on restart. |
@@ -222,14 +222,15 @@ Deployment, security, and operational concerns.
 
 ### Immediate Next Steps
 
-1. **Docker image + compose** — `docker compose up` for one-command dev/test cycle (#71, Tier 7, 🔴 High)
-2. **Metadata provider plugin architecture** — interface + registry (#27, Tier 1.5, 🔴 High)
-3. **Cover Art Archive provider** — free cover art for slskd users (#28, Tier 1.5, 🔴 High)
-4. **MusicBrainz metadata provider** — free ISRC, album grouping, AcoustID (#29, Tier 1.5, 🔴 High)
-5. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
+1. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
+2. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
+3. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
+4. **Wishlist retry endpoint + UI** — `POST /api/downloads/{id}/retry` + Retry button (#54 gap, Tier 4, 🟡)
+5. **Stuck pending auto-fail** — auto-fail/retry pending records older than N minutes (#B5, 🟡 Medium)
 
-### First Major Feature Block (Tier 1.5 + Tier 4)
+### First Major Feature Block (Tier 1.5 completion + Tier 7 security)
 
-1. **Metadata providers** — free-tier backbone: CAA + MusicBrainz + enrichment pipeline
-2. **Spotify OAuth + playlist import** — biggest user-facing premium feature gap (#48, Tier 4)
-3. **Playlist sync pipeline** — end-to-end Spotify → download → library (#50, Tier 4)
+1. **Free-tier metadata completion** — iTunes + Last.fm providers to round out free path coverage
+2. **Authentication** — login gate + API keys for production safety (#70, Tier 7)
+3. **Wishlist polish** — retry endpoint, retry UI, stuck pending detection (#54 gap + #B5)
+4. **Systemd service** — production deployment target (#74, Tier 7)
