@@ -85,7 +85,7 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 	if !c.IsConfigured() {
 		return fmt.Errorf("soulseek: slskd URL not configured")
 	}
-	_, err := c.doRequest(ctx, http.MethodGet, "", nil)
+	_, err := c.doRequest(ctx, http.MethodGet, "application", nil)
 	return err
 }
 
@@ -475,6 +475,22 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 
 			// Parse metadata from filename.
 			trackNum, trackTitle := parseTrackFilename(filename)
+
+			// Extract artist from "Artist - Title" pattern in filename.
+			artist := extractArtistFromFilename(filename)
+
+			// If title still contains artist prefix (e.g. from files that include
+			// artist name before the title), strip it so the matcher compares clean titles.
+			if artist != "" {
+				for _, sep := range []string{" - ", "_-_"} {
+					prefix := strings.ToLower(artist + sep)
+					if strings.HasPrefix(strings.ToLower(trackTitle), prefix) {
+						trackTitle = strings.TrimSpace(trackTitle[len(prefix):])
+						break
+					}
+				}
+			}
+
 			durationSec, _ := fm["length"].(float64)
 			tr := domain.TrackResult{
 				SearchResult: domain.SearchResult{
@@ -490,6 +506,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				},
 				Title:       trackTitle,
 				TrackNumber: trackNum,
+				Artist:      artist,
 			}
 			tracks = append(tracks, tr)
 
@@ -561,12 +578,56 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 
 // parseTrackFilename extracts track number and title from a filename like "01 - Song Name.flac".
 func parseTrackFilename(filename string) (num int, title string) {
-	base := strings.TrimSuffix(path.Base(filename), path.Ext(filename))
+	// Normalize Windows backslashes for path.Base compatibility.
+	normalized := strings.ReplaceAll(filename, "\\", "/")
+	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
 	if m := library.TrackNumRE.FindStringSubmatch(base); m != nil {
 		n, _ := strconv.Atoi(m[1])
 		return n, strings.TrimSpace(m[2])
 	}
 	return 0, base
+}
+
+// extractArtistFromFilename tries to split an "Artist - Title" pattern from a filename.
+// Handles common delimiters: " - " and "_-_".
+// For numbered files: "08 - Eminem - Title" (3+ parts) → artist is second part.
+// For simple files: "Eminem - Title" (2 parts, not numeric) → artist is first part.
+func extractArtistFromFilename(filename string) string {
+	// Normalize Windows backslashes for path.Base compatibility.
+	normalized := strings.ReplaceAll(filename, "\\", "/")
+	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
+
+	// Try " - " delimiter (most common).
+	parts := strings.SplitN(base, " - ", 4)
+	if len(parts) >= 2 {
+		first := strings.TrimSpace(parts[0])
+		// If first part is a pure number: track number.
+		// Need 3+ parts (e.g. "08 - Eminem - Title") for artist to be present.
+		if _, err := strconv.Atoi(first); err == nil {
+			if len(parts) >= 3 {
+				candidate := strings.TrimSpace(parts[1])
+				if len(candidate) > 0 && len(candidate) < 80 {
+					return candidate
+				}
+			}
+			return ""
+		}
+		// Non-numeric first part → likely artist name.
+		if len(first) > 0 && len(first) < 80 {
+			return first
+		}
+	}
+
+	// Try "_-_" delimiter.
+	parts = strings.SplitN(base, "_-_", 3)
+	if len(parts) >= 2 {
+		first := strings.TrimSpace(parts[0])
+		if _, err := strconv.Atoi(first); err != nil && len(first) > 0 && len(first) < 80 {
+			return first
+		}
+	}
+
+	return ""
 }
 
 // parseAlbumDir extracts artist, album title, and year from a directory path segment.
@@ -635,14 +696,16 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 	for _, user := range users {
 		for _, dir := range user.Directories {
 			for _, f := range dir.Files {
+				// Normalize Windows backslashes to forward slashes.
+				normalizedFilename := strings.ReplaceAll(f.Filename, "\\", "/")
 				filePath := ""
-				if f.Filename != "" && downloadPath != "" {
-					filePath = filepath.Join(downloadPath, f.Filename)
+				if normalizedFilename != "" && downloadPath != "" {
+					filePath = filepath.Join(downloadPath, normalizedFilename)
 				}
 				records = append(records, domain.DownloadRecord{
 					ID:          f.ID,
 					SourceName:  pluginName,
-					Filename:    f.Filename,
+					Filename:    normalizedFilename,
 					State:       parseState(f.State),
 					Progress:    f.PercentComplete,
 					Size:        f.Size,
