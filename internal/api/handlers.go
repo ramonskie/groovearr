@@ -15,6 +15,7 @@ import (
 
 	"github.com/ramonskie/groovearr"
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
@@ -28,35 +29,37 @@ import (
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg         *config.Persistence
-	registry    *download.Registry
-	mdRegistry  *metadata.Registry
-	store       library.Store
-	scanner     *library.Scanner
-	downloadSvc *download.DownloadService
-	eventBus    events.IEventAggregator
-	sseHub      *sse.SSEHub
-	matcher     *matching.Engine
-	playlistSvc *playlist.Service
-	httpSrv     *http.Server
+	cfg          *config.Persistence
+	registry     *download.Registry
+	mdRegistry   *metadata.Registry
+	discoveryReg *discovery.Registry
+	store        library.Store
+	scanner      *library.Scanner
+	downloadSvc  *download.DownloadService
+	eventBus     events.IEventAggregator
+	sseHub       *sse.SSEHub
+	matcher      *matching.Engine
+	playlistSvc  *playlist.Service
+	httpSrv      *http.Server
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
-		cfg:         cfg,
-		registry:    registry,
-		mdRegistry:  mdRegistry,
-		store:       store,
-		scanner:     scanner,
-		downloadSvc: downloadSvc,
-		eventBus:    eventBus,
-		sseHub:      sseHub,
-		matcher:     matching.New(),
-		playlistSvc: playlistSvc,
+		cfg:          cfg,
+		registry:     registry,
+		mdRegistry:   mdRegistry,
+		discoveryReg: discoveryReg,
+		store:        store,
+		scanner:      scanner,
+		downloadSvc:  downloadSvc,
+		eventBus:     eventBus,
+		sseHub:       sseHub,
+		matcher:      matching.New(),
+		playlistSvc:  playlistSvc,
 	}
 
 	mux := http.NewServeMux()
@@ -113,6 +116,13 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 	mux.HandleFunc("POST /api/playlists/{id}/download-missing", s.handleDownloadMissing)
 	mux.HandleFunc("POST /api/playlists/{id}/sync", s.handleSyncPlaylist)
 	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
+
+	// Discovery routes — metadata-first album/track browsing.
+	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)
+	mux.HandleFunc("GET /api/discover/search", s.handleDiscoverSearch)
+	mux.HandleFunc("GET /api/discover/artists/{id}/albums", s.handleDiscoverArtistAlbums)
+	mux.HandleFunc("GET /api/discover/albums/{id}/tracks", s.handleDiscoverAlbumTracks)
+	mux.HandleFunc("POST /api/discover/albums/{id}/download", s.handleDiscoverAlbumDownload)
 
 	// SSE endpoint for real-time download progress.
 	mux.HandleFunc("GET /api/events", s.handleEvents)
@@ -886,6 +896,179 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 // writeError sends a JSON error response.
 func writeError(w http.ResponseWriter, status int, err error) {
 	writeJSON(w, status, map[string]string{"error": err.Error()})
+}
+
+// ─── Discovery handlers ─────────────────────────────────────────────
+
+func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request) {
+	if s.discoveryReg == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+	providers := s.discoveryReg.Configured()
+	out := make([]map[string]any, len(providers))
+	for i, p := range providers {
+		out[i] = map[string]any{
+			"name":         p.Name(),
+			"display_name": p.DisplayName(),
+		}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
+func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	searchType := r.URL.Query().Get("type") // "artist", "album", or empty for both
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
+		return
+	}
+	if s.discoveryReg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"artists": []any{}, "albums": []any{}})
+		return
+	}
+
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"artists": []any{}, "albums": []any{}})
+		return
+	}
+	p := providers[0] // Use first configured provider.
+
+	ctx := r.Context()
+	result := map[string]any{}
+
+	if searchType == "" || searchType == "artist" {
+		artists, _ := p.SearchArtists(ctx, q, 10)
+		if artists == nil {
+			artists = []discovery.ArtistSummary{}
+		}
+		result["artists"] = artists
+	}
+	if searchType == "" || searchType == "album" {
+		albums, _ := p.SearchAlbums(ctx, q, 10)
+		if albums == nil {
+			albums = []discovery.AlbumResult{}
+		}
+		result["albums"] = albums
+	}
+
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Request) {
+	artistID := r.PathValue("id")
+	if artistID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "artist id is required"})
+		return
+	}
+	if s.discoveryReg == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	albums, err := providers[0].GetArtistAlbums(r.Context(), artistID, 50)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if albums == nil {
+		albums = []discovery.AlbumResult{}
+	}
+	writeJSON(w, http.StatusOK, albums)
+}
+
+func (s *Server) handleDiscoverAlbumTracks(w http.ResponseWriter, r *http.Request) {
+	albumID := r.PathValue("id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "album id is required"})
+		return
+	}
+	if s.discoveryReg == nil {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		writeJSON(w, http.StatusOK, []any{})
+		return
+	}
+
+	tracks, err := providers[0].GetAlbumTracks(r.Context(), albumID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if tracks == nil {
+		tracks = []discovery.TrackInfo{}
+	}
+	writeJSON(w, http.StatusOK, tracks)
+}
+
+func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Request) {
+	albumID := r.PathValue("id")
+	if albumID == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "album id is required"})
+		return
+	}
+	if s.discoveryReg == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
+		return
+	}
+
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
+		return
+	}
+
+	ctx := r.Context()
+	provider := providers[0]
+	tracks, err := provider.GetAlbumTracks(ctx, albumID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	orch := download.NewOrchestrator(s.registry, func() config.QualityConfig {
+		return s.cfg.Get().Quality
+	})
+
+	var queued int
+	var errors []string
+	for _, t := range tracks {
+		best, err := orch.FindBestMatch(ctx, t.Title, t.ArtistName, t.DurationMs, "")
+		if err != nil {
+			errors = append(errors, fmt.Sprintf("%s - %s: %v", t.ArtistName, t.Title, err))
+			continue
+		}
+
+		_, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, best.Track.Username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+			Artist:      t.ArtistName,
+			Album:       t.AlbumTitle,
+			Title:       t.Title,
+			TrackNumber: t.TrackNumber,
+			DiscNumber:  t.DiscNumber,
+		})
+		if dlErr != nil {
+			errors = append(errors, fmt.Sprintf("%s - %s: queue: %v", t.ArtistName, t.Title, dlErr))
+			continue
+		}
+		queued++
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"queued": queued,
+		"total":  len(tracks),
+		"errors": errors,
+	})
 }
 
 // noCache wraps a handler to prevent browser caching (useful for development).

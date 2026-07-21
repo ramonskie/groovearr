@@ -12,6 +12,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
 	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
@@ -87,6 +88,7 @@ func main() {
 	// Typed registries share the same inner plugin.Registry.
 	registry := download.NewRegistryFrom(pluginReg)
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)
+	discoveryReg := discovery.NewRegistry(pluginReg)
 
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus()
@@ -158,7 +160,7 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, registry, mdRegistry, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
+	srv := api.NewServer(addr, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath}

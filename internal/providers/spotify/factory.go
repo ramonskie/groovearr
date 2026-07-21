@@ -46,10 +46,10 @@ func (f *factory) Name() string        { return pluginName }
 func (f *factory) DisplayName() string { return displayName }
 
 // Capabilities returns the capability domains this plugin provides.
-// Free mode: ["metadata"]. Dev mode: ["metadata", "playlist"].
+// Free mode: ["metadata"]. Dev mode: ["metadata", "discovery", "playlist"].
 func (f *factory) Capabilities() []string {
 	if f.mode == "dev" {
-		return []string{"metadata", "playlist"}
+		return []string{"metadata", "discovery", "playlist"}
 	}
 	return []string{"metadata"}
 }

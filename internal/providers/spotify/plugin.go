@@ -4,8 +4,11 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 )
@@ -283,4 +286,69 @@ func joinArtists(artists []SimplifiedArtist) string {
 		result += ", " + names[i]
 	}
 	return result
+}
+
+// ─── discovery.Provider (dev mode only) ───────────────────────────────
+
+func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]discovery.ArtistSummary, error) {
+	if p.api == nil {
+		return nil, fmt.Errorf("spotify: discovery requires dev mode")
+	}
+	page, err := p.api.SearchArtists(ctx, query, limit, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []discovery.ArtistSummary
+	for _, a := range page.Items {
+		out = append(out, discovery.ArtistSummary{
+			ProviderID: a.ID,
+			Name:       a.Name,
+			ImageURL:   bestImage(a.Images, 300),
+			Genres:     a.Genres,
+		})
+	}
+	return out, nil
+}
+
+func (p *Plugin) GetArtistAlbums(ctx context.Context, providerArtistID string, limit int) ([]discovery.AlbumResult, error) {
+	if p.api == nil {
+		return nil, fmt.Errorf("spotify: discovery requires dev mode")
+	}
+	return spotifyArtistAlbums(p.api, ctx, providerArtistID, limit)
+}
+
+func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]discovery.TrackInfo, error) {
+	if p.api == nil {
+		return nil, fmt.Errorf("spotify: discovery requires dev mode")
+	}
+	return spotifyAlbumTracks(p.api, ctx, providerAlbumID)
+}
+
+func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+	if p.api == nil {
+		return nil, fmt.Errorf("spotify: discovery requires dev mode")
+	}
+	page, err := p.api.SearchAlbums(ctx, query, limit, 0)
+	if err != nil {
+		return nil, err
+	}
+	var out []discovery.AlbumResult
+	for _, a := range page.Items {
+		year, _ := strconv.Atoi(strings.Split(a.ReleaseDate, "-")[0])
+		artistName := ""
+		if len(a.Artists) > 0 {
+			artistName = a.Artists[0].Name
+		}
+		out = append(out, discovery.AlbumResult{
+			ProviderID:   a.ID,
+			ProviderName: "spotify",
+			ArtistName:   artistName,
+			Title:        a.Name,
+			Year:         year,
+			CoverURL:     bestImage(a.Images, 300),
+			TrackCount:   a.TotalTracks,
+			Type:         strings.ToLower(a.AlbumType),
+		})
+	}
+	return out, nil
 }
