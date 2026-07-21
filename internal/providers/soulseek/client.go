@@ -13,8 +13,6 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
-	"regexp"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -474,22 +472,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 			}
 
 			// Parse metadata from filename.
-			trackNum, trackTitle := parseTrackFilename(filename)
-
-			// Extract artist from "Artist - Title" pattern in filename.
-			artist := extractArtistFromFilename(filename)
-
-			// If title still contains artist prefix (e.g. from files that include
-			// artist name before the title), strip it so the matcher compares clean titles.
-			if artist != "" {
-				for _, sep := range []string{" - ", "_-_"} {
-					prefix := strings.ToLower(artist + sep)
-					if strings.HasPrefix(strings.ToLower(trackTitle), prefix) {
-						trackTitle = strings.TrimSpace(trackTitle[len(prefix):])
-						break
-					}
-				}
-			}
+			artist, trackTitle, trackNum := library.ParseArtistTitle(filename)
 
 			durationSec, _ := fm["length"].(float64)
 			tr := domain.TrackResult{
@@ -541,7 +524,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 		}
 
 		// Parse artist, album title, and year from the album path.
-		albumArtist, albumTitle, albumYear := parseAlbumDir(key.path)
+		albumArtist, albumTitle, albumYear := library.ParseAlbumDir(key.path)
 
 		albums = append(albums, domain.AlbumResult{
 			Username:        key.username,
@@ -574,90 +557,6 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 	}
 
 	return filtered, albums
-}
-
-// parseTrackFilename extracts track number and title from a filename like "01 - Song Name.flac".
-func parseTrackFilename(filename string) (num int, title string) {
-	// Normalize Windows backslashes for path.Base compatibility.
-	normalized := strings.ReplaceAll(filename, "\\", "/")
-	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
-	if m := library.TrackNumRE.FindStringSubmatch(base); m != nil {
-		n, _ := strconv.Atoi(m[1])
-		return n, strings.TrimSpace(m[2])
-	}
-	return 0, base
-}
-
-// extractArtistFromFilename tries to split an "Artist - Title" pattern from a filename.
-// Handles common delimiters: " - " and "_-_".
-// For numbered files: "08 - Eminem - Title" (3+ parts) → artist is second part.
-// For simple files: "Eminem - Title" (2 parts, not numeric) → artist is first part.
-func extractArtistFromFilename(filename string) string {
-	// Normalize Windows backslashes for path.Base compatibility.
-	normalized := strings.ReplaceAll(filename, "\\", "/")
-	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
-
-	// Try " - " delimiter (most common).
-	parts := strings.SplitN(base, " - ", 4)
-	if len(parts) >= 2 {
-		first := strings.TrimSpace(parts[0])
-		// If first part is a pure number: track number.
-		// Need 3+ parts (e.g. "08 - Eminem - Title") for artist to be present.
-		if _, err := strconv.Atoi(first); err == nil {
-			if len(parts) >= 3 {
-				candidate := strings.TrimSpace(parts[1])
-				if len(candidate) > 0 && len(candidate) < 80 {
-					return candidate
-				}
-			}
-			return ""
-		}
-		// Non-numeric first part → likely artist name.
-		if len(first) > 0 && len(first) < 80 {
-			return first
-		}
-	}
-
-	// Try "_-_" delimiter.
-	parts = strings.SplitN(base, "_-_", 3)
-	if len(parts) >= 2 {
-		first := strings.TrimSpace(parts[0])
-		if _, err := strconv.Atoi(first); err != nil && len(first) > 0 && len(first) < 80 {
-			return first
-		}
-	}
-
-	return ""
-}
-
-// parseAlbumDir extracts artist, album title, and year from a directory path segment.
-// Patterns handled:
-//
-//	"Artist - Album (2024)"  → artist="Artist", album="Album", year="2024"
-//	"Artist/Album"           → artist="Artist", album="Album"
-//	"Artist - Album"         → artist="Artist", album="Album"
-//	"Album (2024)"           → artist="", album="Album", year="2024"
-func parseAlbumDir(dirPath string) (artist, album, year string) {
-	// Use the last directory segment (the deepest album folder).
-	seg := path.Base(dirPath)
-
-	// Extract year: (YYYY) or [YYYY].
-	yearRE := regexp.MustCompile(`[\[\(](\d{4})[\]\)]`)
-	if m := yearRE.FindStringSubmatch(seg); m != nil {
-		year = m[1]
-		seg = yearRE.ReplaceAllString(seg, "")
-	}
-
-	// Try "Artist - Album" split.
-	if idx := strings.Index(seg, " - "); idx > 0 {
-		artist = strings.TrimSpace(seg[:idx])
-		album = strings.TrimSpace(seg[idx+3:])
-		return artist, album, year
-	}
-
-	// Fallback: just the segment as album title.
-	album = strings.TrimSpace(seg)
-	return "", album, year
 }
 
 func extractAlbumPath(filename string) string {

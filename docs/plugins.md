@@ -400,6 +400,73 @@ Always prefer the recognized names.
 
 ---
 
+## Shared Utilities
+
+The `internal/library` package provides metadata extraction functions that any
+plugin can use when search results lack structured artist/title fields (e.g.,
+peer-to-peer sources that return raw filenames instead of API JSON).
+
+### `library.ParseArtistTitle`
+
+```go
+// internal/library/pathparser.go
+func ParseArtistTitle(filename string) (artist string, title string, trackNum int)
+```
+
+Extracts artist, title, and track number from a filename. Handles:
+- `"Artist - Title.mp3"` → artist, title
+- `"08 - Artist - Title.flac"` → artist, title, trackNum=8
+- `"01 - Title.mp3"` → trackNum=1, title (no artist)
+- `"artist_-_title_(remix).mp3"` → artist, title (underscore-hyphen delimiter)
+- Windows `\` path separators (auto-normalized to `/`)
+
+**When to use:** Your source receives files with names like `"Daft Punk - Get Lucky.flac"`
+or `"01 - Artist - Title.flac"` instead of structured API data.
+
+**When NOT to use:** Your source has structured API metadata (Deezer, Spotify, Tidal).
+Map API fields directly to `TrackResult.Artist`/`TrackResult.Title`.
+
+**Example — Soulseek plugin:**
+```go
+import "github.com/ramonskie/groovearr/internal/library"
+
+// In Search():
+for _, file := range searchResponse.Files {
+    artist, title, trackNum := library.ParseArtistTitle(file.Filename)
+    results = append(results, domain.TrackResult{
+        Artist:      artist,
+        Title:       title,
+        TrackNumber: trackNum,
+        // ... other fields
+    })
+}
+```
+
+### `library.ParseAlbumDir`
+
+```go
+// internal/library/pathparser.go
+func ParseAlbumDir(dirPath string) (artist string, album string, year string)
+```
+
+Extracts artist, album title, and year from a directory path segment.
+- `"Artist - Album (2024)"` → artist, album, year=2024
+- `"Artist/Album"` → artist, album
+- `"Album (2024)"` → album, year=2024
+
+**When to use:** Grouping tracks into albums based on directory structure
+(e.g., Soulseek peer shares, scene-release folder names).
+
+### Other library utilities
+
+| Function | Package | Purpose |
+|---|---|---|
+| `ParseFlatFilename(filename)` | `library` | `"Artist - Title.ext"` → `(artist, album, title)`. No track number awareness. |
+| `ParseFileMetadata(path)` | `library` | Full directory-hierarchy parser: `Artist/Album/01 - Title.ext` |
+| `TrackNumRE` | `library` | Regex: `^(\d{1,3})[\.\s\-]+(.+)$` — extract track numbers |
+
+---
+
 ## Domain Model — What Plugin Authors Set
 
 ### Search Results

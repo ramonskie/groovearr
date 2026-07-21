@@ -176,21 +176,3 @@ func ScanMetadata(track *domain.Track, artist *domain.Artist, album *domain.Albu
 	}
 	return meta
 }
-
-// parseMetadataFromFilename extracts artist/album/title from a flat filename like:
-//
-//	"Daft Punk - Get Lucky.flac"
-//	"Artist - Album - Title.flac"
-func parseMetadataFromFilename(filename string) (artist, album, title string) {
-	base := strings.TrimSuffix(filename, filepath.Ext(filename))
-	parts := strings.SplitN(base, " - ", 3)
-
-	switch len(parts) {
-	case 3:
-		return strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1]), strings.TrimSpace(parts[2])
-	case 2:
-		return strings.TrimSpace(parts[0]), "Unknown Album", strings.TrimSpace(parts[1])
-	default:
-		return "", "", ""
-	}
-}

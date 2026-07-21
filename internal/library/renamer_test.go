@@ -140,9 +140,9 @@ func TestParseMetadataFromFilename(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		artist, album, title := parseMetadataFromFilename(tt.filename)
+		artist, album, title := ParseFlatFilename(tt.filename)
 		if artist != tt.wantArtist || album != tt.wantAlbum || title != tt.wantTitle {
-			t.Errorf("parseMetadataFromFilename(%q) = (%q, %q, %q), want (%q, %q, %q)",
+			t.Errorf("ParseFlatFilename(%q) = (%q, %q, %q), want (%q, %q, %q)",
 				tt.filename, artist, album, title,
 				tt.wantArtist, tt.wantAlbum, tt.wantTitle)
 		}

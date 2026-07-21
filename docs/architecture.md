@@ -44,7 +44,7 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/download/soulseek` | slskd REST API client | `Client` |
 | `internal/download/sqlite` | SQLite download record store | `Store` (implements `DownloadStore`) |
 | `internal/events` | In-memory pub/sub event bus | `InMemoryEventBus`, 8 topic constants |
-| `internal/library` | Library store interface, scanner, renamer, path resolver | `Store` (interface), `Scanner`, `Renamer` |
+| `internal/library` | Library store interface, scanner, renamer, path resolver, filename parser | `Store` (interface), `Scanner`, `Renamer`, `ParseArtistTitle`, `ParseAlbumDir` |
 | `internal/library/sqlite` | SQLite library store (artists, albums, tracks, playlists) | `Store` (implements `library.Store`) |
 | `internal/matching` | Cross-source track matching with version awareness | `Engine` |
 | `internal/playlist` | Playlist service, registry, source interface | `Service`, `Registry`, `Source` (interface) |
