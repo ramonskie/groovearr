@@ -6,6 +6,7 @@ import {
 import { useNavigate } from "react-router-dom";
 import { toast } from "sonner";
 import {
+  useDiscoveryProviders,
   useDiscoverySearch,
   useArtistAlbums,
   useAlbumTracks,
@@ -26,10 +27,13 @@ export default function DiscoverPage() {
   const [selectedAlbumName, setSelectedAlbumName] = useState("");
   const [coverUrl, setCoverUrl] = useState("");
 
+  const { data: providers } = useDiscoveryProviders();
   const searchMutation = useDiscoverySearch();
   const { data: albums } = useArtistAlbums(selectedArtistId);
   const { data: tracks } = useAlbumTracks(selectedAlbumId);
   const downloadAlbumMutation = useDownloadAlbum();
+
+  const noProviders = providers && providers.length === 0;
 
   const handleSearch = useCallback(
     (e: FormEvent) => {
@@ -108,6 +112,14 @@ export default function DiscoverPage() {
         >
           ← Back to {view === "album" ? selectedArtistName : "search results"}
         </button>
+      )}
+
+      {/* No providers configured */}
+      {noProviders && (
+        <div className="text-center text-gray-500 py-12">
+          No discovery providers available. This should never happen —
+          Deezer's free public API is always available.
+        </div>
       )}
 
       {/* Loading / Error / Empty states */}

@@ -24,7 +24,6 @@ interface SidebarNavProps {
 
 const DEFAULT_PAGES: NavPage[] = [
   { id: "discover", label: "Discover", icon: "compass", href: "/discover" },
-  { id: "search", label: "Search", icon: "search", href: "/search" },
   { id: "downloads", label: "Downloads", icon: "downloads", href: "/downloads" },
   { id: "library", label: "Library", icon: "library", href: "/library" },
   { id: "playlists", label: "Playlists", icon: "playlists", href: "/playlists" },

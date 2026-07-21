@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr"
@@ -906,6 +907,7 @@ func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	providers := s.discoveryReg.Configured()
+	log.Printf("discover: providers: %d configured", len(providers))
 	out := make([]map[string]any, len(providers))
 	for i, p := range providers {
 		out[i] = map[string]any{
@@ -919,41 +921,115 @@ func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	searchType := r.URL.Query().Get("type") // "artist", "album", or empty for both
+	log.Printf("discover: search q=%q type=%q", q, searchType)
 	if q == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
 		return
 	}
-	if s.discoveryReg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"artists": []any{}, "albums": []any{}})
+	if s.discoveryReg == nil || len(s.discoveryReg.Configured()) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "no discovery providers configured",
+		})
 		return
 	}
 
 	providers := s.discoveryReg.Configured()
-	if len(providers) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"artists": []any{}, "albums": []any{}})
-		return
-	}
-	p := providers[0] // Use first configured provider.
-
 	ctx := r.Context()
-	result := map[string]any{}
 
-	if searchType == "" || searchType == "artist" {
-		artists, _ := p.SearchArtists(ctx, q, 10)
-		if artists == nil {
-			artists = []discovery.ArtistSummary{}
-		}
-		result["artists"] = artists
+	type providerResult struct {
+		artists []discovery.ArtistSummary
+		albums  []discovery.AlbumResult
+		err     error
 	}
-	if searchType == "" || searchType == "album" {
-		albums, _ := p.SearchAlbums(ctx, q, 10)
-		if albums == nil {
-			albums = []discovery.AlbumResult{}
+	results := make([]providerResult, len(providers))
+
+	// Query all providers in parallel.
+	var wg sync.WaitGroup
+	for i, p := range providers {
+		wg.Add(1)
+		go func(idx int, provider discovery.Provider) {
+			defer wg.Done()
+			log.Printf("discover: querying provider %s", provider.Name())
+			if searchType == "" || searchType == "artist" {
+				a, err := provider.SearchArtists(ctx, q, 10)
+				if err != nil {
+					log.Printf("discover: %s search artists error: %v", provider.Name(), err)
+				}
+				results[idx].artists = a
+				results[idx].err = err
+			}
+			if searchType == "" || searchType == "album" {
+				a, err := provider.SearchAlbums(ctx, q, 10)
+				if err != nil {
+					log.Printf("discover: %s search albums error: %v", provider.Name(), err)
+					if results[idx].err == nil {
+						results[idx].err = err
+					}
+				}
+				results[idx].albums = a
+			}
+		}(i, p)
+	}
+	wg.Wait()
+
+	// Merge artists: deduplicate by normalized name, keep from all providers.
+	artistMap := make(map[string]discovery.ArtistSummary)
+	for _, r := range results {
+		for _, a := range r.artists {
+			key := normalizeKey(a.Name)
+			if _, ok := artistMap[key]; !ok {
+				artistMap[key] = a
+			}
 		}
-		result["albums"] = albums
+	}
+	mergedArtists := make([]discovery.ArtistSummary, 0, len(artistMap))
+	for _, a := range artistMap {
+		mergedArtists = append(mergedArtists, a)
 	}
 
-	writeJSON(w, http.StatusOK, result)
+	// Merge albums: deduplicate by artist+title, keep first.
+	albumMap := make(map[string]discovery.AlbumResult)
+	for _, r := range results {
+		for _, a := range r.albums {
+			key := normalizeKey(a.ArtistName + "|" + a.Title)
+			if _, ok := albumMap[key]; !ok {
+				albumMap[key] = a
+			}
+		}
+	}
+	mergedAlbums := make([]discovery.AlbumResult, 0, len(albumMap))
+	for _, a := range albumMap {
+		mergedAlbums = append(mergedAlbums, a)
+	}
+
+	log.Printf("discover: search results: %d artists, %d albums (from %d providers)", len(mergedArtists), len(mergedAlbums), len(providers))
+	writeJSON(w, http.StatusOK, map[string]any{
+		"artists": mergedArtists,
+		"albums":  mergedAlbums,
+	})
+}
+
+// normalizeKey strips accents, lowercases, and removes non-alphanumeric for dedup.
+func normalizeKey(s string) string {
+	s = strings.ToLower(s)
+	// Simple accent removal for common Latin accents.
+	replacer := strings.NewReplacer(
+		"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a",
+		"é", "e", "è", "e", "ê", "e", "ë", "e",
+		"í", "i", "ì", "i", "î", "i", "ï", "i",
+		"ó", "o", "ò", "o", "ô", "o", "ö", "o", "õ", "o",
+		"ú", "u", "ù", "u", "û", "u", "ü", "u",
+		"ñ", "n", "ç", "c",
+	)
+	s = replacer.Replace(s)
+	// Remove remaining non-alphanumeric.
+	var b strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
 }
 
 func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Request) {

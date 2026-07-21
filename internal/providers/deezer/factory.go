@@ -24,7 +24,7 @@ func (f *factory) Name() string        { return downloadPluginName }
 func (f *factory) DisplayName() string { return downloadDisplayName }
 
 // Capabilities returns the capability domains this plugin provides.
-func (f *factory) Capabilities() []string { return []string{"download", "playlist"} }
+func (f *factory) Capabilities() []string { return []string{"download", "playlist", "discovery"} }
 
 // Create builds a Deezer download client from raw JSON config and runtime resources.
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {

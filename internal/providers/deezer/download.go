@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/playlist"
@@ -58,6 +59,7 @@ type DownloadClient struct {
 	cfg    DeezerConfig
 	dlPath string
 	client *http.Client // API calls (30s timeout)
+	api    *Client      // public API client (discovery, metadata, no auth needed)
 
 	// downloadClient has no timeout — file downloads may take many minutes.
 	// ReadIdleTimeout on the transport kills stalled connections after 30s of inactivity.
@@ -99,6 +101,7 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
 	return &DownloadClient{
 		cfg:    cfg,
 		dlPath: downloadPath,
+		api:    New(cfg),
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Jar:     jar,
@@ -173,10 +176,9 @@ func (c *DownloadClient) Name() string { return downloadPluginName }
 // DisplayName returns a human-readable label.
 func (c *DownloadClient) DisplayName() string { return downloadDisplayName }
 
-// IsConfigured returns true if ARL token is set.
-func (c *DownloadClient) IsConfigured() bool {
-	return c.cfg.ARL != ""
-}
+// IsConfigured returns true if the plugin can serve requests.
+// Discovery/metadata works without ARL (public API). Downloads require ARL.
+func (c *DownloadClient) IsConfigured() bool { return true }
 
 // MaxConcurrentDownloads limits Deezer to 2 concurrent downloads to avoid CDN throttling.
 func (c *DownloadClient) MaxConcurrentDownloads() int { return 2 }
@@ -1049,4 +1051,115 @@ func (c *DownloadClient) GetPlaylistTracks(ctx context.Context, playlistID strin
 		out = append(out, t)
 	}
 	return out, playlistName, nil
+}
+
+// ─── discovery.Provider ────────────────────────────────────────────
+
+func (d *DownloadClient) SearchArtists(ctx context.Context, query string, limit int) ([]discovery.ArtistSummary, error) {
+	artists, err := d.api.SearchArtists(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]discovery.ArtistSummary, len(artists))
+	for i, a := range artists {
+		out[i] = discovery.ArtistSummary{
+			ProviderID: strconv.Itoa(a.ID),
+			Name:       a.Name,
+			ImageURL:   a.PictureMed,
+		}
+	}
+	return out, nil
+}
+
+func (d *DownloadClient) GetArtistAlbums(ctx context.Context, providerArtistID string, limit int) ([]discovery.AlbumResult, error) {
+	id, err := strconv.Atoi(providerArtistID)
+	if err != nil {
+		return nil, fmt.Errorf("deezer: invalid artist id: %w", err)
+	}
+	albums, err := d.api.GetArtistAlbums(ctx, id, limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []discovery.AlbumResult
+	for _, a := range albums {
+		coverURL := a.CoverXL
+		if coverURL == "" {
+			coverURL = a.CoverBig
+		}
+		artistName := ""
+		if a.Artist.Name != "" {
+			artistName = a.Artist.Name
+		}
+		out = append(out, discovery.AlbumResult{
+			ProviderID:   strconv.Itoa(a.ID),
+			ProviderName: "deezer",
+			ArtistName:   artistName,
+			Title:        a.Title,
+			CoverURL:     coverURL,
+			TrackCount:   a.NbTracks,
+			Type:         a.RecordType,
+		})
+	}
+	return out, nil
+}
+
+func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]discovery.TrackInfo, error) {
+	id, err := strconv.Atoi(providerAlbumID)
+	if err != nil {
+		return nil, fmt.Errorf("deezer: invalid album id: %w", err)
+	}
+	album, err := d.api.GetAlbum(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	tracks, err := d.api.GetAlbumTracks(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	artistName := album.Artist.Name
+	out := make([]discovery.TrackInfo, len(tracks))
+	for i, t := range tracks {
+		trackArtist := artistName
+		if t.Artist.Name != "" {
+			trackArtist = t.Artist.Name
+		}
+		out[i] = discovery.TrackInfo{
+			ProviderID:  strconv.Itoa(t.ID),
+			ArtistName:  trackArtist,
+			AlbumTitle:  album.Title,
+			Title:       t.Title,
+			TrackNumber: t.TrackPos,
+			DiscNumber:  t.DiskNumber,
+			DurationMs:  int64(t.Duration) * 1000,
+		}
+	}
+	return out, nil
+}
+
+func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+	albums, err := d.api.SearchAlbums(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	var out []discovery.AlbumResult
+	for _, a := range albums {
+		coverURL := a.CoverXL
+		if coverURL == "" {
+			coverURL = a.CoverBig
+		}
+		artistName := ""
+		if a.Artist.Name != "" {
+			artistName = a.Artist.Name
+		}
+		out = append(out, discovery.AlbumResult{
+			ProviderID:   strconv.Itoa(a.ID),
+			ProviderName: "deezer",
+			ArtistName:   artistName,
+			Title:        a.Title,
+			CoverURL:     coverURL,
+			TrackCount:   a.NbTracks,
+			Type:         a.RecordType,
+		})
+	}
+	return out, nil
 }
