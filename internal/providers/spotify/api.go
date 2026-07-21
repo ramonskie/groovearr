@@ -109,6 +109,7 @@ func (a *API) GetTrack(ctx context.Context, id string, market ...string) (*Track
 
 // GetAlbum returns full album details by Spotify album ID.
 // Optional market parameter specifies an ISO 3166-1 alpha-2 country code.
+// For paginated track listing, use GetAlbumTracks.
 func (a *API) GetAlbum(ctx context.Context, id string, market ...string) (*Album, error) {
 	if err := a.requireDevMode(); err != nil {
 		return nil, err
@@ -126,6 +127,27 @@ func (a *API) GetAlbum(ctx context.Context, id string, market ...string) (*Album
 	return &album, nil
 }
 
+// GetAlbumTracks returns paginated tracks for an album.
+func (a *API) GetAlbumTracks(ctx context.Context, id string, limit, offset int) (*Paging[SimplifiedTrack], error) {
+	if err := a.requireDevMode(); err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+
+	var result Paging[SimplifiedTrack]
+	if err := a.get(ctx, "/albums/"+id+"/tracks", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
+}
+
 // ─── Artists ──────────────────────────────────────────────────────────
 
 // GetArtist returns full artist details by Spotify artist ID.
@@ -139,6 +161,56 @@ func (a *API) GetArtist(ctx context.Context, id string) (*Artist, error) {
 		return nil, err
 	}
 	return &artist, nil
+}
+
+// SearchArtists searches for artists matching a query string.
+func (a *API) SearchArtists(ctx context.Context, query string, limit, offset int) (*Paging[Artist], error) {
+	if err := a.requireDevMode(); err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	params.Set("q", query)
+	params.Set("type", "artist")
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+
+	var result struct {
+		Artists Paging[Artist] `json:"artists"`
+	}
+	if err := a.get(ctx, "/search", params, &result); err != nil {
+		return nil, err
+	}
+	return &result.Artists, nil
+}
+
+// GetArtistAlbums returns an artist's albums by Spotify artist ID.
+// Optional includeGroups parameter filters by album type (e.g. "album,single").
+func (a *API) GetArtistAlbums(ctx context.Context, id string, limit, offset int, includeGroups ...string) (*Paging[SimplifiedAlbum], error) {
+	if err := a.requireDevMode(); err != nil {
+		return nil, err
+	}
+
+	params := url.Values{}
+	if limit > 0 {
+		params.Set("limit", strconv.Itoa(limit))
+	}
+	if offset > 0 {
+		params.Set("offset", strconv.Itoa(offset))
+	}
+	if len(includeGroups) > 0 && includeGroups[0] != "" {
+		params.Set("include_groups", includeGroups[0])
+	}
+
+	var result Paging[SimplifiedAlbum]
+	if err := a.get(ctx, "/artists/"+id+"/albums", params, &result); err != nil {
+		return nil, err
+	}
+	return &result, nil
 }
 
 // ─── Playlists ────────────────────────────────────────────────────────
