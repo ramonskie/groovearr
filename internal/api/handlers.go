@@ -68,7 +68,24 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 	if err != nil {
 		log.Fatalf("embedded UI files missing — run: make build-ui && go build ./cmd/groovearr: %v", err)
 	}
-	mux.Handle("GET /", noCache(http.FileServer(http.FS(staticContent))))
+
+	// SPA-aware static file server — serves embedded files, falls back to
+	// index.html for client-side routes (e.g. /settings, /playlists).
+	fileServer := http.FileServer(http.FS(staticContent))
+	mux.Handle("GET /", noCache(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Check if the requested path exists as a file.
+		fsPath := strings.TrimPrefix(r.URL.Path, "/")
+		if fsPath == "" {
+			fsPath = "."
+		}
+		if f, err := staticContent.Open(fsPath); err != nil {
+			// Not a file — serve index.html for SPA client-side routing.
+			r.URL.Path = "/"
+		} else {
+			f.Close()
+		}
+		fileServer.ServeHTTP(w, r)
+	})))
 
 	// API routes.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
