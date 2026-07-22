@@ -4,7 +4,7 @@ package library
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -21,6 +21,7 @@ var TrackNumRE = regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
 // Scanner walks directories and imports audio files into the library store.
 type Scanner struct {
 	store Store
+	log   *slog.Logger
 }
 
 // ScanStats tracks the outcome of a library scan.
@@ -32,8 +33,8 @@ type ScanStats struct {
 }
 
 // NewScanner creates a library scanner.
-func NewScanner(store Store) *Scanner {
-	return &Scanner{store: store}
+func NewScanner(store Store, logger *slog.Logger) *Scanner {
+	return &Scanner{store: store, log: logger}
 }
 
 // tagMeta holds metadata extracted from audio file tags.
@@ -151,7 +152,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		// Check if already imported (use absolute path).
 		existing, dbErr := s.store.GetTrackByFilePath(ctx, path)
 		if dbErr != nil {
-			log.Printf("scanner: GetTrackByFilePath %s: %v", path, dbErr)
+			s.log.Error("GetTrackByFilePath failed", "path", path, "error", dbErr, "component", "scanner")
 			stats.Errors++
 			return nil
 		}
@@ -164,7 +165,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		relPath, _ := filepath.Rel(absRoot, path)
 		tags, err := readFileTags(path)
 		if err != nil {
-			log.Printf("scanner: tag read %s: %v", path, err)
+			s.log.Warn("tag read failed", "path", path, "error", err, "component", "scanner")
 			stats.Errors++
 			return nil
 		}
@@ -209,7 +210,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 			FileSize:    fi.Size(),
 		}, artistName, albumTitle, albumYear, genres)
 		if err != nil {
-			log.Printf("scanner: import track %q: %v", path, err)
+			s.log.Error("import track failed", "path", path, "error", err, "component", "scanner")
 			stats.Errors++
 			return nil
 		}

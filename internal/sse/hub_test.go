@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"io"
 	"strings"
 	"sync"
 	"testing"
@@ -15,8 +17,13 @@ import (
 	"github.com/ramonskie/groovearr/internal/events"
 )
 
+// testLogger returns a discard logger suitable for tests.
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestRegisterClient(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	id := hub.Register(ch)
@@ -30,7 +37,7 @@ func TestRegisterClient(t *testing.T) {
 }
 
 func TestRegisterMultipleClients(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	ids := make(map[int64]bool)
 	for i := 0; i < 5; i++ {
@@ -48,7 +55,7 @@ func TestRegisterMultipleClients(t *testing.T) {
 }
 
 func TestUnregisterRemovesClient(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 1)
 	id := hub.Register(ch)
@@ -71,7 +78,7 @@ func TestUnregisterRemovesClient(t *testing.T) {
 }
 
 func TestUnregisterIsIdempotent(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 1)
 	id := hub.Register(ch)
@@ -86,7 +93,7 @@ func TestUnregisterIsIdempotent(t *testing.T) {
 }
 
 func TestBroadcastToSingleClient(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -113,7 +120,7 @@ func TestBroadcastToSingleClient(t *testing.T) {
 }
 
 func TestBroadcastToMultipleClients(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	const numClients = 5
 	chs := make([]chan SSEEvent, numClients)
@@ -144,7 +151,7 @@ func TestBroadcastToMultipleClients(t *testing.T) {
 }
 
 func TestBroadcastSlowClientDropped(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	// Channel with buffer size 0 — always full.
 	slowCh := make(chan SSEEvent)
@@ -190,7 +197,7 @@ drainFast:
 }
 
 func TestBroadcastNonBlockingDoesNotHang(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	// Register a client with a zero-size buffer and no reader.
 	ch := make(chan SSEEvent)
@@ -214,7 +221,7 @@ func TestBroadcastNonBlockingDoesNotHang(t *testing.T) {
 }
 
 func TestHeartbeatGoroutine(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -250,7 +257,7 @@ loop:
 }
 
 func TestHeartbeatStopsOnCancel(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := make(chan SSEEvent, 32)
@@ -295,7 +302,7 @@ func TestHeartbeatStopsOnCancel(t *testing.T) {
 }
 
 func TestServeHTTPSetsHeaders(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	rec := httptest.NewRecorder()
@@ -329,7 +336,7 @@ func TestServeHTTPSetsHeaders(t *testing.T) {
 }
 
 func TestServeHTTPCleansUpOnDisconnect(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	rec := httptest.NewRecorder()
@@ -363,7 +370,7 @@ func TestServeHTTPCleansUpOnDisconnect(t *testing.T) {
 }
 
 func TestServeHTTPStreamsEvents(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	rec := httptest.NewRecorder()
@@ -408,7 +415,7 @@ func TestServeHTTPStreamsEvents(t *testing.T) {
 }
 
 func TestServeHTTPHeartbeatWritesComment(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	req := httptest.NewRequest(http.MethodGet, "/api/events", nil)
 	rec := httptest.NewRecorder()
@@ -443,9 +450,9 @@ func TestServeHTTPHeartbeatWritesComment(t *testing.T) {
 }
 
 func TestSSENotifierReceivesProgress(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	_ = NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -471,9 +478,9 @@ func TestSSENotifierReceivesProgress(t *testing.T) {
 }
 
 func TestSSENotifierReceivesCompleted(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	_ = NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -499,9 +506,9 @@ func TestSSENotifierReceivesCompleted(t *testing.T) {
 }
 
 func TestSSENotifierReceivesFailed(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	_ = NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -531,9 +538,9 @@ func TestSSENotifierReceivesFailed(t *testing.T) {
 }
 
 func TestSSENotifierReceivesImportCompleted(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	_ = NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -558,9 +565,9 @@ func TestSSENotifierReceivesImportCompleted(t *testing.T) {
 }
 
 func TestSSENotifierHandle(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	notifier := NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	notifier := NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -591,9 +598,9 @@ func TestSSENotifierHandle(t *testing.T) {
 }
 
 func TestSSENotifierHandlesNonDownloadRecordEvents(t *testing.T) {
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	_ = NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
@@ -617,9 +624,9 @@ func TestSSENotifierImplementsImportHandler(t *testing.T) {
 	// Compile-time check: SSENotifier satisfies the ImportHandler interface.
 	// We verify by asserting the method signature exists.
 
-	hub := NewSSEHub()
-	bus := events.NewInMemoryEventBus()
-	notifier := NewSSENotifier(hub, bus)
+	hub := NewSSEHub(testLogger())
+	bus := events.NewInMemoryEventBus(testLogger())
+	notifier := NewSSENotifier(hub, bus, testLogger())
 
 	// This test uses a helper interface matching download.ImportHandler.
 	type importHandler interface {
@@ -630,7 +637,7 @@ func TestSSENotifierImplementsImportHandler(t *testing.T) {
 }
 
 func TestConcurrentRegisterUnregister(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	var wg sync.WaitGroup
 	const numOps = 100
@@ -652,7 +659,7 @@ func TestConcurrentRegisterUnregister(t *testing.T) {
 }
 
 func TestConcurrentBroadcastDoesNotRace(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	// Register clients with draining goroutines.
 	const numClients = 10
@@ -682,7 +689,7 @@ func TestConcurrentBroadcastDoesNotRace(t *testing.T) {
 }
 
 func TestBroadcastToEmptyHub(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	// Broadcasting to a hub with no clients must not panic.
 	hub.Broadcast(SSEEvent{ID: "no-clients", Type: "test"})
@@ -701,7 +708,7 @@ func drainCh(ch chan SSEEvent) {
 
 // Benchmark to validate the fast path doesn't degrade with many clients.
 func BenchmarkBroadcast(b *testing.B) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	const numClients = 50
 	for i := 0; i < numClients; i++ {
@@ -724,7 +731,7 @@ func BenchmarkBroadcast(b *testing.B) {
 
 // Ensure atomic ID counter doesn't wrap around in reasonable use.
 func TestClientIDIsMonotonic(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	var lastID int64
 	for i := 0; i < 100; i++ {
@@ -772,7 +779,7 @@ func TestSSEEventJSONRoundtrip(t *testing.T) {
 
 // Verify ServeHTTP handles non-flusher response writer gracefully.
 func TestServeHTTPNonFlusher(t *testing.T) {
-	hub := NewSSEHub()
+	hub := NewSSEHub(testLogger())
 
 	// responseWriterNoFlush implements http.ResponseWriter without Flusher.
 	type responseWriterNoFlush struct {

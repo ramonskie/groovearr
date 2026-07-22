@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -11,14 +12,17 @@ import (
 
 // testClientWithRefresh builds a SpotifyClient whose authTransport uses the
 // given refreshFunc instead of the real RefreshAccessToken.
-func testClientWithRefresh(cfg *SpotifyConfig, refreshFunc func(ctx context.Context, refreshToken, clientID string) (string, int, error)) *SpotifyClient {
+func testClientWithRefresh(cfg *SpotifyConfig, refreshFunc func(ctx context.Context, refreshToken, clientID string, log *slog.Logger) (string, int, error)) *SpotifyClient {
+	log := slog.New(slog.DiscardHandler)
 	return &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:         cfg,
 				transport:   http.DefaultTransport,
 				refreshFunc: refreshFunc,
+				log:         log,
 			},
 			Timeout: defaultTimeout,
 		},
@@ -41,7 +45,7 @@ func TestClientBearerTokenInjected(t *testing.T) {
 			AccessToken: "tokendev123",
 		},
 	}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
@@ -71,7 +75,7 @@ func TestClientNoAuthHeaderFreeMode(t *testing.T) {
 	cfg := &SpotifyConfig{
 		Mode: "free",
 	}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
@@ -114,7 +118,7 @@ func TestClient401RefreshRetrySuccess(t *testing.T) {
 		},
 	}
 
-	client := testClientWithRefresh(cfg, func(ctx context.Context, refreshToken, clientID string) (string, int, error) {
+	client := testClientWithRefresh(cfg, func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 		if refreshToken != "refresh-token-1" {
 			t.Errorf("refresh called with token %q, want refresh-token-1", refreshToken)
 		}
@@ -163,7 +167,7 @@ func TestClient401RefreshFails(t *testing.T) {
 	}
 
 	refreshErr := errors.New("spotify: invalid_grant")
-	client := testClientWithRefresh(cfg, func(ctx context.Context, refreshToken, clientID string) (string, int, error) {
+	client := testClientWithRefresh(cfg, func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 		return "", 0, refreshErr
 	})
 
@@ -190,7 +194,7 @@ func TestClient429RetryAfterSuccess(t *testing.T) {
 	defer server.Close()
 
 	cfg := &SpotifyConfig{Mode: "free"}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
@@ -219,7 +223,7 @@ func TestClient429ExceedsMaxRetries(t *testing.T) {
 	defer server.Close()
 
 	cfg := &SpotifyConfig{Mode: "free"}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	_, err := client.Do(req)
@@ -246,7 +250,7 @@ func TestClient200PassThrough(t *testing.T) {
 	defer server.Close()
 
 	cfg := &SpotifyConfig{Mode: "free"}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)
@@ -283,7 +287,7 @@ func TestClientUserAgentSet(t *testing.T) {
 			AccessToken: "tok",
 		},
 	}
-	client := NewClient(cfg)
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
 
 	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
 	resp, err := client.Do(req)

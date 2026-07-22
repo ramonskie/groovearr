@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"sync"
@@ -12,6 +13,15 @@ type Persistence struct {
 	mu   sync.RWMutex
 	cfg  Config
 	path string
+	log  *slog.Logger
+}
+
+// SetLogger sets the logger used for error reporting in Save operations.
+// Must be called before any write operations; safe for concurrent use.
+func (p *Persistence) SetLogger(logger *slog.Logger) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.log = logger
 }
 
 // LoadOrCreate reads config from path, creating defaults if absent.
@@ -53,6 +63,13 @@ func (p *Persistence) reload() error {
 
 	cfg, err := readConfigFile(p.path)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			log := p.log
+			if log == nil {
+				log = slog.Default()
+			}
+			log.Error("read config failed", "path", p.path, "error", err, "component", "config")
+		}
 		return err
 	}
 
@@ -69,7 +86,16 @@ func (p *Persistence) reload() error {
 func (p *Persistence) save() error {
 	data, err := json.MarshalIndent(p.cfg, "", "  ")
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("marshal config failed", "error", err, "component", "config")
+		}
 		return err
 	}
-	return os.WriteFile(p.path, data, 0600)
+	if err := os.WriteFile(p.path, data, 0600); err != nil {
+		if p.log != nil {
+			p.log.Error("write config failed", "path", p.path, "error", err, "component", "config")
+		}
+		return err
+	}
+	return nil
 }

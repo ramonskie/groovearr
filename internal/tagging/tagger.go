@@ -5,6 +5,7 @@ package tagging
 import (
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"os"
 	"sort"
 	"strings"
@@ -13,11 +14,24 @@ import (
 	flac "github.com/go-flac/go-flac/v2"
 )
 
+// Tagger writes ID3v2 (MP3) and Vorbis comment (FLAC) tags to audio files.
+type Tagger struct {
+	log *slog.Logger
+}
+
+// New creates a Tagger with the given logger.
+func New(logger *slog.Logger) *Tagger {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &Tagger{log: logger}
+}
+
 // WriteTags writes ID3v2 or Vorbis comment tags to the file at path based on
 // the file extension. Cover art is embedded from coverPath if the file exists.
 // Returns nil on success, or an error if the file format is unrecognized or
 // the tag write fails.
-func WriteTags(path, artist, album, title, coverPath string) error {
+func (t *Tagger) WriteTags(path, artist, album, title, coverPath string) error {
 	ext := strings.ToLower(strings.TrimPrefix(path[strings.LastIndex(path, "."):], ""))
 	// Fallback: extract proper extension.
 	if idx := strings.LastIndex(path, "."); idx >= 0 {
@@ -26,17 +40,18 @@ func WriteTags(path, artist, album, title, coverPath string) error {
 
 	switch ext {
 	case ".mp3":
-		return writeID3v2(path, artist, album, title, coverPath)
+		return t.writeID3v2(path, artist, album, title, coverPath)
 	case ".flac":
-		return writeFLACTags(path, artist, album, title, coverPath)
+		return t.writeFLACTags(path, artist, album, title, coverPath)
 	default:
 		return nil // non-audio or unsupported — no-op
 	}
 }
 
-func writeID3v2(path, artist, album, title, coverPath string) error {
+func (t *Tagger) writeID3v2(path, artist, album, title, coverPath string) error {
 	tag, err := id3v2.Open(path, id3v2.Options{Parse: true})
 	if err != nil {
+		t.log.Error("id3v2 open failed", "path", path, "error", err, "component", "tagger")
 		return fmt.Errorf("id3v2 open: %w", err)
 	}
 	defer tag.Close()
@@ -62,9 +77,10 @@ func writeID3v2(path, artist, album, title, coverPath string) error {
 	return nil
 }
 
-func writeFLACTags(path, artist, album, title, coverPath string) error {
+func (t *Tagger) writeFLACTags(path, artist, album, title, coverPath string) error {
 	f, err := flac.ParseFile(path)
 	if err != nil {
+		t.log.Error("flac parse failed", "path", path, "error", err, "component", "tagger")
 		return fmt.Errorf("flac parse: %w", err)
 	}
 	defer f.Close()

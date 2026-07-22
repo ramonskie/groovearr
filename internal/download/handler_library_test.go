@@ -18,7 +18,7 @@ func TestLibraryImporterHandler_CreatesArtistAlbumTrack(t *testing.T) {
 	os.WriteFile(trackFile, []byte("audio"), 0o644)
 
 	libStore := newMockLibStore()
-	handler := NewLibraryImporterHandler(libStore)
+	handler := NewLibraryImporterHandler(libStore, nil)
 
 	record := &domain.DownloadRecord{
 		ID:          "test-lib-1",
@@ -61,7 +61,7 @@ func TestLibraryImporterHandler_SkipsExistingByPath(t *testing.T) {
 	os.WriteFile(existingPath, []byte("audio"), 0o644)
 
 	libStore := newMockLibStore()
-	handler := NewLibraryImporterHandler(libStore)
+	handler := NewLibraryImporterHandler(libStore, nil)
 
 	// Pre-populate with an existing track at this path.
 	libStore.UpsertTrack(context.Background(), &domain.Track{
@@ -87,7 +87,7 @@ func TestLibraryImporterHandler_SkipsExistingByPath(t *testing.T) {
 }
 
 func TestLibraryImporterHandler_NoFilePath(t *testing.T) {
-	handler := NewLibraryImporterHandler(newMockLibStore())
+	handler := NewLibraryImporterHandler(newMockLibStore(), nil)
 	record := &domain.DownloadRecord{ID: "test-lib-3"}
 
 	err := handler.Handle(context.Background(), record)

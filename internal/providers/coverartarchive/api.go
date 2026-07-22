@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"time"
@@ -33,11 +34,13 @@ type ReleaseImages struct {
 // No rate limiting required.
 type apiClient struct {
 	httpClient *http.Client
+	log        *slog.Logger
 }
 
-func newAPIClient() *apiClient {
+func newAPIClient(log *slog.Logger) *apiClient {
 	return &apiClient{
 		httpClient: &http.Client{Timeout: 15 * time.Second},
+		log:        log,
 	}
 }
 
@@ -63,18 +66,27 @@ func (c *apiClient) GetReleaseImages(ctx context.Context, mbid string) (*Release
 func (c *apiClient) apiGet(ctx context.Context, path string) (json.RawMessage, error) {
 	u, err := url.Parse(baseURL)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive URL parse failed", "error", err, "component", "caa_api")
+		}
 		return nil, err
 	}
 	u = u.JoinPath(path)
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive request creation failed", "error", err, "component", "caa_api")
+		}
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive request failed", "error", err, "component", "caa_api")
+		}
 		return nil, err
 	}
 	defer resp.Body.Close()
@@ -85,6 +97,9 @@ func (c *apiClient) apiGet(ctx context.Context, path string) (json.RawMessage, e
 	if resp.StatusCode != http.StatusOK {
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
+			if c.log != nil {
+				c.log.Error("coverartarchive read error body failed", "error", err, "status", resp.StatusCode, "component", "caa_api")
+			}
 			return nil, fmt.Errorf("coverartarchive: HTTP %d (read error: %v)", resp.StatusCode, err)
 		}
 		return nil, fmt.Errorf("coverartarchive: HTTP %d: %s", resp.StatusCode, string(body))
@@ -92,6 +107,9 @@ func (c *apiClient) apiGet(ctx context.Context, path string) (json.RawMessage, e
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive read response body failed", "error", err, "component", "caa_api")
+		}
 		return nil, err
 	}
 	return json.RawMessage(body), nil

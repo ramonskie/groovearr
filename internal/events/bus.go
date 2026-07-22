@@ -4,7 +4,7 @@ package events
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"reflect"
 	"sync"
 )
@@ -46,12 +46,17 @@ type IEventAggregator interface {
 type InMemoryEventBus struct {
 	mu       sync.RWMutex
 	handlers map[string][]EventHandler
+	logger   *slog.Logger
 }
 
 // NewInMemoryEventBus creates a ready-to-use InMemoryEventBus.
-func NewInMemoryEventBus() *InMemoryEventBus {
+func NewInMemoryEventBus(logger *slog.Logger) *InMemoryEventBus {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &InMemoryEventBus{
 		handlers: make(map[string][]EventHandler),
+		logger:   logger,
 	}
 }
 
@@ -90,7 +95,7 @@ func (b *InMemoryEventBus) Publish(ctx context.Context, topic string, event any)
 		go func() {
 			defer func() {
 				if r := recover(); r != nil {
-					log.Printf("[events] panic in handler for topic %q: %v", topic, r)
+					b.logger.Error("panic in handler", "topic", topic, "error", r, "component", "events")
 				}
 			}()
 			h(ctx, event)

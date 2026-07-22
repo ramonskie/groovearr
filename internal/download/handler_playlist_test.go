@@ -17,7 +17,7 @@ func TestPlaylistLinkerHandler_LinksMatchingTrack(t *testing.T) {
 		Title:    "Test Song",
 	})
 
-	handler := NewPlaylistLinkerHandler(libStore)
+	handler := NewPlaylistLinkerHandler(libStore, testLogger())
 
 	record := &domain.DownloadRecord{
 		ID:             "test-link-1",
@@ -35,7 +35,7 @@ func TestPlaylistLinkerHandler_LinksMatchingTrack(t *testing.T) {
 }
 
 func TestPlaylistLinkerHandler_NoPlaylistID(t *testing.T) {
-	handler := NewPlaylistLinkerHandler(newMockLibStore())
+	handler := NewPlaylistLinkerHandler(newMockLibStore(), testLogger())
 	record := &domain.DownloadRecord{
 		ID:             "test-link-2",
 		LibraryTrackID: 100,
@@ -48,7 +48,7 @@ func TestPlaylistLinkerHandler_NoPlaylistID(t *testing.T) {
 }
 
 func TestPlaylistLinkerHandler_NoLibraryTrackID(t *testing.T) {
-	handler := NewPlaylistLinkerHandler(newMockLibStore())
+	handler := NewPlaylistLinkerHandler(newMockLibStore(), testLogger())
 	record := &domain.DownloadRecord{
 		ID:         "test-link-3",
 		PlaylistID: "5",

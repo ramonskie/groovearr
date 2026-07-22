@@ -2,6 +2,8 @@ package download
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,6 +12,10 @@ import (
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 // mockMetadataProvider implements metadata.Provider for testing.
 type mockMetadataProvider struct {
@@ -79,7 +85,7 @@ func (m *mockLibraryStore) UpsertAlbum(ctx context.Context, album *domain.Album)
 func TestMetadataEnrichmentHandler_SkipNoLibraryTrack(t *testing.T) {
 	reg := metadata.NewRegistry()
 	store := &mockLibraryStore{}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 0,
@@ -98,7 +104,7 @@ func TestMetadataEnrichmentHandler_NoProviders(t *testing.T) {
 		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
 		tracks: []domain.Track{{ID: 1, FilePath: "/tmp/test.mp3"}},
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 1,
@@ -131,7 +137,7 @@ func TestMetadataEnrichmentHandler_EnrichISRC(t *testing.T) {
 		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
 		tracks: []domain.Track{{ID: 1, FilePath: "/tmp/test.mp3"}},
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 1,
@@ -167,7 +173,7 @@ func TestMetadataEnrichmentHandler_DoesNotOverwriteExisting(t *testing.T) {
 		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
 		tracks: []domain.Track{{ID: 1, FilePath: "/tmp/test.mp3"}},
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 1,
@@ -199,7 +205,7 @@ func TestMetadataEnrichmentHandler_NoOpProvider(t *testing.T) {
 		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
 		tracks: []domain.Track{{ID: 1, FilePath: "/tmp/test.mp3"}},
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 1,
@@ -215,7 +221,7 @@ func TestMetadataEnrichmentHandler_TrackNotFound(t *testing.T) {
 	store := &mockLibraryStore{
 		getTrackErr: os.ErrNotExist,
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 999,
@@ -253,7 +259,7 @@ func TestMetadataEnrichmentHandler_CoverDoesNotOverwrite(t *testing.T) {
 		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1, ThumbURL: "cover.jpg"},
 		tracks: []domain.Track{{ID: 1, FilePath: filepath.Join(tmpDir, "test.mp3")}},
 	}
-	handler := NewMetadataEnrichmentHandler(reg, store)
+	handler := NewMetadataEnrichmentHandler(reg, store, testLogger())
 
 	err := handler.Handle(context.Background(), &domain.DownloadRecord{
 		LibraryTrackID: 1,

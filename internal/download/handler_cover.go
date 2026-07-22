@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -18,14 +18,19 @@ import (
 // CoverArtHandler downloads album cover art for a completed download and
 // updates the album thumb_url in the library store.
 type CoverArtHandler struct {
+	log        *slog.Logger
 	libStore   library.Store
 	httpClient *http.Client
 }
 
 // NewCoverArtHandler creates a handler that fetches cover art from the
 // download record's CoverURL and caches it as cover.jpg in the album directory.
-func NewCoverArtHandler(libStore library.Store) *CoverArtHandler {
+func NewCoverArtHandler(libStore library.Store, logger *slog.Logger) *CoverArtHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &CoverArtHandler{
+		log:        logger,
 		libStore:   libStore,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 	}
@@ -48,7 +53,7 @@ func (h *CoverArtHandler) Handle(ctx context.Context, record *domain.DownloadRec
 	}
 
 	if err := h.downloadCover(ctx, record.CoverURL, coverPath); err != nil {
-		log.Printf("cover handler: download failed for %s: %v", record.Filename, err)
+		h.log.Warn("cover download failed", "filename", record.Filename, "error", err, "component", "cover_handler")
 		return nil // non-fatal
 	}
 
@@ -62,11 +67,13 @@ func (h *CoverArtHandler) Handle(ctx context.Context, record *domain.DownloadRec
 func (h *CoverArtHandler) downloadCover(ctx context.Context, url, dst string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		h.log.Error("create request failed", "url", url, "error", err, "component", "cover_handler")
 		return fmt.Errorf("create request: %w", err)
 	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
+		h.log.Error("fetch cover failed", "url", url, "error", err, "component", "cover_handler")
 		return fmt.Errorf("fetch: %w", err)
 	}
 	defer resp.Body.Close()
@@ -77,6 +84,7 @@ func (h *CoverArtHandler) downloadCover(ctx context.Context, url, dst string) er
 
 	f, err := os.Create(dst)
 	if err != nil {
+		h.log.Error("create cover file failed", "dst", dst, "error", err, "component", "cover_handler")
 		return fmt.Errorf("create file: %w", err)
 	}
 	defer f.Close()

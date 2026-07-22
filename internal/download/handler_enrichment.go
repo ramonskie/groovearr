@@ -3,7 +3,7 @@ package download
 import (
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -28,20 +28,27 @@ type enrichmentStore interface {
 // newly imported tracks to enrich them with ISRC, genres, cover art,
 // release dates, and external IDs.
 type MetadataEnrichmentHandler struct {
+	log        *slog.Logger
 	registry   *metadata.Registry
 	libStore   enrichmentStore
 	httpClient *http.Client
+	tagger     *tagging.Tagger
 }
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
 // metadata providers and applies their results to the library.
 // libStore can be any implementation satisfying the enrichmentStore interface
 // (e.g., library.Store from internal/library).
-func NewMetadataEnrichmentHandler(registry *metadata.Registry, libStore enrichmentStore) *MetadataEnrichmentHandler {
+func NewMetadataEnrichmentHandler(registry *metadata.Registry, libStore enrichmentStore, logger *slog.Logger) *MetadataEnrichmentHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &MetadataEnrichmentHandler{
+		log:        logger,
 		registry:   registry,
 		libStore:   libStore,
 		httpClient: &http.Client{Timeout: 30 * time.Second},
+		tagger:     tagging.New(logger),
 	}
 }
 
@@ -55,19 +62,19 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 
 	track, err := h.libStore.GetTrack(ctx, record.LibraryTrackID)
 	if err != nil || track == nil {
-		log.Printf("enrichment: track %d not found, skipping", record.LibraryTrackID)
+		h.log.Warn("track not found, skipping", "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
 
 	artist, err := h.libStore.GetArtist(ctx, track.ArtistID)
 	if err != nil || artist == nil {
-		log.Printf("enrichment: artist %d not found for track %d, skipping", track.ArtistID, record.LibraryTrackID)
+		h.log.Warn("artist not found, skipping", "artist_id", track.ArtistID, "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
 
 	album, err := h.libStore.GetAlbum(ctx, track.AlbumID)
 	if err != nil || album == nil {
-		log.Printf("enrichment: album %d not found for track %d, skipping", track.AlbumID, record.LibraryTrackID)
+		h.log.Warn("album not found, skipping", "album_id", track.AlbumID, "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
 
@@ -107,7 +114,7 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 		// ── Track enrichment ──────────────────────────────────
 		meta, err := p.EnrichTrack(ctx, track)
 		if err != nil {
-			log.Printf("enrichment: %s EnrichTrack error: %v", p.Name(), err)
+			h.log.Warn("enrich track error", "provider", p.Name(), "error", err, "component", "enrichment")
 			continue
 		}
 		if meta == nil {
@@ -153,12 +160,12 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 	// Persist enriched data.
 	if trackModified {
 		if _, err := h.libStore.UpsertTrack(ctx, track); err != nil {
-			log.Printf("enrichment: upsert track %d: %v", track.ID, err)
+			h.log.Error("upsert track failed", "track_id", track.ID, "error", err, "component", "enrichment")
 		}
 	}
 	if albumModified {
 		if _, err := h.libStore.UpsertAlbum(ctx, album); err != nil {
-			log.Printf("enrichment: upsert album %d: %v", album.ID, err)
+			h.log.Error("upsert album failed", "album_id", album.ID, "error", err, "component", "enrichment")
 		}
 	}
 
@@ -168,8 +175,8 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 		if _, err := os.Stat(coverPath); err != nil {
 			coverPath = "" // no cover to embed
 		}
-		if err := tagging.WriteTags(track.FilePath, artist.Name, album.Title, track.Title, coverPath); err != nil {
-			log.Printf("enrichment: re-tag %s: %v", track.FilePath, err)
+		if err := h.tagger.WriteTags(track.FilePath, artist.Name, album.Title, track.Title, coverPath); err != nil {
+			h.log.Warn("re-tag failed", "file", track.FilePath, "error", err, "component", "enrichment")
 		}
 	}
 
@@ -208,12 +215,13 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		h.log.Error("create cover request failed", "url", url, "error", err, "component", "enrichment")
 		return false
 	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
-		log.Printf("enrichment: fetch cover %s: %v", url, err)
+		h.log.Warn("fetch cover failed", "url", url, "error", err, "component", "enrichment")
 		return false
 	}
 	defer resp.Body.Close()
@@ -224,13 +232,13 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 
 	f, err := os.Create(coverPath)
 	if err != nil {
-		log.Printf("enrichment: create cover file: %v", err)
+		h.log.Warn("create cover file failed", "error", err, "component", "enrichment")
 		return false
 	}
 	defer f.Close()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
-		log.Printf("enrichment: write cover: %v", err)
+		h.log.Warn("write cover failed", "error", err, "component", "enrichment")
 		os.Remove(coverPath) // clean up partial file
 		return false
 	}

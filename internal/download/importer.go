@@ -3,7 +3,8 @@ package download
 
 import (
 	"context"
-	"log"
+	"fmt"
+	"log/slog"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
@@ -18,6 +19,7 @@ type ImportHandler interface {
 // CompletedDownloadService subscribes to download completion events and runs
 // a sequential chain of import handlers on each completed download.
 type CompletedDownloadService struct {
+	log      *slog.Logger
 	store    DownloadStore
 	bus      events.IEventAggregator
 	handlers []ImportHandler
@@ -29,9 +31,14 @@ type CompletedDownloadService struct {
 func NewCompletedDownloadService(
 	store DownloadStore,
 	bus events.IEventAggregator,
+	logger *slog.Logger,
 	handlers ...ImportHandler,
 ) *CompletedDownloadService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	s := &CompletedDownloadService{
+		log:      logger,
 		store:    store,
 		bus:      bus,
 		handlers: handlers,
@@ -51,12 +58,12 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 
 	record, err := s.store.Get(ctx, evt.ID)
 	if err != nil || record == nil {
-		log.Printf("importer: failed to fetch download %s: %v", evt.ID, err)
+		s.log.Error("failed to fetch download", "download_id", evt.ID, "error", err, "component", "importer")
 		return
 	}
 
 	if record.State != domain.DownloadImportPending {
-		log.Printf("importer: download %s state=%q (want importPending), skipping import chain", record.ID, record.State)
+		s.log.Warn("download state mismatch, skipping import chain", "download_id", record.ID, "state", string(record.State), "component", "importer")
 		return
 	}
 
@@ -64,11 +71,11 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 	// concurrently), abort immediately.
 	transited, err := s.store.TransitionState(ctx, record.ID, domain.DownloadImportPending, domain.DownloadImporting)
 	if err != nil {
-		log.Printf("importer: state update for %s: %v", record.ID, err)
+		s.log.Error("state update failed", "download_id", record.ID, "error", err, "component", "importer")
 		return
 	}
 	if !transited {
-		log.Printf("importer: download %s state changed during import, aborting", record.ID)
+		s.log.Warn("state changed during import, aborting", "download_id", record.ID, "component", "importer")
 		return
 	}
 	record.State = domain.DownloadImporting
@@ -79,27 +86,27 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 	for _, h := range s.handlers {
 		current, checkErr := s.store.Get(ctx, record.ID)
 		if checkErr == nil && current != nil && current.State.Terminal() {
-			log.Printf("importer: download %s reached terminal state (%s), aborting chain", record.ID, current.State)
+			s.log.Warn("reached terminal state, aborting chain", "download_id", record.ID, "state", string(current.State), "component", "importer")
 			return
 		}
 		if err := h.Handle(ctx, record); err != nil {
-			log.Printf("importer: handler %T failed for %s: %v", h, record.ID, err)
+			s.log.Error("handler failed", "handler", fmt.Sprintf("%T", h), "download_id", record.ID, "error", err, "component", "importer")
 			record.State = domain.DownloadFailed
 			record.Error = err.Error()
 			if updateErr := s.store.Update(ctx, record); updateErr != nil {
-				log.Printf("importer: failed to persist error for %s: %v", record.ID, updateErr)
+				s.log.Error("failed to persist error", "download_id", record.ID, "error", updateErr, "component", "importer")
 			}
 			s.bus.Publish(ctx, events.TopicImportFailed, record)
 			return
 		}
 	}
 
-	log.Printf("importer: download %s import chain complete (state=%s)", record.ID, record.State)
+	s.log.Info("import chain complete", "download_id", record.ID, "state", string(record.State), "component", "importer")
 
 	// All handlers succeeded.
 	record.State = domain.DownloadImported
 	if err := s.store.Update(ctx, record); err != nil {
-		log.Printf("importer: final state update for %s: %v", record.ID, err)
+		s.log.Error("final state update failed", "download_id", record.ID, "error", err, "component", "importer")
 		return
 	}
 	s.bus.Publish(ctx, events.TopicImportCompleted, record)

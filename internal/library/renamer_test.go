@@ -12,7 +12,7 @@ func TestRenamerRename(t *testing.T) {
 	t.Run("full metadata", func(t *testing.T) {
 		dir := t.TempDir()
 		root := filepath.Join(dir, "library")
-		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root)
+		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root, nil)
 
 		src := filepath.Join(dir, "Daft Punk - Get Lucky.flac")
 		if err := os.WriteFile(src, []byte("dummy"), 0o644); err != nil {
@@ -46,7 +46,7 @@ func TestRenamerRename(t *testing.T) {
 	t.Run("filename fallback", func(t *testing.T) {
 		dir := t.TempDir()
 		root := filepath.Join(dir, "library")
-		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root)
+		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root, nil)
 
 		src := filepath.Join(dir, "Daft Punk - Get Lucky.mp3")
 		if err := os.WriteFile(src, []byte("dummy"), 0o644); err != nil {
@@ -67,7 +67,7 @@ func TestRenamerRename(t *testing.T) {
 	t.Run("same path skipped", func(t *testing.T) {
 		dir := t.TempDir()
 		root := filepath.Join(dir, "library")
-		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root)
+		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root, nil)
 
 		// File already at the computed target path.
 		targetDir := filepath.Join(root, "Daft Punk/Random Access Memories")
@@ -93,7 +93,7 @@ func TestRenamerRename(t *testing.T) {
 
 	t.Run("no metadata no-op", func(t *testing.T) {
 		dir := t.TempDir()
-		r := NewRenamer("{artist}/{album}", dir)
+		r := NewRenamer("{artist}/{album}", dir, nil)
 		src := filepath.Join(dir, "track.mp3")
 		os.WriteFile(src, []byte("dummy"), 0o644)
 
@@ -109,7 +109,7 @@ func TestRenamerRename(t *testing.T) {
 	t.Run("three-part filename fallback", func(t *testing.T) {
 		dir := t.TempDir()
 		root := filepath.Join(dir, "library")
-		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root)
+		r := NewRenamer("{artist}/{album}/{track:00} - {title}", root, nil)
 
 		src := filepath.Join(dir, "Daft Punk - Random Access Memories - Get Lucky.flac")
 		os.WriteFile(src, []byte("dummy"), 0o644)

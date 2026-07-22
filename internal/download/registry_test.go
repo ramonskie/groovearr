@@ -124,7 +124,7 @@ func TestRegistryReplace(t *testing.T) {
 func TestOrchestratorSearch(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek", configured: true})
-	orch := NewOrchestrator(r, nil)
+	orch := NewOrchestrator(r, nil, testLogger())
 
 	_, _, err := orch.Search(context.Background(), "soulseek", "query")
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"regexp"
@@ -115,33 +116,42 @@ func looksLikeID(s string) bool {
 
 // FetchOEmbed fetches oEmbed metadata for a Spotify URL.
 // No authentication required — this is the open oEmbed endpoint.
-func FetchOEmbed(ctx context.Context, spotifyURL string) (*OEmbedResponse, error) {
-	return fetchOEmbed(ctx, http.DefaultClient, spotifyURL)
+func FetchOEmbed(ctx context.Context, spotifyURL string, log *slog.Logger) (*OEmbedResponse, error) {
+	return fetchOEmbed(ctx, http.DefaultClient, spotifyURL, log)
 }
 
 // FetchOEmbedWithClient fetches oEmbed metadata for a Spotify URL using a
 // specific HTTP client. Useful for testing (httptest server).
-func FetchOEmbedWithClient(ctx context.Context, client *http.Client, spotifyURL string) (*OEmbedResponse, error) {
-	return fetchOEmbed(ctx, client, spotifyURL)
+func FetchOEmbedWithClient(ctx context.Context, client *http.Client, spotifyURL string, log *slog.Logger) (*OEmbedResponse, error) {
+	return fetchOEmbed(ctx, client, spotifyURL, log)
 }
 
 // fetchOEmbed performs the actual oEmbed request with the given HTTP client.
-func fetchOEmbed(ctx context.Context, client *http.Client, spotifyURL string) (*OEmbedResponse, error) {
+func fetchOEmbed(ctx context.Context, client *http.Client, spotifyURL string, log *slog.Logger) (*OEmbedResponse, error) {
 	reqURL := fmt.Sprintf("%s?url=%s", oembedBaseURL, url.QueryEscape(spotifyURL))
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify oembed request creation failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: oembed request failed: %w", err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify oembed fetch failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: oembed fetch failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify oembed read failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: oembed read failed: %w", err)
 	}
 
@@ -270,15 +280,21 @@ type EmbedTrack struct {
 
 // FetchEmbedPlaylist fetches and parses a Spotify embed playlist page.
 // Extracts structured data from the __NEXT_DATA__ JSON blob — no auth required.
-func FetchEmbedPlaylist(ctx context.Context, client *http.Client, playlistID string) (*EmbedPlaylist, error) {
+func FetchEmbedPlaylist(ctx context.Context, client *http.Client, playlistID string, log *slog.Logger) (*EmbedPlaylist, error) {
 	u := "https://open.spotify.com/embed/playlist/" + playlistID
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify embed playlist request creation failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: embed request: %w", err)
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify embed playlist fetch failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: embed fetch: %w", err)
 	}
 	defer resp.Body.Close()
@@ -289,6 +305,9 @@ func FetchEmbedPlaylist(ctx context.Context, client *http.Client, playlistID str
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify embed playlist read failed", "error", err, "component", "spotify_embed")
+		}
 		return nil, fmt.Errorf("spotify: embed read: %w", err)
 	}
 

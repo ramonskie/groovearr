@@ -204,7 +204,7 @@ func TestCoverArtHandler_DownloadsCover(t *testing.T) {
 		Title:    "Test Album",
 	})
 
-	handler := NewCoverArtHandler(libStore)
+	handler := NewCoverArtHandler(libStore, testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-cover-1",
 		FilePath: filepath.Join(albumDir, "01 track.mp3"),
@@ -234,7 +234,7 @@ func TestCoverArtHandler_DownloadsCover(t *testing.T) {
 }
 
 func TestCoverArtHandler_EmptyCoverURL(t *testing.T) {
-	handler := NewCoverArtHandler(newMockLibStore())
+	handler := NewCoverArtHandler(newMockLibStore(), testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-cover-2",
 		FilePath: "/tmp/somefile.mp3",
@@ -263,7 +263,7 @@ func TestCoverArtHandler_SkipsExistingCover(t *testing.T) {
 		Title:    "Test Album2",
 	})
 
-	handler := NewCoverArtHandler(libStore)
+	handler := NewCoverArtHandler(libStore, testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-cover-3",
 		FilePath: filepath.Join(albumDir, "01 track.mp3"),

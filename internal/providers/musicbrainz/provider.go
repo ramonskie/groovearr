@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -15,14 +16,16 @@ import (
 type Client struct {
 	cfg       MusicBrainzConfig
 	api       *apiClient // internal API client
+	log       *slog.Logger
 	connected bool
 }
 
 // NewClient creates a MusicBrainz metadata provider.
-func NewClient(cfg MusicBrainzConfig) *Client {
+func NewClient(cfg MusicBrainzConfig, logger *slog.Logger) *Client {
 	return &Client{
 		cfg: cfg,
-		api: newAPIClient(cfg),
+		api: newAPIClient(cfg, logger),
+		log: logger,
 	}
 }
 
@@ -38,6 +41,7 @@ func (c *Client) IsConfigured() bool  { return true } // no credentials required
 func (c *Client) CheckConnection(ctx context.Context) error {
 	_, err := c.api.SearchReleaseGroup(ctx, "test", "test")
 	if err != nil {
+		c.log.Error("musicbrainz check connection failed", "error", err, "component", "musicbrainz")
 		if errors.Is(err, ErrRateLimited) {
 			return fmt.Errorf("musicbrainz: rate limited: %w", err)
 		}
@@ -57,6 +61,7 @@ func (c *Client) Connected() bool { return c.connected }
 func (c *Client) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
 	rg, err := c.api.SearchReleaseGroup(ctx, artist, album)
 	if err != nil {
+		c.log.Error("musicbrainz search cover failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz")
 		return nil, err
 	}
 	if rg == nil {
@@ -107,6 +112,7 @@ func (c *Client) EnrichTrack(ctx context.Context, track *domain.Track) (*metadat
 func (c *Client) enrichByRelease(ctx context.Context, releaseMBID string) (*metadata.TrackMetadata, error) {
 	info, err := c.api.LookupRelease(ctx, releaseMBID)
 	if err != nil {
+		c.log.Error("musicbrainz enrich by release failed", "error", err, "releaseMBID", releaseMBID, "component", "musicbrainz")
 		return nil, err
 	}
 	if info == nil {

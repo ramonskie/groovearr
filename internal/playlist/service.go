@@ -5,7 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -29,6 +29,7 @@ type Service struct {
 	downloadSvc *download.DownloadService
 	matcher     *matching.Engine
 	cfgFn       func() config.Config
+	log         *slog.Logger
 	syncMu      sync.Mutex
 	syncing     map[int64]bool // playlistIDs currently being synced
 }
@@ -41,7 +42,10 @@ type pendingItem struct {
 }
 
 // NewService creates a playlist service.
-func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config) *Service {
+func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, logger *slog.Logger) *Service {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Service{
 		srcReg:      srcReg,
 		store:       store,
@@ -49,6 +53,7 @@ func NewService(srcReg *Registry, store library.Store, downloadReg *download.Reg
 		downloadSvc: downloadSvc,
 		matcher:     matching.New(),
 		cfgFn:       cfgFn,
+		log:         logger,
 		syncing:     make(map[int64]bool),
 	}
 }
@@ -66,7 +71,7 @@ func (s *Service) RefreshSources(downloadReg *download.Registry) {
 		if psp, ok := p.(PlaylistSourceProvider); ok {
 			if p.IsConfigured() {
 				if err := reg.Register(psp.PlaylistSource()); err != nil {
-					log.Printf("playlist: register %s: %v", p.Name(), err)
+					s.log.Error("register plugin failed", "name", p.Name(), "error", err, "component", "playlist")
 				}
 			}
 		}
@@ -171,22 +176,22 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 		}
 
 		if err := s.store.UpsertPlaylistTrack(ctx, &pt); err != nil {
-			log.Printf("playlist: save track %s: %v", info.Title, err)
+			s.log.Error("save track failed", "title", info.Title, "error", err, "component", "playlist")
 		}
 		result.Tracks = append(result.Tracks, pt)
 	}
 
-	log.Printf("playlist: imported %q — %d tracks (%d linked, %d unmatched)",
-		playlistRecord.Name, len(trackInfos), result.Linked, result.Unmatched)
+	s.log.Info("imported", "name", playlistRecord.Name, "total_tracks", len(trackInfos), "linked", result.Linked, "unmatched", result.Unmatched, "component", "playlist")
 
 	// Build playlist folder from linked tracks (background context — outlives request).
+	s.log.Info("building playlist folder", "playlist_id", playlistRecord.ID, "component", "playlist")
 	go s.buildPlaylistFolder(context.Background(), playlistRecord.ID)
 
 	// Auto-trigger downloads for unmatched tracks on first import.
 	if result.Unmatched > 0 {
 		go func() {
 			if _, err := s.DownloadMissing(context.Background(), playlistRecord.ID); err != nil {
-				log.Printf("playlist: auto-download %q: %v", playlistRecord.Name, err)
+				s.log.Error("auto-download failed", "name", playlistRecord.Name, "error", err, "component", "playlist")
 			}
 		}()
 	}
@@ -221,7 +226,7 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 			PlaylistID:  playlistIDStr,
 		})
 		if dlErr != nil {
-			log.Printf("playlist: queue pending %s - %s: %v", pt.Artist, pt.Title, dlErr)
+			s.log.Error("queue pending failed", "artist", pt.Artist, "title", pt.Title, "error", dlErr, "component", "playlist")
 			continue
 		}
 		// Fetch the record so we have the full DownloadRecord for resolution.
@@ -232,11 +237,12 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		items = append(items, pendingItem{record: rec, track: pt})
 	}
 
-	log.Printf("playlist: download missing: queued %d tracks (pending resolution)", len(items))
+	s.log.Info("download missing: queued", "count", len(items), "component", "playlist")
 
 	// Phase 2: resolve and dispatch in background — search for matches one at a time
 	// and submit to the worker pool.
 	if len(items) > 0 {
+		s.log.Info("resolving pending downloads", "count", len(items), "playlist_id", playlistID, "component", "playlist")
 		go s.resolvePendingDownloads(items, playlistID)
 	}
 
@@ -249,7 +255,7 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 	ctx := context.Background()
 	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
 		return s.cfgFn().Quality
-	})
+	}, s.log)
 	resolved := 0
 
 	for _, item := range items {
@@ -258,7 +264,7 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 
 		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
 		if err != nil {
-			log.Printf("playlist: resolve %s - %s: %v", pt.Artist, pt.Title, err)
+			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
 			// Mark as failed so it doesn't appear as pending forever.
 			rec.State = domain.DownloadFailed
 			rec.Error = err.Error()
@@ -277,19 +283,19 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Size = best.Track.Size
 		rec.DisplayName = pt.Artist + " - " + pt.Title
 		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
-			log.Printf("playlist: update pending %s: %v", rec.ID, err)
+			s.log.Error("update pending failed", "download_id", rec.ID, "error", err, "component", "playlist")
 			continue
 		}
 
 		// Dispatch to worker pool.
 		if err := s.downloadSvc.Dispatch(ctx, rec); err != nil {
-			log.Printf("playlist: dispatch %s: %v", rec.ID, err)
+			s.log.Error("dispatch failed", "download_id", rec.ID, "error", err, "component", "playlist")
 			continue
 		}
 		resolved++
 	}
 
-	log.Printf("playlist: resolved %d/%d downloads", resolved, len(items))
+	s.log.Info("resolved downloads", "resolved", resolved, "total", len(items), "component", "playlist")
 	if resolved > 0 {
 		s.syncPlaylistGuarded(playlistID)
 	}
@@ -302,7 +308,7 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 	s.syncMu.Lock()
 	if s.syncing[playlistID] {
 		s.syncMu.Unlock()
-		log.Printf("playlist: sync %d already in progress, skipping", playlistID)
+		s.log.Warn("sync already in progress, skipping", "playlist_id", playlistID, "component", "playlist")
 		return
 	}
 	s.syncing[playlistID] = true
@@ -317,7 +323,7 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	if err := s.SyncPlaylist(ctx, playlistID); err != nil {
-		log.Printf("playlist: background sync %d failed: %v", playlistID, err)
+		s.log.Error("background sync failed", "playlist_id", playlistID, "error", err, "component", "playlist")
 	}
 }
 
@@ -328,7 +334,7 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album string, durationMs int64, excludeSource string, playlistID int64, isrc string) (downloadID, sourceName string, confidence float64, err error) {
 	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
 		return s.cfgFn().Quality
-	})
+	}, s.log)
 
 	best, err := orch.FindBestMatch(ctx, title, artist, durationMs, excludeSource)
 	if err != nil {
@@ -363,7 +369,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 
 	// Wait for any in-progress downloads to complete before scanning.
 	if err := s.waitForDownloads(ctx); err != nil {
-		log.Printf("playlist: download wait: %v", err)
+		s.log.Error("download wait failed", "error", err, "component", "playlist")
 		// Continue anyway — scanner will pick up whatever is already done.
 	}
 
@@ -381,7 +387,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 			for i, info := range trackInfos {
 				newPos := i + 1
 				if old, ok := oldPos[info.SourceTrackID]; ok && old != newPos {
-					log.Printf("playlist: %s moved position %d → %d", info.Title, old, newPos)
+				s.log.Info("track moved", "title", info.Title, "old_pos", old, "new_pos", newPos, "component", "playlist")
 				}
 			}
 
@@ -405,7 +411,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 
 	// Scan download, library, and playlist paths to import newly downloaded files.
 	cfg := s.cfgFn()
-	scanner := library.NewScanner(s.store)
+	scanner := library.NewScanner(s.store, s.log)
 	for _, path := range []string{cfg.Library.DownloadPath, cfg.Library.LibraryPath, cfg.Library.PlaylistPath} {
 		if path == "" {
 			continue
@@ -434,16 +440,18 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 	p.SyncedAt = time.Now().UTC().Format(time.RFC3339)
 	s.store.UpsertPlaylist(ctx, p)
 
-	log.Printf("playlist: synced %q — %d tracks", p.Name, p.TrackCount)
+	s.log.Info("synced", "name", p.Name, "tracks", p.TrackCount, "component", "playlist")
 
 	// Build playlist folder.
 	// Uses background context — the caller may cancel ctx after SyncPlaylist returns.
+	s.log.Info("building playlist folder", "playlist_id", playlistID, "component", "playlist")
 	go s.buildPlaylistFolder(context.Background(), playlistID)
 	return nil
 }
 
 // buildPlaylistFolder creates the playlist directory structure from linked tracks.
 func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
+	defer s.log.Info("playlist folder build done", "playlist_id", playlistID, "component", "playlist")
 	playlist, err := s.store.GetPlaylist(ctx, playlistID)
 	if err != nil || playlist == nil {
 		return
@@ -462,11 +470,10 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 			linkedCount++
 		}
 	}
-	log.Printf("playlist: build folder %q → %s — %d/%d tracks linked",
-		playlist.Name, root, linkedCount, len(tracks))
+	s.log.Info("build folder", "name", playlist.Name, "path", root, "linked", linkedCount, "total", len(tracks), "component", "playlist")
 
 	if root == "" {
-		log.Printf("playlist: build folder %q skipped — playlist_path not configured", playlist.Name)
+		s.log.Warn("build folder skipped: no playlist_path", "name", playlist.Name, "component", "playlist")
 		return
 	}
 	template := cfg.Library.PlaylistTemplate
@@ -477,7 +484,7 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 	// Create playlist directory.
 	playlistDir := filepath.Join(root, sanitize.DirName(playlist.Name))
 	if err := os.MkdirAll(playlistDir, 0o755); err != nil {
-		log.Printf("playlist: mkdir %s: %v", playlistDir, err)
+		s.log.Error("mkdir failed", "path", playlistDir, "error", err, "component", "playlist")
 		return
 	}
 
@@ -502,19 +509,19 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 
 		// Ensure parent directory exists.
 		if err := os.MkdirAll(filepath.Dir(destPath), 0o755); err != nil {
-			log.Printf("playlist: mkdir %s: %v", filepath.Dir(destPath), err)
+			s.log.Error("mkdir failed", "path", filepath.Dir(destPath), "error", err, "component", "playlist")
 			continue
 		}
 
 		// Copy file to playlist folder (library copy stays intact).
 		if err := copyFile(track.FilePath, destPath); err != nil {
-			log.Printf("playlist: copy %s → %s: %v", track.FilePath, destPath, err)
+			s.log.Error("copy failed", "src", track.FilePath, "dst", destPath, "error", err, "component", "playlist")
 			continue
 		}
 		written++
 	}
 
-	log.Printf("playlist: built folder %q — %d tracks", playlist.Name, written)
+	s.log.Info("folder built", "name", playlist.Name, "tracks", written, "component", "playlist")
 
 	// Clean up orphaned files from old positions.
 	keepFiles := make(map[string]bool)
@@ -537,7 +544,7 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 		if !e.IsDir() && !keepFiles[e.Name()] {
 			path := filepath.Join(playlistDir, e.Name())
 			if err := os.Remove(path); err == nil {
-				log.Printf("playlist: removed orphaned file %s", e.Name())
+			s.log.Info("removed orphaned file", "file", e.Name(), "component", "playlist")
 			}
 		}
 	}

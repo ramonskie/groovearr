@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -91,7 +92,7 @@ func BuildAuthURL(clientID, redirectURI, challenge, state string) string {
 
 // ExchangeCode exchanges an OAuth authorization code for access and refresh tokens.
 // Returns accessToken, refreshToken, expiresIn (seconds), and any error.
-func ExchangeCode(ctx context.Context, code, verifier, clientID, redirectURI string) (accessToken, refreshToken string, expiresIn int, err error) {
+func ExchangeCode(ctx context.Context, code, verifier, clientID, redirectURI string, log *slog.Logger) (accessToken, refreshToken string, expiresIn int, err error) {
 	data := url.Values{}
 	data.Set("grant_type", "authorization_code")
 	data.Set("code", code)
@@ -99,19 +100,19 @@ func ExchangeCode(ctx context.Context, code, verifier, clientID, redirectURI str
 	data.Set("client_id", clientID)
 	data.Set("code_verifier", verifier)
 
-	return postToken(ctx, tokenClient(), data)
+	return postToken(ctx, tokenClient(), data, log)
 }
 
 // RefreshAccessToken obtains a new access token using a refresh token.
 // Returns newAccessToken, expiresIn (seconds), and any error.
 // On invalid_grant, the caller should discard the refresh token and re-authorize.
-func RefreshAccessToken(ctx context.Context, refreshToken, clientID string) (newAccessToken string, expiresIn int, err error) {
+func RefreshAccessToken(ctx context.Context, refreshToken, clientID string, log *slog.Logger) (newAccessToken string, expiresIn int, err error) {
 	data := url.Values{}
 	data.Set("grant_type", "refresh_token")
 	data.Set("refresh_token", refreshToken)
 	data.Set("client_id", clientID)
 
-	accessToken, _, expiresIn, err := postToken(ctx, tokenClient(), data)
+	accessToken, _, expiresIn, err := postToken(ctx, tokenClient(), data, log)
 	return accessToken, expiresIn, err
 }
 
@@ -126,21 +127,30 @@ func tokenClient() *http.Client {
 
 // postToken sends a form-encoded POST to the Spotify token endpoint and
 // parses the JSON response.
-func postToken(ctx context.Context, client *http.Client, data url.Values) (accessToken, refreshToken string, expiresIn int, err error) {
+func postToken(ctx context.Context, client *http.Client, data url.Values, log *slog.Logger) (accessToken, refreshToken string, expiresIn int, err error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, tokenEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
+		if log != nil {
+			log.Error("spotify create token request failed", "error", err, "component", "spotify_oauth")
+		}
 		return "", "", 0, fmt.Errorf("spotify: create token request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
 	resp, err := client.Do(req)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify token request failed", "error", err, "component", "spotify_oauth")
+		}
 		return "", "", 0, fmt.Errorf("spotify: token request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		if log != nil {
+			log.Error("spotify read token response failed", "error", err, "component", "spotify_oauth")
+		}
 		return "", "", 0, fmt.Errorf("spotify: read token response: %w", err)
 	}
 

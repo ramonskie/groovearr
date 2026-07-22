@@ -139,6 +139,9 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 		}
 		p, err := f.Create(rawCfg, resources)
 		if err != nil {
+			if resources.Logger != nil {
+				resources.Logger.Error("plugin create failed", "name", name, "error", err, "component", "plugin")
+			}
 			errs = append(errs, fmt.Errorf("plugin %q: create: %w", name, err))
 			continue
 		}
@@ -169,6 +172,9 @@ func (r *Registry) InitRemaining(resources PluginResources) {
 		}
 		p, err := f.Create(f.DefaultConfig(), resources)
 		if err != nil {
+			if resources.Logger != nil {
+				resources.Logger.Error("plugin create failed (default config)", "name", name, "error", err, "component", "plugin")
+			}
 			continue
 		}
 		r.plugins[name] = p

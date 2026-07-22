@@ -4,7 +4,7 @@ package download
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 
 	"github.com/ramonskie/groovearr/internal/config"
@@ -16,6 +16,7 @@ import (
 
 // Orchestrator routes search to configured plugins.
 type Orchestrator struct {
+	log           *slog.Logger
 	registry      *Registry
 	matcher       *matching.Engine
 	qualityConfig func() config.QualityConfig
@@ -24,11 +25,15 @@ type Orchestrator struct {
 // NewOrchestrator creates an orchestrator with the given plugin registry.
 // qualityConfig is a function that returns the latest quality preferences
 // (thread-safe via config.Persistence). Pass nil to use defaults (no filtering).
-func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConfig) *Orchestrator {
+func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConfig, logger *slog.Logger) *Orchestrator {
 	if qualityConfig == nil {
 		qualityConfig = func() config.QualityConfig { return config.QualityConfig{} }
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Orchestrator{
+		log:           logger,
 		registry:      registry,
 		matcher:       matching.New(),
 		qualityConfig: qualityConfig,
@@ -68,7 +73,7 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 	for _, p := range plugins {
 		tracks, albums, err := p.Search(ctx, query)
 		if err != nil {
-			log.Printf("orchestrator: search %s failed: %v", p.Name(), err)
+			o.log.Error("search failed", "plugin", p.Name(), "error", err, "component", "orchestrator")
 			continue
 		}
 		allTracks = append(allTracks, tracks...)
@@ -96,7 +101,7 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, 
 		}
 		searchTracks, _, searchErr := p.Search(ctx, query)
 		if searchErr != nil {
-			log.Printf("orchestrator: search %s for %q: %v", p.Name(), query, searchErr)
+			o.log.Error("search failed", "plugin", p.Name(), "query", query, "error", searchErr, "component", "orchestrator")
 			continue
 		}
 		for _, t := range searchTracks {

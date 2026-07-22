@@ -197,6 +197,7 @@ func TestCompletedDownloadService_SuccessChain(t *testing.T) {
 	var svc CompletedDownloadService
 	svc.store = store
 	svc.bus = bus
+	svc.log = testLogger()
 	svc.handlers = []ImportHandler{h1, h2}
 	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-1"})
 
@@ -230,6 +231,7 @@ func TestCompletedDownloadService_FailureStopsChain(t *testing.T) {
 	var svc CompletedDownloadService
 	svc.store = store
 	svc.bus = bus
+	svc.log = testLogger()
 	svc.handlers = []ImportHandler{h1, h2, h3}
 	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-2"})
 
@@ -260,6 +262,7 @@ func TestCompletedDownloadService_SkipsNonImportPending(t *testing.T) {
 	var svc CompletedDownloadService
 	svc.store = store
 	svc.bus = bus
+	svc.log = testLogger()
 	svc.handlers = []ImportHandler{&successHandler{name: "h1"}}
 	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-3"})
 

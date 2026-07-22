@@ -31,7 +31,7 @@ func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResource
 	if err := json.Unmarshal(rawCfg, &cfg); err != nil {
 		return nil, err
 	}
-	return NewClient(cfg), nil
+	return NewClient(cfg, resources.Logger), nil
 }
 
 // ValidateConfig checks whether the raw config is structurally valid.

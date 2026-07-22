@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -14,14 +15,15 @@ import (
 
 // Store implements download.DownloadStore backed by a *sql.DB connection.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	log *slog.Logger
 }
 
 // New creates a Store using an existing database connection.
 // The caller must ensure the downloads and download_events tables exist
 // (e.g., via library/sqlite v3 migration).
-func New(db *sql.DB) *Store {
-	return &Store{db: db}
+func New(db *sql.DB, logger *slog.Logger) *Store {
+	return &Store{db: db, log: logger}
 }
 
 // Close is a no-op — the underlying database connection is owned by the
@@ -54,6 +56,7 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 		now, now,
 	)
 	if err != nil {
+		s.log.Error("download insert failed", "error", err, "component", "dl_store")
 		return fmt.Errorf("download insert: %w", err)
 	}
 	return nil
@@ -79,6 +82,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 		now, r.ID,
 	)
 	if err != nil {
+		s.log.Error("download update failed", "error", err, "component", "dl_store")
 		return fmt.Errorf("download update: %w", err)
 	}
 
@@ -103,6 +107,7 @@ func (s *Store) UpdateProgress(ctx context.Context, id string, state domain.Down
 		speed, filePath, coverURL, now, id,
 	)
 	if err != nil {
+		s.log.Error("download update progress failed", "error", err, "component", "dl_store")
 		return fmt.Errorf("download update progress: %w", err)
 	}
 	n, _ := result.RowsAffected()
@@ -121,6 +126,7 @@ func (s *Store) TransitionState(ctx context.Context, id string, oldState, newSta
 		string(newState), now, id, string(oldState),
 	)
 	if err != nil {
+		s.log.Error("transition state failed", "error", err, "component", "dl_store")
 		return false, fmt.Errorf("transition state: %w", err)
 	}
 	n, _ := result.RowsAffected()
@@ -130,27 +136,33 @@ func (s *Store) TransitionState(ctx context.Context, id string, oldState, newSta
 // Get returns a single download record by ID, or nil if not found.
 func (s *Store) Get(ctx context.Context, id string) (*domain.DownloadRecord, error) {
 	row := s.db.QueryRowContext(ctx, downloadSelect+" WHERE id=?", id)
-	return scanDownload(row)
+	r, err := s.scanDownload(row)
+	if err != nil {
+		s.log.Error("download get failed", "error", err, "component", "dl_store")
+	}
+	return r, err
 }
 
 // List returns all download records ordered by created_at DESC.
 func (s *Store) List(ctx context.Context) ([]domain.DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx, downloadSelect+" ORDER BY created_at DESC, id DESC")
 	if err != nil {
+		s.log.Error("download list failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download list: %w", err)
 	}
 	defer rows.Close()
-	return scanDownloads(rows)
+	return s.scanDownloads(rows)
 }
 
 // ListByState returns downloads filtered by a single state.
 func (s *Store) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
 	rows, err := s.db.QueryContext(ctx, 		downloadSelect+" WHERE state=? ORDER BY created_at DESC, id DESC", state)
 	if err != nil {
+		s.log.Error("download listByState failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download listByState: %w", err)
 	}
 	defer rows.Close()
-	return scanDownloads(rows)
+	return s.scanDownloads(rows)
 }
 
 // ListActive returns all non-terminal downloads.
@@ -160,10 +172,11 @@ func (s *Store) ListActive(ctx context.Context) ([]domain.DownloadRecord, error)
 		domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
 	)
 	if err != nil {
+		s.log.Error("download listActive failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download listActive: %w", err)
 	}
 	defer rows.Close()
-	return scanDownloads(rows)
+	return s.scanDownloads(rows)
 }
 
 // ListByPlaylist returns downloads filtered by playlist_id.
@@ -172,10 +185,11 @@ func (s *Store) ListByPlaylist(ctx context.Context, playlistID string) ([]domain
 		downloadSelect+" WHERE playlist_id=? ORDER BY created_at DESC, id DESC", playlistID,
 	)
 	if err != nil {
+		s.log.Error("download listByPlaylist failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download listByPlaylist: %w", err)
 	}
 	defer rows.Close()
-	return scanDownloads(rows)
+	return s.scanDownloads(rows)
 }
 
 // ─── Events ────────────────────────────────────────────────────────────
@@ -194,6 +208,7 @@ func (s *Store) RecordEvent(ctx context.Context, e *domain.DownloadEvent) error 
 		e.DownloadID, e.Type, payload, now,
 	)
 	if err != nil {
+		s.log.Error("event record failed", "error", err, "component", "dl_store")
 		return fmt.Errorf("event record: %w", err)
 	}
 
@@ -213,6 +228,7 @@ func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]domain.Down
 		downloadID,
 	)
 	if err != nil {
+		s.log.Error("events get failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("events get: %w", err)
 	}
 	defer rows.Close()
@@ -223,6 +239,7 @@ func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]domain.Down
 		var id int64
 		var payload, createdAt string
 		if err := rows.Scan(&id, &e.DownloadID, &e.Type, &payload, &createdAt); err != nil {
+			s.log.Error("events scan failed", "error", err, "component", "dl_store")
 			return nil, fmt.Errorf("events scan: %w", err)
 		}
 		e.ID = fmt.Sprintf("%d", id)
@@ -243,6 +260,7 @@ func (s *Store) DeleteTerminal(ctx context.Context) error {
 		domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
 	)
 	if err != nil {
+		s.log.Error("deleteTerminal failed", "error", err, "component", "dl_store")
 		return fmt.Errorf("deleteTerminal: %w", err)
 	}
 	return nil
@@ -259,7 +277,7 @@ const downloadSelect = `SELECT
 	created_at, updated_at
 	FROM downloads`
 
-func scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
+func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 	var r domain.DownloadRecord
 	var stateStr string
 	var retryCount int
@@ -276,6 +294,7 @@ func scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
+		s.log.Error("download scan failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download scan: %w", err)
 	}
 
@@ -284,7 +303,7 @@ func scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 		return &r, nil
 	}
 
-func scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
+func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 	var out []domain.DownloadRecord
 	for rows.Next() {
 		var r domain.DownloadRecord
@@ -299,13 +318,18 @@ func scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 			&retryCount, &playlistID,
 			&createdAt, &updatedAt,
 		); err != nil {
+			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")
 			return nil, fmt.Errorf("downloads scan: %w", err)
 		}
 		r.PlaylistID = playlistID
 		r.State = domain.DownloadState(stateStr)
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		s.log.Error("downloads iteration failed", "error", err, "component", "dl_store")
+		return out, err
+	}
+	return out, nil
 }
 
 // Ensure interface compliance at compile time.

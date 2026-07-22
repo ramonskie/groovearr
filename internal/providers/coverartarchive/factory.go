@@ -22,7 +22,7 @@ func (f *factory) DisplayName() string   { return displayName }
 func (f *factory) Capabilities() []string { return []string{"metadata"} }
 
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
-	return NewClient(), nil
+	return NewClient(resources.Logger), nil
 }
 
 func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {

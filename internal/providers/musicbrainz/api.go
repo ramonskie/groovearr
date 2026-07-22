@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -56,6 +57,7 @@ type apiClient struct {
 	cfg        MusicBrainzConfig
 	httpClient *http.Client
 	userAgent  string
+	log        *slog.Logger
 
 	mu         sync.Mutex
 	lastCall   time.Time
@@ -63,7 +65,7 @@ type apiClient struct {
 }
 
 // newAPIClient creates a MusicBrainz API client.
-func newAPIClient(cfg MusicBrainzConfig) *apiClient {
+func newAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *apiClient {
 	ua := "Groovearr/0.1.0 ( github.com/ramonskie/groovearr )"
 	if cfg.Email != "" {
 		ua = "Groovearr/0.1.0 ( " + cfg.Email + " )"
@@ -72,6 +74,7 @@ func newAPIClient(cfg MusicBrainzConfig) *apiClient {
 		cfg:        cfg,
 		httpClient: &http.Client{Timeout: 15 * time.Second},
 		userAgent:  ua,
+		log:        logger,
 		minInterval: time.Second, // 1 req/sec
 	}
 }
@@ -91,6 +94,7 @@ func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string
 		"fmt":   "json",
 	})
 	if err != nil {
+		c.log.Error("musicbrainz search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -107,6 +111,7 @@ func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string
 		} `json:"release-groups"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if len(resp.ReleaseGroups) == 0 {
@@ -129,6 +134,7 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		"fmt":  "json",
 	})
 	if err != nil {
+		c.log.Error("musicbrainz lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -167,6 +173,7 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		} `json:"genres"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -231,6 +238,7 @@ func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	u, err := url.Parse(baseURL)
 	if err != nil {
+		c.log.Error("musicbrainz URL parse failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	u = u.JoinPath(path)
@@ -243,6 +251,7 @@ func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
+		c.log.Error("musicbrainz create request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	req.Header.Set("User-Agent", c.userAgent)
@@ -250,12 +259,14 @@ func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.log.Error("musicbrainz HTTP request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.log.Error("musicbrainz read response failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -263,9 +274,11 @@ func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]s
 		return nil, nil // not found is not an error
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		c.log.Warn("musicbrainz rate limited", "path", path, "component", "musicbrainz_api")
 		return nil, ErrRateLimited
 	}
 	if resp.StatusCode != http.StatusOK {
+		c.log.Error("musicbrainz non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "musicbrainz_api")
 		return nil, fmt.Errorf("musicbrainz: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

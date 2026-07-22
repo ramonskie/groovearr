@@ -21,7 +21,7 @@ func (f *factory) Capabilities() []string { return []string{"download"} }
 
 // Create builds a Soulseek Client from raw JSON config and runtime resources.
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
-	client, err := New(rawCfg, resources.DownloadPath)
+	client, err := New(rawCfg, resources.DownloadPath, resources.Logger)
 	if err != nil {
 		return nil, err
 	}

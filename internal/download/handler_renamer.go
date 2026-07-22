@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -16,12 +17,16 @@ import (
 type FileRenamerHandler struct {
 	renamer *library.Renamer
 	store   DownloadStore
+	log     *slog.Logger
 }
 
 // NewFileRenamerHandler creates a handler that moves downloaded files into
 // the library directory structure after each download completes.
-func NewFileRenamerHandler(renamer *library.Renamer, store DownloadStore) *FileRenamerHandler {
-	return &FileRenamerHandler{renamer: renamer, store: store}
+func NewFileRenamerHandler(renamer *library.Renamer, store DownloadStore, logger *slog.Logger) *FileRenamerHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &FileRenamerHandler{renamer: renamer, store: store, log: logger}
 }
 
 // Handle calls library.Renamer.Rename using the record's embedded metadata
@@ -46,6 +51,7 @@ func (h *FileRenamerHandler) Handle(ctx context.Context, record *domain.Download
 
 	newPath, err := h.renamer.Rename(srcPath, meta)
 	if err != nil {
+		h.log.Error("rename failed", "filename", record.Filename, "error", err, "component", "renamer")
 		return fmt.Errorf("renamer: rename %s: %w", record.Filename, err)
 	}
 

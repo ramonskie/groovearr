@@ -3,7 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -26,6 +26,7 @@ type DownloadJob struct {
 
 // workerPoolImpl implements WorkerPool with bounded goroutines and graceful shutdown.
 type workerPoolImpl struct {
+	log            *slog.Logger
 	maxWorkers     int
 	jobQueue       chan *DownloadJob
 	pluginRegistry *Registry
@@ -46,12 +47,16 @@ type workerPoolImpl struct {
 // download goroutines. maxWorkers defaults to defaultMaxWorkers (3) when zero
 // or negative. Each worker picks jobs from a buffered channel and drives the
 // download through its full lifecycle: downloading → importPending (or failed).
-func NewWorkerPool(maxWorkers int, registry *Registry, store DownloadStore, bus events.IEventAggregator) WorkerPool {
+func NewWorkerPool(maxWorkers int, registry *Registry, store DownloadStore, bus events.IEventAggregator, logger *slog.Logger) WorkerPool {
 	if maxWorkers <= 0 {
 		maxWorkers = defaultMaxWorkers
 	}
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	p := &workerPoolImpl{
+		log:              logger,
 		maxWorkers:       maxWorkers,
 		jobQueue:         make(chan *DownloadJob, maxWorkers*2),
 		pluginRegistry:   registry,
@@ -123,6 +128,7 @@ func (p *workerPoolImpl) Cancel(downloadID string) {
 // pool-level context), drains remaining queued jobs by discarding them, and
 // waits for all workers to exit.
 func (p *workerPoolImpl) Shutdown() {
+	p.log.Info("worker pool shutdown started", "component", "worker")
 	p.cancel()
 	close(p.jobQueue)
 	p.wg.Wait()
@@ -130,10 +136,12 @@ func (p *workerPoolImpl) Shutdown() {
 
 // worker loops on the job queue until it is closed.
 func (p *workerPoolImpl) worker() {
+	p.log.Info("worker started", "component", "worker")
 	defer p.wg.Done()
 	for job := range p.jobQueue {
 		p.processJob(job)
 	}
+	p.log.Info("worker stopped", "component", "worker")
 }
 
 // processJob runs the full download lifecycle for a single job.
@@ -173,10 +181,10 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 
 	// Transition state: queued → downloading atomically.
 	if ok, err := p.store.TransitionState(jobCtx, downloadID, domain.DownloadQueued, domain.DownloadDownloading); err != nil {
-		log.Printf("worker: state update failed for %s: %v", downloadID, err)
+		p.log.Error("state update failed", "download_id", downloadID, "error", err, "component", "worker")
 		return
 	} else if !ok {
-		log.Printf("worker: download %s state changed before worker start, skipping", downloadID)
+		p.log.Warn("state changed before start, skipping", "download_id", downloadID, "component", "worker")
 		return
 	}
 	p.publishRecord(downloadID, domain.DownloadDownloading, events.TopicDownloadStateChanged)
@@ -234,7 +242,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 				if errCount >= 30 {
 					return fmt.Errorf("status check failed %d times: %w", errCount, err)
 				}
-				log.Printf("worker: status check for %s (attempt %d): %v", serviceID, errCount, err)
+				p.log.Warn("status check failed", "service_id", serviceID, "attempt", errCount, "error", err, "component", "worker")
 				continue
 			}
 			errCount = 0
@@ -264,7 +272,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			// import" — this is the PLUGIN's internal state, not the pipeline's
 			// final state. After we see this, we transition to DownloadImportPending
 			// and CompletedDownloadService takes over.
-			log.Printf("worker: %s state=%s progress=%.0f%%", serviceID, status.State, status.Progress)
+			p.log.Debug("download progress", "service_id", serviceID, "state", status.State, "progress_pct", status.Progress, "component", "worker")
 			switch {
 			case status.State == domain.DownloadImported:
 				if lastFilePath != "" {
@@ -300,7 +308,7 @@ func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
 		oldState = record.State
 	}
 
-	log.Printf("worker: download %s FAILED: %s", downloadID, errMsg)
+	p.log.Error("download failed", "download_id", downloadID, "error", errMsg, "component", "worker")
 
 	// Atomic transition — returns false if a concurrent Cancel() already
 	// changed the state to ignored (or any other terminal state).

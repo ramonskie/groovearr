@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -87,13 +88,16 @@ func newDevPlugin(t *testing.T, handler http.HandlerFunc) (*Plugin, *httptest.Se
 		Tokens:       SpotifyTokens{AccessToken: "test-access-token", ExpiresAt: time.Now().Add(1 * time.Hour).Unix()},
 	}
 
+	log := slog.New(slog.DiscardHandler)
 	client := &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:       cfg,
+				log:       log,
 				transport: &urlRewriteTransport{serverURL: server.URL},
-				refreshFunc: func(ctx context.Context, refreshToken, clientID string) (string, int, error) {
+				refreshFunc: func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 					return "", 0, errors.New("no refresh in test")
 				},
 			},
@@ -105,7 +109,8 @@ func newDevPlugin(t *testing.T, handler http.HandlerFunc) (*Plugin, *httptest.Se
 		cfg:    cfg,
 		dlPath: "/tmp",
 		client: client,
-		api:    NewAPI(client),
+		api:    NewAPI(client, log),
+		log:    log,
 	}
 
 	return p, server
@@ -390,13 +395,16 @@ func TestPlugin_CheckConnection_Dev_NetworkError(t *testing.T) {
 		Mode:   "dev",
 		Tokens: SpotifyTokens{AccessToken: "test-token"},
 	}
+	log := slog.New(slog.DiscardHandler)
 	client := &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:       cfg,
+				log:       log,
 				transport: &urlRewriteTransport{serverURL: "http://" + addr},
-				refreshFunc: func(ctx context.Context, refreshToken, clientID string) (string, int, error) {
+				refreshFunc: func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 					return "", 0, errors.New("no refresh in test")
 				},
 			},
@@ -406,7 +414,7 @@ func TestPlugin_CheckConnection_Dev_NetworkError(t *testing.T) {
 	p := &Plugin{
 		cfg:    cfg,
 		client: client,
-		api:    NewAPI(client),
+		api:    NewAPI(client, log),
 	}
 
 	err := p.CheckConnection(context.Background())

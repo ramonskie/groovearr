@@ -3,7 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"strconv"
 	"strings"
 
@@ -15,29 +15,34 @@ import (
 // playlist_tracks entry in the library store when the download originated
 // from a playlist.
 type PlaylistLinkerHandler struct {
+	log      *slog.Logger
 	libStore library.Store
 }
 
 // NewPlaylistLinkerHandler creates a handler that links playlist tracks to
 // their library track IDs after import.
-func NewPlaylistLinkerHandler(libStore library.Store) *PlaylistLinkerHandler {
-	return &PlaylistLinkerHandler{libStore: libStore}
+func NewPlaylistLinkerHandler(libStore library.Store, logger *slog.Logger) *PlaylistLinkerHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &PlaylistLinkerHandler{log: logger, libStore: libStore}
 }
 
 // Handle links the imported track to unmatched playlist_tracks entries
 // using title and artist matching.
 func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
 	if record.PlaylistID == "" {
-		log.Printf("playlist linker: %s skipped — no playlist_id in download record", record.ID)
+		h.log.Info("skipped - no playlist_id", "download_id", record.ID, "component", "playlist_linker")
 		return nil
 	}
 	if record.LibraryTrackID == 0 {
-		log.Printf("playlist linker: %s skipped — no library_track_id (import may have failed)", record.ID)
+		h.log.Warn("skipped - no library_track_id", "download_id", record.ID, "component", "playlist_linker")
 		return nil
 	}
 
 	playlistID, err := strconv.ParseInt(record.PlaylistID, 10, 64)
 	if err != nil {
+		h.log.Error("invalid playlist_id", "playlist_id", record.PlaylistID, "error", err, "component", "playlist_linker")
 		return fmt.Errorf("playlist linker: invalid playlist_id %q: %w", record.PlaylistID, err)
 	}
 
@@ -57,6 +62,7 @@ func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *domain.Downl
 	// mis-linking the wrong track is worse than leaving it unmatched.
 	tracks, err := h.libStore.GetPlaylistTracks(ctx, playlistID)
 	if err != nil {
+		h.log.Error("get playlist tracks failed", "playlist_id", playlistID, "error", err, "component", "playlist_linker")
 		return fmt.Errorf("playlist linker: get playlist tracks: %w", err)
 	}
 
@@ -77,7 +83,7 @@ func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *domain.Downl
 	}
 
 	if !linked {
-		log.Printf("playlist linker: no match for %s - %s in playlist %d", track.Title, artist.Name, playlistID)
+		h.log.Info("no match found", "title", track.Title, "artist", artist.Name, "playlist_id", playlistID, "component", "playlist_linker")
 	}
 
 	return nil

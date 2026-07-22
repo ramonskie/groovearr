@@ -2,6 +2,8 @@ package download_test
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +23,10 @@ import (
 )
 
 // ─── Mock download plugin ────────────────────────────────────────────
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 type mockDLPlugin struct {
 	mu      sync.Mutex
@@ -262,12 +268,12 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	}
 
 	// Real SQLite stores.
-	libStore, err := libsqlite.New(filepath.Join(tmpDir, "library.db"))
+	libStore, err := libsqlite.New(filepath.Join(tmpDir, "library.db"), testLogger())
 	if err != nil {
 		t.Fatalf("lib store: %v", err)
 	}
 	defer libStore.Close()
-	dlStore := dlsqlite.New(libStore.DB())
+	dlStore := dlsqlite.New(libStore.DB(), testLogger())
 
 	// Mock plugin + registry.
 	mockPlugin := newMockDLPlugin(dlPath)
@@ -277,25 +283,25 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	}
 
 	// Event bus.
-	eventBus := events.NewInMemoryEventBus()
+	eventBus := events.NewInMemoryEventBus(testLogger())
 
 	// Download service + worker pool.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus)
-	workerPool := download.NewWorkerPool(3, reg, dlStore, eventBus)
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger())
+	workerPool := download.NewWorkerPool(3, reg, dlStore, eventBus, testLogger())
 	downloadSvc.SetWorkerPool(workerPool)
 	defer workerPool.Shutdown()
 
 	// Renamer: library path.
-	renamer := library.NewRenamer("{artist}/{album}/{title}", libPath)
+	renamer := library.NewRenamer("{artist}/{album}/{title}", libPath, nil)
 
 	// Import handler chain.
 	_ = download.NewCompletedDownloadService(
-		dlStore, eventBus,
-		download.NewFileRenamerHandler(renamer, dlStore),
-		download.NewCoverArtHandler(libStore),
-		download.NewTagWriterHandler(),
-		download.NewLibraryImporterHandler(libStore),
-		download.NewPlaylistLinkerHandler(libStore),
+		dlStore, eventBus, testLogger(),
+		download.NewFileRenamerHandler(renamer, dlStore, nil),
+		download.NewCoverArtHandler(libStore, testLogger()),
+		download.NewTagWriterHandler(testLogger()),
+		download.NewLibraryImporterHandler(libStore, nil),
+		download.NewPlaylistLinkerHandler(libStore, testLogger()),
 	)
 
 	// Playlist service.
@@ -310,7 +316,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 			PlaylistTemplate: "{position:02d} {artist} - {title}",
 		},
 	}
-	plSvc := playlist.NewService(plReg, libStore, reg, downloadSvc, func() config.Config { return cfg })
+	plSvc := playlist.NewService(plReg, libStore, reg, downloadSvc, func() config.Config { return cfg }, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	// ─── Step 1: Import playlist ────────────────────────────────────
 	result, err := plSvc.ImportPlaylist(context.Background(), "mock", "pl-1")

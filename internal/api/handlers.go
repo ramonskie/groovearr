@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/fs"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -14,6 +14,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/ramonskie/groovearr"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
@@ -42,13 +43,14 @@ type Server struct {
 	matcher      *matching.Engine
 	playlistSvc  *playlist.Service
 	httpSrv      *http.Server
+	log          *slog.Logger
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:          cfg,
 		registry:     registry,
@@ -61,6 +63,7 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 		sseHub:       sseHub,
 		matcher:      matching.New(),
 		playlistSvc:  playlistSvc,
+		log:          logger,
 	}
 
 	mux := http.NewServeMux()
@@ -70,7 +73,8 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 	// directory is empty or missing, the Go binary was built without the UI.
 	staticContent, err := fs.Sub(groovearr.UIFiles, "ui/dist")
 	if err != nil {
-		log.Fatalf("embedded UI files missing — run: make build-ui && go build ./cmd/groovearr: %v", err)
+		s.log.Error("embedded UI files missing", "error", err, "component", "api")
+		os.Exit(1)
 	}
 
 	// SPA-aware static file server — serves embedded files, falls back to
@@ -136,13 +140,13 @@ func NewServer(addr string, cfg *config.Persistence, registry *download.Registry
 		register(mux)
 	}
 
-	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(withCORS(mux))}
+	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(s.log)(withRequestID(withCORS(mux)))}
 	return s
 }
 
 // ListenAndServe starts the HTTP server (blocking).
 func (s *Server) ListenAndServe() error {
-	log.Printf("Groovearr listening on %s", s.httpSrv.Addr)
+	s.log.Info("listening", "addr", s.httpSrv.Addr, "component", "api")
 	return s.httpSrv.ListenAndServe()
 }
 
@@ -153,11 +157,62 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // ─── Middleware ──────────────────────────────────────────────────────
 
-func withLogging(next http.Handler) http.Handler {
+func withLogging(logger *slog.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			start := time.Now()
+			wr := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+			next.ServeHTTP(wr, r)
+			logger.Info("request",
+				"method", r.Method,
+				"path", r.URL.Path,
+				"status", wr.status,
+				"duration_ms", time.Since(start).Milliseconds(),
+				"component", "api",
+			)
+		})
+	}
+}
+
+type responseWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (rw *responseWriter) WriteHeader(code int) {
+	rw.status = code
+	rw.ResponseWriter.WriteHeader(code)
+}
+
+// Flush implements http.Flusher so SSE connections work through the logging middleware.
+func (rw *responseWriter) Flush() {
+	if f, ok := rw.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+type requestIDKey struct{}
+
+func withRequestID(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		log.Printf("%s %s", r.Method, r.URL.Path)
-		next.ServeHTTP(w, r)
+		id := r.Header.Get("X-Request-Id")
+		if id == "" {
+			id = uuid.NewString()
+			if len(id) > 8 {
+				id = id[:8]
+			}
+		}
+		w.Header().Set("X-Request-Id", id)
+		ctx := context.WithValue(r.Context(), requestIDKey{}, id)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
+}
+
+func RequestIDFromCtx(ctx context.Context) string {
+	if id, ok := ctx.Value(requestIDKey{}).(string); ok {
+		return id
+	}
+	return ""
 }
 
 func withCORS(next http.Handler) http.Handler {
@@ -217,10 +272,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 
 	// Rebuild all configured plugins with new config.
 	updated := s.cfg.Get()
-	resources := plugin.PluginResources{DownloadPath: updated.Library.DownloadPath}
+	resources := plugin.PluginResources{DownloadPath: updated.Library.DownloadPath, Logger: s.log}
 	for name := range updated.Sources {
 		if err := s.registry.Rebuild(name, updated.Sources[name], resources); err != nil {
-			log.Printf("reload %s: %v", name, err)
+			s.log.Error("reload failed", "name", name, "error", err, "component", "api")
 		}
 	}
 
@@ -233,7 +288,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	for _, p := range []string{updated.Library.DownloadPath, updated.Library.LibraryPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
-				log.Printf("mkdir %s: %v", p, err)
+				s.log.Warn("mkdir failed", "path", p, "error", err, "component", "api")
 			}
 		}
 	}
@@ -353,7 +408,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 			for _, p := range plugins {
 				t, a, err := p.Search(ctx, req.Query)
 				if err != nil {
-					log.Printf("api: search %s failed: %v", p.Name(), err)
+					s.log.Error("search failed", "provider", p.Name(), "error", err, "component", "api")
 					continue
 				}
 				tracks = append(tracks, t...)
@@ -439,7 +494,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	// Create a search-only orchestrator with the handler's quality config.
 	orch := download.NewOrchestrator(s.registry, func() config.QualityConfig {
 		return s.cfg.Get().Quality
-	})
+	}, s.log)
 
 	best, err := orch.FindBestMatch(ctx, req.Title, req.Artist, req.Duration, req.ExcludeSource)
 	if err != nil {
@@ -597,7 +652,7 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 	for _, p := range paths {
 		stats, err := s.scanner.ScanPath(ctx, p)
 		if err != nil {
-			log.Printf("scanner: error scanning %s: %v", p, err)
+			s.log.Error("scan error", "path", p, "error", err, "component", "scanner")
 			agg.Errors++
 			continue
 		}
@@ -775,7 +830,7 @@ func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
 
 	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID)
 	if err != nil {
-		log.Printf("playlist: import %s/%s failed: %v", req.Source, req.PlaylistID, err)
+		s.log.Error("playlist import failed", "source", req.Source, "playlist_id", req.PlaylistID, "error", err, "component", "api")
 		writeError(w, http.StatusInternalServerError, err)
 		return
 	}
@@ -822,7 +877,7 @@ func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
 		if err := s.playlistSvc.SyncPlaylist(ctx, id); err != nil {
-			log.Printf("playlist sync %d: %v", id, err)
+			s.log.Error("playlist sync failed", "playlist_id", id, "error", err, "component", "api")
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "syncing"})
@@ -920,7 +975,7 @@ func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	providers := s.discoveryReg.Configured()
-	log.Printf("discover: providers: %d configured", len(providers))
+	s.log.Info("discover providers", "count", len(providers), "component", "discover")
 	out := make([]map[string]any, len(providers))
 	for i, p := range providers {
 		out[i] = map[string]any{
@@ -934,7 +989,7 @@ func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request)
 func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	searchType := r.URL.Query().Get("type") // "artist", "album", or empty for both
-	log.Printf("discover: search q=%q type=%q", q, searchType)
+	s.log.Info("discover search", "query", q, "type", searchType, "component", "discover")
 	if q == "" {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
 		return
@@ -962,11 +1017,11 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 		wg.Add(1)
 		go func(idx int, provider discovery.Provider) {
 			defer wg.Done()
-			log.Printf("discover: querying provider %s", provider.Name())
+			s.log.Info("discover querying provider", "provider", provider.Name(), "component", "discover")
 			if searchType == "" || searchType == "artist" {
 				a, err := provider.SearchArtists(ctx, q, 10)
 				if err != nil {
-					log.Printf("discover: %s search artists error: %v", provider.Name(), err)
+					s.log.Error("discover search artists error", "provider", provider.Name(), "error", err, "component", "discover")
 				}
 				results[idx].artists = a
 				results[idx].err = err
@@ -974,7 +1029,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 			if searchType == "" || searchType == "album" {
 				a, err := provider.SearchAlbums(ctx, q, 10)
 				if err != nil {
-					log.Printf("discover: %s search albums error: %v", provider.Name(), err)
+					s.log.Error("discover search albums error", "provider", provider.Name(), "error", err, "component", "discover")
 					if results[idx].err == nil {
 						results[idx].err = err
 					}
@@ -991,7 +1046,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	for idx := range providers {
 		r := results[idx]
 		if r.err != nil {
-			log.Printf("discover: provider %s had errors, using partial results", providers[idx].Name())
+			s.log.Warn("discover provider had errors, using partial results", "provider", providers[idx].Name(), "component", "discover")
 		}
 		for _, a := range r.artists {
 			allArtists = append(allArtists, a)
@@ -1024,7 +1079,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	log.Printf("discover: search results: %d artists, %d albums (from %d providers)", len(mergedArtists), len(mergedAlbums), len(providers))
+	s.log.Info("discover search results", "artists", len(mergedArtists), "albums", len(mergedAlbums), "providers", len(providers), "component", "discover")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artists": mergedArtists,
 		"albums":  mergedAlbums,
@@ -1143,7 +1198,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 
 	orch := download.NewOrchestrator(s.registry, func() config.QualityConfig {
 		return s.cfg.Get().Quality
-	})
+	}, s.log)
 
 	var queued int
 	var errors []string

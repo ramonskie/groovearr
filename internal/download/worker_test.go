@@ -141,7 +141,7 @@ func TestNewWorkerPool(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	pool := NewWorkerPool(5, reg, store, bus)
+	pool := NewWorkerPool(5, reg, store, bus, testLogger())
 	if pool == nil {
 		t.Fatal("NewWorkerPool returned nil")
 	}
@@ -151,13 +151,13 @@ func TestNewWorkerPool(t *testing.T) {
 }
 
 func TestNewWorkerPoolDefaultsMaxWorkers(t *testing.T) {
-	pool := NewWorkerPool(0, NewRegistry(), newMockStore(), newMockBus())
+	pool := NewWorkerPool(0, NewRegistry(), newMockStore(), newMockBus(), testLogger())
 	p := pool.(*workerPoolImpl)
 	if p.maxWorkers != defaultMaxWorkers {
 		t.Errorf("maxWorkers = %d, want %d", p.maxWorkers, defaultMaxWorkers)
 	}
 
-	pool2 := NewWorkerPool(-1, NewRegistry(), newMockStore(), newMockBus())
+	pool2 := NewWorkerPool(-1, NewRegistry(), newMockStore(), newMockBus(), testLogger())
 	p2 := pool2.(*workerPoolImpl)
 	if p2.maxWorkers != defaultMaxWorkers {
 		t.Errorf("maxWorkers = %d, want %d", p2.maxWorkers, defaultMaxWorkers)
@@ -168,7 +168,7 @@ func TestSubmitEnqueuesJob(t *testing.T) {
 	reg := NewRegistry()
 	store := newMockStore()
 	bus := newMockBus()
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 
 	err := pool.Submit(context.Background(), &domain.DownloadRecord{
 		ID:         "test-001",
@@ -188,7 +188,7 @@ func TestSubmitOverflow(t *testing.T) {
 	reg := NewRegistry()
 	_ = reg.Register(mp)
 
-	pool := NewWorkerPool(1, reg, newMockStore(), newMockBus())
+	pool := NewWorkerPool(1, reg, newMockStore(), newMockBus(), testLogger())
 
 	// Submit jobs until overflow. Buffer size = maxWorkers*2 = 2.
 	// After the worker picks up the first job, the buffer can hold 2 more.
@@ -221,7 +221,7 @@ func TestSubmitOverflowErrorContainsCapacity(t *testing.T) {
 	mp.completeAfterCalls = 1000 // never completes
 	reg := NewRegistry()
 	_ = reg.Register(mp)
-	pool := NewWorkerPool(1, reg, newMockStore(), newMockBus())
+	pool := NewWorkerPool(1, reg, newMockStore(), newMockBus(), testLogger())
 
 	// Submit many jobs until overflow.
 	for i := 0; i < 20; i++ {
@@ -259,7 +259,7 @@ func TestWorkerPicksUpJobAndCallsPlugin(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	err := pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -312,7 +312,7 @@ func TestWorkerUpdatesStateToDownloading(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -353,7 +353,7 @@ func TestWorkerFiresStateChangedEvent(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -410,7 +410,7 @@ func TestWorkerCompletesDownload(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -485,7 +485,7 @@ func TestWorkerFiresProgressEvents(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -535,7 +535,7 @@ func TestWorkerHandlesDownloadError(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -605,7 +605,7 @@ func TestWorkerHandlesDownloadFailureMidway(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -644,7 +644,7 @@ func TestWorkerHandlesPluginNotFound(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -691,7 +691,7 @@ func TestDownloadProgressorCalled(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -731,7 +731,7 @@ func TestShutdown(t *testing.T) {
 		State:      domain.DownloadQueued,
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
 		ID:         "job-010",
@@ -762,7 +762,7 @@ func TestShutdownCleansUpWorkers(t *testing.T) {
 	reg := NewRegistry()
 	_ = reg.Register(mp)
 
-	pool := NewWorkerPool(3, reg, newMockStore(), newMockBus())
+	pool := NewWorkerPool(3, reg, newMockStore(), newMockBus(), testLogger())
 	p := pool.(*workerPoolImpl)
 
 	// Shutdown and wait — should not hang.
@@ -797,7 +797,7 @@ func TestSubmitWithNoUsernameUsesSourceName(t *testing.T) {
 		// Username intentionally empty — falls back to source name.
 	})
 
-	pool := NewWorkerPool(1, reg, store, bus)
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
@@ -841,7 +841,7 @@ func TestMultipleWorkersConcurrent(t *testing.T) {
 		})
 	}
 
-	pool := NewWorkerPool(3, reg, store, bus)
+	pool := NewWorkerPool(3, reg, store, bus, testLogger())
 	defer pool.(*workerPoolImpl).Shutdown()
 
 	// Submit all 3 jobs.

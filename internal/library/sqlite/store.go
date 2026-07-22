@@ -6,7 +6,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -17,11 +17,12 @@ import (
 
 // Store implements library.Store backed by SQLite.
 type Store struct {
-	db *sql.DB
+	db  *sql.DB
+	log *slog.Logger
 }
 
 // New opens (or creates) a SQLite database at the given path.
-func New(path string) (*Store, error) {
+func New(path string, logger *slog.Logger) (*Store, error) {
 	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=30000&_foreign_keys=on")
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
@@ -29,7 +30,7 @@ func New(path string) (*Store, error) {
 
 	db.SetMaxOpenConns(1) // SQLite serializes writes.
 
-	s := &Store{db: db}
+	s := &Store{db: db, log: logger}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("sqlite migrate: %w", err)
@@ -54,6 +55,7 @@ func (s *Store) DB() *sql.DB {
 func (s *Store) migrate() error {
 	// Ensure version tracking table exists.
 	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
+		s.log.Error("migration: schema_version create failed", "error", err, "component", "lib_store")
 		return fmt.Errorf("migration: schema_version: %w", err)
 	}
 
@@ -119,6 +121,7 @@ func (s *Store) migrate() error {
 
 	for _, stmt := range statements {
 		if _, err := s.db.Exec(stmt); err != nil {
+			s.log.Error("migration v1 exec failed", "error", err, "component", "lib_store")
 			return fmt.Errorf("migration v1: %w", err)
 		}
 	}
@@ -160,6 +163,7 @@ func (s *Store) migrate() error {
 		}
 		for _, stmt := range statements {
 			if _, err := s.db.Exec(stmt); err != nil {
+				s.log.Error("migration v2 exec failed", "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v2: %w", err)
 			}
 		}
@@ -206,6 +210,7 @@ func (s *Store) migrate() error {
 		}
 		for _, stmt := range statements {
 			if _, err := s.db.Exec(stmt); err != nil {
+				s.log.Error("migration v3 exec failed", "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v3: %w", err)
 			}
 		}
@@ -232,6 +237,7 @@ func (s *Store) migrate() error {
 		dropColumn := func(table, col string) error {
 			_, err := s.db.Exec("ALTER TABLE " + table + " DROP COLUMN " + col)
 			if err != nil && !strings.Contains(err.Error(), "no such column") {
+				s.log.Error("migration v4: drop column failed", "table", table, "column", col, "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v4: drop %s.%s: %w (requires SQLite >= 3.35.0)", table, col, err)
 			}
 			return nil
@@ -244,6 +250,7 @@ func (s *Store) migrate() error {
 		}
 		if _, err := s.db.Exec("ALTER TABLE artists ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column name") {
+				s.log.Error("migration v4: add artists.external_ids failed", "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v4: add artists.external_ids: %w", err)
 			}
 		}
@@ -255,6 +262,7 @@ func (s *Store) migrate() error {
 		}
 		if _, err := s.db.Exec("ALTER TABLE albums ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column name") {
+				s.log.Error("migration v4: add albums.external_ids failed", "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v4: add albums.external_ids: %w", err)
 			}
 		}
@@ -266,6 +274,7 @@ func (s *Store) migrate() error {
 		}
 		if _, err := s.db.Exec("ALTER TABLE tracks ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
 			if !strings.Contains(err.Error(), "duplicate column name") {
+				s.log.Error("migration v4: add tracks.external_ids failed", "error", err, "component", "lib_store")
 				return fmt.Errorf("migration v4: add tracks.external_ids: %w", err)
 			}
 		}
@@ -275,9 +284,11 @@ func (s *Store) migrate() error {
 
 	// Record current version.
 	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
+		s.log.Error("migration: clear version failed", "error", err, "component", "lib_store")
 		return fmt.Errorf("migration: clear version: %w", err)
 	}
 	if _, err := s.db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
+		s.log.Error("migration: set version failed", "error", err, "component", "lib_store")
 		return fmt.Errorf("migration: set version: %w", err)
 	}
 	return nil
@@ -298,6 +309,9 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 			artist.Name, string(genresJSON), artist.Summary, artist.ThumbURL,
 			string(extIDsJSON), now, artist.ID,
 		)
+		if err != nil {
+			s.log.Error("upsert artist update failed", "error", err, "component", "lib_store")
+		}
 		return artist.ID, err
 	}
 
@@ -309,6 +323,7 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 		string(extIDsJSON), now, now,
 	)
 	if err != nil {
+		s.log.Error("upsert artist insert failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 
@@ -320,6 +335,7 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 	// Duplicate name — return existing record ID.
 	existing, err := s.GetArtistByName(ctx, artist.Name)
 	if err != nil {
+		s.log.Error("upsert artist getByName failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 	if existing != nil {
@@ -333,7 +349,7 @@ func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error)
 		SELECT id, name, genres, summary, thumb_url,
 			external_ids, created_at, updated_at
 		FROM artists WHERE id=?`, id)
-	return scanArtist(row)
+	return s.scanArtist(row)
 }
 
 func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
@@ -341,7 +357,7 @@ func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artis
 		SELECT id, name, genres, summary, thumb_url,
 			external_ids, created_at, updated_at
 		FROM artists WHERE name=?`, name)
-	return scanArtist(row)
+	return s.scanArtist(row)
 }
 
 func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
@@ -350,10 +366,11 @@ func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Ar
 			external_ids, created_at, updated_at
 		FROM artists ORDER BY name LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
+		s.log.Error("list artists failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanArtists(rows)
+	return s.scanArtists(rows)
 }
 
 func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
@@ -363,10 +380,11 @@ func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]d
 		FROM artists WHERE name LIKE ? ORDER BY name LIMIT ?`,
 		"%"+query+"%", limit)
 	if err != nil {
+		s.log.Error("search artists failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanArtists(rows)
+	return s.scanArtists(rows)
 }
 
 // ─── Albums ──────────────────────────────────────────────────────────
@@ -386,6 +404,9 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 			album.Duration, album.ThumbURL, album.AlbumType, album.ReleaseDate,
 			string(extIDsJSON), now, album.ID,
 		)
+		if err != nil {
+			s.log.Error("upsert album update failed", "error", err, "component", "lib_store")
+		}
 		return album.ID, err
 	}
 
@@ -399,6 +420,7 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 		string(extIDsJSON), now, now,
 	)
 	if err != nil {
+		s.log.Error("upsert album insert failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 	return result.LastInsertId()
@@ -406,26 +428,28 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 
 func (s *Store) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
 	row := s.db.QueryRowContext(ctx, albumSelect+" WHERE id=?", id)
-	return scanAlbum(row)
+	return s.scanAlbum(row)
 }
 
 func (s *Store) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
 	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE artist_id=? ORDER BY year, title", artistID)
 	if err != nil {
+		s.log.Error("get albums by artist failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAlbums(rows)
+	return s.scanAlbums(rows)
 }
 
 func (s *Store) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
 	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE title LIKE ? ORDER BY title LIMIT ?",
 		"%"+query+"%", limit)
 	if err != nil {
+		s.log.Error("search albums failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanAlbums(rows)
+	return s.scanAlbums(rows)
 }
 
 // ─── Tracks ──────────────────────────────────────────────────────────
@@ -445,6 +469,9 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 			string(extIDsJSON), track.AcoustID, track.ISRC,
 			now, track.ID,
 		)
+		if err != nil {
+			s.log.Error("upsert track update failed", "error", err, "component", "lib_store")
+		}
 		return track.ID, err
 	}
 
@@ -459,6 +486,7 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 		now, now,
 	)
 	if err != nil {
+		s.log.Error("upsert track insert failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 	return result.LastInsertId()
@@ -466,35 +494,38 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 
 func (s *Store) GetTrack(ctx context.Context, id int64) (*domain.Track, error) {
 	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE id=?", id)
-	return scanTrack(row)
+	return s.scanTrack(row)
 }
 
 func (s *Store) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
 	rows, err := s.db.QueryContext(ctx, trackSelect+" WHERE album_id=? ORDER BY disc_number, track_number", albumID)
 	if err != nil {
+		s.log.Error("get tracks by album failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanTracks(rows)
+	return s.scanTracks(rows)
 }
 
 func (s *Store) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
 	rows, err := s.db.QueryContext(ctx, trackSelect+" WHERE artist_id=? ORDER BY title", artistID)
 	if err != nil {
+		s.log.Error("get tracks by artist failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanTracks(rows)
+	return s.scanTracks(rows)
 }
 
 func (s *Store) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
 	rows, err := s.db.QueryContext(ctx, trackSelect+" WHERE title LIKE ? ORDER BY title LIMIT ?",
 		"%"+query+"%", limit)
 	if err != nil {
+		s.log.Error("search tracks failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
-	return scanTracks(rows)
+	return s.scanTracks(rows)
 }
 
 func (s *Store) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) {
@@ -502,8 +533,9 @@ func (s *Store) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track,
 		return nil, nil
 	}
 	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE isrc = ?", isrc)
-	t, err := scanTrack(row)
+	t, err := s.scanTrack(row)
 	if err != nil {
+		s.log.Error("get track by isrc failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	return t, nil
@@ -511,11 +543,14 @@ func (s *Store) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track,
 
 func (s *Store) GetTrackByFilePath(ctx context.Context, filePath string) (*domain.Track, error) {
 	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE file_path=?", filePath)
-	return scanTrack(row)
+	return s.scanTrack(row)
 }
 
 func (s *Store) DeleteTrack(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, "DELETE FROM tracks WHERE id=?", id)
+	if err != nil {
+		s.log.Error("delete track failed", "error", err, "component", "lib_store")
+	}
 	return err
 }
 
@@ -524,11 +559,13 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) error {
 func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
 	artistID, err := s.getOrCreateArtist(ctx, artistName)
 	if err != nil {
+		s.log.Error("import track: getOrCreateArtist failed", "error", err, "component", "lib_store")
 		return 0, fmt.Errorf("import artist: %w", err)
 	}
 
 	albumID, err := s.getOrCreateAlbum(ctx, artistID, albumTitle, albumYear, genres)
 	if err != nil {
+		s.log.Error("import track: getOrCreateAlbum failed", "error", err, "component", "lib_store")
 		return 0, fmt.Errorf("import album: %w", err)
 	}
 
@@ -540,6 +577,7 @@ func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName
 func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, error) {
 	existing, err := s.GetArtistByName(ctx, name)
 	if err != nil {
+		s.log.Error("getOrCreateArtist: getByName failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 	if existing != nil {
@@ -554,31 +592,33 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 	row := s.db.QueryRowContext(ctx,
 		albumSelect+" WHERE artist_id=? AND LOWER(title)=LOWER(?) LIMIT 1",
 		artistID, title)
-	al, err := scanAlbum(row)
+	al, err := s.scanAlbum(row)
 	if err != nil {
+		s.log.Error("getOrCreateAlbum: exact match scan failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 	if al != nil {
 		if al.Year == 0 && year != 0 {
 			al.Year = year
 			if _, err := s.UpsertAlbum(ctx, al); err != nil {
-				log.Printf("store: update album year for %q: %v", title, err)
-			}
+			s.log.Error("update album year failed", "title", title, "error", err, "component", "lib_store")
 		}
-		return al.ID, nil
 	}
+	return al.ID, nil
+}
 
-	// Fallback: fuzzy search via LIKE for near matches.
-	albums, err := s.SearchAlbums(ctx, title, 10)
-	if err != nil {
-		return 0, err
-	}
-	for _, al := range albums {
-		if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
-			if al.Year == 0 && year != 0 {
-				al.Year = year
-				if _, err := s.UpsertAlbum(ctx, &al); err != nil {
-					log.Printf("store: update album year for %q: %v", title, err)
+// Fallback: fuzzy search via LIKE for near matches.
+albums, err := s.SearchAlbums(ctx, title, 10)
+if err != nil {
+	s.log.Error("getOrCreateAlbum: search fallback failed", "error", err, "component", "lib_store")
+	return 0, err
+}
+for _, al := range albums {
+	if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
+		if al.Year == 0 && year != 0 {
+			al.Year = year
+			if _, err := s.UpsertAlbum(ctx, &al); err != nil {
+				s.log.Error("update album year failed", "title", title, "error", err, "component", "lib_store")
 				}
 			}
 			return al.ID, nil
@@ -602,21 +642,21 @@ func (s *Store) GetArtistByExternalID(ctx context.Context, service, externalID s
 			external_ids, created_at, updated_at
 		FROM artists WHERE json_extract(external_ids, ?) = ?`,
 		"$."+service, externalID)
-	return scanArtist(row)
+	return s.scanArtist(row)
 }
 
 func (s *Store) GetAlbumByExternalID(ctx context.Context, service, externalID string) (*domain.Album, error) {
 	row := s.db.QueryRowContext(ctx,
 		albumSelect+" WHERE json_extract(external_ids, ?) = ?",
 		"$."+service, externalID)
-	return scanAlbum(row)
+	return s.scanAlbum(row)
 }
 
 func (s *Store) GetTrackByExternalID(ctx context.Context, service, externalID string) (*domain.Track, error) {
 	row := s.db.QueryRowContext(ctx,
 		trackSelect+" WHERE json_extract(external_ids, ?) = ?",
 		"$."+service, externalID)
-	return scanTrack(row)
+	return s.scanTrack(row)
 }
 
 // ─── Internal scan helpers ───────────────────────────────────────────
@@ -630,7 +670,7 @@ const trackSelect = `SELECT id, album_id, artist_id, title, track_number, disc_n
 	external_ids, acoustid, isrc, created_at, updated_at
 	FROM tracks`
 
-func scanArtist(row *sql.Row) (*domain.Artist, error) {
+func (s *Store) scanArtist(row *sql.Row) (*domain.Artist, error) {
 	var a domain.Artist
 	var genresJSON, extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
@@ -639,6 +679,7 @@ func scanArtist(row *sql.Row) (*domain.Artist, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
+		s.log.Error("scan artist failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	json.Unmarshal([]byte(genresJSON), &a.Genres)
@@ -650,13 +691,14 @@ func scanArtist(row *sql.Row) (*domain.Artist, error) {
 	return &a, nil
 }
 
-func scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
+func (s *Store) scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 	var artists []domain.Artist
 	for rows.Next() {
 		var a domain.Artist
 		var genresJSON, extIDsJSON, createdAt, updatedAt string
 		if err := rows.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
 			&extIDsJSON, &createdAt, &updatedAt); err != nil {
+			s.log.Error("scan artists failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		json.Unmarshal([]byte(genresJSON), &a.Genres)
@@ -670,7 +712,7 @@ func scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 	return artists, rows.Err()
 }
 
-func scanAlbum(row *sql.Row) (*domain.Album, error) {
+func (s *Store) scanAlbum(row *sql.Row) (*domain.Album, error) {
 	var a domain.Album
 	var genresJSON, extIDsJSON, createdAt, updatedAt, albumType string
 	err := row.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON, &a.TrackCount,
@@ -680,6 +722,7 @@ func scanAlbum(row *sql.Row) (*domain.Album, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
+		s.log.Error("scan album failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	json.Unmarshal([]byte(genresJSON), &a.Genres)
@@ -692,7 +735,7 @@ func scanAlbum(row *sql.Row) (*domain.Album, error) {
 	return &a, nil
 }
 
-func scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
+func (s *Store) scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 	var albums []domain.Album
 	for rows.Next() {
 		var a domain.Album
@@ -700,6 +743,7 @@ func scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 		if err := rows.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON,
 			&a.TrackCount, &a.Duration, &a.ThumbURL, &albumType, &a.ReleaseDate,
 			&extIDsJSON, &createdAt, &updatedAt); err != nil {
+			s.log.Error("scan albums failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		json.Unmarshal([]byte(genresJSON), &a.Genres)
@@ -714,7 +758,7 @@ func scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 	return albums, rows.Err()
 }
 
-func scanTrack(row *sql.Row) (*domain.Track, error) {
+func (s *Store) scanTrack(row *sql.Row) (*domain.Track, error) {
 	var t domain.Track
 	var extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
@@ -725,6 +769,7 @@ func scanTrack(row *sql.Row) (*domain.Track, error) {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
+		s.log.Error("scan track failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	if extIDsJSON != "" {
@@ -735,7 +780,7 @@ func scanTrack(row *sql.Row) (*domain.Track, error) {
 	return &t, nil
 }
 
-func scanTracks(rows *sql.Rows) ([]domain.Track, error) {
+func (s *Store) scanTracks(rows *sql.Rows) ([]domain.Track, error) {
 	var tracks []domain.Track
 	for rows.Next() {
 		var t domain.Track
@@ -744,6 +789,7 @@ func scanTracks(rows *sql.Rows) ([]domain.Track, error) {
 			&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
 			&extIDsJSON, &t.AcoustID, &t.ISRC,
 			&createdAt, &updatedAt); err != nil {
+			s.log.Error("scan tracks failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		if extIDsJSON != "" {
@@ -773,6 +819,9 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 			p.Name, p.Description, p.TrackCount, p.CoverURL,
 			p.OwnerName, boolToInt(p.IsPublic), autoSync, p.SyncedAt, now, p.ID,
 		)
+		if err != nil {
+			s.log.Error("upsert playlist update failed", "error", err, "component", "lib_store")
+		}
 		return p.ID, err
 	}
 
@@ -785,6 +834,7 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 		p.SyncedAt, now, now,
 	)
 	if err != nil {
+		s.log.Error("upsert playlist insert failed", "error", err, "component", "lib_store")
 		return 0, err
 	}
 
@@ -796,6 +846,9 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 	// Duplicate source+playlist ID — return existing.
 	existing, err := s.GetPlaylistBySourceID(ctx, p.Source, p.SourcePlaylistID)
 	if err != nil || existing == nil {
+		if err != nil {
+			s.log.Error("upsert playlist getBySourceID failed", "error", err, "component", "lib_store")
+		}
 		return 0, fmt.Errorf("playlist insert failed: %s/%s", p.Source, p.SourcePlaylistID)
 	}
 	return existing.ID, nil
@@ -813,6 +866,9 @@ func (s *Store) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, er
 		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
+	}
+	if err != nil {
+		s.log.Error("get playlist failed", "error", err, "component", "lib_store")
 	}
 	p.AutoSync = autoSync != 0
 	return p, err
@@ -832,6 +888,9 @@ func (s *Store) GetPlaylistBySourceID(ctx context.Context, source, sourceID stri
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	if err != nil {
+		s.log.Error("get playlist by source ID failed", "error", err, "component", "lib_store")
+	}
 	p.AutoSync = autoSync != 0
 	return p, err
 }
@@ -842,6 +901,7 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
 			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
 		FROM playlists ORDER BY created_at DESC`)
 	if err != nil {
+		s.log.Error("list playlists failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
@@ -853,6 +913,7 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
 		if err := rows.Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
 			&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
 			&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
+			s.log.Error("list playlists scan failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		p.AutoSync = autoSync != 0
@@ -863,6 +924,9 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
 
 func (s *Store) DeletePlaylist(ctx context.Context, id int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM playlists WHERE id=?`, id)
+	if err != nil {
+		s.log.Error("delete playlist failed", "error", err, "component", "lib_store")
+	}
 	return err
 }
 
@@ -875,6 +939,9 @@ func (s *Store) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack
 		t.PlaylistID, t.Position, t.TrackID, t.SourceTrackID,
 		t.Title, t.Artist, t.Album, t.DurationMs, t.ISRC, now,
 	)
+	if err != nil {
+		s.log.Error("upsert playlist track failed", "error", err, "component", "lib_store")
+	}
 	return err
 }
 
@@ -884,6 +951,7 @@ func (s *Store) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]doma
 			album, duration_ms, isrc
 		FROM playlist_tracks WHERE playlist_id=? ORDER BY position`, playlistID)
 	if err != nil {
+		s.log.Error("get playlist tracks failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
@@ -893,6 +961,7 @@ func (s *Store) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]doma
 		var t domain.PlaylistTrack
 		if err := rows.Scan(&t.PlaylistID, &t.Position, &t.TrackID, &t.SourceTrackID,
 			&t.Title, &t.Artist, &t.Album, &t.DurationMs, &t.ISRC); err != nil {
+			s.log.Error("get playlist tracks scan failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		out = append(out, t)
@@ -902,6 +971,9 @@ func (s *Store) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]doma
 
 func (s *Store) DeletePlaylistTracks(ctx context.Context, playlistID int64) error {
 	_, err := s.db.ExecContext(ctx, `DELETE FROM playlist_tracks WHERE playlist_id=?`, playlistID)
+	if err != nil {
+		s.log.Error("delete playlist tracks failed", "error", err, "component", "lib_store")
+	}
 	return err
 }
 

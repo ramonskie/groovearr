@@ -3,6 +3,7 @@ package spotify
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -24,6 +25,7 @@ var _ download.Plugin = (*Plugin)(nil)
 type Plugin struct {
 	cfg    *SpotifyConfig
 	dlPath string
+	log    *slog.Logger
 
 	// Dev-mode clients (nil in free mode).
 	client *SpotifyClient
@@ -40,15 +42,16 @@ type Plugin struct {
 // NewPlugin creates a Spotify download plugin.
 // In free mode the API client is nil — all operations use oEmbed.
 // In dev mode an authenticated SpotifyClient and API wrapper are created.
-func NewPlugin(cfg *SpotifyConfig, downloadPath string) *Plugin {
+func NewPlugin(cfg *SpotifyConfig, downloadPath string, logger *slog.Logger) *Plugin {
 	p := &Plugin{
 		cfg:        cfg,
 		dlPath:     downloadPath,
+		log:        logger,
 		oembedClient: http.DefaultClient,
 	}
 	if cfg.Mode == "dev" {
-		p.client = NewClient(cfg)
-		p.api = NewAPI(p.client)
+		p.client = NewClient(cfg, logger)
+		p.api = NewAPI(p.client, logger)
 	}
 	return p
 }
@@ -102,21 +105,35 @@ func (p *Plugin) CheckConnection(ctx context.Context) error {
 func (p *Plugin) checkConnectionFree(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodHead, oembedBaseURL, nil)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify connection check request creation failed", "error", err, "component", "spotify")
+		}
 		return fmt.Errorf("spotify: connection check: %w", err)
 	}
 	_, err = p.oembedClient.Do(req)
+	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify connection check failed", "error", err, "component", "spotify")
+		}
+	}
 	return err // network error → unreachable; any HTTP response → reachable
 }
 
 func (p *Plugin) checkConnectionDev(ctx context.Context) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, SpotifyWebAPI+"/me", nil)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify connection check request creation failed", "error", err, "component", "spotify")
+		}
 		return fmt.Errorf("spotify: connection check: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := p.client.Do(req)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify connection check failed", "error", err, "component", "spotify")
+		}
 		return err
 	}
 	defer resp.Body.Close()
@@ -152,8 +169,11 @@ func (p *Plugin) searchFree(ctx context.Context, query string) ([]domain.TrackRe
 		return nil, nil, nil
 	}
 
-	oembed, err := FetchOEmbedWithClient(ctx, p.oembedClient, query)
+	oembed, err := FetchOEmbedWithClient(ctx, p.oembedClient, query, p.log)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify free search oembed failed", "error", err, "component", "spotify")
+		}
 		return nil, nil, err
 	}
 
@@ -179,6 +199,9 @@ func (p *Plugin) searchFree(ctx context.Context, query string) ([]domain.TrackRe
 func (p *Plugin) searchDev(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	paging, err := p.api.SearchTracks(ctx, query, 50, 0)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify search tracks failed", "error", err, "component", "spotify")
+		}
 		return nil, nil, err
 	}
 
@@ -190,6 +213,9 @@ func (p *Plugin) searchDev(ctx context.Context, query string) ([]domain.TrackRes
 	// Album search is best-effort.
 	albumPaging, err := p.api.SearchAlbums(ctx, query, 20, 0)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify search albums failed (non-fatal)", "error", err, "component", "spotify")
+		}
 		return tracks, nil, nil
 	}
 
@@ -296,6 +322,9 @@ func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]
 	}
 	page, err := p.api.SearchArtists(ctx, query, limit, 0)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify search artists failed", "error", err, "component", "spotify")
+		}
 		return nil, err
 	}
 	var out []discovery.ArtistSummary
@@ -314,14 +343,14 @@ func (p *Plugin) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 	if p.api == nil {
 		return nil, fmt.Errorf("spotify: discovery requires dev mode")
 	}
-	return spotifyArtistAlbums(p.api, ctx, providerArtistID, limit)
+	return spotifyArtistAlbums(p.api, ctx, providerArtistID, limit, p.log)
 }
 
 func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]discovery.TrackInfo, error) {
 	if p.api == nil {
 		return nil, fmt.Errorf("spotify: discovery requires dev mode")
 	}
-	return spotifyAlbumTracks(p.api, ctx, providerAlbumID)
+	return spotifyAlbumTracks(p.api, ctx, providerAlbumID, p.log)
 }
 
 func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
@@ -330,6 +359,9 @@ func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 	}
 	page, err := p.api.SearchAlbums(ctx, query, limit, 0)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify search albums failed", "error", err, "component", "spotify")
+		}
 		return nil, err
 	}
 	var out []discovery.AlbumResult

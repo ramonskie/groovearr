@@ -219,18 +219,41 @@ Deployment, security, and operational concerns.
 | B5 | Playlist / Download | 🟡 Medium | **Stuck pending detection.** Records with `source=pending` older than N minutes should be auto-failed or retried. Currently silently stick forever if resolver fails. |
 | B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
 | B7 | Download / UI | 🟢 Low | **Server-side pagination for download list.** `GET /api/downloads` returns all records. Large queues (1000+) should paginate with `?limit=` and `?offset=`. |
+| B8 | Observability | 🔴 High | **No structured logging / request tracing.** `log.Printf` used everywhere — no log levels, no structured fields, no request IDs. Replace with `log/slog` (stdlib since Go 1.21). Add request ID middleware for HTTP correlation. Replace all `log.Printf` calls. |
+| B9 | API | 🔴 High | **No HTTP server timeouts configured.** `http.Server` has zero `ReadTimeout`/`WriteTimeout`/`IdleTimeout`. Slow clients hold connections indefinitely (DoS vector). Set: Read=10s, Write=30s, Idle=120s. |
+| B10 | Designer | 🟡 Medium | **Two-phase worker pool initialization.** `download.Service` requires `SetWorkerPool()` after `NewDownloadService()`. If forgotten, `Queue()` silently succeeds without dispatching. Constructor should accept `WorkerPool` directly. |
+| B11 | Code Quality | 🟡 Medium | **Silent error drops throughout codebase.** `_ = store.UpdateProgress(...)` in worker.go, scanner errors lost in `handleLibraryScan`, "not found" vs "DB down" indistinguishable. Standardize: wrap errors with context, don't use `_` for important operations. |
+| B12 | Download | 🟡 Medium | **FileRenamer.resolveSourcePath blocks without context/timeout.** `filepath.WalkDir` over entire download root with no cancellation, no max depth, no file limit. Large directories block import chain. |
+| B13 | Discovery | 🟡 Medium | **Buggy error propagation in search handler.** `SearchArtists` success + `SearchAlbums` failure → only album error reported, artist success hidden. Track errors separately or use `errors.Join`. |
+| B14 | API | 🟡 Medium | **No API rate limiting.** Search/download/scan endpoints unbounded. Risk: Soulseek/Deezer/Spotify/MusicBrainz provider bans from excessive calls. |
+| B15 | Download | 🟡 Medium | **Shutdown drops queued jobs silently.** `workerPoolImpl.Shutdown()` closes `jobQueue` channel — remaining items lost. Recoverable via `RecoverOrphans` on restart, but orphan window exists. Drain + fail jobs before close. |
+| B16 | Playlist | 🟢 Low | **Dead code: `Service.findAndQueueDownload`.** Defined but never called. Actual resolution uses `resolvePendingDownloads` with `orch.FindBestMatch`. |
+| B17 | Download | 🟢 Low | **No configurable worker pool size.** Hardcoded default of 3 workers. Not exposed in config. |
+| B18 | Download | 🟢 Low | **Weak download ID generation.** Uses `math/rand` (not crypto-grade) + 4 hex digits (65k entropy) + nanosecond timestamp. Collisions unlikely but not impossible. Switch to UUID. (`google/uuid` already in go.sum as indirect.) |
+| B19 | SSE | 🟢 Low | **No SSE client limit.** `SSEHub.clients` unbounded. Many idle clients exhaust file descriptors. |
+| B20 | API | 🟢 Low | **Health endpoint returns no component status.** `GET /api/health` returns `{"status":"ok"}` only — no DB ping, no plugin health, no goroutine/queue stats. Load balancer can't distinguish healthy from degraded. |
+| B21 | Download | 🟢 Low | **No cleanup of terminal download records.** `DeleteTerminal()` exists in store but never called. Completed/failed/ignored downloads accumulate indefinitely. |
+| B22 | Code Quality | 🟢 Low | **main.go growing linearly with features.** Each new plugin adds ~5 lines. At 10+ plugins becomes unwieldy. Consider `App` struct with builder pattern. |
+| B23 | Download | 🟢 Low | **No download retention policy.** Terminal records accumulate forever. Add configurable retention (auto-clean records older than N days). |
+
+> **Note**: Review flagged missing DB migration system as 🔴 — false positive. Migration system already exists (`internal/library/sqlite/store.go`, v1-v4 with `schema_version` table). Roadmap #21 is accurate.
 
 ### Immediate Next Steps
 
-1. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
-2. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
-3. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
-4. **Wishlist retry endpoint + UI** — `POST /api/downloads/{id}/retry` + Retry button (#54 gap, Tier 4, 🟡)
-5. **Stuck pending auto-fail** — auto-fail/retry pending records older than N minutes (#B5, 🟡 Medium)
+1. **Structured logging** — replace `log.Printf` with `log/slog`, add request IDs (#B8, 🔴 High)
+2. **HTTP server timeouts** — set Read/Write/Idle timeouts (#B9, 🔴 High)
+3. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
+4. **API rate limiting** — protect downstream providers from excessive calls (#B14, 🟡 Medium)
+5. **Worker pool init fix** — constructor-based wiring, remove two-phase init (#B10, 🟡 Medium)
+6. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
+7. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
+8. **Wishlist retry endpoint + UI** — `POST /api/downloads/{id}/retry` + Retry button (#54 gap, Tier 4, 🟡)
+9. **Stuck pending auto-fail** — auto-fail/retry pending records older than N minutes (#B5, 🟡 Medium)
 
-### First Major Feature Block (Tier 1.5 completion + Tier 7 security)
+### First Major Feature Block (Platform hardening + Tier 1.5 completion + Tier 7 security)
 
-1. **Free-tier metadata completion** — iTunes + Last.fm providers to round out free path coverage
-2. **Authentication** — login gate + API keys for production safety (#70, Tier 7)
-3. **Wishlist polish** — retry endpoint, retry UI, stuck pending detection (#54 gap + #B5)
-4. **Systemd service** — production deployment target (#74, Tier 7)
+1. **Observability foundation** — structured logging (#B8), HTTP timeouts (#B9), health endpoint (#B20), rate limiting (#B14)
+2. **Free-tier metadata completion** — iTunes + Last.fm providers to round out free path coverage
+3. **Authentication** — login gate + API keys for production safety (#70, Tier 7)
+4. **Wishlist polish** — retry endpoint, retry UI, stuck pending detection (#54 gap + #B5)
+5. **Systemd service** — production deployment target (#74, Tier 7)

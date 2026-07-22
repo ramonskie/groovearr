@@ -5,7 +5,7 @@ package sse
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"sync/atomic"
@@ -36,12 +36,17 @@ type SSEHub struct {
 	mu      sync.RWMutex
 	clients map[int64]chan SSEEvent
 	nextID  atomic.Int64
+	log     *slog.Logger
 }
 
 // NewSSEHub creates a ready-to-use SSEHub.
-func NewSSEHub() *SSEHub {
+func NewSSEHub(logger *slog.Logger) *SSEHub {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &SSEHub{
 		clients: make(map[int64]chan SSEEvent),
+		log:     logger,
 	}
 }
 
@@ -161,7 +166,7 @@ func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			if event.Type == "heartbeat" {
 				// SSE comment — ignored by EventSource, resets proxy timeouts.
 				if _, err := w.Write([]byte(": keepalive\n\n")); err != nil {
-					log.Printf("sse: write heartbeat for client %d: %v", clientID, err)
+					h.log.Error("write heartbeat failed", "client_id", clientID, "error", err, "component", "sse")
 					return
 				}
 				flusher.Flush()
@@ -170,13 +175,13 @@ func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 			if event.ID != "" {
 				if _, err := w.Write([]byte("id: " + event.ID + "\n")); err != nil {
-					log.Printf("sse: write id for client %d: %v", clientID, err)
+					h.log.Error("write id failed", "client_id", clientID, "error", err, "component", "sse")
 					return
 				}
 			}
 			if event.Type != "" {
 				if _, err := w.Write([]byte("event: " + event.Type + "\n")); err != nil {
-					log.Printf("sse: write event for client %d: %v", clientID, err)
+					h.log.Error("write event failed", "client_id", clientID, "error", err, "component", "sse")
 					return
 				}
 			}
@@ -185,13 +190,13 @@ func (h *SSEHub) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				lines := splitLines(string(event.Data))
 				for _, line := range lines {
 					if _, err := w.Write([]byte("data: " + line + "\n")); err != nil {
-						log.Printf("sse: write data for client %d: %v", clientID, err)
+						h.log.Error("write data failed", "client_id", clientID, "error", err, "component", "sse")
 						return
 					}
 				}
 			}
 			if _, err := w.Write([]byte("\n")); err != nil {
-				log.Printf("sse: write terminator for client %d: %v", clientID, err)
+				h.log.Error("write terminator failed", "client_id", clientID, "error", err, "component", "sse")
 				return
 			}
 			flusher.Flush()

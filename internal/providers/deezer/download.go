@@ -9,7 +9,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/cookiejar"
@@ -60,6 +60,7 @@ type DownloadClient struct {
 	dlPath string
 	client *http.Client // API calls (30s timeout)
 	api    *Client      // public API client (discovery, metadata, no auth needed)
+	log    *slog.Logger
 
 	// downloadClient has no timeout — file downloads may take many minutes.
 	// ReadIdleTimeout on the transport kills stalled connections after 30s of inactivity.
@@ -82,7 +83,7 @@ type DownloadClient struct {
 }
 
 // NewDownloadClient creates a Deezer download client.
-func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
+func NewDownloadClient(cfg DeezerConfig, downloadPath string, logger *slog.Logger) *DownloadClient {
 	jar, _ := cookiejar.New(nil)
 	u, _ := url.Parse("https://www.deezer.com")
 	jar.SetCookies(u, []*http.Cookie{{
@@ -101,7 +102,8 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string) *DownloadClient {
 	return &DownloadClient{
 		cfg:    cfg,
 		dlPath: downloadPath,
-		api:    New(cfg),
+		api:    New(cfg, logger),
+		log:    logger,
 		client: &http.Client{
 			Timeout: 30 * time.Second,
 			Jar:     jar,
@@ -193,6 +195,7 @@ func (c *DownloadClient) UserID() int {
 // CheckConnection tries to authenticate with Deezer using the configured ARL.
 func (c *DownloadClient) CheckConnection(ctx context.Context) error {
 	if c.cfg.ARL == "" {
+		c.log.Error("check connection failed: ARL not set", "component", "deezer")
 		return fmt.Errorf("deezer: ARL token not set")
 	}
 	// Use a shorter timeout for the connection test, then restore original.
@@ -208,12 +211,14 @@ func (c *DownloadClient) CheckConnection(ctx context.Context) error {
 // Search queries Deezer's public API for tracks.
 func (c *DownloadClient) Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	if err := c.ensureAuth(); err != nil {
+		c.log.Error("search auth failed", "error", err, "component", "deezer")
 		return nil, nil, fmt.Errorf("deezer auth: %w", err)
 	}
 
-	apiClient := New(c.cfg)
+	apiClient := New(c.cfg, c.log)
 	tracks, err := apiClient.SearchTracks(ctx, query, 30)
 	if err != nil {
+		c.log.Error("search tracks failed", "error", err, "query", query, "component", "deezer")
 		return nil, nil, err
 	}
 
@@ -230,7 +235,7 @@ func (c *DownloadClient) Search(ctx context.Context, query string) ([]domain.Tra
 	// Also search for albums.
 	albums, err := apiClient.SearchAlbums(ctx, query, 20)
 	if err != nil {
-		log.Printf("deezer album search: %v", err)
+		c.log.Warn("album search failed", "error", err, "component", "deezer")
 		return results, nil, nil // album search is non-fatal
 	}
 
@@ -257,14 +262,17 @@ func (c *DownloadClient) Search(ctx context.Context, query string) ([]domain.Tra
 // Download initiates a Deezer download. filename is "track_id||display_name".
 func (c *DownloadClient) Download(ctx context.Context, username, filename string, fileSize int64) (string, error) {
 	if !c.IsConfigured() {
+		c.log.Error("download failed: ARL not set", "component", "deezer")
 		return "", fmt.Errorf("deezer: ARL token not set")
 	}
 	if err := c.ensureAuth(); err != nil {
+		c.log.Error("download auth failed", "error", err, "component", "deezer")
 		return "", fmt.Errorf("deezer auth: %w", err)
 	}
 
 	parts := strings.SplitN(filename, "||", 2)
 	if len(parts) < 1 {
+		c.log.Error("download invalid filename", "filename", filename, "component", "deezer")
 		return "", fmt.Errorf("deezer: invalid filename format, expected 'track_id||display'")
 	}
 	trackID := parts[0]
@@ -289,7 +297,7 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 	c.downloads[downloadID] = record
 	c.downloadsMu.Unlock()
 
-	log.Printf("deezer: download queued %s (%s)", downloadID, displayName)
+	c.log.Info("download queued", "downloadID", downloadID, "displayName", displayName, "component", "deezer")
 
 	// Derive from the worker's context so cancellation propagates.
 	// Also store our own cancel for plugin-level CancelDownload() calls.
@@ -417,24 +425,29 @@ func (c *DownloadClient) authenticate() error {
 	}
 
 	if c.cfg.ARL == "" {
+		c.log.Error("authenticate failed: ARL not set", "component", "deezer")
 		return fmt.Errorf("deezer: ARL token not set")
 	}
 
 	resp, err := c.gwCall(context.Background(), "deezer.getUserData", nil)
 	if err != nil {
+		c.log.Error("authenticate gwCall failed", "error", err, "component", "deezer")
 		return fmt.Errorf("deezer auth: %w", err)
 	}
 	if resp == nil {
+		c.log.Error("authenticate empty response", "component", "deezer")
 		return fmt.Errorf("deezer auth: empty response")
 	}
 
 	user, _ := resp["USER"].(map[string]any)
 	if user == nil {
+		c.log.Error("authenticate no USER in response", "component", "deezer")
 		return fmt.Errorf("deezer auth: no USER in response")
 	}
 
 	uid, _ := user["USER_ID"].(float64)
 	if uid == 0 {
+		c.log.Error("authenticate USER_ID is 0, ARL may be expired", "component", "deezer")
 		return fmt.Errorf("deezer auth: USER_ID is 0 — ARL may be expired")
 	}
 
@@ -463,7 +476,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Catch panics so they don't silently kill the goroutine.
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("deezer: download %s PANIC: %v", downloadID, r)
+			c.log.Error("download panic", "downloadID", downloadID, "panic", r, "component", "deezer")
 			c.setError(downloadID, fmt.Sprintf("panic: %v", r))
 		}
 	}()
@@ -476,7 +489,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Get track data from private API.
 	trackData, err := c.gwCall(ctx, "song.getData", map[string]any{"sng_id": trackID})
 	if err != nil {
-		log.Printf("deezer: download %s: get track data: %v", downloadID, err)
+		c.log.Warn("get track data failed", "downloadID", downloadID, "error", err, "component", "deezer")
 		c.setError(downloadID, fmt.Sprintf("failed to get track data: %v", err))
 		return
 	}
@@ -487,7 +500,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Fetch track metadata from public API (cover URL + renamer metadata).
 	trackIDInt, convErr := strconv.Atoi(trackID)
 	if convErr == nil {
-		apiClient := New(c.cfg)
+		apiClient := New(c.cfg, c.log)
 		if trk, err := apiClient.GetTrack(ctx, trackIDInt); err == nil && trk != nil {
 			year := 0
 			if len(trk.ReleaseDate) >= 4 {
@@ -509,7 +522,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 
 	trackToken, _ := trackData["TRACK_TOKEN"].(string)
 	if trackToken == "" {
-		log.Printf("deezer: download %s: no track token", downloadID)
+		c.log.Warn("no track token", "downloadID", downloadID, "component", "deezer")
 		c.setError(downloadID, "no track token available")
 		return
 	}
@@ -517,12 +530,12 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	// Determine quality and get media URL with fallback.
 	mediaURL, actualQuality := c.getMediaURL(trackToken)
 	if mediaURL == "" {
-		log.Printf("deezer: download %s: no media URL (quality=%s)", downloadID, actualQuality)
+		c.log.Warn("no media URL available", "downloadID", downloadID, "quality", actualQuality, "component", "deezer")
 		c.setError(downloadID, "no media URL available")
 		return
 	}
 
-	log.Printf("deezer: download %s: starting (%s, %s)", downloadID, actualQuality, displayName)
+	c.log.Info("download starting", "downloadID", downloadID, "quality", actualQuality, "displayName", displayName, "component", "deezer")
 
 	ext := ".mp3"
 	if actualQuality == "flac" {
@@ -556,27 +569,31 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 		r.Progress = 100.0
 		r.FilePath = outPath
 	})
-	log.Printf("deezer: download %s: succeeded → %s", downloadID, outPath)
+	c.log.Info("download succeeded", "downloadID", downloadID, "path", outPath, "component", "deezer")
 }
 
 func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, trackID, url, outPath string) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
+		c.log.Error("download create request failed", "error", err, "downloadID", downloadID, "component", "deezer")
 		return fmt.Errorf("create request: %w", err)
 	}
 	resp, err := c.downloadClient.Do(req)
 	if err != nil {
+		c.log.Error("download HTTP request failed", "error", err, "downloadID", downloadID, "component", "deezer")
 		return fmt.Errorf("download request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
+		c.log.Error("download non-OK status", "status", resp.StatusCode, "downloadID", downloadID, "component", "deezer")
 		return fmt.Errorf("download HTTP %d", resp.StatusCode)
 	}
 
 	key := deriveBlowfishKey(trackID)
 	f, err := os.Create(outPath)
 	if err != nil {
+		c.log.Error("download create file failed", "error", err, "downloadID", downloadID, "path", outPath, "component", "deezer")
 		return fmt.Errorf("create file: %w", err)
 	}
 	defer f.Close()
@@ -599,6 +616,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 	// Deezer always uses BF_CBC_STRIPE for all quality formats.
 	firstN, firstReadErr := io.ReadFull(body, buf)
 	if firstReadErr != nil && firstReadErr != io.ErrUnexpectedEOF && firstReadErr != io.EOF {
+		c.log.Error("download read first chunk failed", "error", firstReadErr, "downloadID", downloadID, "component", "deezer")
 		return fmt.Errorf("read response: %w", firstReadErr)
 	}
 	if firstN > 0 {
@@ -609,6 +627,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 			}
 		}
 		if _, err := f.Write(chunk); err != nil {
+			c.log.Error("download write first chunk failed", "error", err, "downloadID", downloadID, "component", "deezer")
 			return fmt.Errorf("write file: %w", err)
 		}
 		downloaded += int64(firstN)
@@ -638,6 +657,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 			}
 
 			if _, err := f.Write(chunk); err != nil {
+				c.log.Error("download write chunk failed", "error", err, "downloadID", downloadID, "component", "deezer")
 				return fmt.Errorf("write file: %w", err)
 			}
 
@@ -665,6 +685,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 			if readErr == io.ErrUnexpectedEOF || readErr == io.EOF {
 				return nil
 			}
+			c.log.Error("download read chunk failed", "error", readErr, "downloadID", downloadID, "component", "deezer")
 			return fmt.Errorf("read response: %w", readErr)
 		}
 	}
@@ -763,6 +784,7 @@ func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, u.String(), strings.NewReader(string(b)))
 	if err != nil {
+		c.log.Error("gwCall create request failed", "error", err, "method", method, "component", "deezer")
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -772,6 +794,7 @@ func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[s
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		c.log.Error("gwCall HTTP request failed", "error", err, "method", method, "component", "deezer")
 		return nil, fmt.Errorf("deezer gw call: %w", err)
 	}
 	defer resp.Body.Close()
@@ -782,6 +805,7 @@ func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[s
 		Results map[string]any `json:"results"`
 	}
 	if err := json.Unmarshal(rawBody, &data); err != nil {
+		c.log.Error("gwCall parse error", "error", err, "method", method, "status", resp.StatusCode, "component", "deezer")
 		return nil, fmt.Errorf("deezer parse error (http %d): %s", resp.StatusCode, string(rawBody))
 	}
 
@@ -792,6 +816,7 @@ func (c *DownloadClient) gwCall(ctx context.Context, method string, params map[s
 			// Empty error array = success, fall through.
 		} else {
 			errJSON, _ := json.Marshal(data.Error)
+			c.log.Error("gwCall API error", "method", method, "apiError", string(errJSON), "component", "deezer")
 			return nil, fmt.Errorf("deezer API error: %s", string(errJSON))
 		}
 	}
@@ -971,6 +996,7 @@ type DeezerPlaylist struct {
 // GetUserPlaylists fetches the authenticated user's playlists via the Deezer gateway.
 func (c *DownloadClient) GetUserPlaylists(ctx context.Context) ([]DeezerPlaylist, error) {
 	if err := c.ensureAuth(); err != nil {
+		c.log.Error("get user playlists auth failed", "error", err, "component", "deezer")
 		return nil, fmt.Errorf("deezer auth: %w", err)
 	}
 
@@ -979,6 +1005,7 @@ func (c *DownloadClient) GetUserPlaylists(ctx context.Context) ([]DeezerPlaylist
 		"tab":     "playlists",
 	})
 	if err != nil {
+		c.log.Error("get user playlists gwCall failed", "error", err, "component", "deezer")
 		return nil, fmt.Errorf("pageProfile: %w", err)
 	}
 
@@ -1011,6 +1038,7 @@ func parsePlaylistItems(rawList []any) []DeezerPlaylist {
 // GetPlaylistTracks fetches all tracks in a Deezer playlist via the gateway.
 func (c *DownloadClient) GetPlaylistTracks(ctx context.Context, playlistID string) ([]DeezerTrackInfo, string, error) {
 	if err := c.ensureAuth(); err != nil {
+		c.log.Error("get playlist tracks auth failed", "error", err, "playlistID", playlistID, "component", "deezer")
 		return nil, "", fmt.Errorf("deezer auth: %w", err)
 	}
 
@@ -1019,6 +1047,7 @@ func (c *DownloadClient) GetPlaylistTracks(ctx context.Context, playlistID strin
 		"nb":          500,
 	})
 	if err != nil {
+		c.log.Error("get playlist tracks gwCall failed", "error", err, "playlistID", playlistID, "component", "deezer")
 		return nil, "", fmt.Errorf("pagePlaylist: %w", err)
 	}
 
@@ -1058,6 +1087,7 @@ func (c *DownloadClient) GetPlaylistTracks(ctx context.Context, playlistID strin
 func (d *DownloadClient) SearchArtists(ctx context.Context, query string, limit int) ([]discovery.ArtistSummary, error) {
 	artists, err := d.api.SearchArtists(ctx, query, limit)
 	if err != nil {
+		d.log.Error("search artists failed", "error", err, "query", query, "component", "deezer")
 		return nil, err
 	}
 	out := make([]discovery.ArtistSummary, len(artists))
@@ -1074,10 +1104,12 @@ func (d *DownloadClient) SearchArtists(ctx context.Context, query string, limit 
 func (d *DownloadClient) GetArtistAlbums(ctx context.Context, providerArtistID string, limit int) ([]discovery.AlbumResult, error) {
 	id, err := strconv.Atoi(providerArtistID)
 	if err != nil {
+		d.log.Error("get artist albums invalid id", "error", err, "providerArtistID", providerArtistID, "component", "deezer")
 		return nil, fmt.Errorf("deezer: invalid artist id: %w", err)
 	}
 	albums, err := d.api.GetArtistAlbums(ctx, id, limit)
 	if err != nil {
+		d.log.Error("get artist albums api failed", "error", err, "artistID", id, "component", "deezer")
 		return nil, err
 	}
 	var out []discovery.AlbumResult
@@ -1106,14 +1138,17 @@ func (d *DownloadClient) GetArtistAlbums(ctx context.Context, providerArtistID s
 func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]discovery.TrackInfo, error) {
 	id, err := strconv.Atoi(providerAlbumID)
 	if err != nil {
+		d.log.Error("get album tracks invalid id", "error", err, "providerAlbumID", providerAlbumID, "component", "deezer")
 		return nil, fmt.Errorf("deezer: invalid album id: %w", err)
 	}
 	album, err := d.api.GetAlbum(ctx, id)
 	if err != nil {
+		d.log.Error("get album tracks get album failed", "error", err, "albumID", id, "component", "deezer")
 		return nil, err
 	}
 	tracks, err := d.api.GetAlbumTracks(ctx, id)
 	if err != nil {
+		d.log.Error("get album tracks api failed", "error", err, "albumID", id, "component", "deezer")
 		return nil, err
 	}
 	artistName := album.Artist.Name
@@ -1139,6 +1174,7 @@ func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID str
 func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
 	albums, err := d.api.SearchAlbums(ctx, query, limit)
 	if err != nil {
+		d.log.Error("search albums failed", "error", err, "query", query, "component", "deezer")
 		return nil, err
 	}
 	var out []discovery.AlbumResult

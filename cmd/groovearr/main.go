@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"log"
 	"net/http"
 	"os"
 	"os/signal"
@@ -15,6 +14,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/logger"
 	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
@@ -37,23 +37,29 @@ func main() {
 		configPath = "./config.json"
 	}
 
+	mainLog := logger.NewDefault()
+
 	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		mainLog.Error("config init failed", "error", err, "component", "main")
+		os.Exit(1)
 	}
+
+	cfg.SetLogger(mainLog)
 
 	// Library store (SQLite).
 	dbPath := filepath.Join(filepath.Dir(configPath), "library.db")
-	libStore, err := sqlite.New(dbPath)
+	libStore, err := sqlite.New(dbPath, mainLog)
 	if err != nil {
-		log.Fatalf("library db: %v", err)
+		mainLog.Error("library db init failed", "error", err, "component", "main")
+		os.Exit(1)
 	}
 	defer libStore.Close()
 
-	scanner := library.NewScanner(libStore)
+	scanner := library.NewScanner(libStore, mainLog)
 
 	// Download store (SQLite — shares the library db connection).
-	dlStore := dlsqlite.New(libStore.DB())
+	dlStore := dlsqlite.New(libStore.DB(), mainLog)
 
 	// Plugin registry — one shared instance for all capability domains.
 	// Factories declare capabilities (e.g. "download", "metadata", "playlist");
@@ -66,7 +72,7 @@ func main() {
 	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath, currentCfg.Library.PlaylistPath} {
 		if p != "" {
 			if err := os.MkdirAll(p, 0o755); err != nil {
-				log.Printf("mkdir %s: %v", p, err)
+				mainLog.Warn("mkdir failed", "path", p, "error", err, "component", "main")
 			}
 		}
 	}
@@ -79,9 +85,9 @@ func main() {
 	pluginReg.RegisterFactory(spotify.Factory)
 
 	// Initialize all plugins from config.
-	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath}
+	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: mainLog}
 	if err := pluginReg.InitAll(currentCfg.Sources, resources); err != nil {
-		log.Printf("init plugins: %v", err)
+		mainLog.Error("init plugins failed", "error", err, "component", "main")
 	}
 	// Create plugins not in config file using their defaults.
 	pluginReg.InitRemaining(resources)
@@ -92,18 +98,19 @@ func main() {
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
 	// Event bus — decouples workers, importers, and SSE notifier.
-	eventBus := events.NewInMemoryEventBus()
+	eventBus := events.NewInMemoryEventBus(mainLog)
 
 	// Download service — queues downloads and dispatches to workers.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus)
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog)
 
 	// Worker pool — picks up queued downloads and drives state machine.
-	workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus)
+	workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus, mainLog)
 
 	// Wire the pipeline: DownloadService → WorkerPool.
 	downloadSvc.SetWorkerPool(workerPool)
 
 	// Recover orphaned queued records from previous runs (pool-at-capacity rejects).
+	mainLog.Info("recovering orphaned downloads", "component", "main")
 	go downloadSvc.RecoverOrphans(context.Background())
 
 	// Build the import handler chain for completed downloads.
@@ -118,29 +125,30 @@ func main() {
 	}
 
 	folderTemplate, libraryRoot := renamerCfg()
-	renamer := library.NewRenamer(folderTemplate, libraryRoot)
+	renamer := library.NewRenamer(folderTemplate, libraryRoot, mainLog)
 
 	// SSE hub — broadcasts real-time download progress to connected clients.
-	sseHub := sse.NewSSEHub()
+	sseHub := sse.NewSSEHub(mainLog)
 	hbCtx, hbCancel := context.WithCancel(context.Background())
 	sseHub.StartHeartbeat(hbCtx)
 
 	// SSE notifier subscribes to event bus topics and translates them into SSE
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
-	sseNotifier := sse.NewSSENotifier(sseHub, eventBus)
+	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, mainLog)
 
 	// Completed download service subscribes to TopicDownloadCompleted on the
 	// event bus and runs import handlers sequentially on each download.
 	download.NewCompletedDownloadService(
 		dlStore,
 		eventBus,
+		mainLog,
 		download.NewTagValidatorHandler(),
-		download.NewFileRenamerHandler(renamer, dlStore),
-		download.NewCoverArtHandler(libStore),
-		download.NewTagWriterHandler(),
-		download.NewLibraryImporterHandler(libStore),
-		download.NewMetadataEnrichmentHandler(mdRegistry, libStore),
-		download.NewPlaylistLinkerHandler(libStore),
+		download.NewFileRenamerHandler(renamer, dlStore, mainLog),
+		download.NewCoverArtHandler(libStore, mainLog),
+		download.NewTagWriterHandler(mainLog),
+		download.NewLibraryImporterHandler(libStore, mainLog),
+		download.NewMetadataEnrichmentHandler(mdRegistry, libStore, mainLog),
+		download.NewPlaylistLinkerHandler(libStore, mainLog),
 		sseNotifier,
 	)
 
@@ -157,7 +165,7 @@ func main() {
 		}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
-	})
+	}, mainLog)
 
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
@@ -165,10 +173,10 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
+	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
 		func(mux *http.ServeMux) {
-			spotify.RegisterOAuthRoutes(mux, cfg, func(name string, rawCfg json.RawMessage) error {
-				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath}
+			spotify.RegisterOAuthRoutes(mux, cfg, mainLog, func(name string, rawCfg json.RawMessage) error {
+				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}
 				return registry.Rebuild(name, rawCfg, res)
 			}, func(name string) {
 				if p := registry.Get(name); p != nil {
@@ -180,27 +188,29 @@ func main() {
 		},
 	)
 
-	log.Printf("groovearr starting")
-	log.Printf("  config:   %s", configPath)
-	log.Printf("  database: %s", dbPath)
-	log.Printf("  download: %s", currentCfg.Library.DownloadPath)
-	log.Printf("  library:  %s", currentCfg.Library.LibraryPath)
-	log.Printf("  listening on %s", addr)
+	mainLog.Info("groovearr starting",
+		"config", configPath,
+		"database", dbPath,
+		"download", currentCfg.Library.DownloadPath,
+		"library", currentCfg.Library.LibraryPath,
+		"addr", addr,
+		"component", "main",
+	)
 	for _, name := range registry.Names() {
 		if p := registry.Get(name); p != nil {
-			log.Printf("  source:   %s", p.DisplayName())
+			mainLog.Info("source configured", "name", name, "display", p.DisplayName(), "component", "main")
 		}
 	}
 	for _, name := range mdRegistry.Names() {
 		if p := mdRegistry.Get(name); p != nil && p.IsConfigured() {
-			log.Printf("  metadata: %s", p.DisplayName())
+			mainLog.Info("metadata configured", "name", name, "display", p.DisplayName(), "component", "main")
 		}
 	}
 	for _, src := range playlistReg.Configured() {
-		log.Printf("  playlist: %s (%s)", src.Name(), src.DisplayName())
+		mainLog.Info("playlist configured", "name", src.Name(), "display", src.DisplayName(), "component", "main")
 	}
 	if len(playlistReg.Configured()) == 0 && len(registry.Names()) > 0 {
-		log.Printf("  playlist: no sources configured (add ARL token to sources.deezer)")
+		mainLog.Info("playlist: no sources configured", "hint", "add ARL token to sources.deezer", "component", "main")
 	}
 
 	// Graceful shutdown.
@@ -208,13 +218,17 @@ func main() {
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		<-sigCh
-		log.Println("shutting down...")
+		mainLog.Info("shutting down", "component", "main")
+		mainLog.Info("heartbeat stopping", "component", "main")
 		hbCancel()
+		mainLog.Info("worker pool shutting down", "component", "main")
 		workerPool.Shutdown()
+		mainLog.Info("server stopped", "component", "main")
 		srv.Shutdown(context.Background())
 	}()
 
 	if err := srv.ListenAndServe(); err != nil {
-		log.Fatalf("server: %v", err)
+		mainLog.Error("server failed", "error", err, "component", "main")
+		os.Exit(1)
 	}
 }

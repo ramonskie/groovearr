@@ -32,7 +32,7 @@ func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResource
 	if err := json.Unmarshal(rawCfg, &cfg); err != nil {
 		return nil, err
 	}
-	return NewDownloadClient(cfg, resources.DownloadPath), nil
+	return NewDownloadClient(cfg, resources.DownloadPath, resources.Logger), nil
 }
 
 func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {

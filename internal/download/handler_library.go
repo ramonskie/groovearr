@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 
@@ -15,12 +16,16 @@ import (
 // handles discovered audio files.
 type LibraryImporterHandler struct {
 	libStore library.Store
+	log      *slog.Logger
 }
 
 // NewLibraryImporterHandler creates a handler that imports downloaded files
 // into the music library by creating/updating artist, album, and track records.
-func NewLibraryImporterHandler(libStore library.Store) *LibraryImporterHandler {
-	return &LibraryImporterHandler{libStore: libStore}
+func NewLibraryImporterHandler(libStore library.Store, logger *slog.Logger) *LibraryImporterHandler {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	return &LibraryImporterHandler{libStore: libStore, log: logger}
 }
 
 // Handle creates artist/album/track records for the downloaded file.
@@ -47,6 +52,7 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 	// Get file info for size.
 	fi, err := os.Stat(record.FilePath)
 	if err != nil {
+		h.log.Error("stat file failed", "path", record.FilePath, "error", err, "component", "library_importer")
 		return fmt.Errorf("library importer: stat file: %w", err)
 	}
 
@@ -73,6 +79,7 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 
 	trackID, err := h.libStore.ImportTrack(ctx, track, artistName, albumTitle, record.Year, nil)
 	if err != nil {
+		h.log.Error("import track failed", "artist", artistName, "title", trackTitle, "error", err, "component", "library_importer")
 		return fmt.Errorf("library importer: import track: %w", err)
 	}
 

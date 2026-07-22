@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"log/slog"
 	"sync"
 	"testing"
 
@@ -88,7 +89,7 @@ func newTestRecord(id, source, filename, display string) *domain.DownloadRecord 
 
 func TestStore_InsertAndGet(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	r := newTestRecord("dl-1", "soulseek", "track.flac", "Artist - Title")
@@ -121,7 +122,7 @@ func TestStore_InsertAndGet(t *testing.T) {
 
 func TestStore_GetNotFound(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	got, err := store.Get(ctx, "nonexistent")
@@ -135,7 +136,7 @@ func TestStore_GetNotFound(t *testing.T) {
 
 func TestStore_Update(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	// Insert.
@@ -184,7 +185,7 @@ func TestStore_Update(t *testing.T) {
 
 func TestStore_UpdateNotFound(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	err := store.Update(ctx, &domain.DownloadRecord{ID: "no-such-id"})
@@ -195,7 +196,7 @@ func TestStore_UpdateNotFound(t *testing.T) {
 
 func TestStore_List(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	// Insert in order: dl-1, dl-2, dl-3. List should be DESC = dl-3, dl-2, dl-1.
@@ -223,7 +224,7 @@ func TestStore_List(t *testing.T) {
 
 func TestStore_ListEmpty(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	records, err := store.List(ctx)
@@ -239,7 +240,7 @@ func TestStore_ListEmpty(t *testing.T) {
 
 func TestStore_ListByState(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	store.Insert(ctx, newTestRecord("dl-1", "a", "a", "a"))
@@ -276,7 +277,7 @@ func TestStore_ListByState(t *testing.T) {
 
 func TestStore_ListActive(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	store.Insert(ctx, newTestRecord("dl-1", "a", "a", "a")) // queued
@@ -301,7 +302,7 @@ func TestStore_ListActive(t *testing.T) {
 
 func TestStore_ListByPlaylist(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	// Insert directly into DB to set playlist_id (Insert doesn't set it).
@@ -345,7 +346,7 @@ func TestStore_ListByPlaylist(t *testing.T) {
 
 func TestStore_RecordAndGetEvents(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	store.Insert(ctx, newTestRecord("dl-1", "soulseek", "t.flac", "T"))
@@ -387,7 +388,7 @@ func TestStore_RecordAndGetEvents(t *testing.T) {
 
 func TestStore_GetEventsEmpty(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	events, err := store.GetEvents(ctx, "nonexistent")
@@ -403,7 +404,7 @@ func TestStore_GetEventsEmpty(t *testing.T) {
 
 func TestStore_DeleteTerminal(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	store.Insert(ctx, newTestRecord("dl-1", "a", "a", "a")) // queued
@@ -447,7 +448,7 @@ func TestStore_DeleteTerminal(t *testing.T) {
 
 func TestStore_ConcurrentUpdates(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 	ctx := context.Background()
 
 	store.Insert(ctx, newTestRecord("dl-1", "soulseek", "t.flac", "T"))
@@ -494,7 +495,7 @@ func TestStore_ConcurrentUpdates(t *testing.T) {
 
 func TestStore_Close(t *testing.T) {
 	db := openTestDB(t)
-	store := New(db)
+	store := New(db, slog.Default())
 
 	if err := store.Close(); err != nil {
 		t.Errorf("Close: %v", err)

@@ -1,11 +1,15 @@
 package plugin
 
-import "encoding/json"
+import (
+	"encoding/json"
+	"log/slog"
+)
 
 // PluginResources holds runtime resources that factories need to construct plugins.
 // Domain-specific factories can embed this or define their own.
 type PluginResources struct {
-	DownloadPath string // where downloads for this source will be stored on disk
+	DownloadPath string       // where downloads for this source will be stored on disk
+	Logger       *slog.Logger // structured logger for plugin use
 }
 
 // PluginFactory is implemented by each plugin package to enable self-registration.

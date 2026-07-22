@@ -8,7 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"path"
@@ -41,6 +41,7 @@ type Client struct {
 	baseURL  string
 	apiKey   string
 	client   *http.Client
+	log      *slog.Logger
 
 	mu             sync.Mutex
 	activeSearches map[string]context.CancelFunc // searchID → cancel
@@ -49,9 +50,9 @@ type Client struct {
 	downloadUsernames map[string]string                 // downloadID → username
 }
 
-// New creates a Soulseek client from a raw JSON config blob and download path.
+// New creates a Soulseek client from a raw JSON config blob, download path, and logger.
 // The raw config is unmarshalled into a local SoulseekConfig.
-func New(cfg json.RawMessage, downloadPath string) (*Client, error) {
+func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client, error) {
 	var sc SoulseekConfig
 	if err := json.Unmarshal(cfg, &sc); err != nil {
 		return nil, fmt.Errorf("soulseek: invalid config: %w", err)
@@ -62,6 +63,7 @@ func New(cfg json.RawMessage, downloadPath string) (*Client, error) {
 		baseURL:        strings.TrimRight(sc.SlskdURL, "/"),
 		apiKey:         sc.APIKey,
 		client:         &http.Client{Timeout: 120 * time.Second},
+		log:            logger,
 		activeSearches: make(map[string]context.CancelFunc),
 		downloads:         make(map[string]*domain.DownloadRecord),
 		downloadUsernames: make(map[string]string),
@@ -114,6 +116,7 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 	body, _ := json.Marshal(searchReq)
 	resp, err := c.doRequest(ctx, http.MethodPost, "searches", bytes.NewReader(body))
 	if err != nil {
+		c.log.Error("soulseek search request failed", "error", err, "query", query, "component", "soulseek")
 		return nil, nil, fmt.Errorf("soulseek search: %w", err)
 	}
 
@@ -193,6 +196,7 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 	endpoint := fmt.Sprintf("transfers/downloads/%s", url.PathEscape(username))
 	resp, err := c.doRequest(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
+		c.log.Error("soulseek download request failed", "error", err, "username", username, "filename", filename, "component", "soulseek")
 		return "", fmt.Errorf("soulseek download: %w", err)
 	}
 
@@ -228,6 +232,7 @@ func (c *Client) Download(ctx context.Context, username, filename string, fileSi
 func (c *Client) findDownloadIDByFilename(ctx context.Context, filename string) string {
 	listResp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil)
 	if err != nil {
+		c.log.Warn("soulseek findDownloadIDByFilename failed", "error", err, "filename", filename, "component", "soulseek")
 		return ""
 	}
 	var users []struct {
@@ -258,6 +263,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 	// Refresh from slskd API.
 	resp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil)
 	if err != nil {
+		c.log.Error("soulseek get downloads request failed, returning cache", "error", err, "component", "soulseek")
 		// Return cached records if API fails.
 		c.downloadsMu.RLock()
 		defer c.downloadsMu.RUnlock()
@@ -268,7 +274,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 		return out, nil
 	}
 
-	records := parseDownloadStatus(resp, c.dlPath)
+	records := parseDownloadStatus(resp, c.dlPath, c.log)
 	c.downloadsMu.Lock()
 	for _, r := range records {
 		c.downloads[r.ID] = &r
@@ -283,39 +289,38 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dom
 	resp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads/"+url.PathEscape(downloadID), nil)
 	if err != nil {
 		// Single-transfer endpoint may 404 for completed/errored transfers.
-		// Try the list endpoint to find the terminal state.
-		log.Printf("soulseek: single-transfer 404 for %s, trying list fallback", downloadID)
+		c.log.Error("soulseek get download status request failed, trying list fallback", "error", err, "downloadID", downloadID, "component", "soulseek")
 		if listResp, listErr := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil); listErr == nil {
 			raw := string(listResp)
 			if len(raw) > 200 {
 				raw = raw[:200]
 			}
-			log.Printf("soulseek: list resp: %s", raw)
-			records := parseDownloadStatus(listResp, c.dlPath)
-			log.Printf("soulseek: list fallback returned %d records", len(records))
+			c.log.Debug("list response", "body", raw, "component", "soulseek")
+			records := parseDownloadStatus(listResp, c.dlPath, c.log)
+			c.log.Debug("list fallback", "records", len(records), "component", "soulseek")
 			for _, rec := range records {
-				log.Printf("soulseek: list record id=%s state=%s (looking for %s)", rec.ID, rec.State, downloadID)
+				c.log.Debug("list record", "id", rec.ID, "state", rec.State, "lookingFor", downloadID, "component", "soulseek")
 				if rec.ID == downloadID {
-					log.Printf("soulseek: FOUND match! state=%s", rec.State)
+					c.log.Info("found match in list", "downloadID", downloadID, "state", rec.State, "component", "soulseek")
 					c.cacheRecord(&rec)
 					return &rec, nil
 				}
 			}
-			log.Printf("soulseek: download %s not found in list (checked %d records)", downloadID, len(records))
+			c.log.Warn("download not found in list", "downloadID", downloadID, "checked", len(records), "component", "soulseek")
 		} else {
-			log.Printf("soulseek: list fallback failed: %v", listErr)
+			c.log.Warn("list fallback failed", "error", listErr, "component", "soulseek")
 		}
 		// Not in list either — use cached record if available.
 		c.downloadsMu.RLock()
 		defer c.downloadsMu.RUnlock()
 		if r, ok := c.downloads[downloadID]; ok {
-			log.Printf("soulseek: returning cached record for %s (state=%s)", downloadID, r.State)
+			c.log.Debug("returning cached record", "downloadID", downloadID, "state", r.State, "component", "soulseek")
 			return r, nil
 		}
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}
 
-	records := parseDownloadStatus(resp, c.dlPath)
+	records := parseDownloadStatus(resp, c.dlPath, c.log)
 	if len(records) == 0 {
 		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
 	}
@@ -362,6 +367,7 @@ func (c *Client) CancelDownload(ctx context.Context, downloadID string, remove b
 	endpoint := fmt.Sprintf("transfers/downloads/%s?remove=%t", url.PathEscape(downloadID), remove)
 	_, err := c.doRequest(ctx, http.MethodDelete, endpoint, nil)
 	if err != nil {
+		c.log.Error("soulseek cancel download failed (fallback)", "error", err, "downloadID", downloadID, "component", "soulseek")
 		return fmt.Errorf("soulseek cancel: %w", err)
 	}
 
@@ -410,6 +416,7 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body io
 	u := c.baseURL + "/api/v0/" + strings.TrimLeft(endpoint, "/")
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
 	if err != nil {
+		c.log.Error("soulseek create request failed", "error", err, "method", method, "endpoint", endpoint, "component", "soulseek")
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -419,16 +426,19 @@ func (c *Client) doRequest(ctx context.Context, method, endpoint string, body io
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		c.log.Error("soulseek HTTP request failed", "error", err, "method", method, "endpoint", endpoint, "component", "soulseek")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.log.Error("soulseek read response failed", "error", err, "method", method, "endpoint", endpoint, "component", "soulseek")
 		return nil, err
 	}
 
 	if resp.StatusCode >= 400 {
+		c.log.Error("soulseek non-OK status", "status", resp.StatusCode, "body", string(respBody)[:min(len(string(respBody)), 200)], "component", "soulseek")
 		return nil, fmt.Errorf("slskd HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -622,7 +632,7 @@ func extractAlbumPath(filename string) string {
 	return strings.Join(parts[:len(parts)-1], "/")
 }
 
-func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.DownloadRecord {
+func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Logger) []domain.DownloadRecord {
 	var users []struct {
 		Username    string `json:"username"`
 		Directories []struct {
@@ -639,7 +649,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string) []domain.Down
 	}
 
 	if err := json.Unmarshal(raw, &users); err != nil {
-		log.Printf("soulseek: parseDownloadStatus unmarshal error: %v", err)
+		log.Error("parseDownloadStatus unmarshal error", "error", err, "component", "soulseek")
 		return nil
 	}
 

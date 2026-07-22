@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -14,11 +15,12 @@ import (
 // before any request to produce a clear error in free mode.
 type API struct {
 	client *SpotifyClient
+	log    *slog.Logger
 }
 
 // NewAPI creates a Spotify API wrapper around an authenticated SpotifyClient.
-func NewAPI(client *SpotifyClient) *API {
-	return &API{client: client}
+func NewAPI(client *SpotifyClient, log *slog.Logger) *API {
+	return &API{client: client, log: log}
 }
 
 // ─── Dev-mode guard ───────────────────────────────────────────────────
@@ -289,6 +291,9 @@ func (a *API) GetUserPlaylists(ctx context.Context, limit, offset int) (*Paging[
 func (a *API) get(ctx context.Context, path string, params url.Values, target interface{}) error {
 	u, err := url.Parse(SpotifyWebAPI + path)
 	if err != nil {
+		if a.log != nil {
+			a.log.Error("spotify URL parse failed", "error", err, "component", "spotify_api")
+		}
 		return fmt.Errorf("spotify: invalid URL: %w", err)
 	}
 	if len(params) > 0 {
@@ -297,12 +302,18 @@ func (a *API) get(ctx context.Context, path string, params url.Values, target in
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
+		if a.log != nil {
+			a.log.Error("spotify request creation failed", "error", err, "component", "spotify_api")
+		}
 		return fmt.Errorf("spotify: request creation failed: %w", err)
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := a.client.Do(req)
 	if err != nil {
+		if a.log != nil {
+			a.log.Error("spotify request failed", "error", err, "component", "spotify_api")
+		}
 		return fmt.Errorf("spotify: request failed: %w", err)
 	}
 	defer resp.Body.Close()
@@ -321,6 +332,9 @@ func (a *API) get(ctx context.Context, path string, params url.Values, target in
 	}
 
 	if err := json.NewDecoder(resp.Body).Decode(target); err != nil {
+		if a.log != nil {
+			a.log.Error("spotify decode failed", "error", err, "component", "spotify_api")
+		}
 		return fmt.Errorf("spotify: decode failed: %w", err)
 	}
 	return nil

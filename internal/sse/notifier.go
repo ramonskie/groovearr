@@ -3,7 +3,7 @@ package sse
 import (
 	"context"
 	"encoding/json"
-	"log"
+	"log/slog"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -18,13 +18,17 @@ import (
 // notifications.
 type SSENotifier struct {
 	hub *SSEHub
+	log *slog.Logger
 }
 
 // NewSSENotifier creates an SSENotifier, subscribes to the relevant event bus
 // topics, and returns the notifier. The notifier must be kept alive for the
 // lifetime of the event bus subscriptions.
-func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator) *SSENotifier {
-	n := &SSENotifier{hub: hub}
+func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator, logger *slog.Logger) *SSENotifier {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	n := &SSENotifier{hub: hub, log: logger}
 
 	bus.Subscribe(events.TopicDownloadQueued, n.onDownloadQueued)
 	bus.Subscribe(events.TopicDownloadStateChanged, n.onStateChanged)
@@ -42,7 +46,7 @@ func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator) *SSENotifier {
 func (n *SSENotifier) broadcastRecord(record *domain.DownloadRecord, eventType string) {
 	data, err := json.Marshal(record)
 	if err != nil {
-		log.Printf("sse: marshal download %s: %v", record.ID, err)
+		n.log.Error("marshal download failed", "download_id", record.ID, "error", err, "component", "sse")
 		return
 	}
 

@@ -6,6 +6,7 @@ slskd.yml
 
 # Build artifacts
 build/
+/groovearr
 
 # Database
 *.db

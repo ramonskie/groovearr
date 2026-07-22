@@ -5,12 +5,18 @@ import (
 	"context"
 	"encoding/binary"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 )
+
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestParsePath_ArtistAlbumTrack(t *testing.T) {
 	artist, album, track := ParseFileMetadata("Daft Punk/Random Access Memories (2013)/01 - Get Lucky.flac")
@@ -258,7 +264,7 @@ func TestScannerScanPath(t *testing.T) {
 		artists: map[string]int64{},
 		albums:  map[string]int64{},
 	}
-	scanner := NewScanner(store)
+	scanner := NewScanner(store, testLogger())
 
 	stats, err := scanner.ScanPath(t.Context(), dir)
 	if err != nil {

@@ -4,7 +4,7 @@ package config
 import (
 	"encoding/json"
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -126,9 +126,11 @@ func (c *Config) mergeFields(partial *Config) {
 }
 
 // Load reads config from a JSON file, falling back to defaults for missing fields.
-func Load(path string) (Config, error) {
+// Validation warnings are logged via the provided logger.
+func Load(path string, logger *slog.Logger) (Config, error) {
 	cfg, err := readConfigFile(path)
 	if err != nil {
+		logger.Error("read config failed", "path", path, "error", err, "component", "config")
 		return cfg, err
 	}
 
@@ -137,10 +139,11 @@ func Load(path string) (Config, error) {
 
 	// Log validation warnings at startup.
 	if errs := cfg.Validate(); len(errs) > 0 {
-		log.Printf("config: validation warnings in %s:", path)
-		for _, e := range errs {
-			log.Printf("  - %s", e)
-		}
+		logger.Warn("validation warnings",
+			"path", path,
+			"component", "config",
+			slog.Any("warnings", errs),
+		)
 	}
 
 	return cfg, nil

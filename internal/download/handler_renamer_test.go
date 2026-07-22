@@ -35,8 +35,8 @@ func TestFileRenamerHandler(t *testing.T) {
 	}
 	store.Insert(context.Background(), record)
 
-	renamer := library.NewRenamer("{artist}/{album} ({year})/{tracknum:02d} {title}", libRoot)
-	handler := NewFileRenamerHandler(renamer, store)
+	renamer := library.NewRenamer("{artist}/{album} ({year})/{tracknum:02d} {title}", libRoot, nil)
+	handler := NewFileRenamerHandler(renamer, store, nil)
 
 	err := handler.Handle(context.Background(), record)
 	if err != nil {
@@ -55,7 +55,7 @@ func TestFileRenamerHandler(t *testing.T) {
 
 func TestFileRenamerHandler_NoFilePath(t *testing.T) {
 	store := newMockDownloadStore()
-	handler := NewFileRenamerHandler(&library.Renamer{}, store)
+	handler := NewFileRenamerHandler(&library.Renamer{}, store, nil)
 
 	record := &domain.DownloadRecord{ID: "no-file"}
 	err := handler.Handle(context.Background(), record)
@@ -78,8 +78,8 @@ func TestFileRenamerHandler_ExistingPath(t *testing.T) {
 	store.Insert(context.Background(), record)
 
 	// Renamer with missing metadata should keep file unchanged.
-	renamer := library.NewRenamer("{artist}/{album}/{title}", t.TempDir())
-	handler := NewFileRenamerHandler(renamer, store)
+	renamer := library.NewRenamer("{artist}/{album}/{title}", t.TempDir(), nil)
+	handler := NewFileRenamerHandler(renamer, store, nil)
 
 	err := handler.Handle(context.Background(), record)
 	if err != nil {

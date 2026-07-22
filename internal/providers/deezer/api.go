@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -89,6 +90,7 @@ type Client struct {
 	cfg         DeezerConfig
 	httpClient  *http.Client
 	accessToken string
+	log         *slog.Logger
 
 	// Rate limiting.
 	lastCall   time.Time
@@ -96,11 +98,12 @@ type Client struct {
 }
 
 // New creates a Deezer metadata API client.
-func New(cfg DeezerConfig) *Client {
+func New(cfg DeezerConfig, logger *slog.Logger) *Client {
 	return &Client{
 		cfg:         cfg,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		accessToken: cfg.AccessToken,
+		log:         logger,
 		minInterval: time.Second, // Deezer soft limit: ~50 req/5s
 	}
 }
@@ -129,6 +132,7 @@ func (c *Client) searchTracks(ctx context.Context, query, track, artist string, 
 		"limit": strconv.Itoa(min(limit, 100)),
 	})
 	if err != nil {
+		c.log.Error("search tracks failed", "error", err, "query", query, "component", "deezer_api")
 		return nil, err
 	}
 
@@ -136,6 +140,7 @@ func (c *Client) searchTracks(ctx context.Context, query, track, artist string, 
 		Data []Track `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("unmarshal search tracks failed", "error", err, "component", "deezer_api")
 		return nil, err
 	}
 	return result.Data, nil
@@ -150,12 +155,14 @@ func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]
 		"limit": strconv.Itoa(min(limit, 100)),
 	})
 	if err != nil {
+		c.log.Error("search artists failed", "error", err, "query", query, "component", "deezer_api")
 		return nil, err
 	}
 	var result struct {
 		Data []Artist `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("unmarshal search artists failed", "error", err, "component", "deezer_api")
 		return nil, err
 	}
 	return result.Data, nil
@@ -170,12 +177,14 @@ func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]A
 		"limit": strconv.Itoa(min(limit, 100)),
 	})
 	if err != nil {
+		c.log.Error("search albums failed", "error", err, "query", query, "component", "deezer_api")
 		return nil, err
 	}
 	var result struct {
 		Data []Album `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("unmarshal search albums failed", "error", err, "component", "deezer_api")
 		return nil, err
 	}
 	return result.Data, nil
@@ -187,10 +196,12 @@ func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]A
 func (c *Client) GetTrack(ctx context.Context, trackID int) (*Track, error) {
 	data, err := c.apiGet(ctx, fmt.Sprintf("track/%d", trackID), nil)
 	if err != nil {
+		c.log.Error("get track failed", "error", err, "trackID", trackID, "component", "deezer_api")
 		return nil, err
 	}
 	var track Track
 	if err := json.Unmarshal(data, &track); err != nil {
+		c.log.Error("unmarshal track failed", "error", err, "trackID", trackID, "component", "deezer_api")
 		return nil, err
 	}
 	return &track, nil
@@ -200,10 +211,12 @@ func (c *Client) GetTrack(ctx context.Context, trackID int) (*Track, error) {
 func (c *Client) GetAlbum(ctx context.Context, albumID int) (*Album, error) {
 	data, err := c.apiGet(ctx, fmt.Sprintf("album/%d", albumID), nil)
 	if err != nil {
+		c.log.Error("get album failed", "error", err, "albumID", albumID, "component", "deezer_api")
 		return nil, err
 	}
 	var album Album
 	if err := json.Unmarshal(data, &album); err != nil {
+		c.log.Error("unmarshal album failed", "error", err, "albumID", albumID, "component", "deezer_api")
 		return nil, err
 	}
 	return &album, nil
@@ -215,12 +228,14 @@ func (c *Client) GetAlbumTracks(ctx context.Context, albumID int) ([]Track, erro
 		"limit": "500",
 	})
 	if err != nil {
+		c.log.Error("get album tracks failed", "error", err, "albumID", albumID, "component", "deezer_api")
 		return nil, err
 	}
 	var result struct {
 		Data []Track `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("unmarshal album tracks failed", "error", err, "albumID", albumID, "component", "deezer_api")
 		return nil, err
 	}
 	return result.Data, nil
@@ -230,10 +245,12 @@ func (c *Client) GetAlbumTracks(ctx context.Context, albumID int) ([]Track, erro
 func (c *Client) GetArtist(ctx context.Context, artistID int) (*Artist, error) {
 	data, err := c.apiGet(ctx, fmt.Sprintf("artist/%d", artistID), nil)
 	if err != nil {
+		c.log.Error("get artist failed", "error", err, "artistID", artistID, "component", "deezer_api")
 		return nil, err
 	}
 	var artist Artist
 	if err := json.Unmarshal(data, &artist); err != nil {
+		c.log.Error("unmarshal artist failed", "error", err, "artistID", artistID, "component", "deezer_api")
 		return nil, err
 	}
 	return &artist, nil
@@ -250,12 +267,14 @@ func (c *Client) GetArtistAlbums(ctx context.Context, artistID, limit int) ([]Al
 			"index": strconv.Itoa(offset),
 		})
 		if err != nil {
+			c.log.Error("get artist albums failed", "error", err, "artistID", artistID, "component", "deezer_api")
 			return albums, err
 		}
 		var result struct {
 			Data []Album `json:"data"`
 		}
 		if err := json.Unmarshal(data, &result); err != nil {
+			c.log.Error("unmarshal artist albums failed", "error", err, "artistID", artistID, "component", "deezer_api")
 			return albums, err
 		}
 		albums = append(albums, result.Data...)
@@ -273,12 +292,14 @@ func (c *Client) GetArtistTopTracks(ctx context.Context, artistID, limit int) ([
 		"limit": strconv.Itoa(limit),
 	})
 	if err != nil {
+		c.log.Error("get artist top tracks failed", "error", err, "artistID", artistID, "component", "deezer_api")
 		return nil, err
 	}
 	var result struct {
 		Data []Track `json:"data"`
 	}
 	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("unmarshal artist top tracks failed", "error", err, "artistID", artistID, "component", "deezer_api")
 		return nil, err
 	}
 	return result.Data, nil
@@ -348,6 +369,7 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 
 	u, err := url.Parse(baseURL + "/" + strings.TrimLeft(endpoint, "/"))
 	if err != nil {
+		c.log.Error("deezer api URL parse failed", "error", err, "endpoint", endpoint, "component", "deezer_api")
 		return nil, err
 	}
 
@@ -362,22 +384,26 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
+		c.log.Error("deezer api create request failed", "error", err, "endpoint", endpoint, "component", "deezer_api")
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
+		c.log.Error("deezer api HTTP request failed", "error", err, "endpoint", endpoint, "component", "deezer_api")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
+		c.log.Error("deezer api read response failed", "error", err, "endpoint", endpoint, "component", "deezer_api")
 		return nil, err
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		c.log.Error("deezer api non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "deezer_api")
 		return nil, fmt.Errorf("deezer API HTTP %d: %s", resp.StatusCode, string(body))
 	}
 

@@ -3,6 +3,7 @@ package spotify
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"sync"
@@ -25,18 +26,21 @@ const (
 type SpotifyClient struct {
 	http *http.Client
 	cfg  *SpotifyConfig
+	log  *slog.Logger
 }
 
 // NewClient creates a SpotifyClient that automatically injects auth headers
 // and handles token refresh and rate limiting via a custom RoundTripper.
-func NewClient(cfg *SpotifyConfig) *SpotifyClient {
+func NewClient(cfg *SpotifyConfig, log *slog.Logger) *SpotifyClient {
 	return &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:         cfg,
 				transport:   http.DefaultTransport,
 				refreshFunc: RefreshAccessToken,
+				log:         log,
 			},
 			Timeout: defaultTimeout,
 		},
@@ -55,8 +59,9 @@ func (c *SpotifyClient) Do(req *http.Request) (*http.Response, error) {
 type authTransport struct {
 	cfg         *SpotifyConfig
 	transport   http.RoundTripper
+	log         *slog.Logger
 	mu          sync.Mutex
-	refreshFunc func(ctx context.Context, refreshToken, clientID string) (newAccessToken string, expiresIn int, err error)
+	refreshFunc func(ctx context.Context, refreshToken, clientID string, log *slog.Logger) (newAccessToken string, expiresIn int, err error)
 }
 
 func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -65,6 +70,9 @@ func (t *authTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 
 	resp, err := t.transport.RoundTrip(req)
 	if err != nil {
+		if t.log != nil {
+			t.log.Error("spotify transport roundtrip failed", "error", err, "component", "spotify_client")
+		}
 		return nil, err
 	}
 
@@ -122,8 +130,11 @@ func (t *authTransport) handleUnauthorized(resp *http.Response, originalReq *htt
 		return nil, fmt.Errorf("spotify: unauthorized and no refresh token available")
 	}
 
-	newToken, expiresIn, err := t.refreshFunc(originalReq.Context(), refreshToken, clientID)
+	newToken, expiresIn, err := t.refreshFunc(originalReq.Context(), refreshToken, clientID, t.log)
 	if err != nil {
+		if t.log != nil {
+			t.log.Error("spotify token refresh failed", "error", err, "component", "spotify_client")
+		}
 		return nil, fmt.Errorf("spotify: token refresh failed: %w", err)
 	}
 
@@ -149,6 +160,9 @@ func (t *authTransport) handleRateLimit(resp *http.Response, originalReq *http.R
 		var err error
 		resp, err = t.transport.RoundTrip(retryReq)
 		if err != nil {
+			if t.log != nil {
+				t.log.Error("spotify rate limit retry failed", "error", err, "component", "spotify_client")
+			}
 			return nil, err
 		}
 

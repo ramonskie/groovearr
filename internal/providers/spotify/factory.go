@@ -67,7 +67,7 @@ func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResource
 	if cfg.Mode == "dev" || cfg.Mode == "free" {
 		f.mode = cfg.Mode
 	}
-	return NewPlugin(&cfg, resources.DownloadPath), nil
+	return NewPlugin(&cfg, resources.DownloadPath, resources.Logger), nil
 }
 
 // ValidateConfig checks whether the raw config is structurally valid.

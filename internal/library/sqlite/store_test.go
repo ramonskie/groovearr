@@ -2,14 +2,20 @@ package sqlite
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestStore_ArtistCRUD(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
-	store, err := New(dbPath)
+	store, err := New(dbPath, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -77,7 +83,7 @@ func TestStore_ArtistCRUD(t *testing.T) {
 
 func TestStore_AlbumCRUD(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
-	store, err := New(dbPath)
+	store, err := New(dbPath, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +133,7 @@ func TestStore_AlbumCRUD(t *testing.T) {
 
 func TestStore_TrackCRUD(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
-	store, err := New(dbPath)
+	store, err := New(dbPath, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +211,7 @@ func TestStore_TrackCRUD(t *testing.T) {
 
 func TestStore_ExternalIDLookups(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
-	store, err := New(dbPath)
+	store, err := New(dbPath, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -241,7 +247,7 @@ func TestStore_ExternalIDLookups(t *testing.T) {
 
 func TestStore_DuplicateUpsert(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
-	store, err := New(dbPath)
+	store, err := New(dbPath, testLogger())
 	if err != nil {
 		t.Fatal(err)
 	}

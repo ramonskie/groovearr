@@ -3,6 +3,7 @@ package coverartarchive
 import (
 	"context"
 	"fmt"
+	"log/slog"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -12,13 +13,15 @@ import (
 // using the Cover Art Archive public API. No credentials required.
 type Client struct {
 	api       *apiClient
+	log       *slog.Logger
 	connected bool
 }
 
 // NewClient creates a Cover Art Archive metadata provider.
-func NewClient() *Client {
+func NewClient(log *slog.Logger) *Client {
 	return &Client{
-		api: newAPIClient(),
+		api: newAPIClient(log),
+		log: log,
 	}
 }
 
@@ -39,6 +42,9 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 	// An empty result (not found) is fine — we only care about network errors.
 	_, err := c.api.GetReleaseImages(ctx, "test")
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive connectivity check failed", "error", err, "component", "caa")
+		}
 		return fmt.Errorf("coverartarchive: connectivity check failed: %w", err)
 	}
 	c.connected = true
@@ -72,6 +78,9 @@ func (c *Client) EnrichTrack(ctx context.Context, track *domain.Track) (*metadat
 func (c *Client) SearchCoverByMBID(ctx context.Context, mbid string) (*metadata.CoverResult, error) {
 	images, err := c.api.GetReleaseImages(ctx, mbid)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("coverartarchive search cover failed", "error", err, "mbid", mbid, "component", "caa")
+		}
 		return nil, err
 	}
 	if images == nil || len(images.Images) == 0 {

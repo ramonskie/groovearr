@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -23,20 +24,23 @@ func newTestAPI(handler http.HandlerFunc) (*API, *httptest.Server) {
 		Tokens: SpotifyTokens{AccessToken: "test-access-token"},
 	}
 
+	log := slog.New(slog.DiscardHandler)
 	client := &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg: cfg,
+				log: log,
 				transport: &urlRewriteTransport{serverURL: server.URL},
-				refreshFunc: func(ctx context.Context, refreshToken, clientID string) (string, int, error) {
+				refreshFunc: func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 					return "", 0, errors.New("no refresh in test")
 				},
 			},
 			Timeout: defaultTimeout,
 		},
 	}
-	return NewAPI(client), server
+	return NewAPI(client, log), server
 }
 
 // urlRewriteTransport redirects Spotify API requests to a test server.
@@ -971,17 +975,20 @@ func TestFreeModeError(t *testing.T) {
 		Mode:   "free",
 		Tokens: SpotifyTokens{AccessToken: ""},
 	}
+	log := slog.New(slog.DiscardHandler)
 	client := &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:       cfg,
+				log:       log,
 				transport: &urlRewriteTransport{serverURL: server.URL},
 			},
 			Timeout: defaultTimeout,
 		},
 	}
-	api := NewAPI(client)
+	api := NewAPI(client, log)
 
 	tests := []struct {
 		name string
@@ -1023,17 +1030,20 @@ func TestFreeModeNoTokenEvenDevMode(t *testing.T) {
 		Mode:   "dev",
 		Tokens: SpotifyTokens{AccessToken: ""},
 	}
+	log := slog.New(slog.DiscardHandler)
 	client := &SpotifyClient{
 		cfg: cfg,
+		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:       cfg,
+				log:       log,
 				transport: &urlRewriteTransport{serverURL: server.URL},
 			},
 			Timeout: defaultTimeout,
 		},
 	}
-	api := NewAPI(client)
+	api := NewAPI(client, log)
 
 	_, err := api.SearchTracks(context.Background(), "q", 5, 0)
 	if err == nil {

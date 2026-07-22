@@ -23,7 +23,7 @@ func TestTagWriterHandler_MP3(t *testing.T) {
 	// Size: synchsafe int for 0 bytes
 	os.WriteFile(mp3Path, header, 0o644)
 
-	handler := NewTagWriterHandler()
+	handler := NewTagWriterHandler(testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-tags-1",
 		FilePath: mp3Path,
@@ -47,7 +47,7 @@ func TestTagWriterHandler_FLAC(t *testing.T) {
 	// treats this as non-fatal.
 	os.WriteFile(flacPath, []byte("fLaC\x00"), 0o644)
 
-	handler := NewTagWriterHandler()
+	handler := NewTagWriterHandler(testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-tags-2",
 		FilePath: flacPath,
@@ -64,7 +64,7 @@ func TestTagWriterHandler_FLAC(t *testing.T) {
 }
 
 func TestTagWriterHandler_NoFilePath(t *testing.T) {
-	handler := NewTagWriterHandler()
+	handler := NewTagWriterHandler(testLogger())
 	record := &domain.DownloadRecord{ID: "test-tags-3"}
 	err := handler.Handle(context.Background(), record)
 	if err != nil {
@@ -77,7 +77,7 @@ func TestTagWriterHandler_NonAudio(t *testing.T) {
 	txtPath := filepath.Join(tmpDir, "readme.txt")
 	os.WriteFile(txtPath, []byte("hello"), 0o644)
 
-	handler := NewTagWriterHandler()
+	handler := NewTagWriterHandler(testLogger())
 	record := &domain.DownloadRecord{
 		ID:       "test-tags-4",
 		FilePath: txtPath,

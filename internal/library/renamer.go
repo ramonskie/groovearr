@@ -4,6 +4,7 @@ package library
 import (
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,13 +16,18 @@ import (
 type Renamer struct {
 	resolver *PathResolver
 	root     string // absolute base directory for resolved paths
+	log      *slog.Logger
 }
 
 // NewRenamer creates a Renamer with a folder template and root directory.
-func NewRenamer(template, root string) *Renamer {
+func NewRenamer(template, root string, logger *slog.Logger) *Renamer {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &Renamer{
 		resolver: NewPathResolver(template),
 		root:     root,
+		log:      logger,
 	}
 }
 
@@ -125,7 +131,7 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 	if err := os.Rename(filePath, targetPath); err != nil {
 		if strings.Contains(err.Error(), "cross-device") {
 			// Copy + delete for cross-filesystem moves (Docker volumes).
-			if copyErr := copyFile(filePath, targetPath); copyErr != nil {
+			if copyErr := r.copyFile(filePath, targetPath); copyErr != nil {
 				return filePath, fmt.Errorf("copy %s → %s: %w", filePath, targetPath, copyErr)
 			}
 			os.Remove(filePath)
@@ -138,15 +144,17 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 }
 
 // copyFile copies a file from src to dst.
-func copyFile(src, dst string) error {
+func (r *Renamer) copyFile(src, dst string) error {
 	s, err := os.Open(src)
 	if err != nil {
+		r.log.Error("open src failed", "src", src, "error", err, "component", "renamer")
 		return err
 	}
 	defer s.Close()
 
 	d, err := os.Create(dst)
 	if err != nil {
+		r.log.Error("create dst failed", "dst", dst, "error", err, "component", "renamer")
 		return err
 	}
 	defer d.Close()

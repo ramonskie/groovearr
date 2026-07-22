@@ -203,7 +203,7 @@ func TestExchangeCode_Success(t *testing.T) {
 
 	ctx := context.Background()
 	accessToken, refreshToken, expiresIn, err := ExchangeCode(
-		ctx, "auth_code_123", "verifier_abc", "cli_42", "http://localhost:8008/callback",
+		ctx, "auth_code_123", "verifier_abc", "cli_42", "http://localhost:8008/callback", nil,
 	)
 	if err != nil {
 		t.Fatalf("ExchangeCode: %v", err)
@@ -231,7 +231,7 @@ func TestExchangeCode_ErrorResponse(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, _, _, err := ExchangeCode(ctx, "bad_code", "v", "c", "http://localhost")
+	_, _, _, err := ExchangeCode(ctx, "bad_code", "v", "c", "http://localhost", nil)
 	if err == nil {
 		t.Fatal("ExchangeCode should return error for invalid_grant")
 	}
@@ -247,7 +247,7 @@ func TestExchangeCode_NonOKStatus(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost")
+	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost", nil)
 	if err == nil {
 		t.Fatal("ExchangeCode should return error for HTTP 500")
 	}
@@ -268,7 +268,7 @@ func TestExchangeCode_MissingAccessToken(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost")
+	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost", nil)
 	if err == nil {
 		t.Fatal("ExchangeCode should return error when access_token is missing")
 	}
@@ -304,7 +304,7 @@ func TestRefreshAccessToken_Success(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	accessToken, expiresIn, err := RefreshAccessToken(ctx, "existing_refresh_token", "cli_42")
+	accessToken, expiresIn, err := RefreshAccessToken(ctx, "existing_refresh_token", "cli_42", nil)
 	if err != nil {
 		t.Fatalf("RefreshAccessToken: %v", err)
 	}
@@ -328,7 +328,7 @@ func TestRefreshAccessToken_Error(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, _, err := RefreshAccessToken(ctx, "revoked_token", "cli")
+	_, _, err := RefreshAccessToken(ctx, "revoked_token", "cli", nil)
 	if err == nil {
 		t.Fatal("RefreshAccessToken should return error for invalid_grant")
 	}
@@ -415,7 +415,7 @@ func TestExchangeCode_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel() // cancel immediately
 
-	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost")
+	_, _, _, err := ExchangeCode(ctx, "code", "v", "c", "http://localhost", nil)
 	if err == nil {
 		t.Fatal("ExchangeCode should return error when context is cancelled")
 	}
@@ -428,7 +428,7 @@ func TestRefreshAccessToken_ContextCancelled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	_, _, err := RefreshAccessToken(ctx, "rt", "c")
+	_, _, err := RefreshAccessToken(ctx, "rt", "c", nil)
 	if err == nil {
 		t.Fatal("RefreshAccessToken should return error when context is cancelled")
 	}

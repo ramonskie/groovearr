@@ -2,7 +2,7 @@ package spotify
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"sync"
 	"time"
@@ -35,9 +35,9 @@ func init() {
 // The rebuild callback is invoked after tokens are stored to recreate the spotify plugin
 // so it picks up the new access token. The verify callback is called after rebuild to
 // run CheckConnection so the UI reflects the new state.
-func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
+func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
 	mux.HandleFunc("GET /api/spotify/login", handleSpotifyLogin(cfg))
-	mux.HandleFunc("GET /api/spotify/callback", handleSpotifyCallback(cfg, rebuild, verify))
+	mux.HandleFunc("GET /api/spotify/callback", handleSpotifyCallback(cfg, logger, rebuild, verify))
 }
 
 // handleSpotifyLogin initiates the OAuth PKCE flow by redirecting the user
@@ -87,7 +87,7 @@ func handleSpotifyLogin(cfg *config.Persistence) http.HandlerFunc {
 // handleSpotifyCallback handles the OAuth callback from Spotify. It validates
 // the state parameter, exchanges the authorization code for tokens, and stores
 // them in the config.
-func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) http.HandlerFunc {
+func handleSpotifyCallback(cfg *config.Persistence, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		code := r.URL.Query().Get("code")
 		state := r.URL.Query().Get("state")
@@ -110,7 +110,7 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 		}
 		oauthStatesMu.Unlock()
 		if !ok {
-			log.Printf("spotify: CSRF check: unknown state %q", state)
+			logger.Warn("CSRF check: unknown state", "state", state, "component", "spotify")
 			http.Error(w, "invalid state — CSRF check failed", http.StatusForbidden)
 			return
 		}
@@ -129,10 +129,10 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 		}
 
 		accessToken, refreshToken, expiresIn, err := ExchangeCode(
-			r.Context(), code, verifier, spCfg.ClientID, spCfg.RedirectURI,
+			r.Context(), code, verifier, spCfg.ClientID, spCfg.RedirectURI, logger,
 		)
 		if err != nil {
-			log.Printf("spotify: token exchange failed: %v", err)
+			logger.Error("token exchange failed", "error", err, "component", "spotify")
 			http.Error(w, "token exchange failed: "+err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -147,6 +147,7 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 		if err := cfg.Update(func(c *config.Config) error {
 			b, err := json.Marshal(spCfg)
 			if err != nil {
+				logger.Error("spotify config marshal failed", "error", err, "component", "spotify_handler")
 				return err
 			}
 			if c.Sources == nil {
@@ -155,7 +156,7 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 			c.Sources["spotify"] = b
 			return nil
 		}); err != nil {
-			log.Printf("spotify: failed to save tokens: %v", err)
+			logger.Error("failed to save tokens", "error", err, "component", "spotify")
 			http.Error(w, "failed to save tokens", http.StatusInternalServerError)
 			return
 		}
@@ -164,7 +165,7 @@ func handleSpotifyCallback(cfg *config.Persistence, rebuild func(name string, ra
 		updated := cfg.Get()
 		if raw, ok := updated.Sources["spotify"]; ok {
 			if err := rebuild("spotify", raw); err != nil {
-				log.Printf("spotify: plugin rebuild after OAuth: %v", err)
+				logger.Error("plugin rebuild after OAuth failed", "error", err, "component", "spotify")
 			} else if verify != nil {
 				verify("spotify")
 			}

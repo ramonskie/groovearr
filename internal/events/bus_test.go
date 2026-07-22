@@ -2,14 +2,20 @@ package events
 
 import (
 	"context"
+	"io"
+	"log/slog"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
 
+func testLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
+
 func TestPublishToMultipleSubscribers(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var (
 		mu    sync.Mutex
 		got   []string
@@ -52,7 +58,7 @@ func TestPublishToMultipleSubscribers(t *testing.T) {
 }
 
 func TestUnsubscribeRemovesHandler(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var count int32
 
 	handler := func(ctx context.Context, event any) {
@@ -78,7 +84,7 @@ func TestUnsubscribeRemovesHandler(t *testing.T) {
 }
 
 func TestUnsubscribeNoOpForMissingHandler(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 
 	h1 := func(ctx context.Context, event any) {}
 	h2 := func(ctx context.Context, event any) {}
@@ -92,13 +98,13 @@ func TestUnsubscribeNoOpForMissingHandler(t *testing.T) {
 }
 
 func TestPublishEmptyTopic(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	// Should not panic or block.
 	bus.Publish(context.Background(), "nonexistent", "event")
 }
 
 func TestHandlerPanicIsolation(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var count int32
 
 	panicking := func(ctx context.Context, event any) {
@@ -120,7 +126,7 @@ func TestHandlerPanicIsolation(t *testing.T) {
 }
 
 func TestUnsubscribeDuringPublish(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var (
 		h1Called int32
 		h2Called int32
@@ -165,7 +171,7 @@ func TestUnsubscribeDuringPublish(t *testing.T) {
 }
 
 func TestConcurrentSubscribePublish(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var count int32
 
 	handler := func(ctx context.Context, event any) {
@@ -199,7 +205,7 @@ func TestConcurrentSubscribePublish(t *testing.T) {
 }
 
 func TestConcurrentSubscribeUnsubscribePublish(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	var running int32
 	atomic.StoreInt32(&running, 1)
 
@@ -233,7 +239,7 @@ func TestConcurrentSubscribeUnsubscribePublish(t *testing.T) {
 }
 
 func TestNewInMemoryEventBus(t *testing.T) {
-	bus := NewInMemoryEventBus()
+	bus := NewInMemoryEventBus(testLogger())
 	if bus == nil {
 		t.Fatal("NewInMemoryEventBus returned nil")
 	}

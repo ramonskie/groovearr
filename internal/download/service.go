@@ -3,7 +3,7 @@ package download
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/rand"
 	"sync"
 	"time"
@@ -43,6 +43,7 @@ type DownloadMeta struct {
 // DownloadService orchestrates the download lifecycle: queueing, status
 // tracking, cancellation, retry, and worker pool dispatch.
 type DownloadService struct {
+	log        *slog.Logger
 	store      DownloadStore
 	bus        events.IEventAggregator
 	workerPool WorkerPool
@@ -51,8 +52,12 @@ type DownloadService struct {
 
 // NewDownloadService creates a DownloadService backed by the given store
 // and event bus. Call SetWorkerPool before queuing downloads.
-func NewDownloadService(store DownloadStore, bus events.IEventAggregator) *DownloadService {
+func NewDownloadService(store DownloadStore, bus events.IEventAggregator, logger *slog.Logger) *DownloadService {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	return &DownloadService{
+		log:   logger,
 		store: store,
 		bus:   bus,
 	}
@@ -187,14 +192,14 @@ func (s *DownloadService) RecoverOrphans(ctx context.Context) {
 
 	queued, err := s.store.ListByState(ctx, domain.DownloadQueued)
 	if err != nil {
-		log.Printf("recover orphans: list failed: %v", err)
+		s.log.Error("recover orphans: list failed", "error", err, "component", "download")
 		return
 	}
 	if len(queued) == 0 {
 		return
 	}
 
-	log.Printf("recover orphans: found %d queued records, re-submitting", len(queued))
+	s.log.Info("recover orphans: re-submitting", "count", len(queued), "component", "download")
 	recovered := 0
 	for _, r := range queued {
 		// Skip records queued via QueuePending — they have no source info
@@ -203,12 +208,12 @@ func (s *DownloadService) RecoverOrphans(ctx context.Context) {
 			continue
 		}
 		if err := pool.Submit(ctx, &r); err != nil {
-			log.Printf("recover orphans: re-submit %s failed: %v", r.ID, err)
+			s.log.Error("recover orphans: re-submit failed", "download_id", r.ID, "error", err, "component", "download")
 			continue
 		}
 		recovered++
 	}
-	log.Printf("recover orphans: recovered %d/%d", recovered, len(queued))
+	s.log.Info("recover orphans: done", "recovered", recovered, "total", len(queued), "component", "download")
 }
 
 // GetStatus returns the current state of a download by ID.
@@ -234,11 +239,15 @@ func (s *DownloadService) ListActive(ctx context.Context) ([]domain.DownloadReco
 // Cancel transitions a download to the "ignored" state, cancels the
 // in-progress worker goroutine, and fires a state-changed event.
 func (s *DownloadService) Cancel(ctx context.Context, id string) error {
+	s.log.Info("cancelling download", "download_id", id, "component", "download")
+
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
+		s.log.Error("cancel: get failed", "download_id", id, "error", err, "component", "download")
 		return fmt.Errorf("cancel: %w", err)
 	}
 	if record == nil {
+		s.log.Error("cancel: not found", "download_id", id, "component", "download")
 		return fmt.Errorf("cancel: download %q not found", id)
 	}
 
@@ -270,13 +279,16 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 func (s *DownloadService) Retry(ctx context.Context, id string) error {
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
+		s.log.Error("retry: get failed", "download_id", id, "error", err, "component", "download")
 		return fmt.Errorf("retry: %w", err)
 	}
 	if record == nil {
+		s.log.Error("retry: not found", "download_id", id, "component", "download")
 		return fmt.Errorf("retry: download %q not found", id)
 	}
 
 	if !record.State.IsRetryable() {
+		s.log.Error("retry: not retryable", "download_id", id, "state", record.State, "component", "download")
 		return fmt.Errorf("retry: download %q in state %q is not retryable", id, record.State)
 	}
 

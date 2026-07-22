@@ -42,6 +42,9 @@ func (p *Plugin) GetUserPlaylists(ctx context.Context) ([]playlist.PlaylistInfo,
 	for {
 		page, err := p.api.GetUserPlaylists(ctx, pageSize, offset)
 		if err != nil {
+			if p.log != nil {
+				p.log.Error("spotify get user playlists failed", "error", err, "component", "spotify_playlist")
+			}
 			return nil, fmt.Errorf("spotify: get user playlists: %w", err)
 		}
 
@@ -76,6 +79,9 @@ func (p *Plugin) getPlaylistTracksDev(ctx context.Context, playlistID string) ([
 	// Fetch playlist metadata for the name.
 	pl, err := p.api.GetPlaylist(ctx, playlistID)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify get playlist failed", "error", err, "component", "spotify_playlist")
+		}
 		return nil, "", fmt.Errorf("spotify: get playlist: %w", err)
 	}
 	playlistName := pl.Name
@@ -86,6 +92,9 @@ func (p *Plugin) getPlaylistTracksDev(ctx context.Context, playlistID string) ([
 	for {
 		page, err := p.api.GetPlaylistTracks(ctx, playlistID, pageSize, offset)
 		if err != nil {
+			if p.log != nil {
+				p.log.Error("spotify get playlist tracks failed", "error", err, "component", "spotify_playlist")
+			}
 			return nil, "", fmt.Errorf("spotify: get playlist tracks: %w", err)
 		}
 
@@ -123,8 +132,11 @@ func (p *Plugin) getPlaylistTracksFree(ctx context.Context, sourcePlaylistID str
 		return nil, "", fmt.Errorf("spotify: URL type is %q, expected playlist", parsed.Type)
 	}
 
-	ep, err := FetchEmbedPlaylist(ctx, p.oembedClient, parsed.ID)
+	ep, err := FetchEmbedPlaylist(ctx, p.oembedClient, parsed.ID, p.log)
 	if err != nil {
+		if p.log != nil {
+			p.log.Error("spotify embed playlist fetch failed", "error", err, "component", "spotify_playlist")
+		}
 		return nil, "", fmt.Errorf("spotify: embed playlist fetch: %w", err)
 	}
 
