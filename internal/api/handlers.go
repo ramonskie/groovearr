@@ -144,7 +144,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 
 	s.httpSrv = &http.Server{
 		Addr:         addr,
-		Handler:      withLogging(s.log)(withRequestID(withCORS(mux))),
+		Handler:      withLogging(s.log)(withRequestID(withCORS(s.withAuth(mux)))),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -228,7 +228,7 @@ func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Api-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
 			return

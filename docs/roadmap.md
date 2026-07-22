@@ -178,7 +178,7 @@ Deployment, security, and operational concerns.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 70 | **Authentication** — login gate, reverse proxy support, API keys | 🔴 High | L | — |
+| 70 | **Authentication** — API key auth via `X-Api-Key` header or `?apikey` query param. Reverse proxy auth handled at proxy level (nginx/traefik). | ✅ Done | L | — |
 | 71 | **Docker image + docker-compose with slskd** — one-command `docker compose up` for the free path. Multi-stage build (golang → alpine), three named volumes, slskd sidecar. | ✅ Done | M | — |
 | 72 | **Multi-profile support** — separate libraries/configs per profile | 🟢 Low | L | Auth |
 | 73 | **Setup wizard** — first-run guided config (choose free/premium path) | 🟡 Medium | M | — |
@@ -205,7 +205,7 @@ Deployment, security, and operational concerns.
 | 4 | Playlists & Discovery | 10 features | 🟡 4 done, 6 remaining |
 | 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
 | 6 | Automation | 7 features | ❌ 0/7 |
-| 7 | Platform & Ops | 12 features | 🟡 1/12 (71 done; 70,72-81 remain) |
+| 7 | Platform & Ops | 12 features | 🟡 2/12 (70,71 done; 72-81 remain) |
 | **Total** | | **81 features** | **32 done, 49 remaining** |
 
 ## Known Bugs
@@ -242,7 +242,7 @@ Deployment, security, and operational concerns.
 
 1. **Structured logging** — replace `log.Printf` with `log/slog`, add request IDs (#B8, 🔴 High)
 2. **HTTP server timeouts** — set Read/Write/Idle timeouts (#B9, ✅ Done)
-3. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
+3. **Authentication** — API key auth via header + query param (#70, ✅ Done)
 4. **API rate limiting** — protect downstream providers from excessive calls (#B14, 🟡 Medium)
 5. **Worker pool init fix** — constructor now accepts pool directly (#B10, ✅ Done)
 6. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)

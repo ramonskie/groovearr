@@ -16,6 +16,7 @@ type Config struct {
 	Sources map[string]json.RawMessage `json:"sources"`
 	Library LibraryConfig              `json:"library"`
 	Quality QualityConfig              `json:"quality"`
+	Auth    AuthConfig                 `json:"auth"`
 }
 
 // LibraryConfig holds music library paths.
@@ -31,6 +32,12 @@ type LibraryConfig struct {
 type QualityConfig struct {
 	PreferredFormat string `json:"preferred_format"` // flac, mp3, any
 	MinBitrate      int    `json:"min_bitrate"`      // kbps, 0 = no minimum
+}
+
+// AuthConfig holds authentication settings. When APIKey is empty,
+// all requests are allowed (backwards compatible default).
+type AuthConfig struct {
+	APIKey string `json:"api_key"` // secret key passed via X-Api-Key header or ?apikey query param
 }
 
 var validFormats = map[string]bool{"flac": true, "mp3": true, "any": true}
@@ -84,6 +91,11 @@ func (c Config) Validate() []string {
 		errs = append(errs, "quality.min_bitrate: must be >= 0")
 	}
 
+	// Auth.
+	if c.Auth.APIKey != "" && len(c.Auth.APIKey) < 8 {
+		errs = append(errs, "auth.api_key: should be at least 8 characters")
+	}
+
 	return errs
 }
 
@@ -122,6 +134,11 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Quality.MinBitrate > 0 {
 		c.Quality.MinBitrate = partial.Quality.MinBitrate
+	}
+
+	// Auth.
+	if partial.Auth.APIKey != "" {
+		c.Auth.APIKey = partial.Auth.APIKey
 	}
 }
 
