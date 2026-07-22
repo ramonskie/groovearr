@@ -8,10 +8,12 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/provider"
 )
 
 // Compile-time interface check.
@@ -47,7 +49,10 @@ func NewPlugin(cfg *SpotifyConfig, downloadPath string, logger *slog.Logger) *Pl
 		cfg:        cfg,
 		dlPath:     downloadPath,
 		log:        logger,
-		oembedClient: http.DefaultClient,
+		oembedClient: &http.Client{
+			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
+			Timeout:   15 * time.Second,
+		},
 	}
 	if cfg.Mode == "dev" {
 		p.client = NewClient(cfg, logger)

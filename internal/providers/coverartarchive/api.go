@@ -9,9 +9,14 @@ import (
 	"net/http"
 	"net/url"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/provider"
 )
 
 const baseURL = "https://coverartarchive.org"
+
+// caaRate limits outgoing requests to the Cover Art Archive to 5 req/s.
+const caaRate = 5
 
 // Image represents a single cover art image from the CAA JSON response.
 type Image struct {
@@ -31,7 +36,7 @@ type ReleaseImages struct {
 }
 
 // apiClient provides access to the Cover Art Archive public API.
-// No rate limiting required.
+// Rate limited to 5 req/s to be polite to the archive.
 type apiClient struct {
 	httpClient *http.Client
 	log        *slog.Logger
@@ -39,7 +44,10 @@ type apiClient struct {
 
 func newAPIClient(log *slog.Logger) *apiClient {
 	return &apiClient{
-		httpClient: &http.Client{Timeout: 15 * time.Second},
+		httpClient: &http.Client{
+			Timeout:   15 * time.Second,
+			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, caaRate),
+		},
 		log:        log,
 	}
 }

@@ -25,6 +25,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/playlist"
+	"github.com/ramonskie/groovearr/internal/provider"
 	"github.com/ramonskie/groovearr/internal/sanitize"
 
 	"golang.org/x/crypto/blowfish"
@@ -32,6 +33,12 @@ import (
 
 const downloadPluginName = "deezer"
 const downloadDisplayName = "Deezer"
+
+// Outgoing rate limits — requests per second to Deezer APIs.
+const (
+	deezerGatewayRate  = 10 // auth, playlist, search metadata
+	deezerDownloadRate = 30 // file transfers (higher throughput)
+)
 
 // Deezer internal API endpoints.
 const (
@@ -109,14 +116,14 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string, logger *slog.Logge
 			Jar:     jar,
 			Transport: &headerTransport{
 				headers:   downloadHeaders,
-				transport: http.DefaultTransport,
+				transport: provider.NewRateLimitedTransport(http.DefaultTransport, deezerGatewayRate),
 			},
 		},
 		downloadClient: &http.Client{
 			Jar: jar,
 			Transport: &headerTransport{
 				headers: downloadHeaders,
-				transport: &http.Transport{
+				transport: provider.NewRateLimitedTransport(&http.Transport{
 					Proxy:                 http.ProxyFromEnvironment,
 					DialContext:           (&net.Dialer{Timeout: 30 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
 					ForceAttemptHTTP2:     true,
@@ -124,7 +131,7 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string, logger *slog.Logge
 					IdleConnTimeout:       90 * time.Second,
 					TLSHandshakeTimeout:   10 * time.Second,
 					ExpectContinueTimeout: 1 * time.Second,
-				},
+				}, deezerDownloadRate),
 			},
 		},
 		downloads:   make(map[string]*domain.DownloadRecord),

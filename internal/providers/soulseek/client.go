@@ -21,10 +21,14 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/provider"
 )
 
 const pluginName = "soulseek"
 const displayName = "Soulseek"
+
+// soulseekRate limits outgoing requests to slskd to 10 req/s.
+const soulseekRate = 10
 
 // SoulseekConfig holds slskd connection and search parameters.
 type SoulseekConfig struct {
@@ -62,7 +66,7 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 		dlPath:         downloadPath,
 		baseURL:        strings.TrimRight(sc.SlskdURL, "/"),
 		apiKey:         sc.APIKey,
-		client:         &http.Client{Timeout: 120 * time.Second},
+		client: &http.Client{Timeout: 120 * time.Second, Transport: provider.NewRateLimitedTransport(http.DefaultTransport, soulseekRate)},
 		log:            logger,
 		activeSearches: make(map[string]context.CancelFunc),
 		downloads:         make(map[string]*domain.DownloadRecord),

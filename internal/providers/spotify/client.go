@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/provider"
 )
 
 // Base URL constants for the Spotify Web API and Accounts service.
@@ -20,6 +22,9 @@ const (
 	max429Retries  = 3
 	userAgent      = "groovearr/1.0"
 	defaultTimeout = 30 * time.Second
+
+	spotifyAPIRate    = 10 // Web API req/s
+	spotifyOEmbedRate = 5  // oembed URL unfurling req/s
 )
 
 // SpotifyClient wraps an http.Client with Spotify authentication and rate-limit handling.
@@ -38,7 +43,7 @@ func NewClient(cfg *SpotifyConfig, log *slog.Logger) *SpotifyClient {
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:         cfg,
-				transport:   http.DefaultTransport,
+				transport:   provider.NewRateLimitedTransport(http.DefaultTransport, spotifyAPIRate),
 				refreshFunc: RefreshAccessToken,
 				log:         log,
 			},

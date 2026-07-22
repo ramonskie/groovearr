@@ -44,6 +44,7 @@ type Server struct {
 	playlistSvc  *playlist.Service
 	httpSrv      *http.Server
 	log          *slog.Logger
+	rateLimiter  *ipRateLimiter
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
@@ -64,6 +65,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 		matcher:      matching.New(),
 		playlistSvc:  playlistSvc,
 		log:          logger,
+		rateLimiter:  newIPRateLimiter(defaultRateBuckets(), logger),
 	}
 
 	mux := http.NewServeMux()
@@ -101,15 +103,15 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("PUT /api/config", s.handleUpdateConfig)
 	mux.HandleFunc("GET /api/config/sources", s.handleGetSources)
 	mux.HandleFunc("POST /api/config/test/{source}", s.handleTestConnection)
-	mux.HandleFunc("POST /api/search", s.handleSearch)
-	mux.HandleFunc("POST /api/download", s.handleDownload)
-	mux.HandleFunc("POST /api/download/match", s.handleDownloadBest)
+	mux.Handle("POST /api/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleSearch)))
+	mux.Handle("POST /api/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownload)))
+	mux.Handle("POST /api/download/match", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadBest)))
 	mux.HandleFunc("GET /api/downloads", s.handleGetDownloads)
 	mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
 	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
-	mux.HandleFunc("POST /api/library/scan", s.handleLibraryScan)
+	mux.Handle("POST /api/library/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleLibraryScan)))
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
 
 	// Playlist routes.
@@ -117,17 +119,17 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/playlists/sources/{source}", s.handlePlaylistSourceBrowse)
 	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
 	mux.HandleFunc("GET /api/playlists/{id}", s.handleGetPlaylist)
-	mux.HandleFunc("POST /api/playlists/import", s.handleImportPlaylist)
-	mux.HandleFunc("POST /api/playlists/{id}/download-missing", s.handleDownloadMissing)
-	mux.HandleFunc("POST /api/playlists/{id}/sync", s.handleSyncPlaylist)
+	mux.Handle("POST /api/playlists/import", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleImportPlaylist)))
+	mux.Handle("POST /api/playlists/{id}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadMissing)))
+	mux.Handle("POST /api/playlists/{id}/sync", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleSyncPlaylist)))
 	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
 
 	// Discovery routes — metadata-first album/track browsing.
 	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)
-	mux.HandleFunc("GET /api/discover/search", s.handleDiscoverSearch)
+	mux.Handle("GET /api/discover/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverSearch)))
 	mux.HandleFunc("GET /api/discover/artists/{id}/albums", s.handleDiscoverArtistAlbums)
 	mux.HandleFunc("GET /api/discover/albums/{id}/tracks", s.handleDiscoverAlbumTracks)
-	mux.HandleFunc("POST /api/discover/albums/{id}/download", s.handleDiscoverAlbumDownload)
+	mux.Handle("POST /api/discover/albums/{id}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDiscoverAlbumDownload)))
 
 	// SSE endpoint for real-time download progress.
 	mux.HandleFunc("GET /api/events", s.handleEvents)
@@ -140,7 +142,13 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 		register(mux)
 	}
 
-	s.httpSrv = &http.Server{Addr: addr, Handler: withLogging(s.log)(withRequestID(withCORS(mux)))}
+	s.httpSrv = &http.Server{
+		Addr:         addr,
+		Handler:      withLogging(s.log)(withRequestID(withCORS(mux))),
+		ReadTimeout:  10 * time.Second,
+		WriteTimeout: 30 * time.Second,
+		IdleTimeout:  120 * time.Second,
+	}
 	return s
 }
 
@@ -152,6 +160,7 @@ func (s *Server) ListenAndServe() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.rateLimiter.Shutdown()
 	return s.httpSrv.Shutdown(ctx)
 }
 

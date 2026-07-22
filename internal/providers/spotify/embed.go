@@ -10,7 +10,15 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
+	"time"
+
+	"github.com/ramonskie/groovearr/internal/provider"
 )
+
+var oembedHTTPClient = &http.Client{
+	Transport: provider.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
+	Timeout:   15 * time.Second,
+}
 
 // SpotifyURL holds the parsed components of a Spotify URL.
 type SpotifyURL struct {
@@ -117,7 +125,7 @@ func looksLikeID(s string) bool {
 // FetchOEmbed fetches oEmbed metadata for a Spotify URL.
 // No authentication required — this is the open oEmbed endpoint.
 func FetchOEmbed(ctx context.Context, spotifyURL string, log *slog.Logger) (*OEmbedResponse, error) {
-	return fetchOEmbed(ctx, http.DefaultClient, spotifyURL, log)
+	return fetchOEmbed(ctx, oembedHTTPClient, spotifyURL, log)
 }
 
 // FetchOEmbedWithClient fetches oEmbed metadata for a Spotify URL using a
