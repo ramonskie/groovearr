@@ -110,11 +110,11 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 	}
 
 	searchReq := map[string]any{
-		"searchText":             query,
-		"timeout":                timeoutSec * 1000, // slskd expects milliseconds
-		"filterResponses":        true,
+		"searchText":              query,
+		"timeout":                 timeoutSec * 1000, // slskd expects milliseconds
+		"filterResponses":         false,
 		"minimumResponseFileCount": 1,
-		"minimumPeerUploadSpeed": c.cfg.MinUploadSpeed * 125000, // Mbps → bytes/sec
+		"minimumPeerUploadSpeed":  c.cfg.MinUploadSpeed * 125000, // Mbps → bytes/sec
 	}
 
 	body, _ := json.Marshal(searchReq)
@@ -289,50 +289,69 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 }
 
 // GetDownloadStatus returns a single download's status.
+// Tries username-based endpoint first (works for all states), falls back
+// to ID-only endpoint, then list endpoint as last resort.
 func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*domain.DownloadRecord, error) {
-	resp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads/"+url.PathEscape(downloadID), nil)
+	// Try username-based endpoint first — it returns the full record for all
+	// download states unlike the ID-only endpoint which 404s for completed
+	// transfers.
+	c.downloadsMu.RLock()
+	username := c.downloadUsernames[downloadID]
+	c.downloadsMu.RUnlock()
+
+	if username != "" {
+		endpoint := fmt.Sprintf("transfers/downloads/%s/%s",
+			url.PathEscape(username), url.PathEscape(downloadID))
+		if rec, err := c.trySingleEndpoint(ctx, endpoint, downloadID); err == nil {
+			return rec, nil
+		}
+	}
+
+	// Fallback 1: ID-only endpoint.
+	if rec, err := c.trySingleEndpoint(ctx, "transfers/downloads/"+url.PathEscape(downloadID), downloadID); err == nil {
+		return rec, nil
+	}
+
+	// Fallback 2: list all downloads and search by ID.
+	c.log.Warn("single-download endpoint failed, trying list fallback", "downloadID", downloadID, "component", "soulseek")
+	if listResp, listErr := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil); listErr == nil {
+		records := parseDownloadStatus(listResp, c.dlPath, c.log)
+		for _, rec := range records {
+			if rec.ID == downloadID {
+				c.log.Info("found match in list", "downloadID", downloadID, "state", rec.State, "component", "soulseek")
+				c.cacheRecord(&rec)
+				return &rec, nil
+			}
+		}
+		c.log.Warn("download not found in list", "downloadID", downloadID, "checked", len(records), "component", "soulseek")
+	} else {
+		c.log.Warn("list fallback failed", "error", listErr, "component", "soulseek")
+	}
+
+	// Last resort: cached record.
+	c.downloadsMu.RLock()
+	defer c.downloadsMu.RUnlock()
+	if r, ok := c.downloads[downloadID]; ok {
+		c.log.Debug("returning cached record", "downloadID", downloadID, "state", r.State, "component", "soulseek")
+		return r, nil
+	}
+
+	return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
+}
+
+// trySingleEndpoint fetches a single download record from the given slskd API
+// endpoint and parses the flat JSON object response.
+func (c *Client) trySingleEndpoint(ctx context.Context, endpoint, downloadID string) (*domain.DownloadRecord, error) {
+	resp, err := c.doRequest(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
-		// Single-transfer endpoint may 404 for completed/errored transfers.
-		c.log.Error("soulseek get download status request failed, trying list fallback", "error", err, "downloadID", downloadID, "component", "soulseek")
-		if listResp, listErr := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil); listErr == nil {
-			raw := string(listResp)
-			if len(raw) > 200 {
-				raw = raw[:200]
-			}
-			c.log.Debug("list response", "body", raw, "component", "soulseek")
-			records := parseDownloadStatus(listResp, c.dlPath, c.log)
-			c.log.Debug("list fallback", "records", len(records), "component", "soulseek")
-			for _, rec := range records {
-				c.log.Debug("list record", "id", rec.ID, "state", rec.State, "lookingFor", downloadID, "component", "soulseek")
-				if rec.ID == downloadID {
-					c.log.Info("found match in list", "downloadID", downloadID, "state", rec.State, "component", "soulseek")
-					c.cacheRecord(&rec)
-					return &rec, nil
-				}
-			}
-			c.log.Warn("download not found in list", "downloadID", downloadID, "checked", len(records), "component", "soulseek")
-		} else {
-			c.log.Warn("list fallback failed", "error", listErr, "component", "soulseek")
-		}
-		// Not in list either — use cached record if available.
-		c.downloadsMu.RLock()
-		defer c.downloadsMu.RUnlock()
-		if r, ok := c.downloads[downloadID]; ok {
-			c.log.Debug("returning cached record", "downloadID", downloadID, "state", r.State, "component", "soulseek")
-			return r, nil
-		}
-		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
+		return nil, err
 	}
-
-	records := parseDownloadStatus(resp, c.dlPath, c.log)
-	if len(records) == 0 {
-		return nil, fmt.Errorf("soulseek: download %s not found", downloadID)
+	rec := parseSingleDownload(resp, c.dlPath, c.log)
+	if rec == nil {
+		return nil, fmt.Errorf("soulseek: empty response for %s", downloadID)
 	}
-	record := records[0]
-
-	c.cacheRecord(&record)
-
-	return &record, nil
+	c.cacheRecord(rec)
+	return rec, nil
 }
 
 // cacheRecord stores a download record in the in-memory cache.
@@ -525,8 +544,6 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 			}
 
 			// Extract track number from filename (the only reliable field).
-			// Artist/Title come from discovery providers or playlist metadata,
-			// NOT from filename parsing.
 			trackNum := 0
 			trackTitle := filename
 			normalized := strings.ReplaceAll(filename, "\\", "/")
@@ -535,6 +552,14 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				n, _ := strconv.Atoi(m[1])
 				trackNum = n
 				trackTitle = strings.TrimSpace(m[2])
+			}
+
+			// Parse artist from filename when it follows "Artist - Title" pattern.
+			// Soulseek has no discovery metadata — the filename IS the metadata.
+			artist := ""
+			if idx := strings.Index(trackTitle, " - "); idx > 0 {
+				artist = strings.TrimSpace(trackTitle[:idx])
+				trackTitle = strings.TrimSpace(trackTitle[idx+3:])
 			}
 
 			durationSec, _ := fm["length"].(float64)
@@ -551,6 +576,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 					QueueLength:     int(getFloat(fm, "queueLength")),
 				},
 				Title:       trackTitle,
+				Artist:      artist,
 				TrackNumber: trackNum,
 			}
 			tracks = append(tracks, tr)
@@ -636,6 +662,58 @@ func extractAlbumPath(filename string) string {
 	return strings.Join(parts[:len(parts)-1], "/")
 }
 
+// parseSingleDownload parses a single download record from the slskd
+// single-download endpoint (flat JSON object, not wrapped in user/directory).
+func parseSingleDownload(raw json.RawMessage, downloadPath string, log *slog.Logger) *domain.DownloadRecord {
+	var f struct {
+		ID               string  `json:"id"`
+		Filename         string  `json:"filename"`
+		State            string  `json:"state"`
+		Size             int64   `json:"size"`
+		BytesTransferred int64   `json:"bytesTransferred"`
+		AverageSpeed     float64 `json:"averageSpeed"`
+		PercentComplete  float64 `json:"percentComplete"`
+	}
+	if err := json.Unmarshal(raw, &f); err != nil {
+		log.Error("parseSingleDownload unmarshal error", "error", err, "component", "soulseek")
+		return nil
+	}
+	if f.ID == "" {
+		return nil
+	}
+
+	normalizedFilename := strings.ReplaceAll(f.Filename, "\\", "/")
+	filePath := ""
+	if normalizedFilename != "" && downloadPath != "" {
+		filePath = filepath.Join(downloadPath, slskdOutputPath(normalizedFilename))
+	}
+
+	return &domain.DownloadRecord{
+		ID:          f.ID,
+		SourceName:  pluginName,
+		Filename:    normalizedFilename,
+		State:       parseState(f.State),
+		Progress:    f.PercentComplete,
+		Size:        f.Size,
+		Transferred: f.BytesTransferred,
+		Speed:       int64(f.AverageSpeed),
+		FilePath:    filePath,
+	}
+}
+
+// slskdOutputPath computes the actual output path slskd uses when moving a
+// completed download from the incomplete directory. slskd keeps only the last
+// two path segments (parent directory + filename) from the original remote path.
+//
+// Example: "Music/Artist/Album/track.flac" → "Album/track.flac"
+func slskdOutputPath(filename string) string {
+	parts := strings.Split(filename, "/")
+	if len(parts) >= 2 {
+		return filepath.Join(parts[len(parts)-2], parts[len(parts)-1])
+	}
+	return filename
+}
+
 func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Logger) []domain.DownloadRecord {
 	var users []struct {
 		Username    string `json:"username"`
@@ -665,7 +743,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Log
 				normalizedFilename := strings.ReplaceAll(f.Filename, "\\", "/")
 				filePath := ""
 				if normalizedFilename != "" && downloadPath != "" {
-					filePath = filepath.Join(downloadPath, normalizedFilename)
+					filePath = filepath.Join(downloadPath, slskdOutputPath(normalizedFilename))
 				}
 				records = append(records, domain.DownloadRecord{
 					ID:          f.ID,

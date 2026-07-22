@@ -265,8 +265,9 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
 		if err != nil {
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
-			// Mark as failed so it doesn't appear as pending forever.
-			rec.State = domain.DownloadFailed
+			// Mark as failedPending so it stays in the Pending tab and is retried
+			// on the next playlist sync rather than moving to Finished.
+			rec.State = domain.DownloadFailedPending
 			rec.Error = err.Error()
 			_ = s.downloadSvc.UpdateDownload(ctx, rec)
 			continue
