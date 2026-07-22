@@ -34,10 +34,18 @@ type QualityConfig struct {
 	MinBitrate      int    `json:"min_bitrate"`      // kbps, 0 = no minimum
 }
 
-// AuthConfig holds authentication settings. When APIKey is empty,
-// all requests are allowed (backwards compatible default).
+// AuthConfig holds authentication settings.
+//
+// Method = "none" (default): no authentication required.
+// Method = "forms": cookie-based login page with username + password.
+// Method = "basic": HTTP Basic Auth (browser popup).
+//
+// APIKey is always accepted regardless of method (for API/programmatic access).
 type AuthConfig struct {
-	APIKey string `json:"api_key"` // secret key passed via X-Api-Key header or ?apikey query param
+	Method   string `json:"method"`   // none, forms, basic
+	Username string `json:"username"` // for forms/basic auth
+	Password string `json:"password"` // bcrypt hash, masked in API responses
+	APIKey   string `json:"api_key"`  // accepted via X-Api-Key header or ?apikey query
 }
 
 var validFormats = map[string]bool{"flac": true, "mp3": true, "any": true}
@@ -92,6 +100,18 @@ func (c Config) Validate() []string {
 	}
 
 	// Auth.
+	validMethods := map[string]bool{"none": true, "forms": true, "basic": true, "": true}
+	if !validMethods[c.Auth.Method] {
+		errs = append(errs, fmt.Sprintf("auth.method: must be none, forms, or basic (got %q)", c.Auth.Method))
+	}
+	if c.Auth.Method != "" && c.Auth.Method != "none" {
+		if c.Auth.Username == "" {
+			errs = append(errs, "auth.username: required when auth.method is "+c.Auth.Method)
+		}
+		if c.Auth.Password == "" {
+			errs = append(errs, "auth.password: required when auth.method is "+c.Auth.Method)
+		}
+	}
 	if c.Auth.APIKey != "" && len(c.Auth.APIKey) < 8 {
 		errs = append(errs, "auth.api_key: should be at least 8 characters")
 	}
@@ -136,7 +156,19 @@ func (c *Config) mergeFields(partial *Config) {
 		c.Quality.MinBitrate = partial.Quality.MinBitrate
 	}
 
-	// Auth.
+	// Auth — preserve password if partial has a masked (asterisk) value.
+	if partial.Auth.Method != "" {
+		c.Auth.Method = partial.Auth.Method
+	}
+	if partial.Auth.Username != "" {
+		c.Auth.Username = partial.Auth.Username
+	}
+	if partial.Auth.Password != "" && !isMaskedString(partial.Auth.Password) {
+		hashed, err := HashPassword(partial.Auth.Password)
+		if err == nil {
+			c.Auth.Password = hashed
+		}
+	}
 	if partial.Auth.APIKey != "" {
 		c.Auth.APIKey = partial.Auth.APIKey
 	}
@@ -149,6 +181,25 @@ func Load(path string, logger *slog.Logger) (Config, error) {
 	if err != nil {
 		logger.Error("read config failed", "path", path, "error", err, "component", "config")
 		return cfg, err
+	}
+
+	// Auth — auto-generate API key if method is configured but no key exists.
+	if cfg.Auth.Method != "" && cfg.Auth.Method != "none" && cfg.Auth.APIKey == "" {
+		cfg.Auth.APIKey = GenerateAPIKey()
+	}
+
+	// Hash plaintext password on first load (bcrypt hashes start with "$2a$").
+	if cfg.Auth.Password != "" && !strings.HasPrefix(cfg.Auth.Password, "$2") {
+		hashed, hashErr := HashPassword(cfg.Auth.Password)
+		if hashErr == nil {
+			cfg.Auth.Password = hashed
+			// Persist the hashed password back to file.
+			if saveErr := saveConfigFile(path, cfg); saveErr != nil {
+				logger.Warn("failed to persist hashed password", "error", saveErr, "component", "config")
+			}
+		} else {
+			logger.Error("failed to hash password", "error", hashErr, "component", "config")
+		}
 	}
 
 	// Expand relative paths.
@@ -183,10 +234,23 @@ func readConfigFile(path string) (Config, error) {
 	return cfg, nil
 }
 
+// saveConfigFile writes cfg to path as indented JSON.
+func saveConfigFile(path string, cfg Config) error {
+	data, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, data, 0600)
+}
+
 // Mask returns a copy of Config with sensitive fields masked.
 // Recognized sensitive keys: api_key, token, secret, arl, password, key, api_secret.
 func (c Config) Mask() Config {
 	masked := c
+	// Mask password (bcrypt hash) — never expose it.
+	if masked.Auth.Password != "" {
+		masked.Auth.Password = "********"
+	}
 	masked.Sources = make(map[string]json.RawMessage, len(c.Sources))
 	for name, raw := range c.Sources {
 		masked.Sources[name] = maskSensitiveJSON(raw)

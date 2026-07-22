@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 )
 
@@ -73,13 +74,27 @@ func (p *Persistence) reload() error {
 		return err
 	}
 
-	// If the file didn't exist, readConfigFile returned defaults — persist them.
-	if _, statErr := os.Stat(p.path); os.IsNotExist(statErr) {
-		p.cfg = cfg
-		return p.save()
+	// Auth bootstrapping: auto-generate API key and hash password on first load.
+	needsSave := false
+	if cfg.Auth.Method != "" && cfg.Auth.Method != "none" && cfg.Auth.APIKey == "" {
+		cfg.Auth.APIKey = GenerateAPIKey()
+		needsSave = true
+	}
+	if cfg.Auth.Password != "" && !strings.HasPrefix(cfg.Auth.Password, "$2") {
+		hashed, hashErr := HashPassword(cfg.Auth.Password)
+		if hashErr == nil {
+			cfg.Auth.Password = hashed
+			needsSave = true
+		}
 	}
 
 	p.cfg = cfg
+
+	// If the file didn't exist, readConfigFile returned defaults — persist them.
+	if _, statErr := os.Stat(p.path); os.IsNotExist(statErr) || needsSave {
+		return p.save()
+	}
+
 	return nil
 }
 

@@ -45,6 +45,7 @@ type Server struct {
 	httpSrv      *http.Server
 	log          *slog.Logger
 	rateLimiter  *ipRateLimiter
+	sessions     *sessionStore
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
@@ -66,6 +67,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 		playlistSvc:  playlistSvc,
 		log:          logger,
 		rateLimiter:  newIPRateLimiter(defaultRateBuckets(), logger),
+		sessions:     newSessionStore(),
 	}
 
 	mux := http.NewServeMux()
@@ -99,6 +101,8 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 
 	// API routes.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/config", s.handleUpdateConfig)
 	mux.HandleFunc("GET /api/config/sources", s.handleGetSources)
