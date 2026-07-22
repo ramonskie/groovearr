@@ -3,6 +3,7 @@ package api
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strings"
 
@@ -22,14 +23,20 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		cfg := s.cfg.Get()
 
-		// No auth configured — allow all.
+		// No auth configured — allow all (Sonarr "None" behavior).
 		if cfg.Auth.Method == "" || cfg.Auth.Method == "none" {
 			next.ServeHTTP(w, r)
 			return
 		}
 
-		// Always allow health check, login, and non-API paths.
+		// Always allow health check, login, and non-API paths (static files, SPA).
 		if r.URL.Path == "/api/health" || r.URL.Path == "/api/login" || !strings.HasPrefix(r.URL.Path, "/api/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+
+		// Local bypass — skip auth for configured CIDR subnets.
+		if len(cfg.Auth.LocalBypassSubnets) > 0 && isInSubnet(r.RemoteAddr, cfg.Auth.LocalBypassSubnets) {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -152,6 +159,28 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// isInSubnet returns true if addr is within any of the given CIDR ranges.
+func isInSubnet(addr string, subnets []string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		host = addr
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	for _, cidr := range subnets {
+		_, ipNet, err := net.ParseCIDR(cidr)
+		if err != nil {
+			continue
+		}
+		if ipNet.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 // handleLogout clears the session cookie.

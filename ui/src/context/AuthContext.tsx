@@ -13,6 +13,7 @@ interface AuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
   username: string | null;
+  authMethod: string;
 }
 
 interface AuthContextValue extends AuthState {
@@ -45,6 +46,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading: true,
     isAuthenticated: false,
     username: null,
+    authMethod: "",
   });
 
   // Check if we're already authenticated (session cookie or API key).
@@ -56,13 +58,20 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
       const res = await fetch("/api/config", { headers });
       if (res.ok) {
-        setState({ isLoading: false, isAuthenticated: true, username: null });
+        const cfg = await res.json() as { auth?: { method?: string; api_key?: string } };
+        const method = cfg?.auth?.method || "";
+        const key = cfg?.auth?.api_key;
+        // Always store the API key so the SPA can use it for all requests.
+        if (key) {
+          try { localStorage.setItem(API_KEY_KEY, key); } catch {}
+        }
+        setState({ isLoading: false, isAuthenticated: true, username: null, authMethod: method });
         return;
       }
     } catch {
       // Network error — treat as unauthenticated.
     }
-    setState({ isLoading: false, isAuthenticated: false, username: null });
+    setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
   }, []);
 
   useEffect(() => {
@@ -81,13 +90,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       throw new Error((body as { error?: string }).error || "Login failed");
     }
 
-    setState({ isLoading: false, isAuthenticated: true, username });
+    setState({ isLoading: false, isAuthenticated: true, username, authMethod: "forms" });
   }, []);
 
   const logout = useCallback(async () => {
     await fetch("/api/logout", { method: "POST" }).catch(() => {});
     localStorage.removeItem(API_KEY_KEY);
-    setState({ isLoading: false, isAuthenticated: false, username: null });
+    setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
   }, []);
 
   return (

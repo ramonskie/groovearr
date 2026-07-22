@@ -34,6 +34,13 @@ export const settingsFormSchema = z.object({
   folder_template: z.string().optional(),
   playlist_path: z.string().optional(),
   playlist_template: z.string().optional(),
+
+  // Auth (Security)
+  auth_method: z.enum(["none", "forms"]).optional(),
+  auth_username: z.string().optional(),
+  auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
+  auth_api_key: z.string().optional(),
+  auth_local_bypass_subnets: z.string().optional(),
 });
 
 export type SettingsFormValues = z.infer<typeof settingsFormSchema>;
@@ -55,6 +62,11 @@ export const settingsDefaults: SettingsFormValues = {
   folder_template: "",
   playlist_path: "",
   playlist_template: "",
+  auth_method: "none",
+  auth_username: "",
+  auth_password: "",
+  auth_api_key: "",
+  auth_local_bypass_subnets: "",
 };
 
 // ─── Source badge variant mapping ───────────────────────────────────

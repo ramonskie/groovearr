@@ -13,11 +13,13 @@ import {
 import GeneralSettings from "./GeneralSettings";
 import SourcesSettings from "./SourcesSettings";
 import LibrarySettings from "./LibrarySettings";
+import SecuritySettings from "./SecuritySettings";
 
 const TABS = [
   { id: "general", label: "General" },
   { id: "sources", label: "Download Sources" },
   { id: "library", label: "Library" },
+  { id: "security", label: "Security" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
@@ -63,6 +65,11 @@ export default function SettingsPage() {
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
         playlist_template: config.library.playlist_template ?? "",
+        auth_method: (config.auth?.method || "none") as "none" | "forms",
+        auth_username: config.auth?.username ?? "",
+        auth_password: "",
+        auth_api_key: config.auth?.api_key ?? "",
+        auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
       });
     }
   }, [config, form]);
@@ -98,6 +105,15 @@ export default function SettingsPage() {
           folder_template: values.folder_template ?? "",
           playlist_path: values.playlist_path ?? "",
           playlist_template: values.playlist_template ?? "",
+        },
+        auth: {
+          method: values.auth_method ?? "none",
+          username: values.auth_username ?? "",
+          password: (values.auth_password?.length ?? 0) >= 4 ? values.auth_password : "",
+          local_bypass_subnets: (values.auth_local_bypass_subnets ?? "")
+            .split("\n")
+            .map((s) => s.trim())
+            .filter((s) => s.length > 0),
         },
       });
     },
@@ -146,6 +162,7 @@ export default function SettingsPage() {
           {activeTab === "general" && <GeneralSettings />}
           {activeTab === "sources" && <SourcesSettings />}
           {activeTab === "library" && <LibrarySettings />}
+          {activeTab === "security" && <SecuritySettings />}
         </div>
       </div>
     </FormProvider>

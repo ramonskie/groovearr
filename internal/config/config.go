@@ -41,11 +41,13 @@ type QualityConfig struct {
 // Method = "basic": HTTP Basic Auth (browser popup).
 //
 // APIKey is always accepted regardless of method (for API/programmatic access).
+// LocalBypassSubnets lists CIDR ranges that skip authentication entirely.
 type AuthConfig struct {
-	Method   string `json:"method"`   // none, forms, basic
-	Username string `json:"username"` // for forms/basic auth
-	Password string `json:"password"` // bcrypt hash, masked in API responses
-	APIKey   string `json:"api_key"`  // accepted via X-Api-Key header or ?apikey query
+	Method             string   `json:"method"`                // none, forms, basic
+	Username           string   `json:"username"`              // for forms/basic auth
+	Password           string   `json:"password"`              // bcrypt hash, masked in API responses
+	APIKey             string   `json:"api_key"`               // accepted via X-Api-Key header or ?apikey query
+	LocalBypassSubnets []string `json:"local_bypass_subnets"`  // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
 }
 
 var validFormats = map[string]bool{"flac": true, "mp3": true, "any": true}
@@ -172,6 +174,9 @@ func (c *Config) mergeFields(partial *Config) {
 	if partial.Auth.APIKey != "" {
 		c.Auth.APIKey = partial.Auth.APIKey
 	}
+	if partial.Auth.LocalBypassSubnets != nil {
+		c.Auth.LocalBypassSubnets = partial.Auth.LocalBypassSubnets
+	}
 }
 
 // Load reads config from a JSON file, falling back to defaults for missing fields.
@@ -181,11 +186,6 @@ func Load(path string, logger *slog.Logger) (Config, error) {
 	if err != nil {
 		logger.Error("read config failed", "path", path, "error", err, "component", "config")
 		return cfg, err
-	}
-
-	// Auth — auto-generate API key if method is configured but no key exists.
-	if cfg.Auth.Method != "" && cfg.Auth.Method != "none" && cfg.Auth.APIKey == "" {
-		cfg.Auth.APIKey = GenerateAPIKey()
 	}
 
 	// Hash plaintext password on first load (bcrypt hashes start with "$2a$").

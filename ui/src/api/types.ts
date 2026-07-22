@@ -40,10 +40,19 @@ export interface QualityConfig {
   min_bitrate: number;
 }
 
+export interface AuthConfig {
+  method?: string;
+  username?: string;
+  password?: string;
+  api_key?: string;
+  local_bypass_subnets?: string[];
+}
+
 export interface Config {
   sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
   quality: QualityConfig;
+  auth: AuthConfig;
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
@@ -51,6 +60,7 @@ export interface ConfigUpdatePayload {
   sources?: Record<string, Record<string, unknown>>;
   library?: Partial<LibraryConfig>;
   quality?: Partial<QualityConfig>;
+  auth?: Partial<AuthConfig>;
 }
 
 export interface UpdateConfigResponse {

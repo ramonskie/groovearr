@@ -86,19 +86,21 @@ function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { data: downloads } = useDownloads();
-  const { logout } = useAuth();
+  const { logout, authMethod } = useAuth();
 
   const activePage = pathToPage(location.pathname);
 
   const activeDownloadCount =
     downloads?.filter((d) => !TERMINAL_STATES.has(d.state)).length ?? 0;
 
+  const isAuthEnabled = authMethod !== "" && authMethod !== "none";
+
   const sidebar = (
     <SidebarNav
       activePage={activePage}
       onNavigate={(href) => navigate(href)}
       downloadCount={activeDownloadCount}
-      onLogout={() => logout()}
+      onLogout={isAuthEnabled ? () => logout() : undefined}
     />
   );
 

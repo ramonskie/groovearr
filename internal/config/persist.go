@@ -76,7 +76,7 @@ func (p *Persistence) reload() error {
 
 	// Auth bootstrapping: auto-generate API key and hash password on first load.
 	needsSave := false
-	if cfg.Auth.Method != "" && cfg.Auth.Method != "none" && cfg.Auth.APIKey == "" {
+	if cfg.Auth.APIKey == "" {
 		cfg.Auth.APIKey = GenerateAPIKey()
 		needsSave = true
 	}
