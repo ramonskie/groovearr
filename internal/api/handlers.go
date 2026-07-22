@@ -101,7 +101,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 
 	// API routes.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
-	mux.HandleFunc("POST /api/login", s.handleLogin)
+	mux.Handle("POST /api/login", withRateLimit("login", s.rateLimiter, http.HandlerFunc(s.handleLogin)))
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
 	mux.HandleFunc("PUT /api/config", s.handleUpdateConfig)
@@ -165,6 +165,7 @@ func (s *Server) ListenAndServe() error {
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.rateLimiter.Shutdown()
+	s.sessions.Shutdown()
 	return s.httpSrv.Shutdown(ctx)
 }
 

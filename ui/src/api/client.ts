@@ -41,21 +41,29 @@ const BASE_URL = "";
 
 /**
  * Typed fetch wrapper.  Throws parsed error message on non-ok responses.
+ * On 401, clears stored state and redirects to login (unless already there).
  * In dev, Vite proxies /api → localhost:8008; in prod the Go binary serves both.
  */
 async function request<T>(
   path: string,
   init?: Omit<RequestInit, "headers"> & { headers?: Record<string, string> },
 ): Promise<T> {
+  const apiKey = getStoredApiKey();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
     headers: {
       "Content-Type": "application/json",
+      ...(apiKey ? { "X-Api-Key": apiKey } : {}),
       ...init?.headers,
     },
   });
 
   if (!res.ok) {
+    if (res.status === 401 && window.location.pathname !== "/login") {
+      try { localStorage.removeItem("groovearr_api_key"); } catch {}
+      window.location.href = "/login";
+      throw new Error("Session expired");
+    }
     let message = `HTTP ${res.status} ${res.statusText}`;
     try {
       const body = (await res.json()) as ConfigValidationError | ApiError;
@@ -73,7 +81,10 @@ async function request<T>(
 
 /** Like request() but returns a Blob (used for cover art images). */
 async function requestBlob(path: string): Promise<Blob> {
-  const res = await fetch(`${BASE_URL}${path}`);
+  const apiKey = getStoredApiKey();
+  const res = await fetch(`${BASE_URL}${path}`, {
+    headers: apiKey ? { "X-Api-Key": apiKey } : {},
+  });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} ${res.statusText}`);
   }
@@ -284,4 +295,16 @@ export function downloadAlbum(albumId: string) {
     `/api/discover/albums/${encodeURIComponent(albumId)}/download`,
     { method: "POST" },
   );
+}
+
+// ─── Auth helpers ───────────────────────────────────────────────────
+
+const API_KEY_KEY = "groovearr_api_key";
+
+function getStoredApiKey(): string | null {
+  try {
+    return localStorage.getItem(API_KEY_KEY);
+  } catch {
+    return null;
+  }
 }

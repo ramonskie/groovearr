@@ -1,9 +1,6 @@
 package config
 
 import (
-	"crypto/rand"
-	"encoding/hex"
-
 	"github.com/google/uuid"
 	"golang.org/x/crypto/bcrypt"
 )
@@ -28,13 +25,4 @@ func HashPassword(plain string) (string, error) {
 // CheckPassword compares a bcrypt hash against a plaintext password.
 func CheckPassword(hash, plain string) bool {
 	return bcrypt.CompareHashAndPassword([]byte(hash), []byte(plain)) == nil
-}
-
-// generateSessionToken returns a 64-char hex random token for session cookies.
-func generateSessionToken() (string, error) {
-	b := make([]byte, 32)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return hex.EncodeToString(b), nil
 }

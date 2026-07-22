@@ -18,6 +18,7 @@ const (
 	defaultSearchRate   = 30 // GET /api/search, GET /api/discover/search
 	defaultDownloadRate = 10 // POST /api/download, playlists import/sync
 	defaultScanRate     = 2  // POST /api/library/scan
+	defaultLoginRate    = 5  // POST /api/login
 )
 
 // rateLimitBucket configures a rate limit for a group of endpoints.
@@ -33,10 +34,12 @@ func defaultRateBuckets() []rateLimitBucket {
 	rateSearch := rateEnv("RATE_SEARCH", defaultSearchRate)
 	rateDownload := rateEnv("RATE_DOWNLOAD", defaultDownloadRate)
 	rateScan := rateEnv("RATE_SCAN", defaultScanRate)
+	rateLogin := rateEnv("RATE_LOGIN", defaultLoginRate)
 	return []rateLimitBucket{
 		{name: "search", max: rateSearch, window: time.Minute},
 		{name: "download", max: rateDownload, window: time.Minute},
 		{name: "scan", max: rateScan, window: time.Minute},
+		{name: "login", max: rateLogin, window: time.Minute},
 	}
 }
 

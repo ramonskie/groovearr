@@ -141,6 +141,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expires,
 		HttpOnly: true,
+		Secure:   r.TLS != nil,
 		SameSite: http.SameSiteLaxMode,
 	})
 

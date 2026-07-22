@@ -17,10 +17,14 @@ type session struct {
 type sessionStore struct {
 	mu       sync.RWMutex
 	sessions map[string]session
+	done     chan struct{}
 }
 
 func newSessionStore() *sessionStore {
-	s := &sessionStore{sessions: make(map[string]session)}
+	s := &sessionStore{
+		sessions: make(map[string]session),
+		done:     make(chan struct{}),
+	}
 	go s.reapLoop()
 	return s
 }
@@ -59,19 +63,34 @@ func (s *sessionStore) Delete(token string) {
 	s.mu.Unlock()
 }
 
+// Shutdown stops the background reaper goroutine. Safe to call multiple times.
+func (s *sessionStore) Shutdown() {
+	select {
+	case <-s.done:
+		return
+	default:
+		close(s.done)
+	}
+}
+
 // reapLoop periodically removes expired sessions.
 func (s *sessionStore) reapLoop() {
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
-	for range ticker.C {
-		now := time.Now()
-		s.mu.Lock()
-		for token, ses := range s.sessions {
-			if now.After(ses.ExpiresAt) {
-				delete(s.sessions, token)
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			now := time.Now()
+			s.mu.Lock()
+			for token, ses := range s.sessions {
+				if now.After(ses.ExpiresAt) {
+					delete(s.sessions, token)
+				}
 			}
+			s.mu.Unlock()
 		}
-		s.mu.Unlock()
 	}
 }
 

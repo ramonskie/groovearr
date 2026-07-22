@@ -6,6 +6,7 @@ import {
   ListMusic,
   Settings,
   Compass,
+  LogOut,
 } from "lucide-react";
 
 export interface NavPage {
@@ -20,6 +21,7 @@ interface SidebarNavProps {
   onNavigate: (href: string) => void;
   downloadCount?: number;
   className?: string;
+  onLogout?: () => void;
 }
 
 const DEFAULT_PAGES: NavPage[] = [
@@ -43,6 +45,7 @@ const SidebarNav: FC<SidebarNavProps> = ({
   onNavigate,
   downloadCount,
   className = "",
+  onLogout,
 }) => {
   return (
     <nav
@@ -83,8 +86,8 @@ const SidebarNav: FC<SidebarNavProps> = ({
         })}
       </div>
 
-      {/* Settings footer */}
-      <div className="border-t border-slate-800 px-2 py-3">
+      {/* Settings + logout footer */}
+      <div className="border-t border-slate-800 px-2 py-3 space-y-1">
         <button
           type="button"
           onClick={() => onNavigate("/settings")}
@@ -97,6 +100,16 @@ const SidebarNav: FC<SidebarNavProps> = ({
           <Settings size={18} />
           <span>Settings</span>
         </button>
+        {onLogout && (
+          <button
+            type="button"
+            onClick={onLogout}
+            className="flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium border-l-4 border-transparent text-slate-500 hover:bg-slate-800 hover:text-red-400 transition-colors"
+          >
+            <LogOut size={18} />
+            <span>Sign out</span>
+          </button>
+        )}
       </div>
     </nav>
   );

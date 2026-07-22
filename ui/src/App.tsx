@@ -9,8 +9,11 @@ import {
 import Layout from "./components/Layout";
 import SidebarNav from "./components/SidebarNav";
 import Spinner from "./components/Spinner";
+import { useAuth } from "./context/AuthContext";
 import { useDownloads } from "./hooks/use-downloads";
 import type { DownloadState } from "./api/types";
+
+const LoginPage = lazy(() => import("./features/auth/LoginPage"));
 
 export type PageName =
   | "discover"
@@ -47,6 +50,14 @@ function PageFallback() {
   );
 }
 
+function FullPageFallback() {
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-zinc-950">
+      <Spinner size="lg" />
+    </div>
+  );
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 const VALID_PAGES = new Set<string>([
@@ -75,13 +86,10 @@ function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { data: downloads } = useDownloads();
+  const { logout } = useAuth();
 
   const activePage = pathToPage(location.pathname);
 
-  // Count downloads that are still in progress (non-terminal states).
-  // NOTE: This triggers a downloads fetch on every page, not just /downloads.
-  // TanStack Query deduplicates by key so no double-fetch when already on
-  // DownloadsPage.  The tradeoff is acceptable for the sidebar badge.
   const activeDownloadCount =
     downloads?.filter((d) => !TERMINAL_STATES.has(d.state)).length ?? 0;
 
@@ -90,6 +98,7 @@ function AppShell() {
       activePage={activePage}
       onNavigate={(href) => navigate(href)}
       downloadCount={activeDownloadCount}
+      onLogout={() => logout()}
     />
   );
 
@@ -113,5 +122,36 @@ function AppShell() {
 // ─── App root ────────────────────────────────────────────────────────
 
 export default function App() {
-  return <AppShell />;
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <FullPageFallback />;
+  }
+
+  return (
+    <Routes>
+      <Route
+        path="/login"
+        element={
+          isAuthenticated ? (
+            <Navigate to="/discover" replace />
+          ) : (
+            <Suspense fallback={<FullPageFallback />}>
+              <LoginPage />
+            </Suspense>
+          )
+        }
+      />
+      <Route
+        path="*"
+        element={
+          isAuthenticated ? (
+            <AppShell />
+          ) : (
+            <Navigate to="/login" replace />
+          )
+        }
+      />
+    </Routes>
+  );
 }
