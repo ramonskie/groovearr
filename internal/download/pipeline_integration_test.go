@@ -285,10 +285,9 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	// Event bus.
 	eventBus := events.NewInMemoryEventBus(testLogger())
 
-	// Download service + worker pool.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger())
+	// Worker pool + download service.
 	workerPool := download.NewWorkerPool(3, reg, dlStore, eventBus, testLogger())
-	downloadSvc.SetWorkerPool(workerPool)
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger(), workerPool)
 	defer workerPool.Shutdown()
 
 	// Renamer: library path.

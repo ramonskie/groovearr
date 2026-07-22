@@ -100,14 +100,11 @@ func main() {
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
-	// Download service — queues downloads and dispatches to workers.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog)
-
 	// Worker pool — picks up queued downloads and drives state machine.
 	workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus, mainLog)
 
-	// Wire the pipeline: DownloadService → WorkerPool.
-	downloadSvc.SetWorkerPool(workerPool)
+	// Download service — queues downloads and dispatches to workers.
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog, workerPool)
 
 	// Recover orphaned queued records from previous runs (pool-at-capacity rejects).
 	mainLog.Info("recovering orphaned downloads", "component", "main")

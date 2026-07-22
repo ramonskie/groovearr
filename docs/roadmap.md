@@ -220,8 +220,8 @@ Deployment, security, and operational concerns.
 | B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
 | B7 | Download / UI | 🟢 Low | **Server-side pagination for download list.** `GET /api/downloads` returns all records. Large queues (1000+) should paginate with `?limit=` and `?offset=`. |
 | B8 | Observability | 🔴 High | **No structured logging / request tracing.** `log.Printf` used everywhere — no log levels, no structured fields, no request IDs. Replace with `log/slog` (stdlib since Go 1.21). Add request ID middleware for HTTP correlation. Replace all `log.Printf` calls. |
-| B9 | API | 🔴 High | **No HTTP server timeouts configured.** `http.Server` has zero `ReadTimeout`/`WriteTimeout`/`IdleTimeout`. Slow clients hold connections indefinitely (DoS vector). Set: Read=10s, Write=30s, Idle=120s. |
-| B10 | Designer | 🟡 Medium | **Two-phase worker pool initialization.** `download.Service` requires `SetWorkerPool()` after `NewDownloadService()`. If forgotten, `Queue()` silently succeeds without dispatching. Constructor should accept `WorkerPool` directly. |
+| B9 | API | ✅ Done | **No HTTP server timeouts configured.** `http.Server` now has Read=10s, Write=30s, Idle=120s timeouts set in `internal/api/handlers.go:148-150`. |
+| B10 | Designer | ✅ Done | **Two-phase worker pool initialization.** `download.Service` requires `SetWorkerPool()` after `NewDownloadService()`. If forgotten, `Queue()` silently succeeds without dispatching. Fixed: constructor now accepts `WorkerPool` directly (`NewDownloadService` signature updated, `main.go` wiring reordered). `SetWorkerPool` retained for test compatibility. |
 | B11 | Code Quality | 🟡 Medium | **Silent error drops throughout codebase.** `_ = store.UpdateProgress(...)` in worker.go, scanner errors lost in `handleLibraryScan`, "not found" vs "DB down" indistinguishable. Standardize: wrap errors with context, don't use `_` for important operations. |
 | B12 | Download | 🟡 Medium | **FileRenamer.resolveSourcePath blocks without context/timeout.** `filepath.WalkDir` over entire download root with no cancellation, no max depth, no file limit. Large directories block import chain. |
 | B13 | Discovery | 🟡 Medium | **Buggy error propagation in search handler.** `SearchArtists` success + `SearchAlbums` failure → only album error reported, artist success hidden. Track errors separately or use `errors.Join`. |
@@ -241,10 +241,10 @@ Deployment, security, and operational concerns.
 ### Immediate Next Steps
 
 1. **Structured logging** — replace `log.Printf` with `log/slog`, add request IDs (#B8, 🔴 High)
-2. **HTTP server timeouts** — set Read/Write/Idle timeouts (#B9, 🔴 High)
+2. **HTTP server timeouts** — set Read/Write/Idle timeouts (#B9, ✅ Done)
 3. **Authentication** — login gate for API access (#70, Tier 7, 🔴 High)
 4. **API rate limiting** — protect downstream providers from excessive calls (#B14, 🟡 Medium)
-5. **Worker pool init fix** — constructor-based wiring, remove two-phase init (#B10, 🟡 Medium)
+5. **Worker pool init fix** — constructor now accepts pool directly (#B10, ✅ Done)
 6. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
 7. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
 8. **Wishlist retry endpoint + UI** — `POST /api/downloads/{id}/retry` + Retry button (#54 gap, Tier 4, 🟡)

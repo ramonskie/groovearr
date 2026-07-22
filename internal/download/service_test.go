@@ -223,7 +223,7 @@ var _ WorkerPool = (*mockWorkerPool)(nil)
 func TestNewDownloadService(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 	if svc == nil {
 		t.Fatal("NewDownloadService returned nil")
 	}
@@ -236,7 +236,7 @@ func TestNewDownloadService(t *testing.T) {
 }
 
 func TestSetWorkerPool(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), nil)
 	pool := &mockWorkerPool{}
 	svc.SetWorkerPool(pool)
 
@@ -250,7 +250,7 @@ func TestSetWorkerPool(t *testing.T) {
 func TestQueueCreatesRecord(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	meta := DownloadMeta{
 		Artist:      "Test Artist",
@@ -324,7 +324,7 @@ func TestQueueCreatesRecord(t *testing.T) {
 
 func TestQueueDisplayNameTitleOnly(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	meta := DownloadMeta{Title: "Just Title"}
 	id, err := svc.Queue(context.Background(), "deezer", "user", "file.mp3", 0, meta)
@@ -339,7 +339,7 @@ func TestQueueDisplayNameTitleOnly(t *testing.T) {
 
 func TestQueueDisplayNameFallback(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	id, err := svc.Queue(context.Background(), "deezer", "user", "fallback.mp3", 0, DownloadMeta{})
 	if err != nil {
@@ -354,7 +354,7 @@ func TestQueueDisplayNameFallback(t *testing.T) {
 func TestQueueFiresEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	_, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	if err != nil {
@@ -380,8 +380,7 @@ func TestQueueFiresEvent(t *testing.T) {
 func TestQueueDispatchesToWorkerPool(t *testing.T) {
 	store := newMockStore()
 	pool := &mockWorkerPool{}
-	svc := NewDownloadService(store, newMockBus(), testLogger())
-	svc.SetWorkerPool(pool)
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	if err != nil {
@@ -399,7 +398,7 @@ func TestQueueDispatchesToWorkerPool(t *testing.T) {
 
 func TestQueueWithoutWorkerPoolOK(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 	// No SetWorkerPool called — should not panic or error.
 
 	id, err := svc.Queue(context.Background(), "deezer", "user", "f.mp3", 1, DownloadMeta{})
@@ -418,8 +417,7 @@ func TestQueueWorkerPoolError(t *testing.T) {
 			return fmt.Errorf("pool full")
 		},
 	}
-	svc := NewDownloadService(store, newMockBus(), testLogger())
-	svc.SetWorkerPool(pool)
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	if err == nil {
@@ -440,7 +438,7 @@ func TestQueueWorkerPoolError(t *testing.T) {
 
 func TestGetStatus(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 42, DownloadMeta{})
 	if err != nil {
@@ -463,7 +461,7 @@ func TestGetStatus(t *testing.T) {
 }
 
 func TestGetStatusNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), nil)
 	record, err := svc.GetStatus(context.Background(), "no-such-id")
 	if err != nil {
 		t.Fatal(err)
@@ -475,7 +473,7 @@ func TestGetStatusNonExistent(t *testing.T) {
 
 func TestList(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	_, _ = svc.Queue(context.Background(), "soulseek", "p1", "a.flac", 1, DownloadMeta{})
 	_, _ = svc.Queue(context.Background(), "deezer", "u1", "b.mp3", 2, DownloadMeta{})
@@ -492,7 +490,7 @@ func TestList(t *testing.T) {
 func TestCancelSetsIgnored(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 
@@ -510,7 +508,7 @@ func TestCancelSetsIgnored(t *testing.T) {
 func TestCancelFiresStateChangedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	_ = svc.Cancel(context.Background(), id)
@@ -531,7 +529,7 @@ func TestCancelFiresStateChangedEvent(t *testing.T) {
 }
 
 func TestCancelNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), nil)
 	err := svc.Cancel(context.Background(), "no-such-id")
 	if err == nil {
 		t.Fatal("expected error for non-existent id")
@@ -541,7 +539,7 @@ func TestCancelNonExistent(t *testing.T) {
 func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	// Manually set to terminal in store.
@@ -568,7 +566,7 @@ func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 func TestRetryResetsToQueued(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 
@@ -595,7 +593,7 @@ func TestRetryResetsToQueued(t *testing.T) {
 func TestRetryFiresStateChangedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewDownloadService(store, bus, testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
@@ -619,7 +617,7 @@ func TestRetryFiresStateChangedEvent(t *testing.T) {
 
 func TestRetryNonRetryableState(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 
@@ -634,7 +632,7 @@ func TestRetryNonRetryableState(t *testing.T) {
 }
 
 func TestRetryNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), nil)
 	err := svc.Retry(context.Background(), "no-such-id")
 	if err == nil {
 		t.Fatal("expected error for non-existent id")
@@ -644,8 +642,7 @@ func TestRetryNonExistent(t *testing.T) {
 func TestRetryDispatchesToWorkerPool(t *testing.T) {
 	store := newMockStore()
 	pool := &mockWorkerPool{}
-	svc := NewDownloadService(store, newMockBus(), testLogger())
-	svc.SetWorkerPool(pool)
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
 	// Queue already submitted once.
@@ -667,7 +664,7 @@ func TestRetryDispatchesToWorkerPool(t *testing.T) {
 
 func TestConcurrentQueueAndCancel(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -691,8 +688,7 @@ func TestConcurrentQueueAndCancel(t *testing.T) {
 func TestQueueConcurrentWorkerPoolAccess(t *testing.T) {
 	store := newMockStore()
 	pool := &mockWorkerPool{}
-	svc := NewDownloadService(store, newMockBus(), testLogger())
-	svc.SetWorkerPool(pool)
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
 
 	var wg sync.WaitGroup
 	for i := 0; i < 10; i++ {

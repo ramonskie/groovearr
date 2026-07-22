@@ -50,20 +50,23 @@ type DownloadService struct {
 	mu         sync.Mutex
 }
 
-// NewDownloadService creates a DownloadService backed by the given store
-// and event bus. Call SetWorkerPool before queuing downloads.
-func NewDownloadService(store DownloadStore, bus events.IEventAggregator, logger *slog.Logger) *DownloadService {
+// NewDownloadService creates a DownloadService backed by the given store,
+// event bus, and worker pool. The pool is required — pass nil only in tests
+// where worker dispatch is not needed.
+func NewDownloadService(store DownloadStore, bus events.IEventAggregator, logger *slog.Logger, pool WorkerPool) *DownloadService {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &DownloadService{
-		log:   logger,
-		store: store,
-		bus:   bus,
+		log:        logger,
+		store:      store,
+		bus:        bus,
+		workerPool: pool,
 	}
 }
 
-// SetWorkerPool wires the worker pool used to dispatch downloads.
+// SetWorkerPool replaces the worker pool at runtime. Prefer passing the pool
+// via NewDownloadService — this method exists for tests and runtime overrides.
 func (s *DownloadService) SetWorkerPool(pool WorkerPool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
