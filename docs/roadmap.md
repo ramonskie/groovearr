@@ -59,6 +59,8 @@ Small but impactful fixes to what's already built.
 | 21 | **DB migration versioning** — version-tracked schema with `schema_version` table | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
 | 23 | **Use central `download.Engine`** — Engine wired into orchestrator, available for future queue/bandwidth features | ✅ Done | S | — |
+| — | **Quality Profiles** — named profiles with ranked format fallback chains (e.g. FLAC → MP3-320 → MP3-128). Replaces per-source quality settings. Profile CRUD, ranked target editor, upgrade-until cutoff. SoulSync PR #974 for reference. | 🟡 Medium | L | QualityConfig (done), Settings UI |
+| — | **Replace lower quality on import** — toggle to auto-replace existing tracks when a higher-quality version is downloaded. Per-profile setting. Stops useless re-downloads of same-or-worse quality. | 🟡 Medium | M | Quality Profiles |
 | 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | ✅ Done | S | — |
 | 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | ✅ Done | M | — |
 | 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | ✅ Done | M | Cover art hook |
@@ -178,7 +180,7 @@ Deployment, security, and operational concerns.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 70 | **Authentication** — API key auth via `X-Api-Key` header or `?apikey` query param. Reverse proxy auth handled at proxy level (nginx/traefik). | ✅ Done | L | — |
+| 70 | **Authentication** — Sonarr-style auth with API key + Forms login. Auto-generated UUID API key via `X-Api-Key`/`?apikey=`/`Bearer`. Forms: username+password → bcrypt → session cookie (7-day sliding). Security tab in settings: method picker, credentials, CIDR subnet bypass, API key display. Login page with auth guard. Rate-limited login (5/min). Session store with `HttpOnly` cookies, `Secure` flag on TLS. | ✅ Done | L | — |
 | 71 | **Docker image + docker-compose with slskd** — one-command `docker compose up` for the free path. Multi-stage build (golang → alpine), three named volumes, slskd sidecar. | ✅ Done | M | — |
 | 72 | **Multi-profile support** — separate libraries/configs per profile | 🟢 Low | L | Auth |
 | 73 | **Setup wizard** — first-run guided config (choose free/premium path) | 🟡 Medium | M | — |
@@ -198,7 +200,7 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 11 features | ✅ 11/11 |
+| 1 | Core Quality | 13 features | 🟡 11/13 |
 | 1.5 | Metadata Providers | 6 features | 🟡 4/6 (27,28,29,31 done; 30,32 remain) |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
@@ -206,7 +208,7 @@ Deployment, security, and operational concerns.
 | 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | 🟡 2/12 (70,71 done; 72-81 remain) |
-| **Total** | | **81 features** | **32 done, 49 remaining** |
+| **Total** | | **83 features** | **36 done, 47 remaining** |
 
 ## Known Bugs
 
@@ -219,13 +221,13 @@ Deployment, security, and operational concerns.
 | B5 | Playlist / Download | 🟡 Medium | **Stuck pending detection.** Records with `source=pending` older than N minutes should be auto-failed or retried. Currently silently stick forever if resolver fails. |
 | B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
 | B7 | Download / UI | 🟢 Low | **Server-side pagination for download list.** `GET /api/downloads` returns all records. Large queues (1000+) should paginate with `?limit=` and `?offset=`. |
-| B8 | Observability | 🔴 High | **No structured logging / request tracing.** `log.Printf` used everywhere — no log levels, no structured fields, no request IDs. Replace with `log/slog` (stdlib since Go 1.21). Add request ID middleware for HTTP correlation. Replace all `log.Printf` calls. |
+| B8 | Observability | ✅ Done | **No structured logging / request tracing.** Replaced `log.Printf` with `log/slog` throughout codebase. Added request ID middleware (`withRequestID`) for HTTP correlation. Fixed in commit `1e6b8de`. |
 | B9 | API | ✅ Done | **No HTTP server timeouts configured.** `http.Server` now has Read=10s, Write=30s, Idle=120s timeouts set in `internal/api/handlers.go:148-150`. |
 | B10 | Designer | ✅ Done | **Two-phase worker pool initialization.** `download.Service` requires `SetWorkerPool()` after `NewDownloadService()`. If forgotten, `Queue()` silently succeeds without dispatching. Fixed: constructor now accepts `WorkerPool` directly (`NewDownloadService` signature updated, `main.go` wiring reordered). `SetWorkerPool` retained for test compatibility. |
 | B11 | Code Quality | 🟡 Medium | **Silent error drops throughout codebase.** `_ = store.UpdateProgress(...)` in worker.go, scanner errors lost in `handleLibraryScan`, "not found" vs "DB down" indistinguishable. Standardize: wrap errors with context, don't use `_` for important operations. |
 | B12 | Download | 🟡 Medium | **FileRenamer.resolveSourcePath blocks without context/timeout.** `filepath.WalkDir` over entire download root with no cancellation, no max depth, no file limit. Large directories block import chain. |
 | B13 | Discovery | 🟡 Medium | **Buggy error propagation in search handler.** `SearchArtists` success + `SearchAlbums` failure → only album error reported, artist success hidden. Track errors separately or use `errors.Join`. |
-| B14 | API | 🟡 Medium | **No API rate limiting.** Search/download/scan endpoints unbounded. Risk: Soulseek/Deezer/Spotify/MusicBrainz provider bans from excessive calls. |
+| B14 | API | ✅ Done | **No API rate limiting.** Search, download, scan, and login endpoints now IP-rate-limited with configurable rates via env vars (`RATE_SEARCH`, `RATE_DOWNLOAD`, `RATE_SCAN`, `RATE_LOGIN`). Fixed in commit `29e5901`. |
 | B15 | Download | 🟡 Medium | **Shutdown drops queued jobs silently.** `workerPoolImpl.Shutdown()` closes `jobQueue` channel — remaining items lost. Recoverable via `RecoverOrphans` on restart, but orphan window exists. Drain + fail jobs before close. |
 | B16 | Playlist | 🟢 Low | **Dead code: `Service.findAndQueueDownload`.** Defined but never called. Actual resolution uses `resolvePendingDownloads` with `orch.FindBestMatch`. |
 | B17 | Download | 🟢 Low | **No configurable worker pool size.** Hardcoded default of 3 workers. Not exposed in config. |
@@ -235,15 +237,16 @@ Deployment, security, and operational concerns.
 | B21 | Download | 🟢 Low | **No cleanup of terminal download records.** `DeleteTerminal()` exists in store but never called. Completed/failed/ignored downloads accumulate indefinitely. |
 | B22 | Code Quality | 🟢 Low | **main.go growing linearly with features.** Each new plugin adds ~5 lines. At 10+ plugins becomes unwieldy. Consider `App` struct with builder pattern. |
 | B23 | Download | 🟢 Low | **No download retention policy.** Terminal records accumulate forever. Add configurable retention (auto-clean records older than N days). |
+| B24 | Settings / Providers | 🟡 Medium | **Provider connection badges not persisted.** After testing a connection, the badge shows "Connected" but reverts to "Configured" when returning to the settings page or restarting the app. Connection state is transient (in-memory only). Should persist last-known status or re-test on page load. |
 
 > **Note**: Review flagged missing DB migration system as 🔴 — false positive. Migration system already exists (`internal/library/sqlite/store.go`, v1-v4 with `schema_version` table). Roadmap #21 is accurate.
 
 ### Immediate Next Steps
 
-1. **Structured logging** — replace `log.Printf` with `log/slog`, add request IDs (#B8, 🔴 High)
+1. **Structured logging** — replace `log.Printf` with `log/slog`, add request IDs (#B8, ✅ Done)
 2. **HTTP server timeouts** — set Read/Write/Idle timeouts (#B9, ✅ Done)
-3. **Authentication** — API key auth via header + query param (#70, ✅ Done)
-4. **API rate limiting** — protect downstream providers from excessive calls (#B14, 🟡 Medium)
+3. **Authentication** — forms login + API key + security settings (#70, ✅ Done)
+4. **API rate limiting** — protect downstream providers from excessive calls (#B14, ✅ Done)
 5. **Worker pool init fix** — constructor now accepts pool directly (#B10, ✅ Done)
 6. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
 7. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
@@ -252,8 +255,8 @@ Deployment, security, and operational concerns.
 
 ### First Major Feature Block (Platform hardening + Tier 1.5 completion + Tier 7 security)
 
-1. **Observability foundation** — structured logging (#B8), HTTP timeouts (#B9), health endpoint (#B20), rate limiting (#B14)
+1. **Observability foundation** — structured logging (#B8 ✅), HTTP timeouts (#B9 ✅), health endpoint (#B20), rate limiting (#B14 ✅)
 2. **Free-tier metadata completion** — iTunes + Last.fm providers to round out free path coverage
-3. **Authentication** — login gate + API keys for production safety (#70, Tier 7)
+3. **Authentication** — forms login + API keys + security settings (#70 ✅, Tier 7)
 4. **Wishlist polish** — retry endpoint, retry UI, stuck pending detection (#54 gap + #B5)
 5. **Systemd service** — production deployment target (#74, Tier 7)
