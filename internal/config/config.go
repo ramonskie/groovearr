@@ -15,7 +15,6 @@ import (
 type Config struct {
 	Sources map[string]json.RawMessage `json:"sources"`
 	Library LibraryConfig              `json:"library"`
-	Quality QualityConfig              `json:"quality"`
 	Auth    AuthConfig                 `json:"auth"`
 }
 
@@ -26,12 +25,6 @@ type LibraryConfig struct {
 	FolderTemplate   string `json:"folder_template"`   // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
 	PlaylistPath     string `json:"playlist_path"`     // separate folder for playlist downloads
 	PlaylistTemplate string `json:"playlist_template"` // e.g. "{position:02d} {artist} - {title}"
-}
-
-// QualityConfig holds quality preferences for downloads.
-type QualityConfig struct {
-	PreferredFormat string `json:"preferred_format"` // flac, mp3, any
-	MinBitrate      int    `json:"min_bitrate"`      // kbps, 0 = no minimum
 }
 
 // AuthConfig holds authentication settings.
@@ -50,7 +43,6 @@ type AuthConfig struct {
 	LocalBypassSubnets []string `json:"local_bypass_subnets"`  // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
 }
 
-var validFormats = map[string]bool{"flac": true, "mp3": true, "any": true}
 var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 
 // DefaultConfig returns a Config populated with sensible defaults.
@@ -63,9 +55,6 @@ func DefaultConfig() Config {
 			FolderTemplate:   "{artist}/{album} ({year})/{track:02d} - {title}",
 			PlaylistPath:     "./playlists",
 			PlaylistTemplate: "{position:02d} {artist} - {title}",
-		},
-		Quality: QualityConfig{
-			PreferredFormat: "flac",
 		},
 	}
 }
@@ -91,14 +80,6 @@ func (c Config) Validate() []string {
 	}
 	if c.Library.LibraryPath != "" && strings.Contains(c.Library.LibraryPath, "\x00") {
 		errs = append(errs, "library.library_path: contains null bytes")
-	}
-
-	// Quality.
-	if c.Quality.PreferredFormat != "" && !validFormats[c.Quality.PreferredFormat] {
-		errs = append(errs, fmt.Sprintf("quality.preferred_format: must be flac, mp3, or any (got %q)", c.Quality.PreferredFormat))
-	}
-	if c.Quality.MinBitrate < 0 {
-		errs = append(errs, "quality.min_bitrate: must be >= 0")
 	}
 
 	// Auth.
@@ -133,7 +114,7 @@ func (c *Config) Merge(partial *Config) {
 	mergeSourcesPreservingSecrets(c.Sources, partial.Sources)
 }
 
-// mergeFields copies non-zero library and quality fields from partial into c.
+// mergeFields copies non-zero library fields from partial into c.
 func (c *Config) mergeFields(partial *Config) {
 	if partial.Library.DownloadPath != "" {
 		c.Library.DownloadPath = partial.Library.DownloadPath
@@ -149,13 +130,6 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Library.PlaylistTemplate != "" {
 		c.Library.PlaylistTemplate = partial.Library.PlaylistTemplate
-	}
-
-	if partial.Quality.PreferredFormat != "" {
-		c.Quality.PreferredFormat = partial.Quality.PreferredFormat
-	}
-	if partial.Quality.MinBitrate > 0 {
-		c.Quality.MinBitrate = partial.Quality.MinBitrate
 	}
 
 	// Auth — preserve password if partial has a masked (asterisk) value.

@@ -123,6 +123,8 @@ func (m *mockLibStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain
 
 func (m *mockLibStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
 
+func (m *mockLibStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) { return nil, nil }
+
 func (m *mockLibStore) GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error) {
 	return nil, nil
 }

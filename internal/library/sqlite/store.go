@@ -282,6 +282,61 @@ func (s *Store) migrate() error {
 		version = 4
 	}
 
+	// Version 5: quality profiles with ranked format fallback chains.
+	if version < 5 {
+		if _, err := s.db.Exec("SAVEPOINT migration_v5"); err != nil {
+			s.log.Error("migration v5: savepoint failed", "error", err, "component", "lib_store")
+			return fmt.Errorf("migration v5: %w", err)
+		}
+
+		statements := []string{
+			`CREATE TABLE IF NOT EXISTS quality_profiles (
+				id INTEGER PRIMARY KEY AUTOINCREMENT,
+				name TEXT NOT NULL UNIQUE,
+				description TEXT DEFAULT '',
+				ranked_targets TEXT NOT NULL DEFAULT '[]',
+				fallback_enabled INTEGER NOT NULL DEFAULT 1,
+				search_mode TEXT NOT NULL DEFAULT 'priority',
+				rank_candidates_by_quality INTEGER NOT NULL DEFAULT 0,
+				upgrade_policy TEXT NOT NULL DEFAULT 'acceptable',
+				upgrade_cutoff_index INTEGER NOT NULL DEFAULT 0,
+				replace_lower_quality INTEGER NOT NULL DEFAULT 0,
+				is_default INTEGER NOT NULL DEFAULT 0,
+				created_at TEXT DEFAULT (datetime('now')),
+				updated_at TEXT DEFAULT (datetime('now'))
+			)`,
+			`CREATE INDEX IF NOT EXISTS idx_quality_profiles_default ON quality_profiles(is_default)`,
+			`ALTER TABLE tracks ADD COLUMN quality_profile_id INTEGER`,
+			`ALTER TABLE downloads ADD COLUMN quality_profile_id INTEGER`,
+			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, upgrade_policy, upgrade_cutoff_index, is_default)
+			SELECT 'Balanced', 'FLAC preferred, MP3 320 fallback',
+				'[{"label":"FLAC 24-bit/96kHz","format":"flac","min_bit_depth":24,"min_sample_rate":96000},{"label":"FLAC 16-bit","format":"flac","min_bit_depth":16},{"label":"MP3 320kbps","format":"mp3","min_bitrate":320}]',
+				1, 'until_cutoff', 1, 1
+			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles)`,
+		}
+
+		var hasError bool
+		for _, stmt := range statements {
+			if _, err := s.db.Exec(stmt); err != nil {
+				s.log.Error("migration v5 exec failed", "error", err, "component", "lib_store")
+				hasError = true
+				break
+			}
+		}
+
+		if hasError {
+			s.db.Exec("ROLLBACK TO migration_v5")
+			return fmt.Errorf("migration v5: rolled back due to error")
+		}
+
+		if _, err := s.db.Exec("RELEASE migration_v5"); err != nil {
+			s.log.Error("migration v5: release savepoint failed", "error", err, "component", "lib_store")
+			return fmt.Errorf("migration v5: %w", err)
+		}
+
+		version = 5
+	}
+
 	// Record current version.
 	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
 		s.log.Error("migration: clear version failed", "error", err, "component", "lib_store")
@@ -462,11 +517,11 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 		_, err := s.db.ExecContext(ctx, `
 			UPDATE tracks SET album_id=?, artist_id=?, title=?, track_number=?,
 			disc_number=?, duration=?, file_path=?, bitrate=?, file_size=?,
-			external_ids=?, acoustid=?, isrc=?, updated_at=?
+			external_ids=?, acoustid=?, isrc=?, quality_profile_id=?, updated_at=?
 			WHERE id=?`,
 			track.AlbumID, track.ArtistID, track.Title, track.TrackNumber,
 			track.DiscNumber, track.Duration, track.FilePath, track.Bitrate, track.FileSize,
-			string(extIDsJSON), track.AcoustID, track.ISRC,
+			string(extIDsJSON), track.AcoustID, track.ISRC, track.QualityProfileID,
 			now, track.ID,
 		)
 		if err != nil {
@@ -478,11 +533,11 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tracks (album_id, artist_id, title, track_number,
 			disc_number, duration, file_path, bitrate, file_size,
-			external_ids, acoustid, isrc, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, acoustid, isrc, quality_profile_id, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		track.AlbumID, track.ArtistID, track.Title, track.TrackNumber,
 		track.DiscNumber, track.Duration, track.FilePath, track.Bitrate, track.FileSize,
-		string(extIDsJSON), track.AcoustID, track.ISRC,
+		string(extIDsJSON), track.AcoustID, track.ISRC, track.QualityProfileID,
 		now, now,
 	)
 	if err != nil {
@@ -552,6 +607,17 @@ func (s *Store) DeleteTrack(ctx context.Context, id int64) error {
 		s.log.Error("delete track failed", "error", err, "component", "lib_store")
 	}
 	return err
+}
+
+// ListTracksWithQuality returns all library tracks with quality-related metadata
+// for upgrade scanning. Format is derived from the file_path extension.
+func (s *Store) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
+	rows, err := s.db.QueryContext(ctx, trackSelect)
+	if err != nil {
+		return nil, fmt.Errorf("list tracks with quality: %w", err)
+	}
+	defer rows.Close()
+	return s.scanTracks(rows)
 }
 
 // ImportTrack creates or updates artist and album records, then inserts
@@ -667,7 +733,7 @@ const albumSelect = `SELECT id, artist_id, title, year, genres, track_count, dur
 
 const trackSelect = `SELECT id, album_id, artist_id, title, track_number, disc_number,
 	duration, file_path, bitrate, file_size,
-	external_ids, acoustid, isrc, created_at, updated_at
+	external_ids, acoustid, isrc, quality_profile_id, created_at, updated_at
 	FROM tracks`
 
 func (s *Store) scanArtist(row *sql.Row) (*domain.Artist, error) {
@@ -763,7 +829,7 @@ func (s *Store) scanTrack(row *sql.Row) (*domain.Track, error) {
 	var extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 		&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
-		&extIDsJSON, &t.AcoustID, &t.ISRC,
+		&extIDsJSON, &t.AcoustID, &t.ISRC, &t.QualityProfileID,
 		&createdAt, &updatedAt)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -787,7 +853,7 @@ func (s *Store) scanTracks(rows *sql.Rows) ([]domain.Track, error) {
 		var extIDsJSON, createdAt, updatedAt string
 		if err := rows.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 			&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
-			&extIDsJSON, &t.AcoustID, &t.ISRC,
+			&extIDsJSON, &t.AcoustID, &t.ISRC, &t.QualityProfileID,
 			&createdAt, &updatedAt); err != nil {
 			s.log.Error("scan tracks failed", "error", err, "component", "lib_store")
 			return nil, err

@@ -35,11 +35,6 @@ export interface LibraryConfig {
   playlist_template: string;
 }
 
-export interface QualityConfig {
-  preferred_format: "flac" | "mp3" | "any";
-  min_bitrate: number;
-}
-
 export interface AuthConfig {
   method?: string;
   username?: string;
@@ -51,7 +46,6 @@ export interface AuthConfig {
 export interface Config {
   sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
-  quality: QualityConfig;
   auth: AuthConfig;
 }
 
@@ -59,7 +53,6 @@ export interface Config {
 export interface ConfigUpdatePayload {
   sources?: Record<string, Record<string, unknown>>;
   library?: Partial<LibraryConfig>;
-  quality?: Partial<QualityConfig>;
   auth?: Partial<AuthConfig>;
 }
 
@@ -70,6 +63,68 @@ export interface UpdateConfigResponse {
 export interface ConfigValidationError {
   error: string;
   errors: string[];
+}
+
+// ─── Quality Profiles ──────────────────────────────────────────────
+
+export interface AudioQuality {
+  format: string;
+  bitrate?: number;
+  sample_rate?: number;
+  bit_depth?: number;
+}
+
+export interface QualityTarget {
+  label: string;
+  format?: string;
+  min_bitrate?: number;
+  min_sample_rate?: number;
+  min_bit_depth?: number;
+}
+
+export type UpgradePolicy = "acceptable" | "until_cutoff" | "until_top";
+export type SearchMode = "priority" | "best_quality";
+
+export interface QualityProfile {
+  id: number;
+  name: string;
+  description: string;
+  ranked_targets: QualityTarget[];
+  fallback_enabled: boolean;
+  search_mode: SearchMode;
+  rank_candidates_by_quality: boolean;
+  upgrade_policy: UpgradePolicy;
+  upgrade_cutoff_index: number;
+  replace_lower_quality: boolean;
+  is_default: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Payload for POST /api/quality-profiles */
+export interface QualityProfileCreatePayload {
+  name: string;
+  description?: string;
+  ranked_targets: QualityTarget[];
+  fallback_enabled?: boolean;
+  search_mode?: SearchMode;
+  rank_candidates_by_quality?: boolean;
+  upgrade_policy?: UpgradePolicy;
+  upgrade_cutoff_index?: number;
+  replace_lower_quality?: boolean;
+}
+
+/** Payload for PUT /api/quality-profiles/{id} */
+export interface QualityProfileUpdatePayload {
+  name?: string;
+  description?: string;
+  ranked_targets?: QualityTarget[];
+  fallback_enabled?: boolean;
+  search_mode?: SearchMode;
+  rank_candidates_by_quality?: boolean;
+  upgrade_policy?: UpgradePolicy;
+  upgrade_cutoff_index?: number;
+  replace_lower_quality?: boolean;
 }
 
 // ─── Sources ───────────────────────────────────────────────────────
@@ -104,6 +159,7 @@ export interface SearchResult {
   bitrate?: number;
   duration?: number;
   quality: string;
+  audio_quality?: AudioQuality;
   free_upload_slots: number;
   upload_speed: number;
   queue_length: number;

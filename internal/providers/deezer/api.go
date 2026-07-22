@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/quality"
 )
 
 const baseURL = "https://api.deezer.com"
@@ -342,6 +343,7 @@ func (t Track) ToTrackResult(quality string) domain.TrackResult {
 			Bitrate:         bitrate,
 			Duration:        int64(t.Duration * 1000),
 			Quality:         mapQuality(quality),
+			AudioQuality:    deezerToAudioQuality(quality),
 			FreeUploadSlots: 999,
 			UploadSpeed:     999999,
 		},
@@ -446,5 +448,29 @@ func mapQuality(q string) string {
 		return "mp3"
 	default:
 		return "mp3"
+	}
+}
+
+// deezerToAudioQuality maps a Deezer quality tier string to a quality.AudioQuality descriptor.
+// Deezer doesn't report actual bitrate from the API — this is based on the configured quality tier.
+func deezerToAudioQuality(qualityTier string) quality.AudioQuality {
+	switch qualityTier {
+	case "flac":
+		return quality.AudioQuality{
+			Format:     "flac",
+			Bitrate:    1411,
+			SampleRate: 44100,
+			BitDepth:   16,
+		}
+	case "mp3_320":
+		return quality.AudioQuality{
+			Format:  "mp3",
+			Bitrate: 320,
+		}
+	default: // mp3_128 or unknown
+		return quality.AudioQuality{
+			Format:  "mp3",
+			Bitrate: 128,
+		}
 	}
 }

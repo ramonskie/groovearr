@@ -22,6 +22,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/quality"
 )
 
 const pluginName = "soulseek"
@@ -476,6 +477,20 @@ var audioExtensions = map[string]bool{
 	"wma": true, "wav": true, "m4a": true,
 }
 
+// slskdToAudioQuality maps slskd file metadata to a quality.AudioQuality descriptor.
+// slskd provides bitrate and filename (which contains the extension).
+// SampleRate and BitDepth are left zero for Soulseek FLAC files —
+// TierScore uses a kbps heuristic to estimate hi-res quality from bitrate alone.
+func slskdToAudioQuality(filename string, bitrate int) quality.AudioQuality {
+	ext := strings.TrimPrefix(path.Ext(filename), ".")
+	format := strings.ToLower(ext)
+
+	return quality.AudioQuality{
+		Format:  format,
+		Bitrate: bitrate,
+	}
+}
+
 func extractID(raw json.RawMessage) string {
 	// Try dict.
 	var m map[string]any
@@ -571,6 +586,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 					Bitrate:         int(getFloat(fm, "bitRate")),
 					Duration:        int64(durationSec * 1000),
 					Quality:         strings.ToLower(ext),
+					AudioQuality:    slskdToAudioQuality(filename, int(getFloat(fm, "bitRate"))),
 					FreeUploadSlots: int(getFloat(fm, "freeUploadSlots")),
 					UploadSpeed:     int64(getFloat(fm, "uploadSpeed")),
 					QueueLength:     int(getFloat(fm, "queueLength")),
@@ -600,7 +616,7 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 		qualityCounts := map[string]int{}
 		for _, t := range albumTracks {
 			totalSize += t.Size
-			qualityCounts[t.Quality]++
+			qualityCounts[t.AudioQuality.Format]++
 		}
 		dominantQuality := ""
 		maxCount := 0

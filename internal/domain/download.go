@@ -84,7 +84,8 @@ type DownloadRecord struct {
 	TrackID     string        `json:"track_id,omitempty"` // source-specific ID
 	CoverURL    string        `json:"cover_url,omitempty"` // album cover image URL
 	PlaylistID  string        `json:"playlist_id,omitempty"`  // playlist this download belongs to
-	LibraryTrackID int64      `json:"library_track_id,omitempty"` // imported library track ID
+	LibraryTrackID   int64  `json:"library_track_id,omitempty"`   // imported library track ID
+	QualityProfileID *int64 `json:"quality_profile_id,omitempty"` // profile applied at download time
 
 	// Track metadata for post-download organization.
 	Artist      string `json:"artist,omitempty"`

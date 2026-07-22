@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/quality"
 )
 
 type mockPlugin struct {
@@ -124,7 +124,7 @@ func TestRegistryReplace(t *testing.T) {
 func TestOrchestratorSearch(t *testing.T) {
 	r := NewRegistry()
 	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek", configured: true})
-	orch := NewOrchestrator(r, nil, testLogger())
+	orch := NewOrchestrator(r, testLogger())
 
 	_, _, err := orch.Search(context.Background(), "soulseek", "query")
 	if err != nil {
@@ -142,36 +142,33 @@ func TestOrchestratorSearch(t *testing.T) {
 	}
 }
 
-func TestFilterByQuality(t *testing.T) {
-	makeCand := func(quality string, bitrate int) Candidate {
+func TestFilterByProfile(t *testing.T) {
+	makeCand := func(format string, bitrate int) Candidate {
 		return Candidate{
-			Track:      domain.TrackResult{SearchResult: domain.SearchResult{Quality: quality, Bitrate: bitrate}},
+			Track: domain.TrackResult{
+				SearchResult: domain.SearchResult{
+					AudioQuality: quality.AudioQuality{Format: format, Bitrate: bitrate},
+				},
+			},
 			SourceName: "test",
 			Score:      0.8,
 		}
 	}
 
-	t.Run("preferred format flac filters out mp3", func(t *testing.T) {
+	t.Run("single target flac filters out mp3", func(t *testing.T) {
 		candidates := []Candidate{
 			makeCand("flac", 1411),
 			makeCand("mp3", 320),
 		}
-		qc := config.QualityConfig{PreferredFormat: "flac"}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 1 || result[0].Track.Quality != "flac" {
+		profile := &quality.QualityProfile{
+			Name: "Lossless",
+			RankedTargets: quality.RankedTargets{
+				{Label: "FLAC", Format: "flac"},
+			},
+		}
+		result := FilterByProfile(candidates, profile)
+		if len(result) != 1 || result[0].Track.AudioQuality.Format != "flac" {
 			t.Errorf("expected 1 flac candidate, got %d", len(result))
-		}
-	})
-
-	t.Run("preferred format mp3 accepts mp3_320", func(t *testing.T) {
-		candidates := []Candidate{
-			makeCand("flac", 1411),
-			makeCand("mp3_320", 320),
-		}
-		qc := config.QualityConfig{PreferredFormat: "mp3"}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 1 || result[0].Track.Quality != "mp3_320" {
-			t.Errorf("expected 1 mp3_320 candidate, got %d", len(result))
 		}
 	})
 
@@ -180,60 +177,141 @@ func TestFilterByQuality(t *testing.T) {
 			makeCand("flac", 1411),
 			makeCand("mp3", 128),
 		}
-		qc := config.QualityConfig{MinBitrate: 320}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 1 || result[0].Track.Quality != "flac" {
+		profile := &quality.QualityProfile{
+			Name: "High Quality",
+			RankedTargets: quality.RankedTargets{
+				{Label: "320kbps+", MinBitrate: 320},
+			},
+		}
+		result := FilterByProfile(candidates, profile)
+		if len(result) != 1 || result[0].Track.AudioQuality.Format != "flac" {
 			t.Errorf("expected 1 candidate >= 320kbps, got %d", len(result))
 		}
 	})
 
-	t.Run("combined format + bitrate filter", func(t *testing.T) {
+	t.Run("ranked targets pick best tier", func(t *testing.T) {
 		candidates := []Candidate{
-			makeCand("flac", 800),           // wrong format
-			makeCand("mp3_320", 320),         // right format, good bitrate
-			makeCand("mp3_128", 128),         // right format, low bitrate
-			makeCand("flac", 1411),           // wrong format
+			makeCand("flac", 1411),   // matches tier 0
+			makeCand("mp3", 320),     // matches tier 1
+			makeCand("mp3", 128),     // matches tier 2
 		}
-		qc := config.QualityConfig{PreferredFormat: "mp3", MinBitrate: 300}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 1 || result[0].Track.Bitrate != 320 {
-			t.Errorf("expected 1 mp3_320 candidate, got %d", len(result))
+		profile := &quality.QualityProfile{
+			Name: "Ranked",
+			RankedTargets: quality.RankedTargets{
+				{Label: "FLAC", Format: "flac"},
+				{Label: "MP3-320", Format: "mp3", MinBitrate: 320},
+				{Label: "MP3-128", Format: "mp3"},
+			},
+		}
+		result := FilterByProfile(candidates, profile)
+		// Best tier (FLAC) should be the only result.
+		if len(result) != 1 || result[0].Track.AudioQuality.Format != "flac" {
+			t.Errorf("expected 1 flac candidate (best tier), got %d", len(result))
 		}
 	})
 
-	t.Run("empty config is no-op", func(t *testing.T) {
+	t.Run("fallback enabled returns lower tier", func(t *testing.T) {
 		candidates := []Candidate{
-			makeCand("flac", 1411),
 			makeCand("mp3", 320),
+			makeCand("mp3", 128),
 		}
-		result := FilterByQuality(candidates, config.QualityConfig{})
+		profile := &quality.QualityProfile{
+			Name:            "FLAC preferred",
+			FallbackEnabled: true,
+			RankedTargets: quality.RankedTargets{
+				{Label: "FLAC", Format: "flac"},
+			},
+		}
+		result := FilterByProfile(candidates, profile)
+		// No FLAC matches but fallback enabled — returns all by tier score.
 		if len(result) != 2 {
-			t.Errorf("expected all candidates to pass, got %d", len(result))
+			t.Errorf("expected 2 candidates with fallback, got %d", len(result))
 		}
 	})
 
-	t.Run("preferred any is no-op", func(t *testing.T) {
+	t.Run("nil profile returns all", func(t *testing.T) {
 		candidates := []Candidate{
 			makeCand("flac", 1411),
 			makeCand("mp3", 320),
-			makeCand("ogg", 192),
 		}
-		qc := config.QualityConfig{PreferredFormat: "any"}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 3 {
-			t.Errorf("expected all candidates with any format, got %d", len(result))
+		result := FilterByProfile(candidates, nil)
+		if len(result) != 2 {
+			t.Errorf("expected all candidates with nil profile, got %d", len(result))
 		}
 	})
 
-	t.Run("mp3 matches mp3_128", func(t *testing.T) {
+	t.Run("empty targets returns all", func(t *testing.T) {
 		candidates := []Candidate{
-			makeCand("mp3_128", 128),
+			makeCand("flac", 1411),
+			makeCand("mp3", 320),
 		}
-		qc := config.QualityConfig{PreferredFormat: "mp3"}
-		result := FilterByQuality(candidates, qc)
-		if len(result) != 1 {
-			t.Errorf("expected mp3 to match mp3_128, got %d", len(result))
+		profile := &quality.QualityProfile{Name: "Empty"}
+		result := FilterByProfile(candidates, profile)
+		if len(result) != 2 {
+			t.Errorf("expected all candidates with empty targets, got %d", len(result))
 		}
 	})
+}
+
+// ─── pickBest helpers ──────────────────────────────────────────────
+
+func makeQualCand(format string, bitrate int, score float64) Candidate {
+	return Candidate{
+		Track: domain.TrackResult{
+			SearchResult: domain.SearchResult{
+				AudioQuality: quality.AudioQuality{Format: format, Bitrate: bitrate},
+			},
+		},
+		SourceName: "test",
+		Score:      score,
+	}
+}
+
+func TestPickBestByScore(t *testing.T) {
+	candidates := []Candidate{
+		makeQualCand("mp3", 128, 0.7),
+		makeQualCand("mp3", 320, 0.6),
+		makeQualCand("mp3", 256, 0.9),
+	}
+	best := pickBestByScore(candidates)
+	if best.Score != 0.9 {
+		t.Errorf("expected best score 0.9, got %.1f", best.Score)
+	}
+}
+
+func TestPickBestByTierScore(t *testing.T) {
+	candidates := []Candidate{
+		makeQualCand("mp3", 128, 0.9),
+		makeQualCand("mp3", 320, 0.6),
+		makeQualCand("mp3", 256, 0.7),
+	}
+	best := pickBestByTierScore(candidates)
+	if best.Track.AudioQuality.Bitrate != 320 {
+		t.Errorf("expected best tier MP3 320, got bitrate %d", best.Track.AudioQuality.Bitrate)
+	}
+}
+
+func TestRankAllByQuality(t *testing.T) {
+	candidates := []Candidate{
+		makeQualCand("mp3", 128, 0.9),
+		makeQualCand("flac", 1411, 0.6),
+		makeQualCand("mp3", 320, 0.8),
+	}
+	profile := &quality.QualityProfile{
+		Name: "Test",
+		RankedTargets: quality.RankedTargets{
+			{Label: "FLAC", Format: "flac"},
+			{Label: "MP3 320", Format: "mp3", MinBitrate: 320},
+		},
+		FallbackEnabled: true,
+		SearchMode:      quality.SearchBestQuality,
+	}
+	result := rankAllByQuality(candidates, profile)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 candidates with best_quality, got %d", len(result))
+	}
+	if result[0].Track.AudioQuality.Format != "flac" {
+		t.Errorf("expected FLAC first with best_quality, got %s", result[0].Track.AudioQuality.Format)
+	}
 }
 

@@ -5,38 +5,31 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"strings"
+	"sort"
 
-	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/matching"
+	"github.com/ramonskie/groovearr/internal/quality"
 )
 
 // ─── Orchestrator ───────────────────────────────────────────────────
 
 // Orchestrator routes search to configured plugins.
 type Orchestrator struct {
-	log           *slog.Logger
-	registry      *Registry
-	matcher       *matching.Engine
-	qualityConfig func() config.QualityConfig
+	log      *slog.Logger
+	registry *Registry
+	matcher  *matching.Engine
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
-// qualityConfig is a function that returns the latest quality preferences
-// (thread-safe via config.Persistence). Pass nil to use defaults (no filtering).
-func NewOrchestrator(registry *Registry, qualityConfig func() config.QualityConfig, logger *slog.Logger) *Orchestrator {
-	if qualityConfig == nil {
-		qualityConfig = func() config.QualityConfig { return config.QualityConfig{} }
-	}
+func NewOrchestrator(registry *Registry, logger *slog.Logger) *Orchestrator {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Orchestrator{
-		log:           logger,
-		registry:      registry,
-		matcher:       matching.New(),
-		qualityConfig: qualityConfig,
+		log:      logger,
+		registry: registry,
+		matcher:  matching.New(),
 	}
 }
 
@@ -86,7 +79,15 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 // metadata, scores candidates, applies quality filters, and returns the best
 // candidate. Excludes results from excludeSource. Returns an error if no
 // candidates meet the confidence threshold or quality constraints.
-func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, durationMs int64, excludeSource string) (*Candidate, error) {
+//
+// Quality profile behavior:
+//   - search_mode="priority" (default): FilterByProfile selects best target group,
+//     then within-group ranking controlled by rank_candidates_by_quality.
+//   - search_mode="best_quality": All candidates ranked by TierScore across all
+//     target groups — quality trumps match score.
+//   - rank_candidates_by_quality=true: Final selection by TierScore instead of
+//     match confidence within the selected group.
+func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, durationMs int64, excludeSource string, profile *quality.QualityProfile) (*Candidate, error) {
 	const minConfidence = 0.55
 
 	query := title
@@ -130,24 +131,30 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, 
 		return nil, fmt.Errorf("no matching track found across sources (min confidence %.0f%%)", minConfidence*100)
 	}
 
-	candidates = FilterByQuality(candidates, o.qualityConfig())
-	if len(candidates) == 0 {
-		qc := o.qualityConfig()
-		return nil, fmt.Errorf("no results match quality constraints (format=%s, min_bitrate=%d kbps)",
-			qc.PreferredFormat, qc.MinBitrate)
-	}
-
-	best := &candidates[0]
-	for i := range candidates[1:] {
-		if candidates[i+1].Score > best.Score {
-			best = &candidates[i+1]
+	if profile != nil {
+		if profile.SearchMode == quality.SearchBestQuality {
+			// best_quality: rank all candidates by TierScore across all target groups.
+			candidates = rankAllByQuality(candidates, profile)
+		} else {
+			// priority: filter to best-matching target group.
+			candidates = FilterByProfile(candidates, profile)
 		}
 	}
+	if len(candidates) == 0 {
+		if profile != nil {
+			return nil, fmt.Errorf("no results match quality profile %q", profile.Name)
+		}
+		return nil, fmt.Errorf("no results match quality constraints")
+	}
 
-	return best, nil
+	// Final selection: pick the best candidate by the appropriate metric.
+	if profile != nil && profile.RankCandidatesByQuality {
+		return pickBestByTierScore(candidates), nil
+	}
+	return pickBestByScore(candidates), nil
 }
 
-// Candidate is a search result with match score used by FilterByQuality
+// Candidate is a search result with match score used by FilterByProfile
 // and download-best selection.
 type Candidate struct {
 	Track      domain.TrackResult
@@ -155,39 +162,113 @@ type Candidate struct {
 	Score      float64
 }
 
-// FilterByQuality filters candidates by preferred_format and min_bitrate.
-// It modifies the slice in-place and returns the filtered view.
-func FilterByQuality(candidates []Candidate, qc config.QualityConfig) []Candidate {
-	if qc.PreferredFormat == "" || qc.PreferredFormat == "any" {
-		if qc.MinBitrate <= 0 {
-			return candidates
-		}
+// FilterByProfile applies ranked quality targets to candidates and returns
+// only the best-matching group, sorted by tier score.
+func FilterByProfile(candidates []Candidate, profile *quality.QualityProfile) []Candidate {
+	if profile == nil || len(profile.RankedTargets) == 0 {
+		return candidates
 	}
-	result := candidates[:0]
-	for _, c := range candidates {
-		if qc.PreferredFormat != "" && qc.PreferredFormat != "any" {
-			if !QualityMatches(qc.PreferredFormat, c.Track.Quality) {
-				continue
-			}
-		}
-		if qc.MinBitrate > 0 && c.Track.Bitrate < qc.MinBitrate {
-			continue
-		}
-		result = append(result, c)
+
+	// Convert candidates to AudioQuality slice for ranking.
+	aqs := make([]quality.AudioQuality, len(candidates))
+	for i, c := range candidates {
+		aqs[i] = c.Track.AudioQuality
+	}
+
+	scored := quality.FilterByProfile(aqs, *profile)
+	if len(scored) == 0 {
+		return nil
+	}
+
+	// Map scored results back to candidates via OriginalIndex (O(1) lookup, zero collisions).
+	result := make([]Candidate, len(scored))
+	for i, s := range scored {
+		result[i] = candidates[s.OriginalIndex]
 	}
 	return result
 }
 
-// qualityMatches returns true if the candidate's quality matches the preferred format.
-// "flac" matches "flac". "mp3" matches "mp3", "mp3_320", "mp3_128".
-func QualityMatches(want, have string) bool {
-	want = strings.ToLower(want)
-	have = strings.ToLower(have)
-	if want == have {
-		return true
+// rankAllByQuality scores and sorts all candidates by TierScore across all target
+// groups (best_quality search mode). Unlike FilterByProfile which selects only the
+// best target group, this keeps all candidates that match ANY target (or all
+// candidates if fallback is enabled), sorted by quality score descending.
+func rankAllByQuality(candidates []Candidate, profile *quality.QualityProfile) []Candidate {
+	aqs := make([]quality.AudioQuality, len(candidates))
+	for i, c := range candidates {
+		aqs[i] = c.Track.AudioQuality
 	}
-	if want == "mp3" && (have == "mp3_320" || have == "mp3_128") {
-		return true
+
+	// Score each candidate against the profile targets.
+	type scored struct {
+		aq           quality.AudioQuality
+		tierScore    float64
+		matched      bool
+		originalIdx  int
 	}
-	return false
+	entries := make([]scored, len(candidates))
+	for i, aq := range aqs {
+		matched := false
+		for _, t := range profile.RankedTargets {
+			if aq.MatchesTarget(t) {
+				matched = true
+				break
+			}
+		}
+		entries[i] = scored{aq: aq, tierScore: aq.TierScore(), matched: matched, originalIdx: i}
+	}
+
+	// Filter: keep candidates that match a target, or all candidates if fallback is enabled.
+	filtered := entries[:0]
+	for _, s := range entries {
+		if s.matched || profile.FallbackEnabled {
+			filtered = append(filtered, s)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+
+	// Sort by TierScore descending.
+	sort.Slice(filtered, func(i, j int) bool {
+		return filtered[i].tierScore > filtered[j].tierScore
+	})
+
+	result := make([]Candidate, len(filtered))
+	for i, s := range filtered {
+		result[i] = candidates[s.originalIdx]
+	}
+	return result
+}
+
+// pickBestByScore returns the candidate with the highest match confidence score.
+// Returns nil if candidates is empty.
+func pickBestByScore(candidates []Candidate) *Candidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	best := &candidates[0]
+	for i := range candidates[1:] {
+		if candidates[i+1].Score > best.Score {
+			best = &candidates[i+1]
+		}
+	}
+	return best
+}
+
+// pickBestByTierScore returns the candidate with the highest audio quality tier score.
+// Returns nil if candidates is empty.
+func pickBestByTierScore(candidates []Candidate) *Candidate {
+	if len(candidates) == 0 {
+		return nil
+	}
+	best := &candidates[0]
+	bestTier := best.Track.AudioQuality.TierScore()
+	for i := range candidates[1:] {
+		tier := candidates[i+1].Track.AudioQuality.TierScore()
+		if tier > bestTier {
+			best = &candidates[i+1]
+			bestTier = tier
+		}
+	}
+	return best
 }

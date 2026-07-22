@@ -33,6 +33,9 @@ import type {
   DiscoveryTrack,
   DiscoveryAlbumDownloadResponse,
   ApiError,
+  QualityProfile,
+  QualityProfileCreatePayload,
+  QualityProfileUpdatePayload,
 } from "./types";
 
 // ─── Base fetch wrapper ────────────────────────────────────────────
@@ -295,6 +298,51 @@ export function downloadAlbum(albumId: string) {
     `/api/discover/albums/${encodeURIComponent(albumId)}/download`,
     { method: "POST" },
   );
+}
+
+// ─── Quality Profiles ──────────────────────────────────────────────
+
+export function getQualityProfiles(): Promise<QualityProfile[]> {
+  return request<QualityProfile[]>("/api/quality-profiles");
+}
+
+export function getQualityProfile(id: number): Promise<QualityProfile> {
+  return request<QualityProfile>(`/api/quality-profiles/${id}`);
+}
+
+export function createQualityProfile(
+  payload: QualityProfileCreatePayload,
+): Promise<QualityProfile> {
+  return request<QualityProfile>("/api/quality-profiles", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function updateQualityProfile(
+  id: number,
+  payload: QualityProfileUpdatePayload,
+): Promise<QualityProfile> {
+  return request<QualityProfile>(`/api/quality-profiles/${id}`, {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteQualityProfile(id: number): Promise<void> {
+  return request<void>(`/api/quality-profiles/${id}`, {
+    method: "DELETE",
+  });
+}
+
+export function setDefaultQualityProfile(id: number): Promise<void> {
+  return request<void>(`/api/quality-profiles/${id}/default`, {
+    method: "PUT",
+  });
+}
+
+export function getQualityPresets(): Promise<Record<string, QualityProfile>> {
+  return request<Record<string, QualityProfile>>("/api/quality-profiles/presets");
 }
 
 // ─── Auth helpers ───────────────────────────────────────────────────

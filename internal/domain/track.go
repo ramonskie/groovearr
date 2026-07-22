@@ -12,8 +12,9 @@ type Track struct {
 	DiscNumber  int       `json:"disc_number,omitempty"`
 	Duration    int64     `json:"duration"` // milliseconds
 	FilePath    string    `json:"file_path,omitempty"`
-	Bitrate     int       `json:"bitrate,omitempty"`  // kbps
-	FileSize    int64     `json:"file_size,omitempty"` // bytes
+	Bitrate           int    `json:"bitrate,omitempty"`            // kbps
+	QualityProfileID  *int64 `json:"quality_profile_id,omitempty"` // NULL = app-wide default
+	FileSize          int64  `json:"file_size,omitempty"`          // bytes
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 

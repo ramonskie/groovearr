@@ -56,4 +56,7 @@ type Store interface {
 
 	// Maintenance.
 	Close() error
+
+	// QualityProfile returns all tracks with quality-related metadata for upgrade scanning.
+	ListTracksWithQuality(ctx context.Context) ([]domain.Track, error)
 }

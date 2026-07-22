@@ -18,20 +18,22 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
+	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sanitize"
 )
 
 // Service orchestrates playlist import and sync.
 type Service struct {
-	srcReg      *Registry
-	store       library.Store
-	downloadReg *download.Registry
-	downloadSvc *download.DownloadService
-	matcher     *matching.Engine
-	cfgFn       func() config.Config
-	log         *slog.Logger
-	syncMu      sync.Mutex
-	syncing     map[int64]bool // playlistIDs currently being synced
+	srcReg             *Registry
+	store              library.Store
+	downloadReg        *download.Registry
+	downloadSvc        *download.DownloadService
+	matcher            *matching.Engine
+	cfgFn              func() config.Config
+	log                *slog.Logger
+	qualityProfileStore quality.ProfileStore
+	syncMu             sync.Mutex
+	syncing            map[int64]bool // playlistIDs currently being synced
 }
 
 // pendingItem pairs a queued download record with its source playlist track
@@ -42,19 +44,20 @@ type pendingItem struct {
 }
 
 // NewService creates a playlist service.
-func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, logger *slog.Logger) *Service {
+func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Service{
-		srcReg:      srcReg,
-		store:       store,
-		downloadReg: downloadReg,
-		downloadSvc: downloadSvc,
-		matcher:     matching.New(),
-		cfgFn:       cfgFn,
-		log:         logger,
-		syncing:     make(map[int64]bool),
+		srcReg:             srcReg,
+		store:              store,
+		downloadReg:        downloadReg,
+		downloadSvc:        downloadSvc,
+		matcher:            matching.New(),
+		cfgFn:              cfgFn,
+		log:                logger,
+		qualityProfileStore: qualityProfileStore,
+		syncing:            make(map[int64]bool),
 	}
 }
 
@@ -253,16 +256,22 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 // and dispatches them to the download pool.
 func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64) {
 	ctx := context.Background()
-	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
-		return s.cfgFn().Quality
-	}, s.log)
+	orch := download.NewOrchestrator(s.downloadReg, s.log)
+	var defaultProfile *quality.QualityProfile
+	if s.qualityProfileStore != nil {
+		p, err := s.qualityProfileStore.LoadProfileByID(ctx, nil)
+		if err != nil {
+			s.log.Warn("failed to load default quality profile, playlist resolution proceeds unfiltered", "error", err, "component", "playlist")
+		}
+		defaultProfile = p
+	}
 	resolved := 0
 
 	for _, item := range items {
 		rec := item.record
 		pt := item.track
 
-		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "")
+		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "", defaultProfile)
 		if err != nil {
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
 			// Mark as failedPending so it stays in the Pending tab and is retried
@@ -333,11 +342,17 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 // Metadata (artist, album, title) comes from the playlist track — authoritative,
 // never from the search result's filename.
 func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album string, durationMs int64, excludeSource string, playlistID int64, isrc string) (downloadID, sourceName string, confidence float64, err error) {
-	orch := download.NewOrchestrator(s.downloadReg, func() config.QualityConfig {
-		return s.cfgFn().Quality
-	}, s.log)
+	orch := download.NewOrchestrator(s.downloadReg, s.log)
+	var defaultProfile *quality.QualityProfile
+	if s.qualityProfileStore != nil {
+		p, err := s.qualityProfileStore.LoadProfileByID(ctx, nil)
+		if err != nil {
+			s.log.Warn("failed to load default quality profile, download proceeds unfiltered", "error", err, "component", "playlist")
+		}
+		defaultProfile = p
+	}
 
-	best, err := orch.FindBestMatch(ctx, title, artist, durationMs, excludeSource)
+	best, err := orch.FindBestMatch(ctx, title, artist, durationMs, excludeSource, defaultProfile)
 	if err != nil {
 		return "", "", 0, err
 	}

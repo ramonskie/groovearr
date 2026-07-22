@@ -114,21 +114,6 @@ func TestValidateDefaults(t *testing.T) {
 	}
 }
 
-func TestValidateBadPreferredFormat(t *testing.T) {
-	cfg := DefaultConfig()
-	cfg.Quality.PreferredFormat = "wav"
-	errs := cfg.Validate()
-	found := false
-	for _, e := range errs {
-		if strings.Contains(e, "preferred_format") {
-			found = true
-		}
-	}
-	if !found {
-		t.Errorf("expected preferred_format error, got: %v", errs)
-	}
-}
-
 func TestValidateNoTemplateTokens(t *testing.T) {
 	cfg := DefaultConfig()
 	cfg.Library.FolderTemplate = "just-a-string"

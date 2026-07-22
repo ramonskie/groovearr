@@ -14,10 +14,12 @@ import GeneralSettings from "./GeneralSettings";
 import SourcesSettings from "./SourcesSettings";
 import LibrarySettings from "./LibrarySettings";
 import SecuritySettings from "./SecuritySettings";
+import QualitySettings from "./QualitySettings";
 
 const TABS = [
   { id: "general", label: "General" },
   { id: "sources", label: "Download Sources" },
+  { id: "quality", label: "Quality" },
   { id: "library", label: "Library" },
   { id: "security", label: "Security" },
 ] as const;
@@ -164,6 +166,7 @@ export default function SettingsPage() {
           {activeTab === "library" && <LibrarySettings />}
           {activeTab === "security" && <SecuritySettings />}
         </div>
+        {activeTab === "quality" && <QualitySettings />}
       </div>
     </FormProvider>
   );

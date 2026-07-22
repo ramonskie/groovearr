@@ -27,6 +27,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
+	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
 
@@ -149,6 +150,9 @@ func main() {
 		sseNotifier,
 	)
 
+	// Quality profile store (SQLite).
+	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
+
 	// Playlist service — auto-register plugins that provide playlist sources.
 	playlistReg := playlist.NewRegistry()
 		for _, p := range registry.All() {
@@ -162,7 +166,7 @@ func main() {
 		}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
-	}, mainLog)
+	}, qualityProfileStore, mainLog)
 
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
@@ -170,7 +174,7 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, eventBus, sseHub,
+	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, mainLog, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}
