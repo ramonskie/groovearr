@@ -31,6 +31,26 @@ func NewSQLiteProfileStore(db *sql.DB) *SQLiteProfileStore {
 	return &SQLiteProfileStore{db: db}
 }
 
+// builtInDefault returns a hardcoded quality profile used when no profiles
+// exist in the database. Prefers FLAC, falls back to MP3 320kbps.
+func builtInDefault() *QualityProfile {
+	return DefaultProfile()
+}
+
+// DefaultProfile returns the built-in quality profile used as fallback
+// when no profile is configured. Prefers FLAC, falls back to MP3 320kbps.
+func DefaultProfile() *QualityProfile {
+	return &QualityProfile{
+		Name:                    "Default",
+		Description:             "Built-in: prefer FLAC, fall back to MP3 320kbps",
+		RankedTargets:           RankedTargets{{Label: "FLAC", Format: "flac"}, {Label: "MP3 320", Format: "mp3", MinBitrate: 320}},
+		FallbackEnabled:         true,
+		SearchMode:              SearchPriority,
+		RankCandidatesByQuality: true,
+		UpgradePolicy:           UpgradeAcceptable,
+	}
+}
+
 const profileSelect = `SELECT id, name, description, ranked_targets,
 	fallback_enabled, search_mode, rank_candidates_by_quality,
 	upgrade_policy, upgrade_cutoff_index, replace_lower_quality,
@@ -193,19 +213,18 @@ func (s *SQLiteProfileStore) SetDefault(ctx context.Context, id int64) error {
 }
 
 // LoadProfileByID resolves a profile by id.
-// nil id → returns the default profile (is_default=1).
+// nil id → returns the default profile (is_default=1), or the built-in default
+// when no profiles exist in the database.
 // non-nil id → fetches by id; falls back to default if not found.
-// Returns error if no profile exists at all.
 func (s *SQLiteProfileStore) LoadProfileByID(ctx context.Context, id *int64) (*QualityProfile, error) {
 	if id == nil {
-		// Resolve default profile.
 		row := s.db.QueryRowContext(ctx, profileSelect+" WHERE is_default = 1")
 		p, err := scanProfile(row)
 		if err != nil {
-			return nil, fmt.Errorf("load default profile: %w", err)
+			return builtInDefault(), nil
 		}
 		if p == nil {
-			return nil, fmt.Errorf("load default profile: no quality profiles exist")
+			return builtInDefault(), nil
 		}
 		return p, nil
 	}
@@ -222,11 +241,8 @@ func (s *SQLiteProfileStore) LoadProfileByID(ctx context.Context, id *int64) (*Q
 	// Not found — fallback to default.
 	row := s.db.QueryRowContext(ctx, profileSelect+" WHERE is_default = 1")
 	p, err = scanProfile(row)
-	if err != nil {
-		return nil, fmt.Errorf("load profile %d: fallback to default: %w", *id, err)
-	}
-	if p == nil {
-		return nil, fmt.Errorf("load profile %d: not found and no default profile exists", *id)
+	if err != nil || p == nil {
+		return builtInDefault(), nil
 	}
 	return p, nil
 }

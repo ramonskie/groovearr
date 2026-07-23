@@ -275,10 +275,16 @@ func TestLoadProfileByID_NoProfiles(t *testing.T) {
 	store := NewSQLiteProfileStore(db)
 	ctx := context.Background()
 
-	// No profiles exist — nil should error.
-	_, err := store.LoadProfileByID(ctx, nil)
-	if err == nil {
-		t.Error("expected error when no profiles exist")
+	// No profiles exist — nil returns built-in default.
+	p, err := store.LoadProfileByID(ctx, nil)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if p == nil {
+		t.Fatal("expected non-nil built-in default profile")
+	}
+	if !p.RankCandidatesByQuality {
+		t.Error("built-in default should rank candidates by quality")
 	}
 }
 

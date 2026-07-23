@@ -124,24 +124,20 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist, album s
 	}
 
 	candidates := allCandidates
-	if profile != nil {
-		if profile.SearchMode == quality.SearchBestQuality {
-			// best_quality: rank all candidates by TierScore across all target groups.
-			candidates = rankAllByQuality(candidates, profile)
-		} else {
-			// priority: filter to best-matching target group.
-			candidates = FilterByProfile(candidates, profile)
-		}
+	if profile == nil {
+		profile = quality.DefaultProfile()
+	}
+	if profile.SearchMode == quality.SearchBestQuality {
+		candidates = rankAllByQuality(candidates, profile)
+	} else {
+		candidates = FilterByProfile(candidates, profile)
 	}
 	if len(candidates) == 0 {
-		if profile != nil {
-			return nil, fmt.Errorf("no results match quality profile %q", profile.Name)
-		}
-		return nil, fmt.Errorf("no results match quality constraints")
+		return nil, fmt.Errorf("no results match quality profile %q", profile.Name)
 	}
 
 	// Final selection: pick the best candidate by the appropriate metric.
-	if profile != nil && profile.RankCandidatesByQuality {
+	if profile.RankCandidatesByQuality {
 		return pickBestByTierScore(candidates), nil
 	}
 	return pickBestByScore(candidates), nil
@@ -322,15 +318,21 @@ func rankAllByQuality(candidates []Candidate, profile *quality.QualityProfile) [
 }
 
 // pickBestByScore returns the candidate with the highest match confidence score.
+// When scores are close (within 0.05), prefers higher audio quality as tie-breaker.
 // Returns nil if candidates is empty.
 func pickBestByScore(candidates []Candidate) *Candidate {
 	if len(candidates) == 0 {
 		return nil
 	}
 	best := &candidates[0]
+	bestTier := best.Track.AudioQuality.TierScore()
 	for i := range candidates[1:] {
-		if candidates[i+1].Score > best.Score {
-			best = &candidates[i+1]
+		c := &candidates[i+1]
+		tier := c.Track.AudioQuality.TierScore()
+		// Primary: match score. Secondary: quality tier when scores are close.
+		if c.Score > best.Score+0.05 || (c.Score > best.Score-0.05 && tier > bestTier) {
+			best = c
+			bestTier = tier
 		}
 	}
 	return best

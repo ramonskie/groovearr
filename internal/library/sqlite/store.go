@@ -195,6 +195,8 @@ func (s *Store) migrate() error {
 				year INTEGER NOT NULL DEFAULT 0,
 				retry_count INTEGER NOT NULL DEFAULT 0,
 				retry_after TEXT NOT NULL DEFAULT '',
+				bitrate INTEGER NOT NULL DEFAULT 0,
+				format TEXT NOT NULL DEFAULT '',
 				playlist_id TEXT NOT NULL DEFAULT '',
 				created_at TEXT NOT NULL DEFAULT (datetime('now')),
 				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -309,11 +311,21 @@ func (s *Store) migrate() error {
 			`CREATE INDEX IF NOT EXISTS idx_quality_profiles_default ON quality_profiles(is_default)`,
 			`ALTER TABLE tracks ADD COLUMN quality_profile_id INTEGER`,
 			`ALTER TABLE downloads ADD COLUMN quality_profile_id INTEGER`,
-			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, upgrade_policy, upgrade_cutoff_index, is_default)
+			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
 			SELECT 'Balanced', 'FLAC preferred, MP3 320 fallback',
-				'[{"label":"FLAC 24-bit/96kHz","format":"flac","min_bit_depth":24,"min_sample_rate":96000},{"label":"FLAC 16-bit","format":"flac","min_bit_depth":16},{"label":"MP3 320kbps","format":"mp3","min_bitrate":320}]',
-				1, 'until_cutoff', 1, 1
-			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles)`,
+				'[{"label":"FLAC","format":"flac"},{"label":"MP3 320","format":"mp3","min_bitrate":320}]',
+				1, 'priority', 1, 'acceptable', 0, 1
+			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Balanced')`,
+			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
+			SELECT 'Lossless Only', 'FLAC only, no fallback',
+				'[{"label":"FLAC","format":"flac"}]',
+				0, 'priority', 1, 'acceptable', 0, 0
+			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Lossless Only')`,
+			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
+			SELECT 'Any Quality', 'Accept any format and bitrate',
+				'[]',
+				1, 'priority', 0, 'acceptable', 0, 0
+			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Any Quality')`,
 		}
 
 		var hasError bool
