@@ -329,14 +329,6 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Title = pt.Title
 		rec.DisplayName = pt.Artist + " - " + pt.Title
 
-		// Fill missing album/year from search result metadata (parsed from filename).
-		if rec.Album == "" && best.Track.Metadata != nil && best.Track.Metadata.Album != "" {
-			rec.Album = best.Track.Metadata.Album
-		}
-		if rec.Year == 0 && best.Track.Metadata != nil && best.Track.Metadata.Year != 0 {
-			rec.Year = best.Track.Metadata.Year
-		}
-
 		// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).
 		if s.metadataResolver != nil && rec.Artist != "" && rec.Album != "" {
 			if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, rec.Artist, rec.Title, rec.Album, rec.Year); enrichErr == nil {
@@ -426,14 +418,6 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		PlaylistID:  strconv.FormatInt(playlistID, 10),
 		Bitrate:     best.Track.Bitrate,
 		Format:      best.Track.Quality,
-	}
-
-	// Fill missing album/year from search result metadata (parsed from filename).
-	if meta.Album == "" && best.Track.Metadata != nil && best.Track.Metadata.Album != "" {
-		meta.Album = best.Track.Metadata.Album
-	}
-	if meta.Year == 0 && best.Track.Metadata != nil && best.Track.Metadata.Year != 0 {
-		meta.Year = best.Track.Metadata.Year
 	}
 
 	// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).

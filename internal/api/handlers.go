@@ -574,14 +574,8 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		if artist == "" && best.Track.Metadata.Artist != "" {
 			artist = best.Track.Metadata.Artist
 		}
-		if album == "" && best.Track.Metadata.Album != "" {
-			album = best.Track.Metadata.Album
-		}
 		if title == "" && best.Track.Metadata.Title != "" {
 			title = best.Track.Metadata.Title
-		}
-		if best.Track.Metadata.Year > 0 {
-			year = best.Track.Metadata.Year
 		}
 	}
 
@@ -1566,11 +1560,6 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		title := t.Title
 		year := 0
 		var coverURL string
-		if best.Track.Metadata != nil {
-			if best.Track.Metadata.Year > 0 {
-				year = best.Track.Metadata.Year
-			}
-		}
 		if s.metadataResolver != nil {
 			enrichCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 			enriched, err := s.metadataResolver.EnrichMetadata(enrichCtx, artist, title, album, year)
