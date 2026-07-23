@@ -241,11 +241,19 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 		case <-deadline:
 			return fmt.Errorf("download timed out after %v: %s (%s)", downloadTimeout, displayName, filename)
 		case <-ticker.C:
-			// If the plugin supports DownloadProgressor, get high-resolution progress.
+			var bestTransferred, bestTotal, bestSpeed int64
+			var bestProgress float64
+
+			// Get real-time transferred/speed from the plugin's progress interface.
 			if dp != nil {
 				prog, err := dp.GetProgress(ctx, pluginID)
 				if err == nil && prog != nil {
-					p.fireProgress(serviceID, 0, prog.Transferred, prog.Total, prog.Speed)
+					bestTransferred = prog.Transferred
+					bestTotal = prog.Total
+					bestSpeed = prog.Speed
+					if prog.Total > 0 {
+						bestProgress = float64(prog.Transferred) / float64(prog.Total) * 100
+					}
 				}
 			}
 
@@ -269,17 +277,21 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 				lastFilePath = status.FilePath
 			}
 
+			// Fall back to status data when dp didn't provide values.
+			if bestTotal == 0 {
+				bestTransferred = status.Transferred
+				bestTotal = status.Size
+				bestSpeed = status.Speed
+				bestProgress = status.Progress
+			}
+
 			// Sync progress back to our store record without overwriting metadata.
-			// Uses job-level ctx so the update is skipped when the download is cancelled.
 			_ = p.store.UpdateProgress(ctx, serviceID, domain.DownloadDownloading,
-				status.Progress, status.Size, status.Transferred, status.Speed,
+				bestProgress, bestTotal, bestTransferred, bestSpeed,
 				lastFilePath, "")
 
-			// Fire progress event with status data (may be overwritten by dp above).
-			if dp == nil {
-				p.fireProgress(serviceID, status.Progress, status.Transferred,
-					status.Size, status.Speed)
-			}
+			p.fireProgress(serviceID, bestProgress, bestTransferred,
+				bestTotal, bestSpeed)
 
 			// Check terminal state.
 			// NOTE: Plugins use DownloadImported to mean "file on disk, ready for
