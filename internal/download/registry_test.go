@@ -87,7 +87,7 @@ func TestRegistryAll(t *testing.T) {
 
 func TestRegistryConfigured(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&mockPlugin{name: "a", display: "A", configured: true})
+	r.Register(&mockPlugin{name: "a", display: "A", configured: true, connected: true})
 	r.Register(&mockPlugin{name: "b", display: "B", configured: false})
 
 	cfg := r.Configured()
@@ -123,7 +123,7 @@ func TestRegistryReplace(t *testing.T) {
 
 func TestOrchestratorSearch(t *testing.T) {
 	r := NewRegistry()
-	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek", configured: true})
+	r.Register(&mockPlugin{name: "soulseek", display: "Soulseek", configured: true, connected: true})
 	orch := NewOrchestrator(r, testLogger())
 
 	_, _, err := orch.Search(context.Background(), "soulseek", "query")

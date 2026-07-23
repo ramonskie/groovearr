@@ -6,11 +6,16 @@ import (
 	"fmt"
 	"log/slog"
 	"sort"
+	"strings"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
+
+// minMatchConfidence is the minimum ScoreTrackMatchWithPath score to consider
+// a candidate as a potential match.
+const minMatchConfidence = 0.55
 
 // ─── Orchestrator ───────────────────────────────────────────────────
 
@@ -77,8 +82,14 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 
 // FindBestMatch searches all configured sources for tracks matching the given
 // metadata, scores candidates, applies quality filters, and returns the best
-// candidate. Excludes results from excludeSource. Returns an error if no
-// candidates meet the confidence threshold or quality constraints.
+// candidate. Uses a multi-query walk: primary (artist+title), album variant
+// (album+artist+title), and cleaned-title fallback — trying each in sequence
+// and merging deduplicated results. Excludes results from excludeSource.
+// Returns an error if no candidates meet the confidence threshold or quality
+// constraints.
+//
+// Parameters:
+//   - album: optional album name for the album-variant query (pass "" if unknown).
 //
 // Quality profile behavior:
 //   - search_mode="priority" (default): FilterByProfile selects best target group,
@@ -87,50 +98,32 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 //     target groups — quality trumps match score.
 //   - rank_candidates_by_quality=true: Final selection by TierScore instead of
 //     match confidence within the selected group.
-func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, durationMs int64, excludeSource string, profile *quality.QualityProfile) (*Candidate, error) {
-	const minConfidence = 0.55
+func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist, album string, durationMs int64, excludeSource string, profile *quality.QualityProfile) (*Candidate, error) {
+	queries := o.configuredQueries(title, artist, album)
 
-	query := title
-	if artist != "" {
-		query = artist + " " + title
-	}
+	var allCandidates []Candidate
+	seenFilenames := make(map[string]bool)
 
-	var candidates []Candidate
-	for _, p := range o.registry.Configured() {
-		if p.Name() == excludeSource {
-			continue
-		}
-		searchTracks, _, searchErr := p.Search(ctx, query)
-		if searchErr != nil {
-			o.log.Error("search failed", "plugin", p.Name(), "query", query, "error", searchErr, "component", "orchestrator")
-			continue
-		}
-		for _, t := range searchTracks {
-			sourceArtists := []string{}
-			if artist != "" {
-				sourceArtists = []string{artist}
-			}
-			candidateArtists := []string{}
-			if t.Artist != "" {
-				candidateArtists = []string{t.Artist}
-			}
-			if t.Username != "" {
-				candidateArtists = append(candidateArtists, t.Username)
-			}
-			score, _ := o.matcher.ScoreTrackMatch(
-				title, sourceArtists, durationMs,
-				t.Title, candidateArtists, t.Duration,
-			)
-			if score >= minConfidence {
-				candidates = append(candidates, Candidate{Track: t, SourceName: p.Name(), Score: score})
+	for i, query := range queries {
+		candidates := o.searchSingleQuery(ctx, query, title, artist, durationMs, excludeSource)
+		o.log.Debug("FindBestMatch: query", "n", i+1, "total", len(queries), "query", query, "results", len(candidates), "component", "orchestrator")
+
+		// Deduplicate by Filename. Skip empty filenames — they can't be deduped reliably.
+		for _, c := range candidates {
+			if c.Track.Filename == "" {
+				allCandidates = append(allCandidates, c)
+			} else if !seenFilenames[c.Track.Filename] {
+				seenFilenames[c.Track.Filename] = true
+				allCandidates = append(allCandidates, c)
 			}
 		}
 	}
 
-	if len(candidates) == 0 {
-		return nil, fmt.Errorf("no matching track found across sources (min confidence %.0f%%)", minConfidence*100)
+	if len(allCandidates) == 0 {
+		return nil, fmt.Errorf("no matching track found across sources (min confidence %.0f%%)", minMatchConfidence*100)
 	}
 
+	candidates := allCandidates
 	if profile != nil {
 		if profile.SearchMode == quality.SearchBestQuality {
 			// best_quality: rank all candidates by TierScore across all target groups.
@@ -152,6 +145,94 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist string, 
 		return pickBestByTierScore(candidates), nil
 	}
 	return pickBestByScore(candidates), nil
+}
+
+// configuredQueries builds an ordered, deduplicated list of search query
+// variants from the available metadata. Queries are tried in order — the
+// first query is the most specific (artist+title), followed by broader
+// variants that may turn up results the primary query missed.
+//
+// Query generation rules:
+//   - Query 1: "{artist} {title}" — always included when artist is non-empty.
+//   - Query 2: "{album} {artist} {title}" — only when album and artist are both non-empty.
+//   - Query 3: cleaned title (via matching.Engine.CleanTitle) — only when different
+//     from the original title and non-empty.
+func (o *Orchestrator) configuredQueries(title, artist, album string) []string {
+	var queries []string
+	seen := make(map[string]bool)
+
+	addIfNew := func(q string) {
+		q = strings.TrimSpace(q)
+		if q == "" {
+			return
+		}
+		key := strings.ToLower(q)
+		if !seen[key] {
+			seen[key] = true
+			queries = append(queries, q)
+		}
+	}
+
+	// Query 1: "{artist} {title}" — primary query.
+	if artist != "" {
+		addIfNew(artist + " " + title)
+	} else if title != "" {
+		addIfNew(title)
+	}
+
+	// Query 2: "{album} {artist} {title}" — album variant.
+	if album != "" && artist != "" {
+		addIfNew(album + " " + artist + " " + title)
+	}
+
+	// Query 3: cleaned title — fallback for when features/remixes confuse search.
+	if title != "" {
+		cleanedTitle := o.matcher.CleanTitle(title)
+		if cleanedTitle != title && cleanedTitle != "" {
+			addIfNew(cleanedTitle)
+		}
+	}
+
+	return queries
+}
+
+// searchSingleQuery queries all configured plugins with a single search string,
+// scores results with ScoreTrackMatchWithPath (using the candidate's Filename
+// for word-boundary artist matching), and returns candidates meeting the
+// minConfidence threshold.
+func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, artist string, durationMs int64, excludeSource string) []Candidate {
+	var candidates []Candidate
+	sourceArtists := []string{}
+	if artist != "" {
+		sourceArtists = []string{artist}
+	}
+
+	for _, p := range o.registry.Configured() {
+		if p.Name() == excludeSource {
+			continue
+		}
+		searchTracks, _, searchErr := p.Search(ctx, query)
+		if searchErr != nil {
+			o.log.Error("search failed", "plugin", p.Name(), "query", query, "error", searchErr, "component", "orchestrator")
+			continue
+		}
+		for _, t := range searchTracks {
+			candidateArtists := []string{}
+			if t.Artist != "" {
+				candidateArtists = []string{t.Artist}
+			}
+			// Use ScoreTrackMatchWithPath for word-boundary artist matching on the file path.
+			score, _ := o.matcher.ScoreTrackMatchWithPath(
+				title, sourceArtists, durationMs,
+				t.Title, candidateArtists, t.Duration,
+				t.Filename,
+			)
+			if score >= minMatchConfidence {
+				candidates = append(candidates, Candidate{Track: t, SourceName: p.Name(), Score: score})
+			}
+		}
+	}
+	return candidates
 }
 
 // Candidate is a search result with match score used by FilterByProfile

@@ -282,7 +282,7 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 			}
 		}
 
-		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "", defaultProfile)
+		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.Album, pt.DurationMs, "", defaultProfile)
 		if err != nil {
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
 
@@ -372,7 +372,7 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		defaultProfile = p
 	}
 
-	best, err := orch.FindBestMatch(ctx, title, artist, durationMs, excludeSource, defaultProfile)
+	best, err := orch.FindBestMatch(ctx, title, artist, album, durationMs, excludeSource, defaultProfile)
 	if err != nil {
 		return "", "", 0, err
 	}

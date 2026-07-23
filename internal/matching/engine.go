@@ -18,13 +18,26 @@ type Engine struct {
 	artistPatterns []*regexp.Regexp
 
 	// Version keywords that indicate a different cut of the same song.
-	versionKeywords []string
+	versionKeywords  []string
 	remasterKeywords []string
+
+	// Hardcoded set of junk artist names (normalized).
+	junkArtists map[string]bool
+	// Combined regex matching any junk artist name with word boundaries.
+	junkArtistRE *regexp.Regexp
+}
+
+// junkArtistNames is the canonical list of junk artist tokens.
+var junkArtistNames = []string{
+	"various artists", "various", "va",
+	"unknown artist", "unknown",
+	"compilation", "soundtrack", "ost",
+	"no artist",
 }
 
 // New creates a matching engine with default patterns.
 func New() *Engine {
-	return &Engine{
+	e := &Engine{
 		titlePatterns: []*regexp.Regexp{
 			regexp.MustCompile(`(?i)\s*\(explicit\)`),
 			regexp.MustCompile(`(?i)\s*\(clean\)`),
@@ -52,7 +65,19 @@ func New() *Engine {
 			"demo", "rough cut",
 		},
 		remasterKeywords: []string{"remaster", "remastered"},
+		junkArtists:      make(map[string]bool, len(junkArtistNames)),
 	}
+
+	// Build junk artist map and combined regex.
+	patterns := make([]string, 0, len(junkArtistNames))
+	for _, name := range junkArtistNames {
+		norm := e.Normalize(name)
+		e.junkArtists[norm] = true
+		patterns = append(patterns, regexp.QuoteMeta(norm))
+	}
+	e.junkArtistRE = regexp.MustCompile(`\b(?:` + strings.Join(patterns, `|`) + `)\b`)
+
+	return e
 }
 
 // Normalize reduces a string to a canonical form for comparison.
@@ -120,12 +145,30 @@ func (e *Engine) CleanArtist(artist string) string {
 }
 
 // ScoreTrackMatch returns a confidence score (0.0–1.0) for a candidate track.
-// Weights: 60% title, 30% artist, 10% duration.
+// Delegates to ScoreTrackMatchWithPath with an empty candidate filename.
+// NOTE: This applies the same 45/40/15 weights and hard gates (artist<0.25 reject,
+// title<0.30 reject, junk artist reject) as ScoreTrackMatchWithPath.
+// Scores may differ from pre-refactor values for the same inputs.
 func (e *Engine) ScoreTrackMatch(
 	sourceTitle string, sourceArtists []string, sourceDurationMs int64,
 	candidateTitle string, candidateArtists []string, candidateDurationMs int64,
 ) (confidence float64, matchType string) {
-	// Artist scoring (30%).
+	return e.ScoreTrackMatchWithPath(
+		sourceTitle, sourceArtists, sourceDurationMs,
+		candidateTitle, candidateArtists, candidateDurationMs,
+		"",
+	)
+}
+
+// ScoreTrackMatchWithPath returns a confidence score (0.0–1.0) for a candidate track,
+// using the Soulseek file path for word-boundary artist matching and junk artist gating.
+// Weights: 45% artist, 40% title, 15% duration.
+func (e *Engine) ScoreTrackMatchWithPath(
+	sourceTitle string, sourceArtists []string, sourceDurationMs int64,
+	candidateTitle string, candidateArtists []string, candidateDurationMs int64,
+	candidateFilename string,
+) (confidence float64, matchType string) {
+	// ── Artist scoring (45%) ──────────────────────────────────────────────
 	artistScore := 0.0
 	for _, sa := range sourceArtists {
 		saC := e.CleanArtist(sa)
@@ -154,7 +197,15 @@ func (e *Engine) ScoreTrackMatch(
 		}
 	}
 
-	// Title scoring (60%).
+	// Word-boundary artist match on path segments (only when filename available).
+	if artistScore < 0.25 && candidateFilename != "" {
+		wbScore := e.wordBoundaryArtistMatch(sourceArtists, candidateFilename)
+		if wbScore > artistScore {
+			artistScore = wbScore
+		}
+	}
+
+	// ── Title scoring (40%) ───────────────────────────────────────────────
 	sourceCore := e.CoreString(sourceTitle)
 	candidateCore := e.CoreString(candidateTitle)
 	titleScore := 0.0
@@ -167,11 +218,29 @@ func (e *Engine) ScoreTrackMatch(
 		titleScore = e.titleSimilarity(cleanSource, cleanCandidate)
 	}
 
-	// Duration scoring (10%).
+	// ── Duration scoring (15%) ────────────────────────────────────────────
 	durationScore := durationSimilarity(sourceDurationMs, candidateDurationMs)
 
-	// Weighted final score.
-	confidence = titleScore*0.6 + artistScore*0.3 + durationScore*0.1
+	// ── Hard gates ────────────────────────────────────────────────────────
+	// Gate 1: Junk artist in path segments.
+	if candidateFilename != "" && e.junkArtistRE.MatchString(e.Normalize(candidateFilename)) {
+		return 0, "rejected"
+	}
+
+	// Gate 2: Artist too low.
+	if artistScore < 0.25 {
+		return 0, "rejected"
+	}
+
+	// Gate 3: Title too low, unless word-boundary match on path overrides.
+	if titleScore < 0.30 {
+		if candidateFilename == "" || !e.titleWordBoundaryMatch(sourceTitle, candidateFilename) {
+			return 0, "rejected"
+		}
+	}
+
+	// ── Weighted final score (45/40/15) ───────────────────────────────────
+	confidence = titleScore*0.40 + artistScore*0.45 + durationScore*0.15
 
 	if titleScore >= 0.95 && artistScore >= 0.9 {
 		matchType = "exact"
@@ -187,6 +256,7 @@ func (e *Engine) ScoreTrackMatch(
 }
 
 // titleSimilarity compares two cleaned titles with version-awareness.
+// Uses lcsRatio as primary comparison; falls back to bigram similarity when lcsRatio < 0.5.
 // Different versions (remix vs live vs original) get heavily penalized.
 func (e *Engine) titleSimilarity(a, b string) float64 {
 	if a == "" || b == "" {
@@ -196,7 +266,10 @@ func (e *Engine) titleSimilarity(a, b string) float64 {
 		return 1.0
 	}
 
-	ratio := stringSimilarity(a, b)
+	ratio := lcsRatio(a, b)
+	if ratio < 0.5 {
+		ratio = stringSimilarity(a, b)
+	}
 
 	// Prefix check: is one a version of the other?
 	shorter, longer := a, b
@@ -235,6 +308,132 @@ func (e *Engine) hasVersionMarker(s string) bool {
 	lower := strings.ToLower(s)
 	for _, kw := range e.versionKeywords {
 		if strings.Contains(lower, kw) {
+			return true
+		}
+	}
+	return false
+}
+
+// lcsRatio computes normalized Longest Common Subsequence ratio.
+// Equivalent to Python's difflib.SequenceMatcher.ratio(): 2*LCS_len / (len(a)+len(b)).
+// Uses DP with single-row optimization — O(n*m) time, O(min(n,m)) space.
+// Rune-aware for Unicode safety.
+func lcsRatio(a, b string) float64 {
+	ra := []rune(a)
+	rb := []rune(b)
+	na, nb := len(ra), len(rb)
+
+	if na == 0 && nb == 0 {
+		return 1.0
+	}
+	if na == 0 || nb == 0 {
+		return 0.0
+	}
+
+	// Ensure a is the shorter string for O(min(n,m)) space.
+	if na > nb {
+		ra, rb = rb, ra
+		na, nb = nb, na
+	}
+
+	prev := make([]int, na+1)
+	curr := make([]int, na+1)
+
+	for j := 1; j <= nb; j++ {
+		for i := 1; i <= na; i++ {
+			if ra[i-1] == rb[j-1] {
+				curr[i] = prev[i-1] + 1
+			} else {
+				if prev[i] > curr[i-1] {
+					curr[i] = prev[i]
+				} else {
+					curr[i] = curr[i-1]
+				}
+			}
+		}
+		prev, curr = curr, prev
+	}
+
+	return 2.0 * float64(prev[na]) / float64(na+nb)
+}
+
+// splitAndNormalizePath splits a candidate filename into path segments
+// (by '/' and '\\') and normalizes each segment via the matching engine.
+func (e *Engine) splitAndNormalizePath(candidateFilename string) []string {
+	segments := strings.FieldsFunc(candidateFilename, func(r rune) bool { return r == '/' || r == '\\' })
+	normSegs := make([]string, len(segments))
+	for i, seg := range segments {
+		normSegs[i] = e.Normalize(seg)
+	}
+	return normSegs
+}
+
+// wordBoundaryArtistMatch splits source artists into tokens and checks each token
+// as a word-boundary regex against each path segment of the candidate filename.
+// Returns the ratio of matched tokens to total tokens.
+func (e *Engine) wordBoundaryArtistMatch(sourceArtists []string, candidateFilename string) float64 {
+	if len(sourceArtists) == 0 || candidateFilename == "" {
+		return 0
+	}
+
+	// Collect all artist tokens (cleaned, whitespace-split).
+	var allTokens []string
+	for _, sa := range sourceArtists {
+		clean := e.CleanArtist(sa)
+		for _, token := range strings.Fields(clean) {
+			if len(token) > 1 {
+				allTokens = append(allTokens, token)
+			}
+		}
+	}
+	if len(allTokens) == 0 {
+		return 0
+	}
+
+	normSegs := e.splitAndNormalizePath(candidateFilename)
+	matched := 0
+	for _, token := range allTokens {
+		re := regexp.MustCompile(`\b` + regexp.QuoteMeta(token) + `\b`)
+		for _, ns := range normSegs {
+			if re.MatchString(ns) {
+				matched++
+				break
+			}
+		}
+	}
+
+	return float64(matched) / float64(len(allTokens))
+}
+
+// titleWordBoundaryMatch checks whether any source title token appears as a
+// word-boundary match in any path segment. Used as an override for the title hard gate.
+func (e *Engine) titleWordBoundaryMatch(sourceTitle, candidateFilename string) bool {
+	cleanSource := e.CleanTitle(sourceTitle)
+	tokens := strings.Fields(cleanSource)
+	if len(tokens) == 0 {
+		return false
+	}
+
+	// Filter to meaningful tokens.
+	var filtered []string
+	for _, t := range tokens {
+		if len(t) > 1 {
+			filtered = append(filtered, t)
+		}
+	}
+	if len(filtered) == 0 {
+		return false
+	}
+
+	patterns := make([]string, len(filtered))
+	for i, token := range filtered {
+		patterns[i] = regexp.QuoteMeta(token)
+	}
+	re := regexp.MustCompile(`\b(?:` + strings.Join(patterns, `|`) + `)\b`)
+
+	normSegs := e.splitAndNormalizePath(candidateFilename)
+	for _, ns := range normSegs {
+		if re.MatchString(ns) {
 			return true
 		}
 	}

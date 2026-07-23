@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -16,12 +17,13 @@ const progressPollInterval = 1 * time.Second
 
 // DownloadJob represents a download task dispatched to a worker.
 type DownloadJob struct {
-	DownloadID string
-	SourceName string
-	Username   string
-	Filename   string
-	FileSize   int64
-	Metadata   DownloadMeta
+	DownloadID  string
+	SourceName  string
+	Username    string
+	Filename    string
+	DisplayName string
+	FileSize    int64
+	Metadata    DownloadMeta
 }
 
 // workerPoolImpl implements WorkerPool with bounded goroutines and graceful shutdown.
@@ -83,11 +85,12 @@ func (p *workerPoolImpl) Submit(ctx context.Context, record *domain.DownloadReco
 	}
 
 	job := &DownloadJob{
-		DownloadID: record.ID,
-		SourceName: record.SourceName,
-		Username:   username,
-		Filename:   record.Filename,
-		FileSize:   record.Size,
+		DownloadID:  record.ID,
+		SourceName:  record.SourceName,
+		Username:    username,
+		Filename:    record.Filename,
+		DisplayName: record.DisplayName,
+		FileSize:    record.Size,
 		Metadata: DownloadMeta{
 			Artist:      record.Artist,
 			Album:       record.Album,
@@ -147,6 +150,17 @@ func (p *workerPoolImpl) worker() {
 // processJob runs the full download lifecycle for a single job.
 func (p *workerPoolImpl) processJob(job *DownloadJob) {
 	downloadID := job.DownloadID
+	displayName := job.DisplayName
+	if displayName == "" {
+		if job.Metadata.Artist != "" && job.Metadata.Title != "" {
+			displayName = job.Metadata.Artist + " - " + job.Metadata.Title
+		} else if job.Metadata.Title != "" {
+			displayName = job.Metadata.Title
+		} else {
+			displayName = job.Filename
+		}
+	}
+	shortFilename := filepath.Base(job.Filename)
 
 	// Create a per-job cancellable context so Cancel() can stop this download.
 	jobCtx, jobCancel := context.WithCancel(p.ctx)
@@ -193,13 +207,13 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 	// which we use for subsequent status and progress queries.
 	pluginDownloadID, err := plugin.Download(jobCtx, job.Username, job.Filename, job.FileSize)
 	if err != nil {
-		p.failJob(downloadID, fmt.Sprintf("plugin download: %v", err))
+		p.failJob(downloadID, fmt.Sprintf("plugin download for %s: %v", displayName, err))
 		return
 	}
 
 	// Poll until the plugin reports a terminal state.
 	dp, _ := plugin.(DownloadProgressor)
-	if err := p.pollUntilComplete(jobCtx, downloadID, plugin, dp, pluginDownloadID); err != nil {
+	if err := p.pollUntilComplete(jobCtx, downloadID, plugin, dp, pluginDownloadID, displayName, shortFilename); err != nil {
 		p.failJob(downloadID, err.Error())
 		return
 	}
@@ -210,7 +224,7 @@ func (p *workerPoolImpl) processJob(job *DownloadJob) {
 
 // pollUntilComplete periodically checks the plugin for download status.
 // Returns nil on success, error on failure/cancellation/timeout.
-func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string, plugin Plugin, dp DownloadProgressor, pluginID string) error {
+func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string, plugin Plugin, dp DownloadProgressor, pluginID string, displayName string, filename string) error {
 	ticker := time.NewTicker(progressPollInterval)
 	defer ticker.Stop()
 
@@ -223,9 +237,9 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 	for {
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("download cancelled")
+			return fmt.Errorf("download cancelled: %s", displayName)
 		case <-deadline:
-			return fmt.Errorf("download timed out after %v", downloadTimeout)
+			return fmt.Errorf("download timed out after %v: %s (%s)", downloadTimeout, displayName, filename)
 		case <-ticker.C:
 			// If the plugin supports DownloadProgressor, get high-resolution progress.
 			if dp != nil {
@@ -240,7 +254,7 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 			if err != nil {
 				errCount++
 				if errCount >= 30 {
-					return fmt.Errorf("status check failed %d times: %w", errCount, err)
+					return fmt.Errorf("status check failed for %s after %d attempts: %w", displayName, errCount, err)
 				}
 				p.log.Warn("status check failed", "service_id", serviceID, "attempt", errCount, "error", err, "component", "worker")
 				continue

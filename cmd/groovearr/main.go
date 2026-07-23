@@ -149,7 +149,7 @@ func main() {
 		dlStore,
 		eventBus,
 		mainLog,
-		download.NewTagValidatorHandler(),
+		download.NewTagValidatorHandler(mainLog),
 		download.NewFileRenamerHandler(renamer, dlStore, mainLog),
 		download.NewCoverArtHandler(libStore, mainLog),
 		download.NewTagWriterHandler(mainLog),

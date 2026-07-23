@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -20,7 +21,6 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
-	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/provider"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
@@ -537,6 +537,62 @@ func parseSearchResponses(raw json.RawMessage) []map[string]any {
 	return responses
 }
 
+// ─── Filename parsing helpers ────────────────────────────────────────
+//
+// NOTE: Soulseek provides no structured metadata — the filename IS the metadata.
+// Artist matching for download selection is handled by the matching engine's
+// word-boundary search on the full path (ScoreTrackMatchWithPath). The parsed
+// artist/title fields here are display hints only.
+
+// Tiered regex patterns for filename parsing, compiled once at init.
+var (
+	filenameTier1RE = regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+?)\s+-\s+(.+)$`)
+	filenameTier2RE = regexp.MustCompile(`^(.+?)\s+-\s+(.+)$`)
+	filenameTier3RE = regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
+	yearInPathRE    = regexp.MustCompile(`(19\d{2}|20\d{2})`)
+)
+
+// parseFilename parses a Soulseek file path using 3-tier regex patterns.
+// Strips the file extension and applies patterns against the basename only.
+// Returns artist, title, and track number; empty strings/zero when no pattern matches.
+// Artist parsing is conservative — only "Artist - Title" basename pattern yields artist.
+// Path-based artist matching is handled by the matching engine (ScoreTrackMatchWithPath).
+func parseFilename(filename string) (artist, title string, trackNum int) {
+	normalized := strings.ReplaceAll(filename, "\\", "/")
+	base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
+
+	if m := filenameTier1RE.FindStringSubmatch(base); m != nil {
+		trackNum, _ = strconv.Atoi(m[1])
+		artist = strings.TrimSpace(m[2])
+		title = strings.TrimSpace(m[3])
+		return
+	}
+
+	// Tier 3 before Tier 2: "01 - Title" must NOT be parsed as artist="01".
+	if m := filenameTier3RE.FindStringSubmatch(base); m != nil {
+		trackNum, _ = strconv.Atoi(m[1])
+		title = strings.TrimSpace(m[2])
+		return
+	}
+
+	if m := filenameTier2RE.FindStringSubmatch(base); m != nil {
+		artist = strings.TrimSpace(m[1])
+		title = strings.TrimSpace(m[2])
+		return
+	}
+
+	return
+}
+
+// parseYearFromPath extracts a 4-digit year (19xx or 20xx) from a file path.
+// Returns the first match or an empty string.
+func parseYearFromPath(filename string) string {
+	if m := yearInPathRE.FindStringSubmatch(filename); m != nil {
+		return m[1]
+	}
+	return ""
+}
+
 func processResponses(responses []map[string]any) ([]domain.TrackResult, []domain.AlbumResult) {
 	type albumKey struct {
 		username string
@@ -561,24 +617,8 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				continue
 			}
 
-			// Extract track number from filename (the only reliable field).
-			trackNum := 0
-			trackTitle := filename
-			normalized := strings.ReplaceAll(filename, "\\", "/")
-			base := strings.TrimSuffix(path.Base(normalized), path.Ext(normalized))
-			if m := library.TrackNumRE.FindStringSubmatch(base); m != nil {
-				n, _ := strconv.Atoi(m[1])
-				trackNum = n
-				trackTitle = strings.TrimSpace(m[2])
-			}
-
-			// Parse artist from filename when it follows "Artist - Title" pattern.
-			// Soulseek has no discovery metadata — the filename IS the metadata.
-			artist := ""
-			if idx := strings.Index(trackTitle, " - "); idx > 0 {
-				artist = strings.TrimSpace(trackTitle[:idx])
-				trackTitle = strings.TrimSpace(trackTitle[idx+3:])
-			}
+			// Parse metadata from filename using 3-tier regex patterns.
+			artist, trackTitle, trackNum := parseFilename(filename)
 
 			durationSec, _ := fm["length"].(float64)
 			tr := domain.TrackResult{
@@ -631,11 +671,14 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 		}
 
 		// Parse artist, album title, and year from the album path.
-		// Since we no longer parse metadata from filenames, set these to empty.
-		// Album grouping still works — tracks are grouped by directory.
-		albumArtist := ""
-		albumTitle := key.path
-		albumYear := ""
+		var albumArtist string
+		if len(albumTracks) > 0 && albumTracks[0].Artist != "" {
+			albumArtist = albumTracks[0].Artist
+		}
+		// Use the directory's last segment as the album title.
+		albumPathSegments := strings.Split(strings.ReplaceAll(key.path, "\\", "/"), "/")
+		albumTitle := albumPathSegments[len(albumPathSegments)-1]
+		albumYear := parseYearFromPath(key.path)
 
 		albums = append(albums, domain.AlbumResult{
 			Username:        key.username,

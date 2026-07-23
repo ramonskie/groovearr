@@ -504,8 +504,9 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Title         string `json:"title"`
 		Artist        string `json:"artist"`
-		Duration      int64  `json:"duration"`       // milliseconds (optional, 0 = neutral)
-		ExcludeSource string `json:"exclude_source"` // source to skip (the one that just failed)
+		Album         string `json:"album,omitempty"` // optional album name for multi-query search
+		Duration      int64  `json:"duration"`        // milliseconds (optional, 0 = neutral)
+		ExcludeSource string `json:"exclude_source"`  // source to skip (the one that just failed)
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -525,7 +526,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	if profileErr != nil {
 		s.log.Warn("failed to load default quality profile, downloads proceed unfiltered", "error", profileErr, "component", "api")
 	}
-	best, err := orch.FindBestMatch(ctx, req.Title, req.Artist, req.Duration, req.ExcludeSource, defaultProfile)
+	best, err := orch.FindBestMatch(ctx, req.Title, req.Artist, req.Album, req.Duration, req.ExcludeSource, defaultProfile)
 	if err != nil {
 		writeJSON(w, http.StatusNotFound, err)
 		return
@@ -1479,7 +1480,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 	var queued int
 	var errors []string
 	for _, t := range tracks {
-		best, err := orch.FindBestMatch(ctx, t.Title, t.ArtistName, t.DurationMs, "", defaultProfile)
+		best, err := orch.FindBestMatch(ctx, t.Title, t.ArtistName, t.AlbumTitle, t.DurationMs, "", defaultProfile)
 		if err != nil {
 			errors = append(errors, fmt.Sprintf("%s - %s: %v", t.ArtistName, t.Title, err))
 			continue
