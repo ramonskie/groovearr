@@ -26,14 +26,13 @@ func NewMetadataResolver(registry *Registry, logger *slog.Logger) *MetadataResol
 }
 
 // EnrichMetadata completes partial metadata by querying configured providers.
-// It returns a domain.TrackMetadata populated with whatever could be discovered
-// plus the caller-supplied values. Fields that cannot be resolved are left empty.
+// When album is empty, uses metadata providers to find the album name from
+// artist+title before searching for cover art.
 //
 // Enrichment logic:
-//   - If album is non-empty, queries each configured provider for cover art.
-//   - If album is empty, skips cover lookup (album name is required for search).
-//   - All provider errors are logged at warn level and do not cause EnrichMetadata
-//     to return an error — best-effort enrichment.
+//   - If album is empty, queries each configured provider for the album name.
+//   - If album is non-empty (after lookup), queries providers for cover art.
+//   - All provider errors are logged at warn level — best-effort enrichment.
 func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, album string, year int) (*domain.TrackMetadata, error) {
 	result := &domain.TrackMetadata{
 		Artist: artist,
@@ -42,21 +41,32 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 		Year:   year,
 	}
 
-	// Cover lookup requires at least artist + album.
-	if album == "" || artist == "" {
+	if artist == "" || title == "" {
 		return result, nil
 	}
 
-	// Try each configured provider until one returns a cover URL.
 	providers := r.registry.Configured()
+
+	// Phase 1: find album name if missing.
+	if album == "" {
+		for _, p := range providers {
+			if found := p.SearchAlbum(ctx, artist, title); found != "" {
+				result.Album = found
+				break
+			}
+		}
+	}
+
+	// Phase 2: find cover art (requires artist + album).
+	if result.Album == "" {
+		return result, nil
+	}
+
 	for _, p := range providers {
-		cover, err := p.SearchCover(ctx, artist, album)
+		cover, err := p.SearchCover(ctx, artist, result.Album)
 		if err != nil {
 			r.log.Warn("metadata resolver: cover search failed, trying next provider",
-				"provider", p.Name(),
-				"artist", artist,
-				"album", album,
-				"error", err,
+				"provider", p.Name(), "artist", artist, "album", result.Album, "error", err,
 			)
 			continue
 		}

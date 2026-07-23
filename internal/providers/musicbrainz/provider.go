@@ -78,9 +78,22 @@ func (c *Client) SearchCover(ctx context.Context, artist, album string) (*metada
 }
 
 // SearchArtistImage looks up an artist image. MusicBrainz does not host
-// artist images, so this always returns nil, nil.
+// artist images directly — returns nil, nil.
 func (c *Client) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
 	return nil, nil
+}
+
+// SearchAlbum finds the album title for a track by searching MusicBrainz
+// recordings via artist+title. Returns empty string if no match found.
+func (c *Client) SearchAlbum(ctx context.Context, artist, title string) string {
+	if artist == "" || title == "" {
+		return ""
+	}
+	rg, err := c.api.SearchRecording(ctx, artist, title)
+	if err != nil || rg == nil {
+		return ""
+	}
+	return rg.Title
 }
 
 // EnrichTrack fetches ISRC codes, genres, label, release date, and external

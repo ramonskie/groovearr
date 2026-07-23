@@ -31,6 +31,7 @@ type mockProvider struct {
 	cover      *CoverResult
 	coverErr   error
 	coverCalls int // incremented on each SearchCover invocation
+	album      string // returned by SearchAlbum
 }
 
 // compile-time interface check
@@ -49,6 +50,10 @@ func (m *mockProvider) SearchCover(_ context.Context, _, _ string) (*CoverResult
 
 func (m *mockProvider) SearchArtistImage(_ context.Context, _ string) (*ArtistImageResult, error) {
 	return nil, nil
+}
+
+func (m *mockProvider) SearchAlbum(_ context.Context, _, _ string) string {
+	return m.album
 }
 
 func (m *mockProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*TrackMetadata, error) {
@@ -330,6 +335,78 @@ func TestEnrichMetadata_OnlyConfiguredProvidersAreUsed(t *testing.T) {
 	}
 	if configured.coverCalls != 1 {
 		t.Errorf("configured provider called %d times, want 1", configured.coverCalls)
+	}
+}
+
+// TestEnrichMetadata_AlbumLookup verifies that when album is empty,
+// SearchAlbum is called to find the album name from artist+title.
+func TestEnrichMetadata_AlbumLookup(t *testing.T) {
+	mp := &mockProvider{
+		name:       "mb",
+		configured: true,
+		album:      "The Gift of Game",
+		cover:      &CoverResult{ImageURL: "https://example.com/cover.jpg"},
+	}
+	r := newTestResolver(mp)
+
+	result, err := r.EnrichMetadata(context.Background(), "Crazy Town", "Butterfly", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Album != "The Gift of Game" {
+		t.Errorf("Album = %q, want 'The Gift of Game'", result.Album)
+	}
+	if result.CoverURL != "https://example.com/cover.jpg" {
+		t.Errorf("CoverURL = %q, want cover URL", result.CoverURL)
+	}
+}
+
+// TestEnrichMetadata_AlbumLookupNotFound verifies that when album is empty
+// and no provider finds one, album stays empty and cover is not searched.
+func TestEnrichMetadata_AlbumLookupNotFound(t *testing.T) {
+	mp := &mockProvider{
+		name:       "mb",
+		configured: true,
+		album:      "", // no album found
+	}
+	r := newTestResolver(mp)
+
+	result, _ := r.EnrichMetadata(context.Background(), "Crazy Town", "Butterfly", "", 0)
+	if result.Album != "" {
+		t.Errorf("Album = %q, want empty", result.Album)
+	}
+	if result.CoverURL != "" {
+		t.Errorf("CoverURL = %q, want empty (no cover without album)", result.CoverURL)
+	}
+}
+
+// TestEnrichMetadata_AlbumAlreadySet skips album lookup when album is provided.
+func TestEnrichMetadata_AlbumAlreadySet(t *testing.T) {
+	mp := &mockProvider{
+		name:       "mb",
+		configured: true,
+		album:      "Wrong Album", // should NOT be used
+		cover:      &CoverResult{ImageURL: "https://example.com/cover.jpg"},
+	}
+	r := newTestResolver(mp)
+
+	result, _ := r.EnrichMetadata(context.Background(), "Crazy Town", "Butterfly", "The Gift of Game", 2000)
+	if result.Album != "The Gift of Game" {
+		t.Errorf("Album = %q, want 'The Gift of Game' (provided album preserved)", result.Album)
+	}
+}
+
+// TestEnrichMetadata_AlbumLookupMultipleProviders uses the first provider that returns an album.
+func TestEnrichMetadata_AlbumLookupMultipleProviders(t *testing.T) {
+	p1 := &mockProvider{name: "p1", configured: true, album: ""}        // no album
+	p2 := &mockProvider{name: "p2", configured: true, album: "Discovery"} // found!
+	p3 := &mockProvider{name: "p3", configured: true, album: "Wrong"}     // should not be reached
+	_ = p3
+	r := newTestResolver(p1, p2)
+
+	result, _ := r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
+	if result.Album != "Discovery" {
+		t.Errorf("Album = %q, want 'Discovery'", result.Album)
 	}
 }
 

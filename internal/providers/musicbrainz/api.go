@@ -127,6 +127,53 @@ func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string
 	}, nil
 }
 
+// SearchRecording finds the first recording matching artist+title and returns
+// the associated release title as the album name.
+// Returns nil, nil if no match found.
+func (c *apiClient) SearchRecording(ctx context.Context, artist, title string) (*ReleaseGroupResult, error) {
+	if artist == "" || title == "" {
+		return nil, nil
+	}
+	query := fmt.Sprintf(`artist:"%s" AND recording:"%s"`, escapeLucene(artist), escapeLucene(title))
+	data, err := c.apiGet(ctx, "/recording/", map[string]string{
+		"query": query,
+		"limit": "3",
+		"fmt":   "json",
+	})
+	if err != nil {
+		c.log.Error("musicbrainz search recording failed", "error", err, "artist", artist, "title", title, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+
+	var resp struct {
+		Recordings []struct {
+			ID            string `json:"id"`
+			Title         string `json:"title"`
+			Releases      []struct {
+				ID    string `json:"id"`
+				Title string `json:"title"`
+			} `json:"releases"`
+		} `json:"recordings"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal search recording failed", "error", err, "component", "musicbrainz_api")
+		return nil, err
+	}
+
+	for _, rec := range resp.Recordings {
+		if len(rec.Releases) > 0 {
+			return &ReleaseGroupResult{
+				MBID:  rec.ID,
+				Title: rec.Releases[0].Title,
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
 func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
 	data, err := c.apiGet(ctx, "/release/"+mbid, map[string]string{

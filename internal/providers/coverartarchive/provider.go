@@ -66,6 +66,9 @@ func (c *Client) SearchArtistImage(ctx context.Context, artist string) (*metadat
 	return nil, nil
 }
 
+// SearchAlbum is unsupported by CAA — no recording-level data.
+func (c *Client) SearchAlbum(ctx context.Context, artist, title string) string { return "" }
+
 // EnrichTrack is unsupported by CAA — no ISRC/genre/label data.
 func (c *Client) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
 	return nil, nil

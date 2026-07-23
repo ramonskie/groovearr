@@ -29,6 +29,10 @@ type Provider interface {
 	// Returns nil, nil if no image is found.
 	SearchArtistImage(ctx context.Context, artist string) (*ArtistImageResult, error)
 
+	// SearchAlbum finds the album title for a track given artist+title.
+	// Returns empty string if no match found.
+	SearchAlbum(ctx context.Context, artist, title string) string
+
 	// EnrichTrack fetches metadata (ISRC, genres, release date, etc.) for a track.
 	// The returned TrackMetadata describes what was found; the caller decides
 	// which fields to apply to the track.
