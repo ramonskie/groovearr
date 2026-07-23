@@ -145,6 +145,18 @@ func (m *mockStore) DeleteTerminal(ctx context.Context) error {
 }
 
 func (m *mockStore) Close() error { return nil }
+
+func (m *mockStore) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.records {
+		if r.Artist == artist && r.Title == title && !r.State.Terminal() {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
 func (m *mockStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) { return nil, nil }
 
 // Compile-time check.

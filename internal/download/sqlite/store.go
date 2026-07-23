@@ -200,6 +200,15 @@ func (s *Store) ListByPlaylist(ctx context.Context, playlistID string) ([]domain
 	return s.scanDownloads(rows)
 }
 
+// FindActiveByTitle returns the first active download matching artist+title, or nil.
+func (s *Store) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
+	row := s.db.QueryRowContext(ctx, 
+		downloadSelect+" WHERE artist=? AND title=? AND state NOT IN (?, ?, ?) LIMIT 1",
+		artist, title, domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
+	)
+	return s.scanDownload(row)
+}
+
 // ─── Events ────────────────────────────────────────────────────────────
 
 // RecordEvent inserts a new event into the download_events table.

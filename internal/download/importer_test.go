@@ -138,6 +138,16 @@ func (m *mockDownloadStore) DeleteTerminal(ctx context.Context) error {
 
 func (m *mockDownloadStore) Close() error { return nil }
 
+func (m *mockDownloadStore) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
+	for _, r := range m.records {
+		if r.Artist == artist && r.Title == title && !r.State.Terminal() {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
 // trackingBus records published events for assertion in tests.
 type trackingBus struct {
 	events []trackedEvent

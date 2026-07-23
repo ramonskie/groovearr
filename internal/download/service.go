@@ -77,8 +77,22 @@ func (s *DownloadService) SetWorkerPool(pool WorkerPool) {
 
 // Queue creates a new download record in "queued" state, persists it via the
 // store, fires a TopicDownloadQueued event, and dispatches to the worker pool.
+// Skips if an active download already exists for the same artist+title.
 // Returns the generated download ID.
 func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta DownloadMeta) (string, error) {
+	// Serialize dedup check + insert to prevent TOCTOU race.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Dedup: skip if an active download already exists for the same artist+title.
+	if meta.Artist != "" && meta.Title != "" {
+		if existing, err := s.store.FindActiveByTitle(ctx, meta.Artist, meta.Title); err != nil {
+			s.log.Warn("dedup check failed, proceeding", "artist", meta.Artist, "title", meta.Title, "error", err, "component", "download")
+		} else if existing != nil {
+			return existing.ID, nil
+		}
+	}
+
 	id := fmt.Sprintf("%s-%d-%04x", sourceName, time.Now().UnixNano(), rand.Intn(0xffff))
 
 	displayName := filename
@@ -136,6 +150,19 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 // This enables batch-queuing all items first (visible in UI), then resolving
 // them in the background.
 func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (string, error) {
+	// Serialize dedup check + insert to prevent TOCTOU race.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Dedup: skip if an active download already exists for the same artist+title.
+	if meta.Artist != "" && meta.Title != "" {
+		if existing, err := s.store.FindActiveByTitle(ctx, meta.Artist, meta.Title); err != nil {
+			s.log.Warn("dedup check failed, proceeding", "artist", meta.Artist, "title", meta.Title, "error", err, "component", "download")
+		} else if existing != nil {
+			return existing.ID, nil
+		}
+	}
+
 	id := fmt.Sprintf("pending-%d-%04x", time.Now().UnixNano(), rand.Intn(0xffff))
 
 	displayName := meta.Artist + " - " + meta.Title

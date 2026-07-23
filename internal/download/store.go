@@ -40,6 +40,9 @@ type DownloadStore interface {
 	// ListByPlaylist returns downloads filtered by playlist_id.
 	ListByPlaylist(ctx context.Context, playlistID string) ([]domain.DownloadRecord, error)
 
+	// FindActiveByTitle returns the first active download matching artist+title, or nil.
+	FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error)
+
 	// RecordEvent inserts a new event into the download_events table.
 	RecordEvent(ctx context.Context, event *domain.DownloadEvent) error
 

@@ -214,12 +214,16 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 	// Phase 1: queue all unmatched tracks immediately (metadata only, no search).
 	// This makes them visible in the UI before the downloader starts processing.
 	var items []pendingItem
+	// seen prevents duplicate processing when QueuePending dedup returns the
+	// same existing download ID for multiple tracks with matching artist+title.
+	seen := make(map[string]bool)
 	playlistIDStr := strconv.FormatInt(playlistID, 10)
 
 	for _, pt := range tracks {
 		if pt.TrackID != nil {
 			continue
 		}
+
 		id, dlErr := s.downloadSvc.QueuePending(ctx, download.DownloadMeta{
 			Artist:      pt.Artist,
 			Album:       pt.Album,
@@ -232,8 +236,15 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 			s.log.Error("queue pending failed", "artist", pt.Artist, "title", pt.Title, "error", dlErr, "component", "playlist")
 			continue
 		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
 		// Fetch the record so we have the full DownloadRecord for resolution.
-		rec, _ := s.downloadSvc.GetStatus(ctx, id)
+		rec, err := s.downloadSvc.GetStatus(ctx, id)
+		if err != nil {
+			s.log.Warn("get status after queue failed", "download_id", id, "error", err, "component", "playlist")
+		}
 		if rec == nil {
 			continue
 		}
