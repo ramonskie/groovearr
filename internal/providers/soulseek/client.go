@@ -97,17 +97,20 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 
 // Search queries slskd and returns matching tracks and albums.
 func (c *Client) Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error) {
-	return c.search(ctx, query, 60, nil)
+	return c.search(ctx, query, c.cfg.SearchTimeout, nil)
 }
 
 // SearchWithProgress implements download.SearchPlugin.
 func (c *Client) SearchWithProgress(ctx context.Context, query string, cb func(tracks []domain.TrackResult, albums []domain.AlbumResult, responseCount int)) ([]domain.TrackResult, []domain.AlbumResult, error) {
-	return c.search(ctx, query, 60, cb)
+	return c.search(ctx, query, c.cfg.SearchTimeout, cb)
 }
 
 func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb func([]domain.TrackResult, []domain.AlbumResult, int)) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	if !c.IsConfigured() {
 		return nil, nil, fmt.Errorf("soulseek: not configured")
+	}
+	if timeoutSec < 1 {
+		timeoutSec = 60
 	}
 
 	searchReq := map[string]any{

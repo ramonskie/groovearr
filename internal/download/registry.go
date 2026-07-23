@@ -56,13 +56,13 @@ func (r *Registry) All() []Plugin {
 	return out
 }
 
-// Configured returns download plugins where IsConfigured() == true.
-// Non-download plugins are silently skipped.
+// Configured returns download plugins that are ready to use (Connected() == true,
+// meaning authenticated and API-reachable). Non-download plugins are skipped.
 func (r *Registry) Configured() []Plugin {
 	bps := r.inner.Configured()
 	out := make([]Plugin, 0, len(bps))
 	for _, bp := range bps {
-		if p, ok := bp.(Plugin); ok {
+		if p, ok := bp.(Plugin); ok && p.Connected() {
 			out = append(out, p)
 		}
 	}

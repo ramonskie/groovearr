@@ -137,7 +137,10 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 		if !ok {
 			continue
 		}
-		p, err := f.Create(rawCfg, resources)
+
+		// Merge factory defaults with user config so missing keys get sane values.
+		merged := mergeWithDefaults(rawCfg, f.DefaultConfig())
+		p, err := f.Create(merged, resources)
 		if err != nil {
 			if resources.Logger != nil {
 				resources.Logger.Error("plugin create failed", "name", name, "error", err, "component", "plugin")
@@ -156,6 +159,48 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 		return fmt.Errorf("init plugins: %w", errors.Join(errs...))
 	}
 	return nil
+}
+
+// mergeWithDefaults deep-merges user config onto factory defaults, so missing
+// keys in user config inherit their factory default values.
+func mergeWithDefaults(user, defaults json.RawMessage) json.RawMessage {
+	if len(defaults) == 0 {
+		return user
+	}
+	if len(user) == 0 || string(user) == "{}" || string(user) == "null" {
+		return defaults
+	}
+
+	var userMap, defaultsMap map[string]any
+	if json.Unmarshal(defaults, &defaultsMap) != nil {
+		return user
+	}
+	if json.Unmarshal(user, &userMap) != nil {
+		return defaults
+	}
+	for k, v := range userMap {
+		defaultsMap[k] = v
+	}
+	result, _ := json.Marshal(defaultsMap)
+	return result
+}
+
+// FillDefaults returns a copy of sources with factory defaults merged into each
+// entry. Missing keys in user config inherit their factory default values.
+func (r *Registry) FillDefaults(sources map[string]json.RawMessage) map[string]json.RawMessage {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+
+	out := make(map[string]json.RawMessage, len(sources))
+	for name, rawCfg := range sources {
+		f, ok := r.factories[name]
+		if !ok {
+			out[name] = rawCfg
+			continue
+		}
+		out[name] = mergeWithDefaults(rawCfg, f.DefaultConfig())
+	}
+	return out
 }
 
 // InitRemaining creates plugins with their factory DefaultConfig() for any
@@ -191,7 +236,7 @@ func (r *Registry) Rebuild(name string, rawCfg json.RawMessage, resources Plugin
 	if !ok {
 		return fmt.Errorf("plugin factory %q not registered", name)
 	}
-	p, err := f.Create(rawCfg, resources)
+	p, err := f.Create(mergeWithDefaults(rawCfg, f.DefaultConfig()), resources)
 	if err != nil {
 		return fmt.Errorf("plugin %q: create: %w", name, err)
 	}

@@ -51,6 +51,7 @@ func openTestDB(t *testing.T) *sql.DB {
 			disc_number INTEGER NOT NULL DEFAULT 0,
 			year INTEGER NOT NULL DEFAULT 0,
 			retry_count INTEGER NOT NULL DEFAULT 0,
+			retry_after TEXT NOT NULL DEFAULT '',
 			playlist_id TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))

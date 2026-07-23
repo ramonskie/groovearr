@@ -93,6 +93,15 @@ func main() {
 	// Create plugins not in config file using their defaults.
 	pluginReg.InitRemaining(resources)
 
+	// Persist factory defaults back to disk so users can see all available settings.
+	mergedSources := pluginReg.FillDefaults(currentCfg.Sources)
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Sources = mergedSources
+		return nil
+	}); err != nil {
+		mainLog.Warn("failed to persist source defaults to config", "error", err, "component", "main")
+	}
+
 	// Typed registries share the same inner plugin.Registry.
 	registry := download.NewRegistryFrom(pluginReg)
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)

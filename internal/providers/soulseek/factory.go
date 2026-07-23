@@ -3,6 +3,7 @@ package soulseek
 
 import (
 	"encoding/json"
+	"fmt"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -29,16 +30,21 @@ func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResource
 }
 
 // ValidateConfig checks whether raw config is structurally valid for Soulseek.
-// Actual connectivity testing happens at connection time, not here.
 func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 	var cfg SoulseekConfig
 	if err := json.Unmarshal(rawCfg, &cfg); err != nil {
 		return err
+	}
+	if cfg.SearchTimeout < 0 {
+		return fmt.Errorf("soulseek.search_timeout: must be >= 0 (got %d)", cfg.SearchTimeout)
+	}
+	if cfg.MinUploadSpeed < 0 {
+		return fmt.Errorf("soulseek.min_upload_speed: must be >= 0 (got %d)", cfg.MinUploadSpeed)
 	}
 	return nil
 }
 
 // DefaultConfig returns the default Soulseek configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"slskd_url":"","api_key":"","search_timeout":60,"min_upload_speed":0}`)
+	return json.RawMessage(`{"slskd_url":"","api_key":"","search_timeout":90,"min_upload_speed":0}`)
 }

@@ -44,15 +44,15 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 			size, transferred, speed, file_path, error,
 			track_id, cover_url, artist, album, title,
 			track_number, disc_number, year,
-			retry_count, playlist_id,
+			retry_count, retry_after, playlist_id,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Filename, r.DisplayName,
 		string(domain.DownloadQueued), 0.0,
 		r.Size, 0, 0, "", "",
 		r.TrackID, r.CoverURL, r.Artist, r.Album, r.Title,
 		r.TrackNumber, r.DiscNumber, r.Year,
-		0, r.PlaylistID,
+		0, r.RetryAfter, r.PlaylistID,
 		now, now,
 	)
 	if err != nil {
@@ -74,6 +74,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 			speed=?, file_path=?, error=?, cover_url=?,
 			artist=?, album=?, title=?,
 			track_number=?, disc_number=?, year=?,
+			retry_count=?, retry_after=?,
 			updated_at=?
 		WHERE id=?`,
 		r.SourceName, r.Filename, r.DisplayName,
@@ -81,6 +82,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 		r.Speed, r.FilePath, r.Error, r.CoverURL,
 		r.Artist, r.Album, r.Title,
 		r.TrackNumber, r.DiscNumber, r.Year,
+		r.RetryCount, r.RetryAfter,
 		now, r.ID,
 	)
 	if err != nil {
@@ -275,21 +277,20 @@ const downloadSelect = `SELECT
 	progress, size, transferred, speed, file_path, error,
 	track_id, cover_url,
 	artist, album, title, track_number, disc_number, year,
-	retry_count, playlist_id,
+	retry_count, retry_after, playlist_id,
 	created_at, updated_at
 	FROM downloads`
 
 func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 	var r domain.DownloadRecord
 	var stateStr string
-	var retryCount int
-	var playlistID, createdAt, updatedAt string
+	var playlistID, retryAfter, createdAt, updatedAt string
 	err := row.Scan(
 		&r.ID, &r.SourceName, &r.Filename, &r.DisplayName, &stateStr,
 		&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
 		&r.TrackID, &r.CoverURL,
 		&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
-		&retryCount, &playlistID,
+		&r.RetryCount, &retryAfter, &playlistID,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -300,30 +301,31 @@ func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 		return nil, fmt.Errorf("download scan: %w", err)
 	}
 
-		r.PlaylistID = playlistID
-		r.State = domain.DownloadState(stateStr)
-		return &r, nil
-	}
+	r.PlaylistID = playlistID
+	r.RetryAfter = retryAfter
+	r.State = domain.DownloadState(stateStr)
+	return &r, nil
+}
 
 func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 	var out []domain.DownloadRecord
 	for rows.Next() {
 		var r domain.DownloadRecord
 		var stateStr string
-		var retryCount int
-		var playlistID, createdAt, updatedAt string
+		var playlistID, retryAfter, createdAt, updatedAt string
 		if err := rows.Scan(
 			&r.ID, &r.SourceName, &r.Filename, &r.DisplayName, &stateStr,
 			&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
 			&r.TrackID, &r.CoverURL,
 			&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
-			&retryCount, &playlistID,
+			&r.RetryCount, &retryAfter, &playlistID,
 			&createdAt, &updatedAt,
 		); err != nil {
 			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")
 			return nil, fmt.Errorf("downloads scan: %w", err)
 		}
 		r.PlaylistID = playlistID
+		r.RetryAfter = retryAfter
 		r.State = domain.DownloadState(stateStr)
 		out = append(out, r)
 	}

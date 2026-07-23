@@ -86,6 +86,8 @@ type DownloadRecord struct {
 	PlaylistID  string        `json:"playlist_id,omitempty"`  // playlist this download belongs to
 	LibraryTrackID   int64  `json:"library_track_id,omitempty"`   // imported library track ID
 	QualityProfileID *int64 `json:"quality_profile_id,omitempty"` // profile applied at download time
+	RetryCount       int    `json:"retry_count,omitempty"`       // number of resolution retries
+	RetryAfter       string `json:"retry_after,omitempty"`       // RFC3339 — don't retry until after this time
 
 	// Track metadata for post-download organization.
 	Artist      string `json:"artist,omitempty"`

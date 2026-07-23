@@ -93,7 +93,8 @@ func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) 
 	album = record.Album
 	title = record.Title
 
-	if artist == "" || album == "" || title == "" {
+	// Only fall back to path parsing when ALL fields are missing.
+	if artist == "" && album == "" && title == "" {
 		artist, album, title = library.ParseFileMetadata(record.FilePath)
 	}
 

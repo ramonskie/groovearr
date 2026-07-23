@@ -185,9 +185,8 @@ func (c *DownloadClient) Name() string { return downloadPluginName }
 // DisplayName returns a human-readable label.
 func (c *DownloadClient) DisplayName() string { return downloadDisplayName }
 
-// IsConfigured returns true if the plugin can serve requests.
-// Discovery/metadata works without ARL (public API). Downloads require ARL.
-func (c *DownloadClient) IsConfigured() bool { return true }
+// IsConfigured returns true if the plugin has a valid ARL token for downloads.
+func (c *DownloadClient) IsConfigured() bool { return c.cfg.ARL != "" }
 
 // MaxConcurrentDownloads limits Deezer to 2 concurrent downloads to avoid CDN throttling.
 func (c *DownloadClient) MaxConcurrentDownloads() int { return 2 }

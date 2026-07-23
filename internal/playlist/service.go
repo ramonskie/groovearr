@@ -271,11 +271,28 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec := item.record
 		pt := item.track
 
+		// ISRC dedup: skip if a library track with the same ISRC already exists.
+		if pt.ISRC != "" {
+			if existing, _ := s.store.GetTrackByISRC(ctx, pt.ISRC); existing != nil {
+				s.log.Info("playlist track already imported via ISRC, skipping",
+					"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
+				rec.State = domain.DownloadIgnored
+				_ = s.downloadSvc.UpdateDownload(ctx, rec)
+				continue
+			}
+		}
+
 		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.DurationMs, "", defaultProfile)
 		if err != nil {
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
-			// Mark as failedPending so it stays in the Pending tab and is retried
-			// on the next playlist sync rather than moving to Finished.
+
+			// Exponential backoff: 1m, 2m, 4m, 8m, 16m, cap at 30m.
+			rec.RetryCount++
+			backoffMin := 1 << (rec.RetryCount - 1)
+			if backoffMin > 30 {
+				backoffMin = 30
+			}
+			rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
 			rec.State = domain.DownloadFailedPending
 			rec.Error = err.Error()
 			_ = s.downloadSvc.UpdateDownload(ctx, rec)
@@ -291,6 +308,9 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Username = username
 		rec.Filename = best.Track.Filename
 		rec.Size = best.Track.Size
+		rec.Artist = pt.Artist
+		rec.Album = pt.Album
+		rec.Title = pt.Title
 		rec.DisplayName = pt.Artist + " - " + pt.Title
 		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
 			s.log.Error("update pending failed", "download_id", rec.ID, "error", err, "component", "playlist")
