@@ -18,6 +18,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sanitize"
 )
@@ -29,6 +30,7 @@ type Service struct {
 	downloadReg        *download.Registry
 	downloadSvc        *download.DownloadService
 	matcher            *matching.Engine
+	metadataResolver   *metadata.MetadataResolver
 	cfgFn              func() config.Config
 	log                *slog.Logger
 	qualityProfileStore quality.ProfileStore
@@ -44,7 +46,7 @@ type pendingItem struct {
 }
 
 // NewService creates a playlist service.
-func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, logger *slog.Logger) *Service {
+func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, metadataResolver *metadata.MetadataResolver, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -54,6 +56,7 @@ func NewService(srcReg *Registry, store library.Store, downloadReg *download.Reg
 		downloadReg:        downloadReg,
 		downloadSvc:        downloadSvc,
 		matcher:            matching.New(),
+		metadataResolver:   metadataResolver,
 		cfgFn:              cfgFn,
 		log:                logger,
 		qualityProfileStore: qualityProfileStore,
@@ -325,6 +328,27 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Album = pt.Album
 		rec.Title = pt.Title
 		rec.DisplayName = pt.Artist + " - " + pt.Title
+
+		// Fill missing album/year from search result metadata (parsed from filename).
+		if rec.Album == "" && best.Track.Metadata != nil && best.Track.Metadata.Album != "" {
+			rec.Album = best.Track.Metadata.Album
+		}
+		if rec.Year == 0 && best.Track.Metadata != nil && best.Track.Metadata.Year != 0 {
+			rec.Year = best.Track.Metadata.Year
+		}
+
+		// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).
+		if s.metadataResolver != nil && rec.Artist != "" && rec.Album != "" {
+			if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, rec.Artist, rec.Title, rec.Album, rec.Year); enrichErr == nil {
+				if enriched.CoverURL != "" {
+					rec.CoverURL = enriched.CoverURL
+				}
+			} else {
+				s.log.Warn("metadata enrichment failed for pending download",
+					"artist", rec.Artist, "title", rec.Title, "error", enrichErr, "component", "playlist")
+			}
+		}
+
 		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
 			s.log.Error("update pending failed", "download_id", rec.ID, "error", err, "component", "playlist")
 			continue
@@ -392,7 +416,8 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 
 	username := best.Track.Username
 
-	id, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+	// Build DownloadMeta with authoritative playlist metadata.
+	meta := download.DownloadMeta{
 		Artist:      artist,
 		Album:       album,
 		Title:       title,
@@ -401,7 +426,29 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		PlaylistID:  strconv.FormatInt(playlistID, 10),
 		Bitrate:     best.Track.Bitrate,
 		Format:      best.Track.Quality,
-	})
+	}
+
+	// Fill missing album/year from search result metadata (parsed from filename).
+	if meta.Album == "" && best.Track.Metadata != nil && best.Track.Metadata.Album != "" {
+		meta.Album = best.Track.Metadata.Album
+	}
+	if meta.Year == 0 && best.Track.Metadata != nil && best.Track.Metadata.Year != 0 {
+		meta.Year = best.Track.Metadata.Year
+	}
+
+	// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).
+	if s.metadataResolver != nil && meta.Artist != "" && meta.Album != "" {
+		if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, meta.Artist, meta.Title, meta.Album, meta.Year); enrichErr == nil {
+			if enriched.CoverURL != "" {
+				meta.CoverURL = enriched.CoverURL
+			}
+		} else {
+			s.log.Warn("metadata enrichment failed, queueing with partial metadata",
+				"artist", meta.Artist, "title", meta.Title, "error", enrichErr, "component", "playlist")
+		}
+	}
+
+	id, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, meta)
 	if dlErr != nil {
 		return "", "", best.Score, fmt.Errorf("queue download: %w", dlErr)
 	}

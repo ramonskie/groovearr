@@ -35,6 +35,7 @@ type Server struct {
 	cfg                 *config.Persistence
 	registry            *download.Registry
 	mdRegistry          *metadata.Registry
+	metadataResolver    *metadata.MetadataResolver
 	discoveryReg        *discovery.Registry
 	store               library.Store
 	scanner             *library.Scanner
@@ -54,11 +55,12 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
 		mdRegistry:          mdRegistry,
+		metadataResolver:    metadataResolver,
 		discoveryReg:        discoveryReg,
 		store:               store,
 		scanner:             scanner,
@@ -484,15 +486,39 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
+
+	// Enrich missing metadata fields with resolver.
+	artist := req.Artist
+	album := req.Album
+	year := req.Year
+	var coverURL string
+	if s.metadataResolver != nil {
+		enrichCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		enriched, err := s.metadataResolver.EnrichMetadata(enrichCtx, artist, req.Title, album, year)
+		cancel()
+		if err == nil && enriched != nil {
+			if enriched.CoverURL != "" {
+				coverURL = enriched.CoverURL
+			}
+			if album == "" && enriched.Album != "" {
+				album = enriched.Album
+			}
+			if year == 0 && enriched.Year > 0 {
+				year = enriched.Year
+			}
+		}
+	}
+
 	id, err := s.downloadSvc.Queue(ctx, req.Source, req.Username, req.Filename, req.Size, download.DownloadMeta{
-		Artist:      req.Artist,
-		Album:       req.Album,
+		Artist:      artist,
+		Album:       album,
 		Title:       req.Title,
 		TrackNumber: req.TrackNumber,
 		DiscNumber:  req.DiscNumber,
-		Year:        req.Year,
+		Year:        year,
 		Bitrate:     req.Bitrate,
 		Format:      req.Quality,
+		CoverURL:    coverURL,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -538,13 +564,55 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 
 	username := best.Track.Username
 
+	// Collect metadata from search result before enrichment.
+	artist := best.Track.Artist
+	title := best.Track.Title
+	album := best.Track.Album
+	year := 0
+
+	if best.Track.Metadata != nil {
+		if artist == "" && best.Track.Metadata.Artist != "" {
+			artist = best.Track.Metadata.Artist
+		}
+		if album == "" && best.Track.Metadata.Album != "" {
+			album = best.Track.Metadata.Album
+		}
+		if title == "" && best.Track.Metadata.Title != "" {
+			title = best.Track.Metadata.Title
+		}
+		if best.Track.Metadata.Year > 0 {
+			year = best.Track.Metadata.Year
+		}
+	}
+
+	// Enrich with metadata resolver for missing album/cover art.
+	var coverURL string
+	if s.metadataResolver != nil {
+		enrichCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		enriched, err := s.metadataResolver.EnrichMetadata(enrichCtx, artist, title, album, year)
+		cancel()
+		if err == nil && enriched != nil {
+			if enriched.CoverURL != "" {
+				coverURL = enriched.CoverURL
+			}
+			if album == "" && enriched.Album != "" {
+				album = enriched.Album
+			}
+			if year == 0 && enriched.Year > 0 {
+				year = enriched.Year
+			}
+		}
+	}
+
 	id, err := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
-		Artist:      best.Track.Artist,
-		Album:       best.Track.Album,
-		Title:       best.Track.Title,
+		Artist:      artist,
+		Album:       album,
+		Title:       title,
 		TrackNumber: best.Track.TrackNumber,
+		Year:        year,
 		Bitrate:     best.Track.Bitrate,
 		Format:      best.Track.Quality,
+		CoverURL:    coverURL,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("queue download: %v", err)})
@@ -1492,14 +1560,44 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 			continue
 		}
 
+		// Enrich metadata before queuing.
+		artist := t.ArtistName
+		album := t.AlbumTitle
+		title := t.Title
+		year := 0
+		var coverURL string
+		if best.Track.Metadata != nil {
+			if best.Track.Metadata.Year > 0 {
+				year = best.Track.Metadata.Year
+			}
+		}
+		if s.metadataResolver != nil {
+			enrichCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+			enriched, err := s.metadataResolver.EnrichMetadata(enrichCtx, artist, title, album, year)
+			cancel()
+			if err == nil && enriched != nil {
+				if enriched.CoverURL != "" {
+					coverURL = enriched.CoverURL
+				}
+				if album == "" && enriched.Album != "" {
+					album = enriched.Album
+				}
+				if year == 0 && enriched.Year > 0 {
+					year = enriched.Year
+				}
+			}
+		}
+
 		_, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, best.Track.Username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
-			Artist:      t.ArtistName,
-			Album:       t.AlbumTitle,
-			Title:       t.Title,
+			Artist:      artist,
+			Album:       album,
+			Title:       title,
 			TrackNumber: t.TrackNumber,
 			DiscNumber:  t.DiscNumber,
+			Year:        year,
 			Bitrate:     best.Track.Bitrate,
 			Format:      best.Track.Quality,
+			CoverURL:    coverURL,
 		})
 		if dlErr != nil {
 			errors = append(errors, fmt.Sprintf("%s - %s: queue: %v", t.ArtistName, t.Title, dlErr))

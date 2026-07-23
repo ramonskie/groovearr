@@ -107,6 +107,9 @@ func main() {
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
+	// Metadata resolver enriches track metadata (cover art, album info) at queue time.
+	metadataResolver := metadata.NewMetadataResolver(mdRegistry, mainLog)
+
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
@@ -149,7 +152,6 @@ func main() {
 		dlStore,
 		eventBus,
 		mainLog,
-		download.NewTagValidatorHandler(mainLog),
 		download.NewFileRenamerHandler(renamer, dlStore, mainLog),
 		download.NewCoverArtHandler(libStore, mainLog),
 		download.NewTagWriterHandler(mainLog),
@@ -175,7 +177,7 @@ func main() {
 		}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
-	}, qualityProfileStore, mainLog)
+	}, qualityProfileStore, metadataResolver, mainLog)
 
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
@@ -183,7 +185,7 @@ func main() {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub,
+	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, mainLog, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}

@@ -315,7 +315,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 			PlaylistTemplate: "{position:02d} {artist} - {title}",
 		},
 	}
-	plSvc := playlist.NewService(plReg, libStore, reg, downloadSvc, func() config.Config { return cfg }, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	plSvc := playlist.NewService(plReg, libStore, reg, downloadSvc, func() config.Config { return cfg }, nil, nil, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 
 	// ─── Step 1: Import playlist ────────────────────────────────────
 	result, err := plSvc.ImportPlaylist(context.Background(), "mock", "pl-1")

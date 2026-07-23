@@ -638,10 +638,31 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 				Artist:      artist,
 				TrackNumber: trackNum,
 			}
+
+			// Populate structured metadata from filename parsing.
+			// Soulseek has no structured metadata — everything comes from the filename.
+			albumPath := extractAlbumPath(filename)
+			yearStr := parseYearFromPath(filename)
+			albumName := ""
+			if albumPath != "" {
+				albumSegments := strings.Split(strings.ReplaceAll(albumPath, "\\", "/"), "/")
+				albumName = albumSegments[len(albumSegments)-1]
+			}
+			year := 0
+			if yearStr != "" {
+				year, _ = strconv.Atoi(yearStr)
+			}
+			tr.Metadata = &domain.TrackMetadata{
+				Artist:   artist,
+				Title:    trackTitle,
+				Album:    albumName,
+				Year:     year,
+				CoverURL: "", // Soulseek doesn't provide cover — resolver fills later
+			}
+
 			tracks = append(tracks, tr)
 
 			// Group by album path.
-			albumPath := extractAlbumPath(filename)
 			if albumPath != "" {
 				key := albumKey{username: username, path: albumPath}
 				albumsByPath[key] = append(albumsByPath[key], tr)

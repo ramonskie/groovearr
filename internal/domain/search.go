@@ -2,6 +2,17 @@ package domain
 
 import "github.com/ramonskie/groovearr/internal/quality"
 
+// TrackMetadata holds parsed metadata for a track. Populated when the provider
+// can extract metadata from the search result (e.g. filename parsing for Soulseek,
+// structured API response for Deezer/Spotify). Nil when unavailable.
+type TrackMetadata struct {
+	Artist   string `json:"artist,omitempty"`
+	Album    string `json:"album,omitempty"`
+	Title    string `json:"title,omitempty"`
+	Year     int    `json:"year,omitempty"`
+	CoverURL string `json:"cover_url,omitempty"`
+}
+
 // SearchResult is the base type returned by download source searches.
 type SearchResult struct {
 	Username        string              `json:"username"`          // source name or slskd peer
@@ -19,11 +30,12 @@ type SearchResult struct {
 // TrackResult is an individual track search hit.
 type TrackResult struct {
 	SearchResult
-	Artist      string `json:"artist,omitempty"`
-	Title       string `json:"title,omitempty"`
-	Album       string `json:"album,omitempty"`
-	TrackNumber int    `json:"track_number,omitempty"`
-	CoverURL    string `json:"cover_url,omitempty"` // album cover image URL (source-agnostic)
+	Artist      string          `json:"artist,omitempty"`
+	Title       string          `json:"title,omitempty"`
+	Album       string          `json:"album,omitempty"`
+	TrackNumber int             `json:"track_number,omitempty"`
+	CoverURL    string          `json:"cover_url,omitempty"`   // album cover image URL (source-agnostic)
+	Metadata    *TrackMetadata  `json:"metadata,omitempty"`    // structured metadata (nil for providers that don't support it)
 }
 
 // AlbumResult is an album-level search hit containing multiple tracks.

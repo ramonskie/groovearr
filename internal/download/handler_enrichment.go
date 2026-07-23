@@ -52,13 +52,18 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, libStore enrichme
 	}
 }
 
-// Handle enriches a track with metadata from configured providers.
+// Handle enriches a library track with metadata from configured providers.
+// Requires the track to already be in the library (LibraryTrackID > 0).
+// Pre-library tracks (LibraryTrackID == 0) are skipped — metadata is now
+// resolved at queue time by the webhook/indexer pipeline.
 // Failures are non-fatal — the import continues with whatever metadata
 // was successfully enriched.
 func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
 	if record.LibraryTrackID == 0 || record.FilePath == "" {
 		return nil
 	}
+
+	// Post-library mode: enrich existing library records.
 
 	track, err := h.libStore.GetTrack(ctx, record.LibraryTrackID)
 	if err != nil || track == nil {
