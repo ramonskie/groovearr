@@ -155,6 +155,8 @@ func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (
 		TrackNumber: meta.TrackNumber,
 		DiscNumber:  meta.DiscNumber,
 		Year:        meta.Year,
+		Bitrate:     meta.Bitrate,
+		Format:      meta.Format,
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {

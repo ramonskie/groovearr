@@ -308,6 +308,8 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Username = username
 		rec.Filename = best.Track.Filename
 		rec.Size = best.Track.Size
+		rec.Bitrate = best.Track.Bitrate
+		rec.Format = best.Track.Quality
 		rec.Artist = pt.Artist
 		rec.Album = pt.Album
 		rec.Title = pt.Title
