@@ -102,6 +102,12 @@ const DownloadItem: FC<DownloadItemProps> = ({
           <span>
             {formatBytes(download.transferred)} / {formatBytes(download.size)}
           </span>
+          {download.format && (
+            <span className="text-slate-500">
+              {download.format.toUpperCase()}
+              {download.bitrate && download.bitrate > 0 && ` ${download.bitrate}kbps`}
+            </span>
+          )}
           {!isTerminal && download.speed > 0 && (
             <span>{formatSpeed(download.speed)}</span>
           )}

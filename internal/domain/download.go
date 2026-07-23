@@ -97,4 +97,6 @@ type DownloadRecord struct {
 	DiscNumber  int    `json:"disc_number,omitempty"`
 	Year        int    `json:"year,omitempty"`
 	ISRC        string `json:"isrc,omitempty"`
+	Bitrate     int    `json:"bitrate,omitempty"` // kbps
+	Format      string `json:"format,omitempty"`  // "flac", "mp3", etc.
 }

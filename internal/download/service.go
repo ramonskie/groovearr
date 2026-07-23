@@ -38,6 +38,8 @@ type DownloadMeta struct {
 	ISRC        string
 	CoverURL    string
 	PlaylistID  string
+	Bitrate     int    // kbps
+	Format      string // "flac", "mp3", etc.
 }
 
 // DownloadService orchestrates the download lifecycle: queueing, status
@@ -104,6 +106,8 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 		TrackNumber: meta.TrackNumber,
 		DiscNumber:  meta.DiscNumber,
 		Year:        meta.Year,
+		Bitrate:     meta.Bitrate,
+		Format:      meta.Format,
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {

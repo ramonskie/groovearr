@@ -275,6 +275,8 @@ export interface DownloadRecord {
   track_number?: number;
   disc_number?: number;
   year?: number;
+  bitrate?: number;
+  format?: string;
 }
 
 /** SSE event type names broadcast from the backend via GET /api/events. */
@@ -300,6 +302,8 @@ export interface DownloadRequest {
   username: string;
   filename: string;
   size: number;
+  bitrate?: number;
+  quality?: string;
 }
 
 export interface DownloadResponse {

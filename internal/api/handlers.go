@@ -475,6 +475,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		TrackNumber int    `json:"track_number,omitempty"`
 		DiscNumber  int    `json:"disc_number,omitempty"`
 		Year        int    `json:"year,omitempty"`
+		Bitrate     int    `json:"bitrate,omitempty"`
+		Quality     string `json:"quality,omitempty"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -489,6 +491,8 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		TrackNumber: req.TrackNumber,
 		DiscNumber:  req.DiscNumber,
 		Year:        req.Year,
+		Bitrate:     req.Bitrate,
+		Format:      req.Quality,
 	})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
@@ -539,6 +543,8 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		Album:       best.Track.Album,
 		Title:       best.Track.Title,
 		TrackNumber: best.Track.TrackNumber,
+		Bitrate:     best.Track.Bitrate,
+		Format:      best.Track.Quality,
 	})
 	if err != nil {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": fmt.Sprintf("queue download: %v", err)})
@@ -1492,6 +1498,8 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 			Title:       t.Title,
 			TrackNumber: t.TrackNumber,
 			DiscNumber:  t.DiscNumber,
+			Bitrate:     best.Track.Bitrate,
+			Format:      best.Track.Quality,
 		})
 		if dlErr != nil {
 			errors = append(errors, fmt.Sprintf("%s - %s: queue: %v", t.ArtistName, t.Title, dlErr))

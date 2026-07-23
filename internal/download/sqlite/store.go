@@ -44,14 +44,16 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 			size, transferred, speed, file_path, error,
 			track_id, cover_url, artist, album, title,
 			track_number, disc_number, year,
+			bitrate, format,
 			retry_count, retry_after, playlist_id,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Filename, r.DisplayName,
 		string(domain.DownloadQueued), 0.0,
 		r.Size, 0, 0, "", "",
 		r.TrackID, r.CoverURL, r.Artist, r.Album, r.Title,
 		r.TrackNumber, r.DiscNumber, r.Year,
+		r.Bitrate, r.Format,
 		0, r.RetryAfter, r.PlaylistID,
 		now, now,
 	)
@@ -74,6 +76,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 			speed=?, file_path=?, error=?, cover_url=?,
 			artist=?, album=?, title=?,
 			track_number=?, disc_number=?, year=?,
+			bitrate=?, format=?,
 			retry_count=?, retry_after=?,
 			updated_at=?
 		WHERE id=?`,
@@ -82,6 +85,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 		r.Speed, r.FilePath, r.Error, r.CoverURL,
 		r.Artist, r.Album, r.Title,
 		r.TrackNumber, r.DiscNumber, r.Year,
+		r.Bitrate, r.Format,
 		r.RetryCount, r.RetryAfter,
 		now, r.ID,
 	)
@@ -277,6 +281,7 @@ const downloadSelect = `SELECT
 	progress, size, transferred, speed, file_path, error,
 	track_id, cover_url,
 	artist, album, title, track_number, disc_number, year,
+	bitrate, format,
 	retry_count, retry_after, playlist_id,
 	created_at, updated_at
 	FROM downloads`
@@ -290,6 +295,7 @@ func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 		&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
 		&r.TrackID, &r.CoverURL,
 		&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
+		&r.Bitrate, &r.Format,
 		&r.RetryCount, &retryAfter, &playlistID,
 		&createdAt, &updatedAt,
 	)
@@ -318,6 +324,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 			&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
 			&r.TrackID, &r.CoverURL,
 			&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
+			&r.Bitrate, &r.Format,
 			&r.RetryCount, &retryAfter, &playlistID,
 			&createdAt, &updatedAt,
 		); err != nil {

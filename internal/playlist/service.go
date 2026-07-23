@@ -386,6 +386,8 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		TrackNumber: best.Track.TrackNumber,
 		ISRC:        isrc,
 		PlaylistID:  strconv.FormatInt(playlistID, 10),
+		Bitrate:     best.Track.Bitrate,
+		Format:      best.Track.Quality,
 	})
 	if dlErr != nil {
 		return "", "", best.Score, fmt.Errorf("queue download: %w", dlErr)

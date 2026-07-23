@@ -45,6 +45,8 @@ function SearchPage() {
           username: track.username,
           filename: track.filename,
           size: track.size,
+          bitrate: track.bitrate,
+          quality: track.quality,
         },
         {
           onSuccess: (data) => {
@@ -75,6 +77,8 @@ function SearchPage() {
             username: track.username,
             filename: track.filename,
             size: track.size,
+            bitrate: track.bitrate,
+            quality: track.quality,
           });
           results.push({ status: "fulfilled" as const, value: result });
         } catch (primaryErr) {
