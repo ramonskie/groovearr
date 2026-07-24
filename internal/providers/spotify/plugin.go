@@ -79,8 +79,18 @@ func (p *Plugin) IsConfigured() bool {
 	return p.cfg.ClientID != "" && p.cfg.ClientSecret != ""
 }
 
-// CapabilityStatus returns status for all Spotify capabilities (download/playlist/discovery).
+// CapabilityStatus returns per-capability connection status.
+// In free mode only URL parsing is available. Discovery and playlist
+// require dev mode with an authenticated Spotify Web API.
+// Spotify never supports downloading — the "download" capability is omitted.
 func (p *Plugin) CapabilityStatus() map[string]string {
+	if p.cfg.Mode == "free" {
+		return map[string]string{
+			"playlist":  "not_configured",
+			"discovery": "not_configured",
+		}
+	}
+
 	s := "not_configured"
 	if p.IsConfigured() {
 		s = "configured"
@@ -89,7 +99,6 @@ func (p *Plugin) CapabilityStatus() map[string]string {
 		}
 	}
 	return map[string]string{
-		"download":  s,
 		"playlist":  s,
 		"discovery": s,
 	}
