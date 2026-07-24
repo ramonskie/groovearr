@@ -41,6 +41,9 @@ export const settingsFormSchema = z.object({
   auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
   auth_api_key: z.string().optional(),
   auth_local_bypass_subnets: z.string().optional(),
+
+  // Metadata provider order
+  metadata_order: z.array(z.string()).optional(),
 });
 
 export type SettingsFormValues = z.infer<typeof settingsFormSchema>;
@@ -67,6 +70,7 @@ export const settingsDefaults: SettingsFormValues = {
   auth_password: "",
   auth_api_key: "",
   auth_local_bypass_subnets: "",
+  metadata_order: [],
 };
 
 // ─── Source badge variant mapping ───────────────────────────────────

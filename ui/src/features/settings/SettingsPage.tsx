@@ -72,6 +72,7 @@ export default function SettingsPage() {
         auth_password: "",
         auth_api_key: config.auth?.api_key ?? "",
         auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
+        metadata_order: config.metadata_order ?? [],
       });
     }
   }, [config, form]);
@@ -117,6 +118,7 @@ export default function SettingsPage() {
             .map((s) => s.trim())
             .filter((s) => s.length > 0),
         },
+        metadata_order: values.metadata_order,
       });
     },
     [updateConfig, config],

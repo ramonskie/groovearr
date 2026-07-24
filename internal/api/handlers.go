@@ -36,6 +36,7 @@ type Server struct {
 	registry            *download.Registry
 	mdRegistry          *metadata.Registry
 	metadataResolver    *metadata.MetadataResolver
+	enrichmentHandler   *download.MetadataEnrichmentHandler
 	discoveryReg        *discovery.Registry
 	store               library.Store
 	scanner             *library.Scanner
@@ -55,12 +56,13 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
 		mdRegistry:          mdRegistry,
 		metadataResolver:    metadataResolver,
+		enrichmentHandler:   enrichmentHandler,
 		discoveryReg:        discoveryReg,
 		store:               store,
 		scanner:             scanner,
@@ -305,6 +307,14 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	for name := range updated.Sources {
 		if err := s.registry.Rebuild(name, updated.Sources[name], resources); err != nil {
 			s.log.Error("reload failed", "name", name, "error", err, "component", "api")
+		}
+	}
+
+	// Re-apply metadata provider order to resolvers.
+	if len(updated.MetadataOrder) > 0 {
+		s.metadataResolver.SetProviderOrder(updated.MetadataOrder)
+		if s.enrichmentHandler != nil {
+			s.enrichmentHandler.SetProviderOrder(updated.MetadataOrder)
 		}
 	}
 

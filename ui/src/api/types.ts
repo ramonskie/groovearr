@@ -47,6 +47,7 @@ export interface Config {
   sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
   auth: AuthConfig;
+  metadata_order?: string[];
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
@@ -54,6 +55,7 @@ export interface ConfigUpdatePayload {
   sources?: Record<string, Record<string, unknown>>;
   library?: Partial<LibraryConfig>;
   auth?: Partial<AuthConfig>;
+  metadata_order?: string[];
 }
 
 export interface UpdateConfigResponse {
