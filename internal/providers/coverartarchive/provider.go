@@ -50,7 +50,7 @@ func (c *Client) CapabilityStatus() map[string]string {
 }
 
 func (c *Client) CheckConnection(ctx context.Context) error {
-	_, err := c.api.GetReleaseImages(ctx, "test")
+	_, err := c.api.GetReleaseImages(ctx, "76df3287-6cda-33eb-8e9a-044b5e15ffdd") // Radiohead – OK Computer (known stable MBID)
 	c.mu.Lock()
 	if err != nil {
 		c.connected = false

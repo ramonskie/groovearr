@@ -209,6 +209,18 @@ export function getCoverArt(albumId: number): Promise<Blob> {
   return requestBlob(`/api/covers/${albumId}`);
 }
 
+export function getLibraryArtist(artistId: number): Promise<Artist> {
+  return request<Artist>(`/api/library/artists/${artistId}`);
+}
+
+export function getLibraryArtistAlbums(artistId: number): Promise<Album[]> {
+  return request<Album[]>(`/api/library/artists/${artistId}/albums`);
+}
+
+export function getLibraryArtistTracks(artistId: number): Promise<Track[]> {
+  return request<Track[]>(`/api/library/artists/${artistId}/tracks`);
+}
+
 // ─── Playlists ─────────────────────────────────────────────────────
 
 export function getPlaylistSources(): Promise<PlaylistSourceItem[]> {

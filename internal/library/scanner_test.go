@@ -303,6 +303,7 @@ func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.A
 }
 func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error)     { return nil, nil }
 func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) { return nil, nil }
+func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error      { return nil }
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) {
 	key := fmt.Sprintf("%d:%s", a.ArtistID, a.Title)
 	if id, ok := m.albums[key]; ok { return id, nil }

@@ -359,6 +359,7 @@ export interface Artist {
   genres?: string[];
   summary?: string;
   thumb_url?: string;
+  first_album_id?: number;
   created_at: string;
   updated_at: string;
   external_ids?: Record<string, string>;

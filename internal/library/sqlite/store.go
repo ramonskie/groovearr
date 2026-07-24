@@ -415,7 +415,8 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			external_ids, created_at, updated_at
+			external_ids, created_at, updated_at,
+			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
 		FROM artists WHERE id=?`, id)
 	return s.scanArtist(row)
 }
@@ -423,7 +424,8 @@ func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error)
 func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			external_ids, created_at, updated_at
+			external_ids, created_at, updated_at,
+			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
 		FROM artists WHERE name=?`, name)
 	return s.scanArtist(row)
 }
@@ -431,7 +433,8 @@ func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artis
 func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			external_ids, created_at, updated_at
+			external_ids, created_at, updated_at,
+			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
 		FROM artists ORDER BY name LIMIT ? OFFSET ?`, limit, offset)
 	if err != nil {
 		s.log.Error("list artists failed", "error", err, "component", "lib_store")
@@ -444,7 +447,8 @@ func (s *Store) ListArtists(ctx context.Context, offset, limit int) ([]domain.Ar
 func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
-			external_ids, created_at, updated_at
+			external_ids, created_at, updated_at,
+			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
 		FROM artists WHERE name LIKE ? ORDER BY name LIMIT ?`,
 		"%"+query+"%", limit)
 	if err != nil {
@@ -453,6 +457,17 @@ func (s *Store) SearchArtists(ctx context.Context, query string, limit int) ([]d
 	}
 	defer rows.Close()
 	return s.scanArtists(rows)
+}
+
+func (s *Store) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE artists SET thumb_url=?, updated_at=? WHERE id=?`,
+		thumbURL, now, artistID)
+	if err != nil {
+		s.log.Error("set artist thumb_url failed", "error", err, "component", "lib_store")
+	}
+	return err
 }
 
 // ─── Albums ──────────────────────────────────────────────────────────
@@ -718,7 +733,8 @@ for _, al := range albums {
 func (s *Store) GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id, name, genres, summary, thumb_url,
-			external_ids, created_at, updated_at
+			external_ids, created_at, updated_at,
+			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
 		FROM artists WHERE json_extract(external_ids, ?) = ?`,
 		"$."+service, externalID)
 	return s.scanArtist(row)
@@ -753,7 +769,7 @@ func (s *Store) scanArtist(row *sql.Row) (*domain.Artist, error) {
 	var a domain.Artist
 	var genresJSON, extIDsJSON, createdAt, updatedAt string
 	err := row.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
-		&extIDsJSON, &createdAt, &updatedAt)
+		&extIDsJSON, &createdAt, &updatedAt, &a.FirstAlbumID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -776,7 +792,7 @@ func (s *Store) scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 		var a domain.Artist
 		var genresJSON, extIDsJSON, createdAt, updatedAt string
 		if err := rows.Scan(&a.ID, &a.Name, &genresJSON, &a.Summary, &a.ThumbURL,
-			&extIDsJSON, &createdAt, &updatedAt); err != nil {
+			&extIDsJSON, &createdAt, &updatedAt, &a.FirstAlbumID); err != nil {
 			s.log.Error("scan artists failed", "error", err, "component", "lib_store")
 			return nil, err
 		}

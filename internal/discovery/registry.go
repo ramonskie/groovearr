@@ -41,6 +41,20 @@ func (r *Registry) Configured() []Provider {
 	return out
 }
 
+// Any returns all discovery-capable plugins regardless of IsConfigured().
+// Useful for best-effort operations (e.g. artist image enrichment) where
+// a partially configured provider may still handle some requests.
+func (r *Registry) Any() []Provider {
+	plugins := r.inner.WithCapability("discovery")
+	var out []Provider
+	for _, p := range plugins {
+		if dp, ok := p.(Provider); ok {
+			out = append(out, dp)
+		}
+	}
+	return out
+}
+
 // RegisterFactory registers a plugin factory for a discovery provider.
 func (r *Registry) RegisterFactory(f plugin.PluginFactory) error {
 	if !hasCapability(f.Capabilities(), "discovery") {

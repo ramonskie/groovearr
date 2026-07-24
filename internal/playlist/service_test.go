@@ -126,6 +126,7 @@ func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.A
 }
 func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) { return nil, nil }
 func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) { return nil, nil }
+func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error      { return nil }
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) { return 0, nil }
 func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) { return nil, nil }
 func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) { return nil, nil }

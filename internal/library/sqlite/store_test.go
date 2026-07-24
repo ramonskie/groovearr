@@ -277,3 +277,84 @@ func TestStore_DuplicateUpsert(t *testing.T) {
 		t.Errorf("expected 1 artist, got %d", len(all))
 	}
 }
+
+func TestStore_SetArtistThumbURL(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	id, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Artist Without Image"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// ThumbURL should be empty initially.
+	a, _ := store.GetArtist(ctx, id)
+	if a.ThumbURL != "" {
+		t.Errorf("expected empty thumb_url, got %q", a.ThumbURL)
+	}
+
+	// Set thumb_url.
+	if err := store.SetArtistThumbURL(ctx, id, "https://example.com/artist.jpg"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Verify it persisted.
+	a, err = store.GetArtist(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ThumbURL != "https://example.com/artist.jpg" {
+		t.Errorf("thumb_url = %q, want https://example.com/artist.jpg", a.ThumbURL)
+	}
+
+	// Verify other fields untouched.
+	if a.Name != "Artist Without Image" {
+		t.Errorf("name = %q, want Artist Without Image", a.Name)
+	}
+}
+
+func TestStore_FirstAlbumID(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Artist without albums.
+	artistID, _ := store.UpsertArtist(ctx, &domain.Artist{Name: "No Albums"})
+	a, _ := store.GetArtist(ctx, artistID)
+	if a.FirstAlbumID != 0 {
+		t.Errorf("expected first_album_id=0 for artist without albums, got %d", a.FirstAlbumID)
+	}
+
+	// Artist with albums.
+	artistID2, _ := store.UpsertArtist(ctx, &domain.Artist{Name: "Has Albums"})
+	albumID, _ := store.UpsertAlbum(ctx, &domain.Album{ArtistID: artistID2, Title: "First Album", Year: 2020})
+	store.UpsertAlbum(ctx, &domain.Album{ArtistID: artistID2, Title: "Second Album", Year: 2021})
+	_ = albumID
+
+	a, _ = store.GetArtist(ctx, artistID2)
+	if a.FirstAlbumID == 0 {
+		t.Error("expected non-zero first_album_id for artist with albums")
+	}
+
+	// ListArtists should also include first_album_id.
+	all, _ := store.ListArtists(ctx, 0, 10)
+	for _, artist := range all {
+		if artist.Name == "Has Albums" && artist.FirstAlbumID == 0 {
+			t.Error("ListArtists: expected non-zero first_album_id")
+		}
+		if artist.Name == "No Albums" && artist.FirstAlbumID != 0 {
+			t.Error("ListArtists: expected first_album_id=0 for artist without albums")
+		}
+	}
+}

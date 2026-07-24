@@ -57,6 +57,9 @@ func (m *mockLibStore) ListArtists(ctx context.Context, offset, limit int) ([]do
 func (m *mockLibStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
 	return nil, nil
 }
+func (m *mockLibStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error {
+	return nil
+}
 
 func (m *mockLibStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) {
 	if a.ID == 0 {

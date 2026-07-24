@@ -125,6 +125,9 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
 	mux.Handle("POST /api/library/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleLibraryScan)))
+	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
+	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
+	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
 
 	// Playlist routes.
@@ -750,7 +753,93 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 	if artists == nil {
 		artists = []domain.Artist{}
 	}
+
+	// Enrich artists without thumb_url from discovery providers.
+	// Runs asynchronously so it doesn't block the response; images appear on
+	// subsequent requests once cached in the database.
+	s.log.Info("enrich: starting background artist image enrichment", "component", "api")
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("enrich artist images panicked", "recover", r, "component", "api")
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+		s.enrichArtistImages(ctx, artists)
+	}()
+
 	writeJSON(w, http.StatusOK, artists)
+}
+
+// enrichArtistImages fills in missing artist thumb_url values by searching
+// discovery providers. Results are persisted to the store for future requests.
+// Uses Any() so partially-configured providers (e.g. Deezer without ARL) can
+// still serve public artist search data.
+func (s *Server) enrichArtistImages(ctx context.Context, artists []domain.Artist) {
+	if s.discoveryReg == nil {
+		s.log.Info("enrich artist images: no discovery registry", "component", "api")
+		return
+	}
+	providers := s.discoveryReg.Any()
+	if len(providers) == 0 {
+		s.log.Info("enrich artist images: no discovery-capable providers", "component", "api")
+		return
+	}
+
+	const maxEnrich = 20
+	enriched := 0
+	seen := make(map[int64]bool)
+	total := 0
+
+	for i := range artists {
+		if enriched >= maxEnrich {
+			break
+		}
+		if artists[i].ThumbURL != "" {
+			continue
+		}
+		total++
+		id := artists[i].ID
+		name := artists[i].Name
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+
+		for _, p := range providers {
+			results, err := p.SearchArtists(ctx, name, 1)
+			if err != nil {
+				s.log.Debug("enrich: search failed",
+					"provider", p.Name(), "artist", name, "error", err, "component", "api")
+				continue
+			}
+			if len(results) == 0 {
+				s.log.Debug("enrich: no results",
+					"provider", p.Name(), "artist", name, "component", "api")
+				continue
+			}
+			if !strings.EqualFold(results[0].Name, name) {
+				s.log.Debug("enrich: name mismatch",
+					"provider", p.Name(), "wanted", name, "got", results[0].Name, "component", "api")
+				continue
+			}
+			if results[0].ImageURL == "" {
+				continue
+			}
+			if err := s.store.SetArtistThumbURL(ctx, id, results[0].ImageURL); err != nil {
+				s.log.Warn("failed to persist artist thumb_url",
+					"artist", name, "error", err, "component", "api")
+				continue
+			}
+			enriched++
+			s.log.Info("enriched artist image",
+				"artist", name, "provider", p.Name(), "component", "api")
+			break
+		}
+	}
+	s.log.Info("enrich artist images done",
+		"enriched", enriched, "total_missing", total, "component", "api")
 }
 
 func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
@@ -799,6 +888,61 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 		"errors":   agg.Errors,
 		"paths":    paths,
 	})
+}
+
+func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("artistID")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
+		return
+	}
+	artist, err := s.store.GetArtist(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if artist == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, artist)
+}
+
+func (s *Server) handleLibraryArtistAlbums(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("artistID")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
+		return
+	}
+	albums, err := s.store.GetAlbumsByArtist(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if albums == nil {
+		albums = []domain.Album{}
+	}
+	writeJSON(w, http.StatusOK, albums)
+}
+
+func (s *Server) handleLibraryArtistTracks(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("artistID")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
+		return
+	}
+	tracks, err := s.store.GetTracksByArtist(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if tracks == nil {
+		tracks = []domain.Track{}
+	}
+	writeJSON(w, http.StatusOK, tracks)
 }
 
 // handleCoverArt serves the cover.jpg image for an album.
@@ -853,6 +997,7 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "cover not found", http.StatusNotFound)
 		return
 	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, r, coverPath)
 }
 
@@ -1348,7 +1493,7 @@ func (s *Server) handleDiscoverProviders(w http.ResponseWriter, r *http.Request)
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-	providers := s.discoveryReg.Configured()
+	providers := s.discoveryReg.Any()
 	s.log.Info("discover providers", "count", len(providers), "component", "discover")
 	out := make([]map[string]any, len(providers))
 	for i, p := range providers {
@@ -1368,14 +1513,14 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
 		return
 	}
-	if s.discoveryReg == nil || len(s.discoveryReg.Configured()) == 0 {
+	if s.discoveryReg == nil || len(s.discoveryReg.Any()) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
 			"error": "no discovery providers configured",
 		})
 		return
 	}
 
-	providers := s.discoveryReg.Configured()
+	providers := s.discoveryReg.Any()
 	ctx := r.Context()
 
 	type providerResult struct {
@@ -1494,7 +1639,7 @@ func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	providers := s.discoveryReg.Configured()
+	providers := s.discoveryReg.Any()
 	if len(providers) == 0 {
 		writeJSON(w, http.StatusOK, []any{})
 		return
@@ -1522,7 +1667,7 @@ func (s *Server) handleDiscoverAlbumTracks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	providers := s.discoveryReg.Configured()
+	providers := s.discoveryReg.Any()
 	if len(providers) == 0 {
 		writeJSON(w, http.StatusOK, []any{})
 		return
@@ -1550,7 +1695,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	providers := s.discoveryReg.Configured()
+	providers := s.discoveryReg.Any()
 	if len(providers) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
 		return

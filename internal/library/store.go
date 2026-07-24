@@ -16,6 +16,7 @@ type Store interface {
 	GetArtistByName(ctx context.Context, name string) (*domain.Artist, error)
 	ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error)
 	SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error)
+	SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error
 
 	// Albums.
 	UpsertAlbum(ctx context.Context, album *domain.Album) (int64, error)

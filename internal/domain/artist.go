@@ -5,16 +5,15 @@ import "time"
 
 // Artist represents a music artist in the library.
 type Artist struct {
-	ID        int64     `json:"id"`
-	Name      string    `json:"name"`
-	Genres    []string  `json:"genres,omitempty"`
-	Summary   string    `json:"summary,omitempty"`
-	ThumbURL  string    `json:"thumb_url,omitempty"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
-
-	// External service IDs (keyed by source name, e.g., "spotify", "musicbrainz").
-	ExternalIDs map[string]string `json:"external_ids,omitempty"`
+	ID           int64             `json:"id"`
+	Name         string            `json:"name"`
+	Genres       []string          `json:"genres,omitempty"`
+	Summary      string            `json:"summary,omitempty"`
+	ThumbURL     string            `json:"thumb_url,omitempty"`
+	FirstAlbumID int64             `json:"first_album_id,omitempty"`
+	CreatedAt    time.Time         `json:"created_at"`
+	UpdatedAt    time.Time         `json:"updated_at"`
+	ExternalIDs  map[string]string `json:"external_ids,omitempty"`
 }
 
 // ArtistImage represents a cached artist image URL from a specific source.
