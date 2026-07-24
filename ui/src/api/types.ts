@@ -136,6 +136,8 @@ export interface SourceInfo {
   display_name: string;
   configured: boolean;
   status: SourceStatus;
+  /** Per-capability status: {"download": "connected", "metadata": "connected"} */
+  capabilities?: Record<string, SourceStatus>;
 }
 
 export interface TestConnectionResponse {

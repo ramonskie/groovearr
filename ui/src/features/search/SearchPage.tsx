@@ -137,32 +137,48 @@ function SearchPage() {
       {/* Source status badges */}
       {sources && sources.length > 0 && (
         <div className="flex flex-wrap gap-2">
-          {sources.map((s) => (
+          {sources.map((s) => {
+            // Use capabilities for per-feature status if available, otherwise flat status.
+            const caps = s.capabilities;
+            const primaryStatus = caps
+              ? (Object.values(caps).includes("connected") ? "connected"
+                : Object.values(caps).includes("configured") ? "configured"
+                : "not_configured")
+              : s.status;
+
+            return (
             <span
               key={s.name}
               className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium ${
-                s.status === "connected"
+                primaryStatus === "connected"
                   ? "border-green-800 bg-green-950/50 text-green-400"
-                  : s.status === "configured"
+                  : primaryStatus === "configured"
                     ? "border-yellow-800 bg-yellow-950/50 text-yellow-400"
                     : "border-slate-700 bg-slate-900 text-slate-500"
               }`}
             >
-              <span
-                className={`h-1.5 w-1.5 rounded-full ${
-                  s.status === "connected"
-                    ? "bg-green-400"
-                    : s.status === "configured"
-                      ? "bg-yellow-400"
-                      : "bg-slate-600"
-                }`}
-              />
+              {/* Capability dots */}
+              {caps && Object.keys(caps).length > 0 && (
+                <span className="flex gap-0.5 mr-0.5">
+                  {Object.entries(caps).map(([cap, st]) => (
+                    <span
+                      key={cap}
+                      title={`${cap}: ${st}`}
+                      className={`h-1.5 w-1.5 rounded-full ${
+                        st === "connected" ? "bg-green-400"
+                        : st === "configured" ? "bg-yellow-400"
+                        : "bg-slate-600"
+                      }`}
+                    />
+                  ))}
+                </span>
+              )}
               {s.display_name}
             </span>
-          ))}
+            );
+          })}
         </div>
       )}
-
       {/* Status area */}
       {searchMutation.isPending && (
         <StatusMessage variant="info" message="Searching...">

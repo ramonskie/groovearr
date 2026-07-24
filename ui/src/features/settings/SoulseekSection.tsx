@@ -5,7 +5,7 @@ import type { SourceInfo } from "../../api/types";
 import Card from "../../components/Card";
 import FormGroup from "../../components/FormGroup";
 import Button from "../../components/Button";
-import Badge from "../../components/Badge";
+import CapabilityBadges from "./CapabilityBadges";
 import Spinner from "../../components/Spinner";
 import {
   sourceBadge,
@@ -48,7 +48,7 @@ export default function SoulseekSection({ source }: Props) {
   return (
     <Card
       title="Soulseek (slskd)"
-      actions={<Badge variant={badge.variant}>{badge.label}</Badge>}
+      actions={<CapabilityBadges capabilities={source?.capabilities} />}
     >
       <div className="space-y-4">
         <FormGroup

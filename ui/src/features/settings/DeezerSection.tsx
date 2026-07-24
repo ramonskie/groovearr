@@ -5,8 +5,8 @@ import type { SourceInfo } from "../../api/types";
 import Card from "../../components/Card";
 import FormGroup from "../../components/FormGroup";
 import Button from "../../components/Button";
-import Badge from "../../components/Badge";
 import Spinner from "../../components/Spinner";
+import CapabilityBadges from "./CapabilityBadges";
 import {
   sourceBadge,
   type SettingsFormValues,
@@ -58,7 +58,7 @@ export default function DeezerSection({ source }: Props) {
   return (
     <Card
       title="Deezer"
-      actions={<Badge variant={badge.variant}>{badge.label}</Badge>}
+      actions={<CapabilityBadges capabilities={source?.capabilities} />}
     >
       <div className="space-y-4">
         <FormGroup
