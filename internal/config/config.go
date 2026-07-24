@@ -51,7 +51,7 @@ var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 func DefaultConfig() Config {
 	return Config{
 		Sources:       make(map[string]json.RawMessage),
-		MetadataOrder: []string{"deezer", "musicbrainz", "coverartarchive"},
+		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder: []string{"soulseek", "deezer"},
 		Library: LibraryConfig{
 			DownloadPath:     "./downloads",

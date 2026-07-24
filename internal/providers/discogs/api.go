@@ -30,6 +30,20 @@ type ArtistResult struct {
 	Thumb    string `json:"thumb"`
 }
 
+// ArtistDetail represents a full Discogs artist resource.
+type ArtistDetail struct {
+	Name   string        `json:"name"`
+	Images []ArtistImage `json:"images"`
+}
+
+// ArtistImage represents a Discogs artist image.
+type ArtistImage struct {
+	URI         string `json:"uri"`
+	URI150      string `json:"uri150"`
+	Width       int    `json:"width"`
+	Height      int    `json:"height"`
+}
+
 // ReleaseResult represents a minimal Discogs release from search or artist pages.
 type ReleaseResult struct {
 	ID     int    `json:"id"`
@@ -101,6 +115,24 @@ func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]
 		return nil, err
 	}
 	return result.Results, nil
+}
+
+// GetArtist fetches the full artist resource including images.
+func (c *Client) GetArtist(ctx context.Context, artistID int) (*ArtistDetail, error) {
+	data, err := c.apiGet(ctx, fmt.Sprintf("/artists/%d", artistID), nil)
+	if err != nil {
+		c.log.Error("discogs get artist failed", "error", err, "artistID", artistID, "component", "discogs_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+	var result ArtistDetail
+	if err := json.Unmarshal(data, &result); err != nil {
+		c.log.Error("discogs unmarshal artist failed", "error", err, "component", "discogs_api")
+		return nil, err
+	}
+	return &result, nil
 }
 
 // GetArtistReleases fetches releases for a given artist.

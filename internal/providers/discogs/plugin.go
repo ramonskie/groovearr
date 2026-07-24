@@ -79,6 +79,7 @@ func (p *Plugin) CapabilityStatus() map[string]string {
 // ─── discovery.Provider ───────────────────────────────────────────────
 
 // SearchArtists searches for artists by name on Discogs.
+// If search results lack images, fetches full artist detail as fallback.
 func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]discovery.ArtistSummary, error) {
 	artists, err := p.client.SearchArtists(ctx, query, limit)
 	if err != nil {
@@ -87,10 +88,28 @@ func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]
 	}
 	out := make([]discovery.ArtistSummary, len(artists))
 	for i, a := range artists {
+		imageURL := a.ImageURL
+		if imageURL == "" && a.Thumb != "" {
+			imageURL = a.Thumb
+		}
+		// Fallback: fetch full artist detail for better images.
+		if imageURL == "" {
+			detail, detailErr := p.client.GetArtist(ctx, a.ID)
+			if detailErr != nil {
+				p.log.Debug("discogs get artist image fallback failed",
+					"artist", a.Name, "error", detailErr, "component", "discogs")
+			} else if detail != nil && len(detail.Images) > 0 {
+				// Prefer uri150 (thumbnail), fall back to full uri.
+				imageURL = detail.Images[0].URI150
+				if imageURL == "" {
+					imageURL = detail.Images[0].URI
+				}
+			}
+		}
 		out[i] = discovery.ArtistSummary{
 			ProviderID: strconv.Itoa(a.ID),
 			Name:       a.Name,
-			ImageURL:   a.ImageURL,
+			ImageURL:   imageURL,
 		}
 	}
 	return out, nil
@@ -198,17 +217,34 @@ func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 // IsMetadataAvailable is always true — the public Discogs API is free.
 func (p *Plugin) IsMetadataAvailable() bool { return true }
 
-// SearchArtistImage looks up an artist image via Discogs search.
+// SearchArtistImage looks up an artist image via Discogs search, with artist detail fallback.
 func (p *Plugin) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
 	artists, err := p.client.SearchArtists(ctx, artist, 1)
 	if err != nil || len(artists) == 0 {
 		return nil, nil
 	}
-	if artists[0].ImageURL == "" {
+	imageURL := artists[0].ImageURL
+	if imageURL == "" && artists[0].Thumb != "" {
+		imageURL = artists[0].Thumb
+	}
+	// Fallback: fetch full artist detail for better images.
+	if imageURL == "" {
+		detail, detailErr := p.client.GetArtist(ctx, artists[0].ID)
+		if detailErr != nil {
+			p.log.Debug("discogs get artist image fallback failed",
+				"artist", artist, "error", detailErr, "component", "discogs")
+		} else if detail != nil && len(detail.Images) > 0 {
+			imageURL = detail.Images[0].URI150
+			if imageURL == "" {
+				imageURL = detail.Images[0].URI
+			}
+		}
+	}
+	if imageURL == "" {
 		return nil, nil
 	}
 	return &metadata.ArtistImageResult{
-		ImageURL: artists[0].ImageURL,
+		ImageURL: imageURL,
 		Source:   "discogs",
 	}, nil
 }

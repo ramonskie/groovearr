@@ -782,7 +782,7 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 				s.log.Error("enrich artist images panicked", "recover", r, "component", "api")
 			}
 		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
 		s.enrichArtistImages(ctx, artists)
 	}()
@@ -814,7 +814,7 @@ func (s *Server) enrichArtistImages(ctx context.Context, artists []domain.Artist
 		if enriched >= maxEnrich {
 			break
 		}
-		if artists[i].ThumbURL != "" {
+		if artists[i].ThumbURL != "" && !isPlaceholderImage(artists[i].ThumbURL) {
 			continue
 		}
 		total++
@@ -825,35 +825,50 @@ func (s *Server) enrichArtistImages(ctx context.Context, artists []domain.Artist
 		}
 		seen[id] = true
 
-		for _, p := range providers {
-			results, err := p.SearchArtists(ctx, name, 1)
-			if err != nil {
-				s.log.Debug("enrich: search failed",
-					"provider", p.Name(), "artist", name, "error", err, "component", "api")
-				continue
+		// Try full name first, then primary artist name (first before comma/feat/&).
+		namesToTry := []string{name}
+		if primary := extractPrimaryArtist(name); primary != "" && primary != name {
+			namesToTry = append(namesToTry, primary)
+		}
+
+		var found bool
+		for _, tryName := range namesToTry {
+			if found {
+				break
 			}
-			if len(results) == 0 {
-				s.log.Debug("enrich: no results",
-					"provider", p.Name(), "artist", name, "component", "api")
-				continue
+			for _, p := range providers {
+				results, err := p.SearchArtists(ctx, tryName, 1)
+				if err != nil {
+					s.log.Info("enrich: search failed",
+						"provider", p.Name(), "artist", tryName, "error", err, "component", "api")
+					continue
+				}
+				if len(results) == 0 {
+					s.log.Debug("enrich: no results",
+						"provider", p.Name(), "artist", tryName, "component", "api")
+					continue
+				}
+				if !strings.EqualFold(results[0].Name, tryName) && !strings.Contains(strings.ToLower(results[0].Name), strings.ToLower(tryName)) {
+					s.log.Debug("enrich: name mismatch",
+						"provider", p.Name(), "wanted", tryName, "got", results[0].Name, "component", "api")
+					continue
+				}
+				if results[0].ImageURL == "" || isPlaceholderImage(results[0].ImageURL) {
+					s.log.Info("enrich: no image URL",
+						"provider", p.Name(), "artist", tryName, "component", "api")
+					continue
+				}
+				if err := s.store.SetArtistThumbURL(ctx, id, results[0].ImageURL); err != nil {
+					s.log.Warn("failed to persist artist thumb_url",
+						"artist", name, "error", err, "component", "api")
+					continue
+				}
+				enriched++
+				s.log.Info("enriched artist image",
+					"artist", name, "provider", p.Name(), "component", "api")
+				found = true
+				break
 			}
-			if !strings.EqualFold(results[0].Name, name) {
-				s.log.Debug("enrich: name mismatch",
-					"provider", p.Name(), "wanted", name, "got", results[0].Name, "component", "api")
-				continue
-			}
-			if results[0].ImageURL == "" {
-				continue
-			}
-			if err := s.store.SetArtistThumbURL(ctx, id, results[0].ImageURL); err != nil {
-				s.log.Warn("failed to persist artist thumb_url",
-					"artist", name, "error", err, "component", "api")
-				continue
-			}
-			enriched++
-			s.log.Info("enriched artist image",
-				"artist", name, "provider", p.Name(), "component", "api")
-			break
 		}
 	}
 	s.log.Info("enrich artist images done",
@@ -906,6 +921,26 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 		"errors":   agg.Errors,
 		"paths":    paths,
 	})
+}
+
+// isPlaceholderImage returns true if the URL is a known empty/default placeholder
+// from Deezer (MD5 of empty string) or other providers.
+func isPlaceholderImage(url string) bool {
+	return strings.Contains(url, "/artist/d41d8cd98f00b204e9800998ecf8427e/")
+}
+
+// extractPrimaryArtist returns the first artist from a comma/ampersand-separated
+// or featured-artist string. Handles non-breaking spaces (\u00a0) commonly found in
+// audio file metadata. Returns empty if no split is needed.
+func extractPrimaryArtist(name string) string {
+	// Replace non-breaking spaces with regular spaces for consistent splitting.
+	name = strings.ReplaceAll(name, "\u00a0", " ")
+	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
+		if idx := strings.Index(name, sep); idx > 0 {
+			return strings.TrimSpace(name[:idx])
+		}
+	}
+	return ""
 }
 
 func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
@@ -1205,10 +1240,10 @@ func (s *Server) handleDebugDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	info := map[string]any{
-		"download":    dl,
-		"state":       dl.State,
-		"terminal":    dl.State.Terminal(),
-		"playlist_id": dl.PlaylistID,
+		"download":         dl,
+		"state":            dl.State,
+		"terminal":         dl.State.Terminal(),
+		"playlist_id":      dl.PlaylistID,
 		"library_track_id": dl.LibraryTrackID,
 	}
 
