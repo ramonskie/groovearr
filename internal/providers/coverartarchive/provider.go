@@ -20,8 +20,9 @@ type Client struct {
 // NewClient creates a Cover Art Archive metadata provider.
 func NewClient(log *slog.Logger) *Client {
 	return &Client{
-		api: newAPIClient(log),
-		log: log,
+		api:       newAPIClient(log),
+		log:       log,
+		connected: true, // public API, presumed reachable
 	}
 }
 
@@ -38,9 +39,13 @@ func (c *Client) DisplayName() string { return displayName }
 func (c *Client) IsConfigured() bool         { return true } // no credentials required
 func (c *Client) IsMetadataAvailable() bool  { return true }
 
-// CapabilityStatus returns metadata status (public API — always available).
+// CapabilityStatus returns metadata status based on health check.
 func (c *Client) CapabilityStatus() map[string]string {
-	return map[string]string{"metadata": "connected"}
+	s := "configured"
+	if c.Connected() {
+		s = "connected"
+	}
+	return map[string]string{"metadata": s}
 }
 
 func (c *Client) CheckConnection(ctx context.Context) error {

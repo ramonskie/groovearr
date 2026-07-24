@@ -23,9 +23,10 @@ type Client struct {
 // NewClient creates a MusicBrainz metadata provider.
 func NewClient(cfg MusicBrainzConfig, logger *slog.Logger) *Client {
 	return &Client{
-		cfg: cfg,
-		api: newAPIClient(cfg, logger),
-		log: logger,
+		cfg:       cfg,
+		api:       newAPIClient(cfg, logger),
+		log:       logger,
+		connected: true, // public API, presumed reachable
 	}
 }
 
@@ -39,9 +40,13 @@ func (c *Client) DisplayName() string { return displayName }
 func (c *Client) IsConfigured() bool  { return true } // no credentials required
 func (c *Client) IsMetadataAvailable() bool { return true }
 
-// CapabilityStatus returns metadata status (public API — always available).
+// CapabilityStatus returns metadata status based on health check.
 func (c *Client) CapabilityStatus() map[string]string {
-	return map[string]string{"metadata": "connected"}
+	s := "configured"
+	if c.Connected() {
+		s = "connected"
+	}
+	return map[string]string{"metadata": s}
 }
 
 func (c *Client) CheckConnection(ctx context.Context) error {
