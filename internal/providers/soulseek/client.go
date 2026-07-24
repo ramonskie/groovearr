@@ -47,6 +47,7 @@ type Client struct {
 	apiKey   string
 	client   *http.Client
 	log      *slog.Logger
+	connected bool // set by health checker
 
 	mu             sync.Mutex
 	activeSearches map[string]context.CancelFunc // searchID → cancel
@@ -104,6 +105,9 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 		return fmt.Errorf("soulseek: slskd URL not configured")
 	}
 	_, err := c.doRequest(ctx, http.MethodGet, "application", nil)
+	c.mu.Lock()
+	c.connected = err == nil
+	c.mu.Unlock()
 	return err
 }
 
@@ -433,7 +437,11 @@ func (c *Client) ClearCompleted(ctx context.Context) error {
 }
 
 // Connected returns true if configured (Soulseek has no separate auth step).
-func (c *Client) Connected() bool { return c.IsConfigured() }
+func (c *Client) Connected() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.connected
+}
 
 // GetProgress implements download.DownloadProgressor by delegating to the
 // slskd API for current transfer state.

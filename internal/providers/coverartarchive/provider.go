@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -15,14 +16,14 @@ type Client struct {
 	api       *apiClient
 	log       *slog.Logger
 	connected bool
+	mu        sync.RWMutex // protects connected
 }
 
 // NewClient creates a Cover Art Archive metadata provider.
 func NewClient(log *slog.Logger) *Client {
 	return &Client{
-		api:       newAPIClient(log),
-		log:       log,
-		connected: true, // public API, presumed reachable
+		api: newAPIClient(log),
+		log: log,
 	}
 }
 
@@ -49,20 +50,26 @@ func (c *Client) CapabilityStatus() map[string]string {
 }
 
 func (c *Client) CheckConnection(ctx context.Context) error {
-	// Probe a known-good release MBID to verify the CAA service is reachable.
-	// An empty result (not found) is fine — we only care about network errors.
 	_, err := c.api.GetReleaseImages(ctx, "test")
+	c.mu.Lock()
 	if err != nil {
+		c.connected = false
+		c.mu.Unlock()
 		if c.log != nil {
 			c.log.Error("coverartarchive connectivity check failed", "error", err, "component", "caa")
 		}
 		return fmt.Errorf("coverartarchive: connectivity check failed: %w", err)
 	}
 	c.connected = true
+	c.mu.Unlock()
 	return nil
 }
 
-func (c *Client) Connected() bool { return c.connected }
+func (c *Client) Connected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
 
 // ─── metadata.Provider ─────────────────────────────────────────────────
 

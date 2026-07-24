@@ -77,6 +77,7 @@ type DownloadClient struct {
 	authMu        sync.Mutex   // serializes authenticate calls
 	tokenMu       sync.RWMutex // protects apiToken, licenseToken, userID, authenticated
 	authenticated bool
+	publicHealthy bool // set by CheckConnection when public API is reachable
 	apiToken      string
 	licenseToken  string
 	userID        int
@@ -192,9 +193,7 @@ func (c *DownloadClient) IsConfigured() bool { return c.cfg.ARL != "" }
 // IsMetadataAvailable is always true — the public Deezer API works without auth.
 func (c *DownloadClient) IsMetadataAvailable() bool { return true }
 
-// CapabilityStatus reports per-capability connection status.
-// Metadata + Discovery are always connected (public API).
-// Download + Playlist need ARL.
+// CapabilityStatus reports per-capability connection status from health checks.
 func (c *DownloadClient) CapabilityStatus() map[string]string {
 	dlStatus := "not_configured"
 	if c.cfg.ARL != "" {
@@ -203,11 +202,15 @@ func (c *DownloadClient) CapabilityStatus() map[string]string {
 			dlStatus = "connected"
 		}
 	}
+	pubStatus := "configured"
+	if c.Connected() {
+		pubStatus = "connected"
+	}
 	return map[string]string{
 		"download":  dlStatus,
 		"playlist":  dlStatus,
-		"discovery": "connected", // public API: albums, artists, charts
-		"metadata":  "connected", // public API: search, albums, covers
+		"discovery": pubStatus,
+		"metadata":  pubStatus,
 	}
 }
 
@@ -228,6 +231,9 @@ func (c *DownloadClient) CheckConnection(ctx context.Context) error {
 	if c.cfg.ARL == "" {
 		// Metadata-only mode: verify public API is reachable.
 		_, err := c.api.SearchTracks(ctx, "test", 1)
+		c.tokenMu.Lock()
+		c.publicHealthy = err == nil
+		c.tokenMu.Unlock()
 		if err != nil {
 			c.log.Error("deezer metadata check failed", "error", err, "component", "deezer")
 			return fmt.Errorf("deezer: public API unreachable: %w", err)
@@ -414,7 +420,9 @@ func (c *DownloadClient) ClearCompleted(ctx context.Context) error {
 
 // Connected returns true if authentication has succeeded.
 func (c *DownloadClient) Connected() bool {
-	return c.isAuthenticated()
+	c.tokenMu.RLock()
+	defer c.tokenMu.RUnlock()
+	return c.authenticated || c.publicHealthy
 }
 
 // GetProgress implements download.DownloadProgressor by retrieving the current

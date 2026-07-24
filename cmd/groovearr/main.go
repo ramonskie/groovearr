@@ -111,6 +111,11 @@ func main() {
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, mainLog)
 	metadataResolver.SetProviderOrder(currentCfg.MetadataOrder)
 
+	// Plugin health checker — periodically verifies connectivity of all plugins.
+	// Runs at startup and every 5 minutes thereafter.
+	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, mainLog)
+	healthChecker.Start(context.Background())
+
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
 

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sync"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -15,18 +16,18 @@ import (
 // (ISRC, genres, label, release date), and artist image lookup (unavailable).
 type Client struct {
 	cfg       MusicBrainzConfig
-	api       *apiClient // internal API client
+	api       *apiClient
 	log       *slog.Logger
 	connected bool
+	mu        sync.RWMutex // protects connected
 }
 
 // NewClient creates a MusicBrainz metadata provider.
 func NewClient(cfg MusicBrainzConfig, logger *slog.Logger) *Client {
 	return &Client{
-		cfg:       cfg,
-		api:       newAPIClient(cfg, logger),
-		log:       logger,
-		connected: true, // public API, presumed reachable
+		cfg: cfg,
+		api: newAPIClient(cfg, logger),
+		log: logger,
 	}
 }
 
@@ -51,7 +52,10 @@ func (c *Client) CapabilityStatus() map[string]string {
 
 func (c *Client) CheckConnection(ctx context.Context) error {
 	_, err := c.api.SearchReleaseGroup(ctx, "test", "test")
+	c.mu.Lock()
 	if err != nil {
+		c.connected = false
+		c.mu.Unlock()
 		c.log.Error("musicbrainz check connection failed", "error", err, "component", "musicbrainz")
 		if errors.Is(err, ErrRateLimited) {
 			return fmt.Errorf("musicbrainz: rate limited: %w", err)
@@ -59,10 +63,15 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 		return fmt.Errorf("musicbrainz: connectivity check failed: %w", err)
 	}
 	c.connected = true
+	c.mu.Unlock()
 	return nil
 }
 
-func (c *Client) Connected() bool { return c.connected }
+func (c *Client) Connected() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.connected
+}
 
 // ─── metadata.Provider ─────────────────────────────────────────────────
 
