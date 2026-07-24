@@ -26,9 +26,16 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
   │  folder template         │ route search/download     │ import/sync
   │  {artist}/{album}...     │ cross-source fallback     │ playlist.Registry
   │                                                     │ deezer.PlaylistSource
-  └─ matching.Engine                                    │
-     track matching                                     │
-     version awareness
+└─ matching.Engine                                    │
+   track matching                                     │
+   version awareness
+
+   metadata.Registry          metadata.MetadataResolver
+   │ provider lookup          │ queue-time enrichment
+   │ configurable order       │ primaryArtist fallback
+   ├─ musicbrainz.Client      │ album + cover lookup
+   ├─ deezer.DownloadClient   │
+   └─ coverartarchive.Client
 ```
 
 ## Package Map
@@ -40,8 +47,10 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/config` | JSON config load/validate/persist (thread-safe) | `Config`, `Persistence` |
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Plugin contract, registry, worker pool, import pipeline | `Plugin`, `Registry`, `WorkerPool`, `DownloadService`, `Orchestrator`, import handlers |
-| `internal/download/deezer` | Deezer ARL download client | `DownloadClient` |
-| `internal/download/soulseek` | slskd REST API client | `Client` |
+| `internal/metadata` | Metadata provider interface + resolver + registry | `Provider`, `MetadataResolver`, `Registry`, `CoverResult`, `TrackMetadata` |
+| `internal/providers/musicbrainz` | MusicBrainz metadata provider (recording search, release lookup) | `Client` (implements `metadata.Provider`) |
+| `internal/providers/coverartarchive` | Cover Art Archive (MBID-based cover lookup) | `Client` (implements `metadata.Provider`) |
+| `internal/providers/deezer` | Deezer plugin — download (ARL) + metadata (public API) | `DownloadClient` (implements `download.Plugin` + `metadata.Provider`), `Client` (API) |
 | `internal/download/sqlite` | SQLite download record store | `Store` (implements `DownloadStore`) |
 | `internal/events` | In-memory pub/sub event bus | `InMemoryEventBus`, 8 topic constants |
 | `internal/library` | Library store interface, scanner, renamer, path resolver, filename parser | `Store` (interface), `Scanner`, `Renamer`, `ParseArtistTitle`, `ParseAlbumDir` |
@@ -139,10 +148,10 @@ SearchResult          TrackResult           AlbumResult
                 │         │ Import handler chain (sequential):
                 │         │  1. TagValidator → verifies file tags match expected metadata
                 │         │  2. FileRenamer → moves to library path
-                │         │  3. CoverArt → downloads cover.jpg
+                │         │  3. CoverArt → downloads cover.jpg from CoverURL
                 │         │  4. TagWriter → ID3/FLAC tags
                 │         │  5. LibraryImporter → artist→album→track in SQLite
-                │         │  6. MetadataEnrichment → ISRC, genres, MBIDs
+                │         │  6. MetadataEnrichment → album resolution, ISRC, genres, covers, MBIDs, thumb_url sync
                 │         │  7. PlaylistLinker → updates playlist_tracks
                 │         │  8. SSENotifier → broadcasts completion
                │    ┌────▼────┐         ┌────────┐
@@ -239,6 +248,56 @@ type Source interface {
 
 **Current source:** Deezer (ARL).
 
+|## Metadata Enrichment Pipeline
+
+### Queue-Time Resolution
+
+Before a download is queued, `MetadataResolver.EnrichMetadata()` queries configured
+providers in priority order (`metadata_order` config):
+
+```
+EnrichMetadata(artist, title, album, year)
+  │
+  ├─ Phase 1: Album lookup (if album empty)
+  │   └─ For each provider in order:
+  │       ├─ SearchAlbum(full artist, title) → found? Done.
+  │       └─ SearchAlbum(primary artist, title) → comma fallback
+  │
+  ├─ Phase 2: Cover art lookup (if album found)
+  │   └─ For each provider in order:
+  │       ├─ SearchCover(full artist, album) → found? Done.
+  │       └─ SearchCover(primary artist, album) → comma fallback
+  │
+  └─ Returns TrackMetadata{Album, CoverURL}
+```
+
+### Post-Import Enrichment
+
+After the library album/track exists, `MetadataEnrichmentHandler` (step 6) runs:
+
+```
+For each configured provider:
+  ├─ Album title resolution (if album.Title empty)
+  │   └─ SearchAlbum(artist, track title) → update album title
+  ├─ Cover art download
+  │   ├─ SearchCover(artist, album) → download cover.jpg
+  │   └─ SearchCoverByMBID(mbid) → CAA lookup
+  ├─ ThumbURL sync (if cover.jpg exists on disk)
+  │   └─ Set album.thumb_url = "cover.jpg"
+  ├─ Track enrichment
+  │   └─ EnrichTrack → ISRC, genres, release date, label, external IDs
+  └─ Re-tag file with updated metadata
+```
+
+### Provider Order
+
+Configurable via `metadata_order` in config.json:
+```json
+{"metadata_order": ["deezer", "musicbrainz", "coverartarchive"]}
+```
+
+Deezer first (fast, 50 req/5s, better album resolution). Falls through to MusicBrainz (1 req/s, deep catalog). CoverArtArchive last (MBID-based only). Unlisted providers go to end.
+
 ## Dependency Injection
 
 All components are wired explicitly in `main()`. No framework, no global state. Each component
@@ -282,6 +341,8 @@ SQLite library record
 | `library.library_path` | `./music` | Organized final library | Yes |
 | `library.folder_template` | `{artist}/{album} ({year})/{track:02d} - {title}` | Rename pattern | — |
 | `library.playlist_path` | `./playlists` | Separate playlist downloads | No |
+| `library.playlist_template` | `{position:02d} {artist} - {title}` | Playlist filename pattern | — |
+| `metadata_order` | `["deezer", "musicbrainz", "coverartarchive"]` | Metadata provider priority | — |
 
 ## Database
 

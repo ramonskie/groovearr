@@ -75,12 +75,15 @@ This tier enables the fully free path (slskd + free metadata = complete library)
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 27 | **Metadata provider plugin interface** — `MetadataProvider` interface (separate from `download.Plugin`): `SearchCover(artist, album) *CoverResult`, `EnrichTrack(track) *Metadata`. Registry-based, config-driven. Optional interfaces: `CoverArtArchiveProvider`, `ArtistMetadataProvider`, `LyricsProvider`. | ✅ Done | M | Plugin architecture (done) |
+| 27 | **Metadata provider plugin interface** — `Provider` interface (extends `plugin.BasePlugin`): `SearchCover(artist, album)`, `SearchAlbum(artist, title)`, `SearchArtistImage(artist)`, `EnrichTrack(track)`. Registry-based, config-driven. Optional interfaces: `CoverArtArchiveProvider`, `ArtistMetadataProvider`, `LyricsProvider`. | ✅ Done | M | Plugin architecture (done) |
 | 28 | **Cover Art Archive provider** — free cover art via MusicBrainz Cover Art Archive. Search by MBID. No auth required. Fills `CoverURL` for slskd downloads. | ✅ Done | M | Metadata provider interface, MusicBrainz ID lookup |
-| 29 | **MusicBrainz metadata provider** — artist/album/release IDs, ISRC enrichment, genre/label/release-date via release lookup. Rate-limited API client (1 req/s). Backbone of free-tier metadata. | ✅ Done | L | Metadata provider interface |
-| 30 | **iTunes Search API provider** — free cover art + metadata fallback. No auth, good for mainstream releases not in CAA. | 🟡 Medium | S | Metadata provider interface |
-| 31 | **Metadata enrichment pipeline** — `MetadataEnrichmentHandler` in download post-processing chain. Runs all configured metadata providers against imported tracks: cover art fetch (CAA), ISRC/genre/label enrichment (MusicBrainz), re-tagging with new metadata. | ✅ Done | M | Metadata provider interface + registry |
-| 32 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | 🟡 Medium | M | Metadata provider interface, Last.fm API key |
+| 29 | **MusicBrainz metadata provider** — artist/album/release IDs, ISRC enrichment, genre/label/release-date via release lookup. Album lookup via aggregate-frequency across 100 recordings (finds original album among compilations). Rate-limited API client (1 req/s). Backbone of free-tier metadata. | ✅ Done | L | Metadata provider interface |
+| 30 | **Deezer metadata provider** — uses public `api.deezer.com/search` (no ARL, no auth). `SearchAlbum` via field-scoped `search/track`, `SearchCover` returns CDN cover URLs directly. Integrated into existing Deezer plugin — metadata always available, downloads need ARL. Much better album resolution than MusicBrainz alone (~85% vs ~30% correct). | ✅ Done | M | Metadata provider interface |
+| 31 | **Metadata enrichment pipeline** — `MetadataEnrichmentHandler` in download post-processing chain. Runs all configured metadata providers against imported tracks: cover art fetch (CAA + Deezer CDN), ISRC/genre/label enrichment (MusicBrainz), album title resolution when missing, re-tagging with new metadata. Syncs `thumb_url` from on-disk `cover.jpg`. | ✅ Done | M | Metadata provider interface + registry |
+| 32 | **Configurable metadata provider order** — `metadata_order` config field (`["deezer", "musicbrainz", "coverartarchive"]`). Resolver and enrichment handler query providers in specified priority. Unlisted providers fall to end. | ✅ Done | S | Metadata resolver + enrichment handler |
+| 33 | **Comma-separated artist handling** — Spotify free mode returns co-artist strings like `"The Moon, DJ Ghost"`. Resolver tries full artist first, then primary artist (before first comma) as fallback for both album and cover lookup. | ✅ Done | S | Metadata resolver |
+| 34 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | 🟡 Medium | M | Metadata provider interface, Last.fm API key |
+| — | **iTunes Search API provider** — free cover art + metadata fallback. No auth, good for mainstream releases not in CAA. | 🟡 Medium | S | Metadata provider interface |
 
 **Goal**: After Tier 1.5, a user with only slskd configured gets:
 - ✅ Cover art (`cover.jpg` in album dirs)
@@ -201,14 +204,14 @@ Deployment, security, and operational concerns.
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
 | 1 | Core Quality | 13 features | 🟡 11/13 |
-| 1.5 | Metadata Providers | 6 features | 🟡 4/6 (27,28,29,31 done; 30,32 remain) |
+| 1.5 | Metadata Providers | 8 features | ✅ 7/8 (27-33 done; 34 remains) |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | 🟡 4 done, 6 remaining |
 | 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | 🟡 2/12 (70,71 done; 72-81 remain) |
-| **Total** | | **83 features** | **36 done, 47 remaining** |
+| **Total** | | **85 features** | **39 done, 46 remaining** |
 
 ## Known Bugs
 
@@ -220,6 +223,13 @@ Deployment, security, and operational concerns.
 | B4 | Playlist / Download | ✅ Done | **Queued tracks now visible.** `DownloadMissing` uses two-phase batch-queue → background-resolve. `QueuePending` inserts all tracks immediately with `source=pending`. Pending tab shows queue via SSE. `RecoverOrphans` recovers stuck records on restart. |
 | B5 | Playlist / Download | 🟡 Medium | **Stuck pending detection.** Records with `source=pending` older than N minutes should be auto-failed or retried. Currently silently stick forever if resolver fails. |
 | B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
+| B25 | Metadata | ✅ Done | **Resolver guard prevents album lookup.** `resolvePendingDownloads` required `rec.Album != ""` to call `EnrichMetadata`, but `EnrichMetadata` was designed to FIND the album when missing. Guard changed to `rec.Artist != "" && rec.Title != ""` (`internal/playlist/service.go`). |
+| B26 | Metadata | ✅ Done | **"Unknown Album" hardcoded fallback.** `extractMetadata` in `LibraryImporterHandler` defaulted to `library.DefaultAlbumTitle` ("Unknown Album") before enrichment handler could resolve it. Removed fallback, album stays empty until enrichment (`internal/download/handler_library.go`). |
+| B27 | Metadata | ✅ Done | **Enrichment handler never resolved album title.** `MetadataEnrichmentHandler` updated ISRC, genres, covers but not the album title itself. Added `SearchAlbum` call in provider loop when `album.Title == ""` (`internal/download/handler_enrichment.go`). |
+| B28 | Metadata | ✅ Done | **Worker progress polling zeroed `cover_url`.** `UpdateProgress` always set `cover_url=''` during download, wiping the cover URL set at queue time. Changed to `CASE WHEN ? = '' THEN cover_url ELSE ? END` — preserves existing when empty passed (`internal/download/sqlite/store.go`). |
+| B29 | Metadata | ✅ Done | **`thumb_url` never persisted when cover already exists.** CoverArtHandler (step 3) downloads `cover.jpg` but `updateAlbumThumb` fails (album not in library yet). Enrichment handler (step 6) skips `ThumbURL` update because cover already on disk. Added sync: if `cover.jpg` exists, set `thumb_url` regardless of who downloaded it (`internal/download/handler_enrichment.go`). |
+| B30 | Metadata | ✅ Done | **MusicBrainz returned compilations instead of original albums.** `SearchRecording` picked first recording's first release title (often a compilation). Rewrote to aggregate release-group titles across 100 recordings, pick most frequent Album type. For tracks with 20+ recording matches, original album beats compilations (`internal/providers/musicbrainz/api.go`). |
+| B31 | Metadata | ✅ Done | **Comma-separated Spotify artist strings failed lookup.** Spotify free mode returns co-artist strings like `"The Moon, DJ Ghost"`. Deezer/MusicBrainz search fails on full string. Added `primaryArtist` fallback: try full artist, then first segment before comma (`internal/metadata/resolver.go`). |
 | B7 | Download / UI | 🟢 Low | **Server-side pagination for download list.** `GET /api/downloads` returns all records. Large queues (1000+) should paginate with `?limit=` and `?offset=`. |
 | B8 | Observability | ✅ Done | **No structured logging / request tracing.** Replaced `log.Printf` with `log/slog` throughout codebase. Added request ID middleware (`withRequestID`) for HTTP correlation. Fixed in commit `1e6b8de`. |
 | B9 | API | ✅ Done | **No HTTP server timeouts configured.** `http.Server` now has Read=10s, Write=30s, Idle=120s timeouts set in `internal/api/handlers.go:148-150`. |
