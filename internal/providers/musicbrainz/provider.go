@@ -39,13 +39,9 @@ func (c *Client) DisplayName() string { return displayName }
 func (c *Client) IsConfigured() bool  { return true } // no credentials required
 func (c *Client) IsMetadataAvailable() bool { return true }
 
-// CapabilityStatus returns metadata status (always connected — public API).
+// CapabilityStatus returns metadata status (public API — always available).
 func (c *Client) CapabilityStatus() map[string]string {
-	s := "configured"
-	if c.Connected() {
-		s = "connected"
-	}
-	return map[string]string{"metadata": s}
+	return map[string]string{"metadata": "connected"}
 }
 
 func (c *Client) CheckConnection(ctx context.Context) error {
