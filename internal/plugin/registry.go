@@ -186,12 +186,13 @@ func mergeWithDefaults(user, defaults json.RawMessage) json.RawMessage {
 }
 
 // FillDefaults returns a copy of sources with factory defaults merged into each
-// entry. Missing keys in user config inherit their factory default values.
+// entry. Factory keys not present in sources are added with their default config,
+// so newly registered providers automatically appear in persisted configuration.
 func (r *Registry) FillDefaults(sources map[string]json.RawMessage) map[string]json.RawMessage {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 
-	out := make(map[string]json.RawMessage, len(sources))
+	out := make(map[string]json.RawMessage, len(sources)+len(r.factories))
 	for name, rawCfg := range sources {
 		f, ok := r.factories[name]
 		if !ok {
@@ -199,6 +200,12 @@ func (r *Registry) FillDefaults(sources map[string]json.RawMessage) map[string]j
 			continue
 		}
 		out[name] = mergeWithDefaults(rawCfg, f.DefaultConfig())
+	}
+	// Add factory defaults for any registered factory not yet in the config.
+	for name, f := range r.factories {
+		if _, ok := out[name]; !ok {
+			out[name] = f.DefaultConfig()
+		}
 	}
 	return out
 }

@@ -2,13 +2,12 @@ import { useCallback, useRef, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { useSources } from "../../hooks/use-config";
 import type { SettingsFormValues } from "./settings-schema";
+import type { SourceInfo } from "../../api/types";
 
-const DOWNLOAD_PROVIDERS = ["soulseek", "deezer"];
-
-const PROVIDER_LABELS: Record<string, string> = {
-  soulseek: "Soulseek",
-  deezer: "Deezer",
-};
+/** Returns true if the source provides download capability. */
+function hasDownload(s: SourceInfo): boolean {
+  return s.capabilities != null && "download" in s.capabilities;
+}
 
 interface DragState {
   index: number;
@@ -24,11 +23,11 @@ export default function DownloadOrderSection() {
 
   // Only show connected download providers.
   const connected = (sources ?? [])
-    .filter((s) => DOWNLOAD_PROVIDERS.includes(s.name) && s.status === "connected")
+    .filter((s) => hasDownload(s) && s.status === "connected")
     .map((s) => s.name);
 
   const ordered = [...new Set([...downloadOrder, ...connected])].filter((name) =>
-    DOWNLOAD_PROVIDERS.includes(name),
+    (sources ?? []).some((s) => s.name === name && hasDownload(s)),
   );
 
   const handleDragStart = useCallback((index: number) => {
@@ -72,6 +71,12 @@ export default function DownloadOrderSection() {
 
   if (ordered.length === 0) return null;
 
+  // Build display name lookup from sources.
+  const displayNames: Record<string, string> = {};
+  for (const s of sources ?? []) {
+    displayNames[s.name] = s.display_name;
+  }
+
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
       <div className="mb-3 flex items-center justify-between">
@@ -100,7 +105,7 @@ export default function DownloadOrderSection() {
           >
             <span className="text-slate-500 tabular-nums">{i + 1}.</span>
             <span className="text-slate-400 select-none">⠿</span>
-            <span>{PROVIDER_LABELS[name] ?? name}</span>
+            <span>{displayNames[name] ?? name}</span>
           </li>
         ))}
       </ul>

@@ -2,14 +2,12 @@ import { useCallback, useRef, useState } from "react";
 import { useFormContext } from "react-hook-form";
 import { useSources } from "../../hooks/use-config";
 import type { SettingsFormValues } from "./settings-schema";
+import type { SourceInfo } from "../../api/types";
 
-const METADATA_PROVIDERS = ["deezer", "musicbrainz", "coverartarchive"];
-
-const PROVIDER_LABELS: Record<string, string> = {
-  deezer: "Deezer",
-  musicbrainz: "MusicBrainz",
-  coverartarchive: "Cover Art Archive",
-};
+/** Returns true if the source provides metadata capability. */
+function hasMetadata(s: SourceInfo): boolean {
+  return s.capabilities != null && "metadata" in s.capabilities;
+}
 
 interface DragState {
   index: number;
@@ -23,14 +21,14 @@ export default function MetadataOrderSection() {
   const [dragOver, setDragOver] = useState<number | null>(null);
   const dragItem = useRef<DragState | null>(null);
 
-  // Build ordered list: known providers in metadata_order first, then any
-  // configured metadata providers not yet in the order list.
+  // Build ordered list: metadata-capable providers in metadata_order first,
+  // then any configured metadata providers not yet in the order list.
   const configured = (sources ?? [])
-    .filter((s) => METADATA_PROVIDERS.includes(s.name) && s.configured)
+    .filter((s) => hasMetadata(s) && s.configured)
     .map((s) => s.name);
 
   const ordered = [...new Set([...metadataOrder, ...configured])].filter((name) =>
-    METADATA_PROVIDERS.includes(name),
+    (sources ?? []).some((s) => s.name === name && hasMetadata(s)),
   );
 
   const handleDragStart = useCallback((index: number) => {
@@ -74,6 +72,12 @@ export default function MetadataOrderSection() {
 
   if (ordered.length === 0) return null;
 
+  // Build display name lookup from sources.
+  const displayNames: Record<string, string> = {};
+  for (const s of sources ?? []) {
+    displayNames[s.name] = s.display_name;
+  }
+
   return (
     <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
       <div className="mb-3 flex items-center justify-between">
@@ -102,7 +106,7 @@ export default function MetadataOrderSection() {
           >
             <span className="text-slate-500 tabular-nums">{i + 1}.</span>
             <span className="text-slate-400 select-none">⠿</span>
-            <span>{PROVIDER_LABELS[name] ?? name}</span>
+            <span>{displayNames[name] ?? name}</span>
           </li>
         ))}
       </ul>

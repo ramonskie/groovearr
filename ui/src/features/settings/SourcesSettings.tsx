@@ -6,6 +6,8 @@ import SoulseekSection from "./SoulseekSection";
 import DeezerSection from "./DeezerSection";
 import MusicBrainzSection from "./MusicBrainzSection";
 import SpotifySection from "./SpotifySection";
+import DiscogsSection from "./DiscogsSection";
+import LastFmSection from "./LastFmSection";
 import MetadataOrderSection from "./MetadataOrderSection";
 import DownloadOrderSection from "./DownloadOrderSection";
 
@@ -32,6 +34,8 @@ export default function SourcesSettings() {
   const deezerSource = sources?.find((s) => s.name === "deezer");
   const mbSource = sources?.find((s) => s.name === "musicbrainz");
   const spotifySource = sources?.find((s) => s.name === "spotify");
+  const discogsSource = sources?.find((s) => s.name === "discogs");
+  const lastfmSource = sources?.find((s) => s.name === "lastfm");
 
   return (
     <div>
@@ -48,6 +52,8 @@ export default function SourcesSettings() {
           <DeezerSection source={deezerSource} />
           <MusicBrainzSection source={mbSource} />
           <SpotifySection source={spotifySource} />
+          <DiscogsSection source={discogsSource} />
+          <LastFmSection source={lastfmSource} />
         </div>
       )}
 

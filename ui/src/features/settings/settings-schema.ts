@@ -29,6 +29,13 @@ export const settingsFormSchema = z.object({
   spotify_client_secret: z.string().optional(),
   spotify_redirect_uri: z.string().optional(),
 
+  // Discogs
+  discogs_consumer_key: z.string().optional(),
+  discogs_consumer_secret: z.string().optional(),
+
+  // Last.fm
+  lastfm_api_key: z.string().optional(),
+
   // Library
   library_path: z.string().optional(),
   folder_template: z.string().optional(),
@@ -64,6 +71,9 @@ export const settingsDefaults: SettingsFormValues = {
   spotify_client_id: "",
   spotify_client_secret: "",
   spotify_redirect_uri: "",
+  discogs_consumer_key: "",
+  discogs_consumer_secret: "",
+  lastfm_api_key: "",
   library_path: "",
   folder_template: "",
   playlist_path: "",

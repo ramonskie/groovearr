@@ -18,6 +18,8 @@ import (
 	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
+	"github.com/ramonskie/groovearr/internal/providers/discogs"
+	"github.com/ramonskie/groovearr/internal/providers/lastfm"
 	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
@@ -84,6 +86,8 @@ func main() {
 	pluginReg.RegisterFactory(musicbrainz.Factory)
 	pluginReg.RegisterFactory(coverartarchive.Factory)
 	pluginReg.RegisterFactory(spotify.Factory)
+	pluginReg.RegisterFactory(discogs.Factory)
+	pluginReg.RegisterFactory(lastfm.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: mainLog}

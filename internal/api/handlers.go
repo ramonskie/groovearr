@@ -378,6 +378,17 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Collect from discovery registry (skip already included from download/metadata).
+	if s.discoveryReg != nil {
+		for _, p := range s.discoveryReg.Any() {
+			if seen[p.Name()] {
+				continue
+			}
+			seen[p.Name()] = true
+			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
+		}
+	}
+
 	writeJSON(w, http.StatusOK, sources)
 }
 
@@ -404,12 +415,19 @@ func sourceEntry(name, displayName string, configured, connected bool, caps map[
 func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 	source := r.PathValue("source")
 
-	// Check both registries.
+	// Check all registries.
 	var p plugin.BasePlugin
 	if dp := s.registry.Get(source); dp != nil {
 		p = dp
 	} else if mp := s.mdRegistry.Get(source); mp != nil {
 		p = mp
+	} else if s.discoveryReg != nil {
+		for _, dp := range s.discoveryReg.Any() {
+			if dp.Name() == source {
+				p = dp
+				break
+			}
+		}
 	}
 	if p == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "source not found"})

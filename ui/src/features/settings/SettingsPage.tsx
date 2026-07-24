@@ -52,6 +52,8 @@ export default function SettingsPage() {
       const mb = config.sources?.musicbrainz ?? {};
       const sp = config.sources?.spotify ?? {};
       const spCast = sp as { mode?: string; client_id?: string; client_secret?: string; redirect_uri?: string };
+      const dc = config.sources?.discogs ?? {};
+      const lfm = config.sources?.lastfm ?? {};
       form.reset({
         download_path: config.library.download_path ?? "",
         slskd_url: (slskd as Record<string, string>).slskd_url ?? "",
@@ -63,6 +65,9 @@ export default function SettingsPage() {
         spotify_client_id: spCast.client_id ?? "",
         spotify_client_secret: spCast.client_secret ?? "",
         spotify_redirect_uri: spCast.redirect_uri ?? "",
+        discogs_consumer_key: (dc as Record<string, string>).consumer_key ?? "",
+        discogs_consumer_secret: (dc as Record<string, string>).consumer_secret ?? "",
+        lastfm_api_key: (lfm as Record<string, string>).api_key ?? "",
         library_path: config.library.library_path ?? "",
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
@@ -101,6 +106,13 @@ export default function SettingsPage() {
             redirect_uri: values.spotify_redirect_uri ?? "",
             // Preserve tokens obtained via OAuth — they are server-managed, not user-editable.
             tokens: (config?.sources?.spotify as Record<string, unknown>)?.tokens ?? {},
+          },
+          discogs: {
+            consumer_key: values.discogs_consumer_key ?? "",
+            consumer_secret: values.discogs_consumer_secret ?? "",
+          },
+          lastfm: {
+            api_key: values.lastfm_api_key ?? "",
           },
         },
         library: {
