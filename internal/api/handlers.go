@@ -37,6 +37,7 @@ type Server struct {
 	mdRegistry          *metadata.Registry
 	metadataResolver    *metadata.MetadataResolver
 	enrichmentHandler   *download.MetadataEnrichmentHandler
+	orchestrator        *download.Orchestrator
 	discoveryReg        *discovery.Registry
 	store               library.Store
 	scanner             *library.Scanner
@@ -56,13 +57,14 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
 		mdRegistry:          mdRegistry,
 		metadataResolver:    metadataResolver,
 		enrichmentHandler:   enrichmentHandler,
+		orchestrator:        orchestrator,
 		discoveryReg:        discoveryReg,
 		store:               store,
 		scanner:             scanner,
@@ -318,6 +320,11 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Re-apply download source order.
+	if len(updated.DownloadOrder) > 0 && s.orchestrator != nil {
+		s.orchestrator.SetDownloadOrder(updated.DownloadOrder)
+	}
+
 	// Re-register playlist sources from rebuilt plugins.
 	if s.playlistSvc != nil {
 		s.playlistSvc.RefreshSources(s.registry)
@@ -571,9 +578,11 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	ctx := r.Context()
-
-	// Create a search-only orchestrator with the quality profile store.
-	orch := download.NewOrchestrator(s.registry, s.log)
+	orch := s.orchestrator
+	if orch == nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("orchestrator not initialized"))
+		return
+	}
 
 	defaultProfile, profileErr := s.qualityProfileStore.LoadProfileByID(ctx, nil)
 	if profileErr != nil {
@@ -1561,7 +1570,11 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	orch := download.NewOrchestrator(s.registry, s.log)
+	orch := s.orchestrator
+	if orch == nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("orchestrator not initialized"))
+		return
+	}
 
 	defaultProfile, profileErr := s.qualityProfileStore.LoadProfileByID(ctx, nil)
 	if profileErr != nil {

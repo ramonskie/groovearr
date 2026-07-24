@@ -48,6 +48,7 @@ export interface Config {
   library: LibraryConfig;
   auth: AuthConfig;
   metadata_order?: string[];
+  download_order?: string[];
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
@@ -56,6 +57,7 @@ export interface ConfigUpdatePayload {
   library?: Partial<LibraryConfig>;
   auth?: Partial<AuthConfig>;
   metadata_order?: string[];
+  download_order?: string[];
 }
 
 export interface UpdateConfigResponse {

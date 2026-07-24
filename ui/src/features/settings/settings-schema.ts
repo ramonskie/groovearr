@@ -44,6 +44,9 @@ export const settingsFormSchema = z.object({
 
   // Metadata provider order
   metadata_order: z.array(z.string()).optional(),
+
+  // Download provider order
+  download_order: z.array(z.string()).optional(),
 });
 
 export type SettingsFormValues = z.infer<typeof settingsFormSchema>;
@@ -71,6 +74,7 @@ export const settingsDefaults: SettingsFormValues = {
   auth_api_key: "",
   auth_local_bypass_subnets: "",
   metadata_order: [],
+  download_order: [],
 };
 
 // ─── Source badge variant mapping ───────────────────────────────────

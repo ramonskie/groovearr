@@ -73,6 +73,7 @@ export default function SettingsPage() {
         auth_api_key: config.auth?.api_key ?? "",
         auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
         metadata_order: config.metadata_order ?? [],
+        download_order: config.download_order ?? [],
       });
     }
   }, [config, form]);
@@ -119,6 +120,7 @@ export default function SettingsPage() {
             .filter((s) => s.length > 0),
         },
         metadata_order: values.metadata_order,
+        download_order: values.download_order,
       });
     },
     [updateConfig, config],

@@ -5,6 +5,7 @@ import DeezerSection from "./DeezerSection";
 import MusicBrainzSection from "./MusicBrainzSection";
 import SpotifySection from "./SpotifySection";
 import MetadataOrderSection from "./MetadataOrderSection";
+import DownloadOrderSection from "./DownloadOrderSection";
 
 export default function SourcesSettings() {
   const { data: sources, isLoading } = useSources();
@@ -29,6 +30,7 @@ export default function SourcesSettings() {
       <MusicBrainzSection source={mbSource} />
       <SpotifySection source={spotifySource} />
       <MetadataOrderSection />
+      <DownloadOrderSection />
     </div>
   );
 }

@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/matching"
@@ -21,9 +22,11 @@ const minMatchConfidence = 0.55
 
 // Orchestrator routes search to configured plugins.
 type Orchestrator struct {
-	log      *slog.Logger
-	registry *Registry
-	matcher  *matching.Engine
+	log           *slog.Logger
+	registry      *Registry
+	matcher       *matching.Engine
+	orderMu       sync.RWMutex
+	downloadOrder []string // priority order for download source queries
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
@@ -36,6 +39,42 @@ func NewOrchestrator(registry *Registry, logger *slog.Logger) *Orchestrator {
 		registry: registry,
 		matcher:  matching.New(),
 	}
+}
+
+// SetDownloadOrder configures the priority order for download source queries.
+func (o *Orchestrator) SetDownloadOrder(order []string) {
+	o.orderMu.Lock()
+	o.downloadOrder = order
+	o.orderMu.Unlock()
+}
+
+// orderedConfigured returns connected download plugins sorted by downloadOrder.
+func (o *Orchestrator) orderedConfigured() []Plugin {
+	plugins := o.registry.Configured()
+	o.orderMu.RLock()
+	order := o.downloadOrder
+	o.orderMu.RUnlock()
+	if len(order) == 0 || len(plugins) <= 1 {
+		return plugins
+	}
+	byName := make(map[string]Plugin, len(plugins))
+	for _, p := range plugins {
+		byName[p.Name()] = p
+	}
+	var ordered []Plugin
+	seen := make(map[string]bool)
+	for _, name := range order {
+		if p, ok := byName[name]; ok && !seen[name] {
+			ordered = append(ordered, p)
+			seen[name] = true
+		}
+	}
+	for _, p := range plugins {
+		if !seen[p.Name()] {
+			ordered = append(ordered, p)
+		}
+	}
+	return ordered
 }
 
 // Registry returns the plugin registry.
@@ -55,7 +94,7 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 		return p.Search(ctx, query)
 	}
 
-	plugins := o.registry.Configured()
+	plugins := o.orderedConfigured()
 	if len(plugins) == 0 {
 		return nil, nil, fmt.Errorf("no download sources configured")
 	}
@@ -203,7 +242,7 @@ func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, arti
 		sourceArtists = []string{artist}
 	}
 
-	for _, p := range o.registry.Configured() {
+	for _, p := range o.orderedConfigured() {
 		if p.Name() == excludeSource {
 			continue
 		}

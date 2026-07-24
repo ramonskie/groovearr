@@ -188,13 +188,17 @@ func main() {
 		return cfg.Get()
 	}, qualityProfileStore, metadataResolver, mainLog)
 
+	// Download orchestrator for search and download-best selection.
+	orch := download.NewOrchestrator(registry, mainLog)
+	orch.SetDownloadOrder(currentCfg.DownloadOrder)
+
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
 	if addr == "" {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler,
+	srv := api.NewServer(addr, mainLog, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, mainLog, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}
