@@ -21,6 +21,12 @@ import (
 type Provider interface {
 	plugin.BasePlugin
 
+	// IsMetadataAvailable returns true when the provider can serve metadata
+	// via free/public APIs, regardless of its primary IsConfigured() state.
+	// This allows providers like Deezer to offer metadata without ARL while
+	// still requiring ARL for downloads.
+	IsMetadataAvailable() bool
+
 	// SearchCover looks up album cover art by artist and album name.
 	// Returns nil, nil if no cover is found.
 	SearchCover(ctx context.Context, artist, album string) (*CoverResult, error)

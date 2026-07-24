@@ -101,9 +101,8 @@ func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) 
 	if artist == "" {
 		artist = library.DefaultArtistName
 	}
-	if album == "" {
-		album = library.DefaultAlbumTitle
-	}
+	// album stays empty when unknown — post-import enrichment (MetadataEnrichmentHandler)
+	// will attempt to resolve it via MusicBrainz. "Unknown Album" is dishonest metadata.
 	if title == "" {
 		title = filepath.Base(record.FilePath)
 	}

@@ -40,6 +40,12 @@ var _ Provider = (*mockProvider)(nil)
 func (m *mockProvider) Name() string                                  { return m.name }
 func (m *mockProvider) DisplayName() string                           { return m.name }
 func (m *mockProvider) IsConfigured() bool                            { return m.configured }
+func (m *mockProvider) IsMetadataAvailable() bool                     { return m.configured }
+func (m *mockProvider) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if m.configured { s = "connected" }
+	return map[string]string{"metadata": s}
+}
 func (m *mockProvider) CheckConnection(_ context.Context) error       { return nil }
 func (m *mockProvider) Connected() bool                               { return true }
 
@@ -77,7 +83,9 @@ func newTestResolver(providers ...*mockProvider) *MetadataResolver {
 // ---------------------------------------------------------------------------
 
 // TestEnrichMetadata_EmptyAlbum verifies the resolver returns early when
-// album is empty — no provider is consulted. (User test case 1)
+// artist or title is empty — no provider queries are made. When album is
+// empty but artist+title are provided, SearchAlbum is called (tested separately
+// in TestEnrichMetadata_AlbumLookup).
 func TestEnrichMetadata_EmptyAlbum(t *testing.T) {
 	tests := []struct {
 		name   string

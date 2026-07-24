@@ -334,25 +334,34 @@ func (e *validationError) Error() string { return "validation failed" }
 
 func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 	var sources []map[string]any
+	seen := make(map[string]bool)
 
 	// Collect from download registry.
 	for _, name := range s.registry.Names() {
+		if seen[name] {
+			continue
+		}
 		if p := s.registry.Get(name); p != nil {
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected()))
+			seen[name] = true
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
 		}
 	}
 
-	// Collect from metadata registry.
+	// Collect from metadata registry (skip already included from download).
 	for _, name := range s.mdRegistry.Names() {
+		if seen[name] {
+			continue
+		}
 		if p := s.mdRegistry.Get(name); p != nil {
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected()))
+			seen[name] = true
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
 		}
 	}
 
 	writeJSON(w, http.StatusOK, sources)
 }
 
-func sourceEntry(name, displayName string, configured, connected bool) map[string]any {
+func sourceEntry(name, displayName string, configured, connected bool, caps map[string]string) map[string]any {
 	status := "not_configured"
 	if configured {
 		status = "configured"
@@ -360,12 +369,16 @@ func sourceEntry(name, displayName string, configured, connected bool) map[strin
 			status = "connected"
 		}
 	}
-	return map[string]any{
+	entry := map[string]any{
 		"name":         name,
 		"display_name": displayName,
 		"configured":   configured,
 		"status":       status,
 	}
+	if len(caps) > 0 {
+		entry["capabilities"] = caps
+	}
+	return entry
 }
 
 func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {

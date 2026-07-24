@@ -14,7 +14,8 @@ type BasePlugin interface {
 	// DisplayName returns a human-readable label (e.g. "Soulseek", "Deezer").
 	DisplayName() string
 
-	// IsConfigured returns true if the plugin has valid credentials/settings.
+	// IsConfigured returns true if the plugin has valid credentials/settings
+	// for its primary capability (usually download).
 	IsConfigured() bool
 
 	// CheckConnection probes the plugin's backend for reachability.
@@ -22,4 +23,10 @@ type BasePlugin interface {
 
 	// Connected returns true if the plugin has been verified (auth tested, API reachable).
 	Connected() bool
+
+	// CapabilityStatus returns per-capability connection status.
+	// Values: "connected", "configured", "not_configured".
+	// Plugins with split capabilities (e.g., Deezer metadata without ARL)
+	// can report different status per capability.
+	CapabilityStatus() map[string]string
 }

@@ -42,6 +42,9 @@ func (m *mockDLPlugin) Name() string             { return "mock" }
 func (m *mockDLPlugin) DisplayName() string      { return "Mock" }
 func (m *mockDLPlugin) IsConfigured() bool       { return true }
 func (m *mockDLPlugin) Connected() bool          { return true }
+func (m *mockDLPlugin) CapabilityStatus() map[string]string {
+	return map[string]string{"download": "connected"}
+}
 func (m *mockDLPlugin) CheckConnection(context.Context) error { return nil }
 
 func (m *mockDLPlugin) Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error) {

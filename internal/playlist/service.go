@@ -329,9 +329,14 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		rec.Title = pt.Title
 		rec.DisplayName = pt.Artist + " - " + pt.Title
 
-		// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).
-		if s.metadataResolver != nil && rec.Artist != "" && rec.Album != "" {
+		// Enrich with album name + cover art from metadata providers (MusicBrainz/CoverArtArchive).
+		// Always call EnrichMetadata — it resolves album from artist+title when album is empty,
+		// then searches for cover art. Only requires artist+title to function.
+		if s.metadataResolver != nil && rec.Artist != "" && rec.Title != "" {
 			if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, rec.Artist, rec.Title, rec.Album, rec.Year); enrichErr == nil {
+				if rec.Album == "" && enriched.Album != "" {
+					rec.Album = enriched.Album
+				}
 				if enriched.CoverURL != "" {
 					rec.CoverURL = enriched.CoverURL
 				}
@@ -420,9 +425,14 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		Format:      best.Track.Quality,
 	}
 
-	// Enrich with cover art from metadata providers (MusicBrainz/CoverArtArchive).
-	if s.metadataResolver != nil && meta.Artist != "" && meta.Album != "" {
+	// Enrich with album name + cover art from metadata providers (MusicBrainz/CoverArtArchive).
+	// Always call EnrichMetadata — it resolves album from artist+title when album is empty,
+	// then searches for cover art. Only requires artist+title to function.
+	if s.metadataResolver != nil && meta.Artist != "" && meta.Title != "" {
 		if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, meta.Artist, meta.Title, meta.Album, meta.Year); enrichErr == nil {
+			if meta.Album == "" && enriched.Album != "" {
+				meta.Album = enriched.Album
+			}
 			if enriched.CoverURL != "" {
 				meta.CoverURL = enriched.CoverURL
 			}

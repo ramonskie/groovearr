@@ -20,6 +20,12 @@ func (m *mockPlugin) Name() string                                  { return m.n
 func (m *mockPlugin) DisplayName() string                           { return m.display }
 func (m *mockPlugin) IsConfigured() bool                            { return m.configured }
 func (m *mockPlugin) Connected() bool                                { return m.connected }
+func (m *mockPlugin) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if m.configured { s = "configured" }
+	if m.connected { s = "connected" }
+	return map[string]string{"download": s}
+}
 func (m *mockPlugin) CheckConnection(ctx context.Context) error       { return nil }
 func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	if m.searchResults != nil {

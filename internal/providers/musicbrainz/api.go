@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-const baseURL = "https://musicbrainz.org/ws/2"
+const defaultBaseURL = "https://musicbrainz.org/ws/2"
 
 // ErrRateLimited is returned when MusicBrainz responds with HTTP 503.
 var ErrRateLimited = errors.New("musicbrainz: rate limited")
@@ -54,10 +54,11 @@ type ReleaseTrack struct {
 
 // apiClient provides access to the MusicBrainz public API.
 type apiClient struct {
-	cfg        MusicBrainzConfig
-	httpClient *http.Client
-	userAgent  string
-	log        *slog.Logger
+	cfg         MusicBrainzConfig
+	httpClient  *http.Client
+	userAgent   string
+	baseURL     string // configurable for testing
+	log         *slog.Logger
 
 	mu         sync.Mutex
 	lastCall   time.Time
@@ -71,10 +72,11 @@ func newAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *apiClient {
 		ua = "Groovearr/0.1.0 ( " + cfg.Email + " )"
 	}
 	return &apiClient{
-		cfg:        cfg,
-		httpClient: &http.Client{Timeout: 15 * time.Second},
-		userAgent:  ua,
-		log:        logger,
+		cfg:         cfg,
+		httpClient:  &http.Client{Timeout: 15 * time.Second},
+		userAgent:   ua,
+		baseURL:     defaultBaseURL,
+		log:         logger,
 		minInterval: time.Second, // 1 req/sec
 	}
 }
@@ -127,17 +129,22 @@ func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string
 	}, nil
 }
 
-// SearchRecording finds the first recording matching artist+title and returns
-// the associated release title as the album name.
+// SearchRecording finds the album title for a track by searching MusicBrainz
+// recordings via artist+title, then aggregating release-group titles across
+// all matching recordings. The most frequent Album-type release group is
+// returned — compilations appear once per recording, while the original album
+// appears many times (different editions, formats, regions).
+//
 // Returns nil, nil if no match found.
 func (c *apiClient) SearchRecording(ctx context.Context, artist, title string) (*ReleaseGroupResult, error) {
 	if artist == "" || title == "" {
 		return nil, nil
 	}
+
 	query := fmt.Sprintf(`artist:"%s" AND recording:"%s"`, escapeLucene(artist), escapeLucene(title))
 	data, err := c.apiGet(ctx, "/recording/", map[string]string{
 		"query": query,
-		"limit": "3",
+		"limit": "100",
 		"fmt":   "json",
 	})
 	if err != nil {
@@ -150,11 +157,15 @@ func (c *apiClient) SearchRecording(ctx context.Context, artist, title string) (
 
 	var resp struct {
 		Recordings []struct {
-			ID            string `json:"id"`
-			Title         string `json:"title"`
-			Releases      []struct {
-				ID    string `json:"id"`
-				Title string `json:"title"`
+			ID       string `json:"id"`
+			Title    string `json:"title"`
+			Releases []struct {
+				ID           string `json:"id"`
+				ReleaseGroup *struct {
+					ID          string `json:"id"`
+					Title       string `json:"title"`
+					PrimaryType string `json:"primary-type"`
+				} `json:"release-group,omitempty"`
 			} `json:"releases"`
 		} `json:"recordings"`
 	}
@@ -163,15 +174,56 @@ func (c *apiClient) SearchRecording(ctx context.Context, artist, title string) (
 		return nil, err
 	}
 
+	// Aggregate release-group titles by frequency.
+	// Prefer Album type; fall back to any type if no Albums found.
+	counts := make(map[string]int)
+	anyCounts := make(map[string]int)
 	for _, rec := range resp.Recordings {
-		if len(rec.Releases) > 0 {
-			return &ReleaseGroupResult{
-				MBID:  rec.ID,
-				Title: rec.Releases[0].Title,
-			}, nil
+		seen := make(map[string]bool) // dedupe per recording
+		for _, rel := range rec.Releases {
+			if rel.ReleaseGroup == nil {
+				continue
+			}
+			key := rel.ReleaseGroup.Title
+			if rel.ReleaseGroup.PrimaryType == "Album" {
+				if !seen[key] {
+					counts[key]++
+					seen[key] = true
+				}
+			} else if !seen[key] {
+				anyCounts[key]++
+				seen[key] = true
+			}
 		}
 	}
-	return nil, nil
+
+	// Prefer most frequent Album; fall back to any type.
+	pick := pickMostFrequent(counts)
+	if pick == "" {
+		pick = pickMostFrequent(anyCounts)
+	}
+	if pick == "" {
+		return nil, nil
+	}
+
+	return &ReleaseGroupResult{
+		Title: pick,
+	}, nil
+}
+
+// pickMostFrequent returns the key with the highest count from a map.
+// On ties, the alphabetically first key wins for deterministic results.
+// Returns empty string if the map is empty.
+func pickMostFrequent(counts map[string]int) string {
+	var best string
+	var bestCount int
+	for k, v := range counts {
+		if v > bestCount || (v == bestCount && (best == "" || k < best)) {
+			best = k
+			bestCount = v
+		}
+	}
+	return best
 }
 
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
@@ -283,7 +335,7 @@ func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]s
 	c.lastCall = time.Now()
 	c.mu.Unlock()
 
-	u, err := url.Parse(baseURL)
+	u, err := url.Parse(c.baseURL)
 	if err != nil {
 		c.log.Error("musicbrainz URL parse failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err

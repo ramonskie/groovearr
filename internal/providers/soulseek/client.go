@@ -86,6 +86,18 @@ func (c *Client) IsConfigured() bool {
 	return c.baseURL != "" && c.apiKey != ""
 }
 
+// CapabilityStatus returns download status derived from IsConfigured.
+func (c *Client) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if c.IsConfigured() {
+		s = "configured"
+		if c.Connected() {
+			s = "connected"
+		}
+	}
+	return map[string]string{"download": s}
+}
+
 // CheckConnection probes the slskd API for reachability.
 func (c *Client) CheckConnection(ctx context.Context) error {
 	if !c.IsConfigured() {

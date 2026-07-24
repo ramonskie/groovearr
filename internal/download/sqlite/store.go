@@ -104,15 +104,21 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 // UpdateProgress updates only progress and state fields without overwriting
 // metadata (artist, album, title, etc.). Use during polling to avoid zeroing
 // out metadata set at queue time.
+// cover_url is only updated when a non-empty value is passed (e.g., from a
+// plugin that provides cover art). Empty strings preserve the existing value.
 func (s *Store) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET
 			state=?, progress=?, size=?, transferred=?,
-			speed=?, file_path=?, cover_url=?, updated_at=?
+			speed=?, file_path=?,
+			cover_url=CASE WHEN ? = '' THEN cover_url ELSE ? END,
+			updated_at=?
 		WHERE id=?`,
 		string(state), progress, size, transferred,
-		speed, filePath, coverURL, now, id,
+		speed, filePath,
+		coverURL, coverURL,
+		now, id,
 	)
 	if err != nil {
 		s.log.Error("download update progress failed", "error", err, "component", "dl_store")

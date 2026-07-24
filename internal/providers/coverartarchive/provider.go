@@ -35,7 +35,17 @@ var (
 
 func (c *Client) Name() string        { return pluginName }
 func (c *Client) DisplayName() string { return displayName }
-func (c *Client) IsConfigured() bool  { return true } // no credentials required
+func (c *Client) IsConfigured() bool         { return true } // no credentials required
+func (c *Client) IsMetadataAvailable() bool  { return true }
+
+// CapabilityStatus returns metadata status (always connected — public API).
+func (c *Client) CapabilityStatus() map[string]string {
+	s := "configured"
+	if c.Connected() {
+		s = "connected"
+	}
+	return map[string]string{"metadata": s}
+}
 
 func (c *Client) CheckConnection(ctx context.Context) error {
 	// Probe a known-good release MBID to verify the CAA service is reachable.

@@ -56,6 +56,11 @@ func createWorkerTestPlugin(name string) *workerTestPlugin {
 func (m *workerTestPlugin) Name() string                             { return m.name }
 func (m *workerTestPlugin) DisplayName() string                      { return m.displayName }
 func (m *workerTestPlugin) IsConfigured() bool                       { return m.configured }
+func (m *workerTestPlugin) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if m.configured { s = "connected" }
+	return map[string]string{"download": s}
+}
 func (m *workerTestPlugin) CheckConnection(ctx context.Context) error { return nil }
 func (m *workerTestPlugin) Connected() bool                          { return m.configured }
 

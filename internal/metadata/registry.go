@@ -69,6 +69,21 @@ func (r *Registry) Configured() []Provider {
 	return out
 }
 
+// Available returns metadata providers that can serve metadata regardless
+// of their primary IsConfigured() state. Uses IsMetadataAvailable() to
+// determine availability — providers like Deezer can offer metadata via
+// public APIs even without their primary credentials (ARL).
+func (r *Registry) Available() []Provider {
+	bps := r.inner.All()
+	out := make([]Provider, 0, len(bps))
+	for _, bp := range bps {
+		if p, ok := bp.(Provider); ok && p.IsMetadataAvailable() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
 // Replace swaps an existing metadata provider under its canonical name.
 func (r *Registry) Replace(name string, p Provider) error { return r.inner.Replace(name, p) }
 

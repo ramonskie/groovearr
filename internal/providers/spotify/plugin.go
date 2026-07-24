@@ -79,6 +79,22 @@ func (p *Plugin) IsConfigured() bool {
 	return p.cfg.ClientID != "" && p.cfg.ClientSecret != ""
 }
 
+// CapabilityStatus returns status for all Spotify capabilities (download/playlist/discovery).
+func (p *Plugin) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if p.IsConfigured() {
+		s = "configured"
+		if p.Connected() {
+			s = "connected"
+		}
+	}
+	return map[string]string{
+		"download":  s,
+		"playlist":  s,
+		"discovery": s,
+	}
+}
+
 // Connected returns the result of the last CheckConnection call.
 func (p *Plugin) Connected() bool {
 	p.mu.RLock()

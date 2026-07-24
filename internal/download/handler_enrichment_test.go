@@ -29,6 +29,12 @@ type mockMetadataProvider struct {
 func (m *mockMetadataProvider) Name() string                    { return m.name }
 func (m *mockMetadataProvider) DisplayName() string             { return m.name }
 func (m *mockMetadataProvider) IsConfigured() bool              { return m.configured }
+func (m *mockMetadataProvider) IsMetadataAvailable() bool       { return m.configured }
+func (m *mockMetadataProvider) CapabilityStatus() map[string]string {
+	s := "not_configured"
+	if m.configured { s = "connected" }
+	return map[string]string{"metadata": s}
+}
 func (m *mockMetadataProvider) CheckConnection(ctx context.Context) error { return nil }
 func (m *mockMetadataProvider) Connected() bool                 { return m.connected }
 
@@ -38,6 +44,10 @@ func (m *mockMetadataProvider) SearchCover(ctx context.Context, artist, album st
 
 func (m *mockMetadataProvider) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
 	return nil, nil
+}
+
+func (m *mockMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) string {
+	return "" // default: no album found
 }
 
 func (m *mockMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {

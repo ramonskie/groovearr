@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -28,11 +29,12 @@ type enrichmentStore interface {
 // newly imported tracks to enrich them with ISRC, genres, cover art,
 // release dates, and external IDs.
 type MetadataEnrichmentHandler struct {
-	log        *slog.Logger
-	registry   *metadata.Registry
-	libStore   enrichmentStore
-	httpClient *http.Client
-	tagger     *tagging.Tagger
+	log           *slog.Logger
+	registry      *metadata.Registry
+	providerOrder []string // priority order for provider queries
+	libStore      enrichmentStore
+	httpClient    *http.Client
+	tagger        *tagging.Tagger
 }
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
@@ -50,6 +52,37 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, libStore enrichme
 		httpClient: &http.Client{Timeout: 30 * time.Second},
 		tagger:     tagging.New(logger),
 	}
+}
+
+// SetProviderOrder configures the priority order for metadata provider queries.
+func (h *MetadataEnrichmentHandler) SetProviderOrder(order []string) {
+	h.providerOrder = order
+}
+
+// orderedProviders returns configured providers sorted by providerOrder.
+func (h *MetadataEnrichmentHandler) orderedProviders() []metadata.Provider {
+	providers := h.registry.Available()
+	if len(h.providerOrder) == 0 {
+		return providers
+	}
+	byName := make(map[string]metadata.Provider, len(providers))
+	for _, p := range providers {
+		byName[p.Name()] = p
+	}
+	var ordered []metadata.Provider
+	seen := make(map[string]bool)
+	for _, name := range h.providerOrder {
+		if p, ok := byName[name]; ok && !seen[name] {
+			ordered = append(ordered, p)
+			seen[name] = true
+		}
+	}
+	for _, p := range providers {
+		if !seen[p.Name()] {
+			ordered = append(ordered, p)
+		}
+	}
+	return ordered
 }
 
 // Handle enriches a library track with metadata from configured providers.
@@ -83,7 +116,7 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 		return nil
 	}
 
-	providers := h.registry.Configured()
+	providers := h.orderedProviders()
 	if len(providers) == 0 {
 		return nil
 	}
@@ -92,11 +125,32 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 	albumModified := false
 
 	for _, p := range providers {
-		// ── Cover art (artist+album search) ────────────────────
-		if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
-			if downloaded := h.downloadCoverIfMissing(ctx, album, cover); downloaded {
+		// ── Album title resolution (when missing) ──────────────
+		// Query configured providers to find the album name from artist+title.
+		// Try full artist first, then primary artist fallback for comma-separated
+		// Spotify co-artist strings (e.g., "The Moon, DJ Ghost").
+		if album.Title == "" {
+			if found := p.SearchAlbum(ctx, artist.Name, track.Title); found != "" {
+				album.Title = found
 				albumModified = true
-				album.ThumbURL = "cover.jpg"
+			} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+				if found := p.SearchAlbum(ctx, primary, track.Title); found != "" {
+					album.Title = found
+					albumModified = true
+				}
+			}
+		}
+
+		// ── Cover art (artist+album search) ────────────────────
+		if album.Title == "" {
+			continue // can't search for cover without an album name
+		}
+		if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
+			h.downloadCoverIfMissing(ctx, album, cover)
+		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+			// Fallback: try primary artist for comma-separated co-artists.
+			if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
+				h.downloadCoverIfMissing(ctx, album, cover2)
 			}
 		}
 
@@ -108,10 +162,7 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 			}
 			if mbid != "" {
 				if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
-					if downloaded := h.downloadCoverIfMissing(ctx, album, cover); downloaded {
-						albumModified = true
-						album.ThumbURL = "cover.jpg"
-					}
+					h.downloadCoverIfMissing(ctx, album, cover)
 				}
 			}
 		}
@@ -162,6 +213,20 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 		}
 	}
 
+	// ── Sync thumb_url with on-disk cover (run once after all providers) ─
+	// The CoverArtHandler (step 3) may have already downloaded cover.jpg,
+	// but album didn't exist in the library yet at that point. Ensure
+	// thumb_url is set if cover.jpg exists on disk.
+	if album.ThumbURL == "" {
+		if tracks, err := h.libStore.GetTracksByAlbum(ctx, album.ID); err == nil && len(tracks) > 0 {
+			coverPath := filepath.Join(filepath.Dir(tracks[0].FilePath), "cover.jpg")
+			if _, err := os.Stat(coverPath); err == nil {
+				album.ThumbURL = "cover.jpg"
+				albumModified = true
+			}
+		}
+	}
+
 	// Persist enriched data.
 	if trackModified {
 		if _, err := h.libStore.UpsertTrack(ctx, track); err != nil {
@@ -190,16 +255,15 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 
 // downloadCoverIfMissing downloads a cover image from result.ThumbURL
 // (or ImageURL as fallback) to cover.jpg in the album directory.
-// Returns true if a new cover was downloaded.
-func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, album *domain.Album, cover *metadata.CoverResult) bool {
+func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, album *domain.Album, cover *metadata.CoverResult) {
 	if cover == nil {
-		return false
+		return
 	}
 
 	// Determine album directory from existing tracks.
 	tracks, err := h.libStore.GetTracksByAlbum(ctx, album.ID)
 	if err != nil || len(tracks) == 0 {
-		return false
+		return
 	}
 
 	albumDir := filepath.Dir(tracks[0].FilePath)
@@ -207,7 +271,7 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 
 	// Don't overwrite existing covers.
 	if _, err := os.Stat(coverPath); err == nil {
-		return false
+		return
 	}
 
 	url := cover.ThumbURL
@@ -215,41 +279,49 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 		url = cover.ImageURL
 	}
 	if url == "" {
-		return false
+		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		h.log.Error("create cover request failed", "url", url, "error", err, "component", "enrichment")
-		return false
+		return
 	}
 
 	resp, err := h.httpClient.Do(req)
 	if err != nil {
 		h.log.Warn("fetch cover failed", "url", url, "error", err, "component", "enrichment")
-		return false
+		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return false
+		return
 	}
 
 	f, err := os.Create(coverPath)
 	if err != nil {
 		h.log.Warn("create cover file failed", "error", err, "component", "enrichment")
-		return false
+		return
 	}
 	defer f.Close()
 
 	if _, err := io.Copy(f, resp.Body); err != nil {
 		h.log.Warn("write cover failed", "error", err, "component", "enrichment")
 		os.Remove(coverPath) // clean up partial file
-		return false
+		return
 	}
 
-	return true
+	return
 }
 
 // Compile-time interface check.
 var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
+
+// primaryArtist returns the first segment before a comma (e.g., "The Moon, DJ Ghost" → "The Moon").
+func primaryArtist(artist string) string {
+	if idx := strings.Index(artist, ","); idx > 0 {
+		return strings.TrimSpace(artist[:idx])
+	}
+	return artist
+}

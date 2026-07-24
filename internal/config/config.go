@@ -13,9 +13,10 @@ import (
 
 // Config holds all application settings.
 type Config struct {
-	Sources map[string]json.RawMessage `json:"sources"`
-	Library LibraryConfig              `json:"library"`
-	Auth    AuthConfig                 `json:"auth"`
+	Sources       map[string]json.RawMessage `json:"sources"`
+	Library       LibraryConfig              `json:"library"`
+	Auth          AuthConfig                 `json:"auth"`
+	MetadataOrder []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer-meta", "musicbrainz"])
 }
 
 // LibraryConfig holds music library paths.
@@ -48,7 +49,8 @@ var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Sources: make(map[string]json.RawMessage),
+		Sources:       make(map[string]json.RawMessage),
+		MetadataOrder: []string{"deezer", "musicbrainz", "coverartarchive"},
 		Library: LibraryConfig{
 			DownloadPath:     "./downloads",
 			LibraryPath:      "./music",
@@ -150,6 +152,10 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Auth.LocalBypassSubnets != nil {
 		c.Auth.LocalBypassSubnets = partial.Auth.LocalBypassSubnets
+	}
+
+	if len(partial.MetadataOrder) > 0 {
+		c.MetadataOrder = partial.MetadataOrder
 	}
 }
 

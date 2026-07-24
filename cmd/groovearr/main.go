@@ -109,6 +109,7 @@ func main() {
 
 	// Metadata resolver enriches track metadata (cover art, album info) at queue time.
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, mainLog)
+	metadataResolver.SetProviderOrder(currentCfg.MetadataOrder)
 
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
@@ -137,6 +138,9 @@ func main() {
 	folderTemplate, libraryRoot := renamerCfg()
 	renamer := library.NewRenamer(folderTemplate, libraryRoot, mainLog)
 
+	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, libStore, mainLog)
+	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
+
 	// SSE hub — broadcasts real-time download progress to connected clients.
 	sseHub := sse.NewSSEHub(mainLog)
 	hbCtx, hbCancel := context.WithCancel(context.Background())
@@ -156,7 +160,7 @@ func main() {
 		download.NewCoverArtHandler(libStore, mainLog),
 		download.NewTagWriterHandler(mainLog),
 		download.NewLibraryImporterHandler(libStore, mainLog),
-		download.NewMetadataEnrichmentHandler(mdRegistry, libStore, mainLog),
+		enrichmentHandler,
 		download.NewPlaylistLinkerHandler(libStore, mainLog),
 		sseNotifier,
 	)

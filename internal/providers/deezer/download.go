@@ -24,6 +24,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/provider"
 	"github.com/ramonskie/groovearr/internal/sanitize"
@@ -188,6 +189,28 @@ func (c *DownloadClient) DisplayName() string { return downloadDisplayName }
 // IsConfigured returns true if the plugin has a valid ARL token for downloads.
 func (c *DownloadClient) IsConfigured() bool { return c.cfg.ARL != "" }
 
+// IsMetadataAvailable is always true — the public Deezer API works without auth.
+func (c *DownloadClient) IsMetadataAvailable() bool { return true }
+
+// CapabilityStatus reports per-capability connection status.
+// Metadata + Discovery are always connected (public API).
+// Download + Playlist need ARL.
+func (c *DownloadClient) CapabilityStatus() map[string]string {
+	dlStatus := "not_configured"
+	if c.cfg.ARL != "" {
+		dlStatus = "configured"
+		if c.Connected() {
+			dlStatus = "connected"
+		}
+	}
+	return map[string]string{
+		"download":  dlStatus,
+		"playlist":  dlStatus,
+		"discovery": "connected", // public API: albums, artists, charts
+		"metadata":  "connected", // public API: search, albums, covers
+	}
+}
+
 // MaxConcurrentDownloads limits Deezer to 2 concurrent downloads to avoid CDN throttling.
 func (c *DownloadClient) MaxConcurrentDownloads() int { return 2 }
 
@@ -198,11 +221,18 @@ func (c *DownloadClient) UserID() int {
 	return c.userID
 }
 
-// CheckConnection tries to authenticate with Deezer using the configured ARL.
+// CheckConnection verifies the Deezer connection. When ARL is configured,
+// authenticates with Deezer for downloads. When ARL is empty, only checks
+// the public metadata API — metadata works without authentication.
 func (c *DownloadClient) CheckConnection(ctx context.Context) error {
 	if c.cfg.ARL == "" {
-		c.log.Error("check connection failed: ARL not set", "component", "deezer")
-		return fmt.Errorf("deezer: ARL token not set")
+		// Metadata-only mode: verify public API is reachable.
+		_, err := c.api.SearchTracks(ctx, "test", 1)
+		if err != nil {
+			c.log.Error("deezer metadata check failed", "error", err, "component", "deezer")
+			return fmt.Errorf("deezer: public API unreachable: %w", err)
+		}
+		return nil
 	}
 	// Use a shorter timeout for the connection test, then restore original.
 	origClient := c.client
@@ -1204,4 +1234,67 @@ func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit i
 		})
 	}
 	return out, nil
+}
+
+// ─── metadata.Provider (public API, no ARL needed) ─────────────────────
+
+// Compile-time check.
+var _ metadata.Provider = (*DownloadClient)(nil)
+
+// SearchAlbum finds the album title for a track via Deezer's public search API.
+func (c *DownloadClient) SearchAlbum(ctx context.Context, artist, title string) string {
+	if artist == "" || title == "" {
+		return ""
+	}
+	tracks, err := c.api.SearchTracksAdvanced(ctx, title, artist, "", 3)
+	if err != nil {
+		c.log.Warn("deezer search album failed", "error", err, "artist", artist, "title", title, "component", "deezer")
+		return ""
+	}
+	for _, t := range tracks {
+		if t.Album.Title != "" {
+			return t.Album.Title
+		}
+	}
+	return ""
+}
+
+// SearchCover looks up album cover art via Deezer's public search API.
+func (c *DownloadClient) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
+	if artist == "" || album == "" {
+		return nil, nil
+	}
+	tracks, err := c.api.SearchTracksAdvanced(ctx, "", artist, album, 1)
+	if err != nil {
+		c.log.Warn("deezer search cover failed", "error", err, "artist", artist, "album", album, "component", "deezer")
+		return nil, err
+	}
+	if len(tracks) == 0 || tracks[0].Album.Title == "" {
+		return nil, nil
+	}
+	a := tracks[0].Album
+	imageURL := a.CoverXL
+	if imageURL == "" {
+		imageURL = a.CoverBig
+	}
+	if imageURL == "" {
+		return nil, nil
+	}
+	return &metadata.CoverResult{
+		ImageURL: imageURL,
+		Width:    500,
+		Height:   500,
+		Source:   "deezer",
+		ThumbURL: a.CoverMed,
+	}, nil
+}
+
+// SearchArtistImage is unsupported by the Deezer public search API.
+func (c *DownloadClient) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
+	return nil, nil
+}
+
+// EnrichTrack is unsupported by the Deezer public search API.
+func (c *DownloadClient) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
+	return nil, nil
 }
