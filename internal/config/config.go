@@ -22,11 +22,12 @@ type Config struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	DownloadPath     string `json:"download_path"`     // download staging directory
-	LibraryPath      string `json:"library_path"`      // where organized downloads end up
-	FolderTemplate   string `json:"folder_template"`   // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
-	PlaylistPath     string `json:"playlist_path"`     // separate folder for playlist downloads
-	PlaylistTemplate string `json:"playlist_template"` // e.g. "{position:02d} {artist} - {title}"
+	DownloadPath      string `json:"download_path"`       // download staging directory
+	LibraryPath       string `json:"library_path"`        // where organized downloads end up
+	FolderTemplate    string `json:"folder_template"`     // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	PlaylistPath      string `json:"playlist_path"`       // separate folder for playlist downloads
+	PlaylistTemplate  string `json:"playlist_template"`   // e.g. "{position:02d} {artist} - {title}"
+	MaxDownloadWorkers int  `json:"max_download_workers"` // concurrent download workers (default 3)
 }
 
 // AuthConfig holds authentication settings.
@@ -54,10 +55,11 @@ func DefaultConfig() Config {
 		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder: []string{"soulseek", "deezer"},
 		Library: LibraryConfig{
-			DownloadPath:     "./downloads",
-			LibraryPath:      "./music",
-			FolderTemplate:   "{artist}/{album} ({year})/{track:02d} - {title}",
-			PlaylistPath:     "./playlists",
+			DownloadPath:      "./downloads",
+			LibraryPath:       "./music",
+			FolderTemplate:    "{artist}/{album} ({year})/{track:02d} - {title}",
+			PlaylistPath:      "./playlists",
+			MaxDownloadWorkers: 3,
 			PlaylistTemplate: "{position:02d} {artist} - {title}",
 		},
 	}
@@ -134,6 +136,9 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Library.PlaylistTemplate != "" {
 		c.Library.PlaylistTemplate = partial.Library.PlaylistTemplate
+	}
+	if partial.Library.MaxDownloadWorkers > 0 {
+		c.Library.MaxDownloadWorkers = partial.Library.MaxDownloadWorkers
 	}
 
 	// Auth — preserve password if partial has a masked (asterisk) value.

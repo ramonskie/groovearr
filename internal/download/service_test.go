@@ -881,3 +881,205 @@ func TestRetrySetsRetryAfterAndQueuedState(t *testing.T) {
 		t.Error("RetryAfter should be set when retrying")
 	}
 }
+
+// ─── submitQueued / RecoverOrphans / dispatchQueued ─────────────────
+
+func TestSubmitQueuedAllDispatched(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	// Create 3 queued records.
+	records := make([]domain.DownloadRecord, 3)
+	for i := range records {
+		records[i] = domain.DownloadRecord{
+			ID:         fmt.Sprintf("rec-%d", i),
+			State:      domain.DownloadQueued,
+			SourceName: "soulseek",
+			Filename:   fmt.Sprintf("f%d.flac", i),
+		}
+	}
+
+	dispatched, full := svc.submitQueued(context.Background(), pool, records, true)
+	if dispatched != 3 {
+		t.Errorf("dispatched = %d, want 3", dispatched)
+	}
+	if full {
+		t.Error("full = true, want false")
+	}
+	if len(pool.submitted()) != 3 {
+		t.Errorf("submitted = %d, want 3", len(pool.submitted()))
+	}
+}
+
+func TestSubmitQueuedSkipsPendingSource(t *testing.T) {
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), pool)
+
+	records := []domain.DownloadRecord{
+		{ID: "rec-1", State: domain.DownloadQueued, SourceName: domain.PendingSourceName, Filename: ""},
+		{ID: "rec-2", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f.flac"},
+	}
+
+	dispatched, _ := svc.submitQueued(context.Background(), pool, records, true)
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (pending skipped)", dispatched)
+	}
+	submitted := pool.submitted()
+	if len(submitted) != 1 || submitted[0] != "rec-2" {
+		t.Errorf("submitted = %v, want [rec-2]", submitted)
+	}
+}
+
+func TestSubmitQueuedStopOnFull(t *testing.T) {
+	pool := &mockWorkerPool{
+		submitFn: func(ctx context.Context, r *domain.DownloadRecord) error {
+			if r.ID == "rec-2" {
+				return fmt.Errorf("pool full")
+			}
+			return nil
+		},
+	}
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), pool)
+
+	records := []domain.DownloadRecord{
+		{ID: "rec-1", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f1.flac"},
+		{ID: "rec-2", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f2.flac"},
+		{ID: "rec-3", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f3.flac"},
+	}
+
+	dispatched, full := svc.submitQueued(context.Background(), pool, records, true)
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (stopped at rec-2)", dispatched)
+	}
+	if !full {
+		t.Error("full = false, want true")
+	}
+}
+
+func TestSubmitQueuedContinueOnError(t *testing.T) {
+	pool := &mockWorkerPool{
+		submitFn: func(ctx context.Context, r *domain.DownloadRecord) error {
+			if r.ID == "rec-2" {
+				return fmt.Errorf("transient error")
+			}
+			return nil
+		},
+	}
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), pool)
+
+	records := []domain.DownloadRecord{
+		{ID: "rec-1", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f1.flac"},
+		{ID: "rec-2", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f2.flac"},
+		{ID: "rec-3", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f3.flac"},
+	}
+
+	dispatched, full := svc.submitQueued(context.Background(), pool, records, false) // stopOnFull=false
+	if dispatched != 2 {
+		t.Errorf("dispatched = %d, want 2 (rec-2 failed but continued)", dispatched)
+	}
+	if full {
+		t.Error("full = true, want false")
+	}
+}
+
+func TestSubmitQueuedRespectsRetryAfter(t *testing.T) {
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), pool)
+
+	future := time.Now().UTC().Add(10 * time.Minute).Format(time.RFC3339)
+	past := time.Now().UTC().Add(-1 * time.Minute).Format(time.RFC3339)
+
+	records := []domain.DownloadRecord{
+		{ID: "rec-1", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f1.flac", RetryAfter: future},
+		{ID: "rec-2", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f2.flac", RetryAfter: past},
+		{ID: "rec-3", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f3.flac"},
+	}
+
+	dispatched, _ := svc.submitQueued(context.Background(), pool, records, true)
+	if dispatched != 2 {
+		t.Errorf("dispatched = %d, want 2 (rec-1 skipped for future RetryAfter)", dispatched)
+	}
+	submitted := pool.submitted()
+	if len(submitted) != 2 {
+		t.Fatalf("submitted = %d, want 2", len(submitted))
+	}
+	if submitted[0] != "rec-2" || submitted[1] != "rec-3" {
+		t.Errorf("submitted = %v, want [rec-2, rec-3]", submitted)
+	}
+}
+
+func TestSubmitQueuedInvalidRetryAfterNotSkipped(t *testing.T) {
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), pool)
+
+	records := []domain.DownloadRecord{
+		{ID: "rec-1", State: domain.DownloadQueued, SourceName: "soulseek", Filename: "f1.flac", RetryAfter: "not-a-date"},
+	}
+
+	dispatched, _ := svc.submitQueued(context.Background(), pool, records, true)
+	if dispatched != 1 {
+		t.Errorf("dispatched = %d, want 1 (invalid RetryAfter treated as expired)", dispatched)
+	}
+}
+
+func TestRecoverOrphansDispatchesQueued(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	// Insert records directly into store (simulating orphans).
+	for i := 0; i < 3; i++ {
+		_ = store.Insert(context.Background(), &domain.DownloadRecord{
+			ID:         fmt.Sprintf("orphan-%d", i),
+			SourceName: "soulseek",
+			Filename:   fmt.Sprintf("f%d.flac", i),
+			State:      domain.DownloadQueued,
+		})
+	}
+
+	svc.RecoverOrphans(context.Background())
+
+	submitted := pool.submitted()
+	if len(submitted) != 3 {
+		t.Errorf("submitted = %d, want 3", len(submitted))
+	}
+}
+
+func TestRecoverOrphansSkipsPendingSource(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID:         "pending-1",
+		SourceName: domain.PendingSourceName,
+		Filename:   "",
+		State:      domain.DownloadQueued,
+	})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID:         "real-1",
+		SourceName: "soulseek",
+		Filename:   "f.flac",
+		State:      domain.DownloadQueued,
+	})
+
+	svc.RecoverOrphans(context.Background())
+
+	submitted := pool.submitted()
+	if len(submitted) != 1 || submitted[0] != "real-1" {
+		t.Errorf("submitted = %v, want [real-1]", submitted)
+	}
+}
+
+func TestRecoverOrphansNoPool(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "orphan-1", SourceName: "soulseek", Filename: "f.flac", State: domain.DownloadQueued,
+	})
+
+	// Should not panic.
+	svc.RecoverOrphans(context.Background())
+}

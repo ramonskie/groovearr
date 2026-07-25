@@ -124,7 +124,7 @@ func main() {
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
 	// Worker pool — picks up queued downloads and drives state machine.
-	workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus, mainLog)
+	workerPool := download.NewWorkerPool(currentCfg.Library.MaxDownloadWorkers, registry, dlStore, eventBus, mainLog)
 
 	// Download service — queues downloads and dispatches to workers.
 	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog, workerPool)
@@ -197,6 +197,10 @@ func main() {
 	// resolution/dispatch with exponential backoff (max 5 retries).
 	downloadSvc.StartRetryWorker(bgCtx, 2*time.Minute)
 	playlistSvc.StartRetryWorker(bgCtx, 1*time.Minute)
+
+	// Start background dispatch scanner — recovers queued downloads that
+	// failed pool submission (e.g., pool at capacity during batch imports).
+	downloadSvc.StartDispatcher(bgCtx)
 
 	// Download orchestrator for search and download-best selection.
 	orch := download.NewOrchestrator(registry, mainLog)

@@ -234,20 +234,80 @@ func (s *DownloadService) RecoverOrphans(ctx context.Context) {
 	}
 
 	s.log.Info("recover orphans: re-submitting", "count", len(queued), "component", "download")
-	recovered := 0
-	for _, r := range queued {
-		// Skip records queued via QueuePending — they have no source info
-		// and need resolution, not worker dispatch.
-		if r.IsPendingSource() {
-			continue
-		}
-		if err := pool.Submit(ctx, &r); err != nil {
-			s.log.Error("recover orphans: re-submit failed", "download_id", r.ID, "error", err, "component", "download")
-			continue
-		}
-		recovered++
-	}
+	recovered, _ := s.submitQueued(ctx, pool, queued, false) // false = log errors, don't stop
 	s.log.Info("recover orphans: done", "recovered", recovered, "total", len(queued), "component", "download")
+}
+
+const dispatchInterval = 60 * time.Second
+
+// StartDispatcher periodically rescans for queued downloads and submits them
+// to the worker pool. This handles records that were inserted into the DB but
+// whose initial pool.Submit failed (e.g., pool at capacity during batch imports).
+// Runs until ctx is cancelled. Does not block the caller.
+func (s *DownloadService) StartDispatcher(ctx context.Context) {
+	go func() {
+		ticker := time.NewTicker(dispatchInterval)
+		defer ticker.Stop()
+
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				s.dispatchQueued(ctx)
+			}
+		}
+	}()
+}
+
+func (s *DownloadService) dispatchQueued(ctx context.Context) {
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool == nil {
+		return
+	}
+
+	queued, err := s.store.ListByState(ctx, domain.DownloadQueued)
+	if err != nil {
+		s.log.Warn("dispatch scan: list failed", "error", err, "component", "download")
+		return
+	}
+
+	dispatched, _ := s.submitQueued(ctx, pool, queued, true) // true = stop on full
+	if dispatched > 0 {
+		s.log.Debug("dispatch scan: submitted", "count", dispatched, "component", "download")
+	}
+}
+
+// submitQueued iterates over queued records and submits them to the pool.
+// When stopOnFull is true, it breaks on the first submission error (pool at
+// capacity). When false, it logs each error and continues.
+// Returns (dispatched, full) — full is true when the loop stopped because
+// the pool was full.
+func (s *DownloadService) submitQueued(ctx context.Context, pool WorkerPool, queued []domain.DownloadRecord, stopOnFull bool) (int, bool) {
+	dispatched := 0
+	for _, r := range queued {
+		rec := r // copy for pointer safety
+		if rec.IsPendingSource() {
+			continue
+		}
+		// Respect retry backoff — don't submit before RetryAfter.
+		if rec.RetryAfter != "" {
+			if t, err := time.Parse(time.RFC3339, rec.RetryAfter); err == nil && time.Now().UTC().Before(t) {
+				continue
+			}
+		}
+		if err := pool.Submit(ctx, &rec); err != nil {
+			if stopOnFull {
+				return dispatched, true
+			}
+			s.log.Error("submit queued: failed", "download_id", rec.ID, "error", err, "component", "download")
+			continue
+		}
+		dispatched++
+	}
+	return dispatched, false
 }
 
 // GetStatus returns the current state of a download by ID.

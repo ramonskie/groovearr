@@ -13,6 +13,7 @@ import (
 )
 
 const defaultMaxWorkers = 3
+const maxWorkersCap = 50
 const progressPollInterval = 1 * time.Second
 
 // DownloadJob represents a download task dispatched to a worker.
@@ -52,6 +53,9 @@ type workerPoolImpl struct {
 func NewWorkerPool(maxWorkers int, registry *Registry, store DownloadStore, bus events.IEventAggregator, logger *slog.Logger) WorkerPool {
 	if maxWorkers <= 0 {
 		maxWorkers = defaultMaxWorkers
+	}
+	if maxWorkers > maxWorkersCap {
+		maxWorkers = maxWorkersCap
 	}
 	if logger == nil {
 		logger = slog.Default()
