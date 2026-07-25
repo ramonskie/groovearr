@@ -152,8 +152,8 @@ func main() {
 
 	// SSE hub — broadcasts real-time download progress to connected clients.
 	sseHub := sse.NewSSEHub(mainLog)
-	hbCtx, hbCancel := context.WithCancel(context.Background())
-	sseHub.StartHeartbeat(hbCtx)
+	bgCtx, bgCancel := context.WithCancel(context.Background())
+	sseHub.StartHeartbeat(bgCtx)
 
 	// SSE notifier subscribes to event bus topics and translates them into SSE
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
@@ -191,6 +191,12 @@ func main() {
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
 	}, qualityProfileStore, metadataResolver, mainLog)
+
+	// Start auto-retry workers for failed and failedPending downloads.
+	// Retry workers periodically scan for retryable downloads and re-attempt
+	// resolution/dispatch with exponential backoff (max 5 retries).
+	downloadSvc.StartRetryWorker(bgCtx, 2*time.Minute)
+	playlistSvc.StartRetryWorker(bgCtx, 1*time.Minute)
 
 	// Download orchestrator for search and download-best selection.
 	orch := download.NewOrchestrator(registry, mainLog)
@@ -248,8 +254,8 @@ func main() {
 	go func() {
 		<-sigCh
 		mainLog.Info("shutting down", "component", "main")
-		mainLog.Info("heartbeat stopping", "component", "main")
-		hbCancel()
+		mainLog.Info("background workers stopping", "component", "main")
+		bgCancel()
 		mainLog.Info("worker pool shutting down", "component", "main")
 		workerPool.Shutdown()
 		mainLog.Info("server stopped", "component", "main")

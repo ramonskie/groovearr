@@ -269,6 +269,12 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 // resolvePendingDownloads searches for source matches for pending records
 // and dispatches them to the download pool.
 func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("resolvePendingDownloads panicked", "panic", r, "playlist_id", playlistID, "component", "playlist")
+		}
+	}()
+
 	ctx := context.Background()
 	orch := download.NewOrchestrator(s.downloadReg, s.log)
 	var defaultProfile *quality.QualityProfile
@@ -300,8 +306,17 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 		if err != nil {
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
 
-			// Exponential backoff: 1m, 2m, 4m, 8m, 16m, cap at 30m.
 			rec.RetryCount++
+			if rec.RetryCount > domain.MaxRetries {
+				s.log.Warn("max retries reached for pending download",
+					"artist", pt.Artist, "title", pt.Title, "retry_count", rec.RetryCount, "component", "playlist")
+				rec.State = domain.DownloadFailed
+				rec.Error = fmt.Sprintf("search resolution failed after %d retries: %s", rec.RetryCount, err.Error())
+				_ = s.downloadSvc.UpdateDownload(ctx, rec)
+				continue
+			}
+
+			// Exponential backoff: 1m, 2m, 4m, 8m, 16m, cap at 30m.
 			backoffMin := 1 << (rec.RetryCount - 1)
 			if backoffMin > 30 {
 				backoffMin = 30
@@ -782,6 +797,160 @@ func (s *Service) findInLibrary(ctx context.Context, info TrackInfo) int64 {
 	}
 
 	return 0
+}
+
+// ─── Retry worker ─────────────────────────────────────────────────────
+
+// StartRetryWorker runs a periodic goroutine that scans for failedPending
+// download records and retries search resolution. Runs until ctx is cancelled.
+func (s *Service) StartRetryWorker(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 1 * time.Minute
+	}
+	s.log.Info("pending retry worker started", "interval", interval, "max_retries", domain.MaxRetries, "component", "playlist")
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("pending retry worker panicked", "panic", r, "component", "playlist")
+			}
+		}()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.log.Info("pending retry worker stopped", "component", "playlist")
+				return
+			case <-ticker.C:
+				s.retryPendingDownloads(ctx)
+			}
+		}
+	}()
+}
+
+// retryPendingDownloads lists failedPending records and re-attempts search
+// resolution for those whose RetryAfter has passed and haven't hit MaxRetries.
+func (s *Service) retryPendingDownloads(ctx context.Context) {
+	failedPending, err := s.downloadSvc.ListByState(ctx, domain.DownloadFailedPending)
+	if err != nil {
+		s.log.Error("pending retry worker: list failed", "error", err, "component", "playlist")
+		return
+	}
+	if len(failedPending) == 0 {
+		return
+	}
+
+	orch := download.NewOrchestrator(s.downloadReg, s.log)
+	var defaultProfile *quality.QualityProfile
+	if s.qualityProfileStore != nil {
+		p, err := s.qualityProfileStore.LoadProfileByID(ctx, nil)
+		if err != nil {
+			s.log.Warn("pending retry worker: failed to load quality profile", "error", err, "component", "playlist")
+		}
+		defaultProfile = p
+	}
+
+	retried := 0
+	for i := range failedPending {
+		rec := &failedPending[i]
+
+		if rec.RetryCount >= domain.MaxRetries {
+			// Belt and suspenders — transition to terminal failed so the
+			// record doesn't stay stuck in failedPending forever.
+			rec.State = domain.DownloadFailed
+			rec.Error = fmt.Sprintf("search resolution failed after %d retries", rec.RetryCount)
+			_ = s.downloadSvc.UpdateDownload(ctx, rec)
+			continue
+		}
+		if rec.RetryAfter != "" {
+			retryAfter, parseErr := time.Parse(time.RFC3339, rec.RetryAfter)
+			if parseErr == nil && time.Now().UTC().Before(retryAfter) {
+				continue
+			}
+		}
+		if rec.Artist == "" || rec.Title == "" {
+			s.log.Warn("pending retry worker: missing artist/title, marking failed",
+				"download_id", rec.ID, "component", "playlist")
+			rec.State = domain.DownloadFailed
+			rec.Error = "missing artist or title metadata — cannot resolve download source"
+			_ = s.downloadSvc.UpdateDownload(ctx, rec)
+			continue
+		}
+
+		// ISRC dedup: skip if a library track with the same ISRC already exists.
+		if rec.ISRC != "" {
+			if existing, _ := s.store.GetTrackByISRC(ctx, rec.ISRC); existing != nil {
+				s.log.Info("pending retry worker: track already imported via ISRC, skipping",
+					"artist", rec.Artist, "title", rec.Title, "isrc", rec.ISRC, "component", "playlist")
+				rec.State = domain.DownloadIgnored
+				_ = s.downloadSvc.UpdateDownload(ctx, rec)
+				continue
+			}
+		}
+
+		best, searchErr := orch.FindBestMatch(ctx, rec.Title, rec.Artist, rec.Album, 0, "", defaultProfile)
+		if searchErr != nil {
+			s.log.Warn("pending retry worker: search failed",
+				"artist", rec.Artist, "title", rec.Title, "error", searchErr, "component", "playlist")
+
+			rec.RetryCount++
+			if rec.RetryCount > domain.MaxRetries {
+				rec.State = domain.DownloadFailed
+				rec.Error = fmt.Sprintf("search resolution failed after %d retries: %s", rec.RetryCount, searchErr.Error())
+			} else {
+				backoffMin := 1 << (rec.RetryCount - 1)
+				if backoffMin > 30 {
+					backoffMin = 30
+				}
+				rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
+				rec.Error = searchErr.Error()
+			}
+			_ = s.downloadSvc.UpdateDownload(ctx, rec)
+			continue
+		}
+
+		// Update record with resolved source info.
+		username := best.Track.Username
+		if username == "" {
+			username = best.SourceName
+		}
+		rec.SourceName = best.SourceName
+		rec.Username = username
+		rec.Filename = best.Track.Filename
+		rec.Size = best.Track.Size
+		rec.Bitrate = best.Track.Bitrate
+		rec.Format = best.Track.Quality
+		rec.State = domain.DownloadQueued
+		rec.Error = ""
+		rec.RetryAfter = ""
+		rec.DisplayName = rec.Artist + " - " + rec.Title
+
+		// Enrich metadata.
+		if s.metadataResolver != nil && rec.Artist != "" && rec.Title != "" {
+			if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, rec.Artist, rec.Title, rec.Album, rec.Year); enrichErr == nil {
+				if rec.Album == "" && enriched.Album != "" {
+					rec.Album = enriched.Album
+				}
+				if enriched.CoverURL != "" {
+					rec.CoverURL = enriched.CoverURL
+				}
+			}
+		}
+
+		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
+			s.log.Error("pending retry worker: update failed", "download_id", rec.ID, "error", err, "component", "playlist")
+			continue
+		}
+
+		if err := s.downloadSvc.Dispatch(ctx, rec); err != nil {
+			s.log.Error("pending retry worker: dispatch failed", "download_id", rec.ID, "error", err, "component", "playlist")
+			continue
+		}
+		retried++
+	}
+	if retried > 0 {
+		s.log.Info("pending retry worker: retried", "count", retried, "component", "playlist")
+	}
 }
 
 // copyFile copies src to dst.

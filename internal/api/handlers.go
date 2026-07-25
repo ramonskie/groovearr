@@ -121,6 +121,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.Handle("POST /api/download/match", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadBest)))
 	mux.HandleFunc("GET /api/downloads", s.handleGetDownloads)
 	mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
+	mux.Handle("POST /api/downloads/{id}/retry", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleRetryDownload)))
 	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
@@ -710,6 +711,46 @@ func (s *Server) handleCancelDownload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"status": "cancelled"})
+}
+
+// handleRetryDownload manually retries a failed or failedPending download.
+func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+
+	// Check if the download exists and determine how to retry it.
+	rec, err := s.downloadSvc.GetStatus(r.Context(), id)
+	if err != nil || rec == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("download %q not found", id))
+		return
+	}
+
+	switch rec.State {
+	case domain.DownloadFailed:
+		if err := s.downloadSvc.Retry(r.Context(), id); err != nil {
+			if strings.Contains(err.Error(), "max retries") {
+				writeError(w, http.StatusConflict, err)
+			} else {
+				writeError(w, http.StatusInternalServerError, err)
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"status": "retrying"})
+	case domain.DownloadFailedPending:
+		if rec.RetryCount >= domain.MaxRetries {
+			writeError(w, http.StatusConflict, fmt.Errorf("download %q reached max retries (%d)", id, domain.MaxRetries))
+			return
+		}
+		// Re-trigger search resolution immediately by setting RetryAfter to now.
+		rec.RetryAfter = time.Now().UTC().Format(time.RFC3339)
+		if err := s.downloadSvc.UpdateDownload(r.Context(), rec); err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		// The retry worker will pick it up on next tick.
+		writeJSON(w, http.StatusOK, map[string]string{"status": "queued for retry"})
+	default:
+		writeError(w, http.StatusBadRequest, fmt.Errorf("download %q in state %q is not retryable", id, rec.State))
+	}
 }
 
 // handleEvents serves SSE stream for real-time download events.

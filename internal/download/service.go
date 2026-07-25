@@ -130,9 +130,7 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 
 	s.bus.Publish(ctx, events.TopicDownloadQueued, record)
 
-	s.mu.Lock()
 	pool := s.workerPool
-	s.mu.Unlock()
 	if pool != nil {
 		if err := pool.Submit(ctx, record); err != nil {
 			return id, fmt.Errorf("worker dispatch: %w", err)
@@ -311,7 +309,7 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 
 // Retry resets a failed download back to "queued" and re-dispatches it to
 // the worker pool. Returns an error if the download is not in a retryable
-// state (only "failed" is retryable).
+// state (only "failed" is retryable), or if max retries have been reached.
 func (s *DownloadService) Retry(ctx context.Context, id string) error {
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -328,6 +326,18 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 		return fmt.Errorf("retry: download %q in state %q is not retryable", id, record.State)
 	}
 
+	record.RetryCount++
+	if record.RetryCount > domain.MaxRetries {
+		s.log.Warn("retry: max retries reached", "download_id", id, "retry_count", record.RetryCount, "component", "download")
+		return fmt.Errorf("retry: download %q reached max retries (%d)", id, domain.MaxRetries)
+	}
+
+	// Exponential backoff for download retries: 2m, 4m, 8m, 16m, 32m.
+	backoffMin := 1 << (record.RetryCount) // 2, 4, 8, 16, 32
+	if backoffMin > 60 {
+		backoffMin = 60
+	}
+	record.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
 	record.State = domain.DownloadQueued
 	record.Error = ""
 	record.Progress = 0
@@ -347,4 +357,65 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 	}
 
 	return nil
+}
+
+// StartRetryWorker runs a periodic goroutine that scans for failed downloads
+// and retries them (up to MaxRetries). Runs until ctx is cancelled.
+func (s *DownloadService) StartRetryWorker(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 2 * time.Minute
+	}
+	s.log.Info("download retry worker started", "interval", interval, "max_retries", domain.MaxRetries, "component", "download")
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("download retry worker panicked", "panic", r, "component", "download")
+			}
+		}()
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.log.Info("download retry worker stopped", "component", "download")
+				return
+			case <-ticker.C:
+				s.retryFailedDownloads(ctx)
+			}
+		}
+	}()
+}
+
+// retryFailedDownloads lists failed downloads and retries those that haven't
+// exceeded MaxRetries and whose RetryAfter time has passed.
+func (s *DownloadService) retryFailedDownloads(ctx context.Context) {
+	failed, err := s.store.ListByState(ctx, domain.DownloadFailed)
+	if err != nil {
+		s.log.Error("retry worker: list failed", "error", err, "component", "download")
+		return
+	}
+	if len(failed) == 0 {
+		return
+	}
+
+	retried := 0
+	for _, rec := range failed {
+		if rec.RetryCount >= domain.MaxRetries {
+			continue
+		}
+		if rec.RetryAfter != "" {
+			retryAfter, parseErr := time.Parse(time.RFC3339, rec.RetryAfter)
+			if parseErr == nil && time.Now().UTC().Before(retryAfter) {
+				continue
+			}
+		}
+		if err := s.Retry(ctx, rec.ID); err != nil {
+			s.log.Warn("retry worker: retry failed", "download_id", rec.ID, "error", err, "component", "download")
+			continue
+		}
+		retried++
+	}
+	if retried > 0 {
+		s.log.Info("retry worker: retried", "count", retried, "component", "download")
+	}
 }

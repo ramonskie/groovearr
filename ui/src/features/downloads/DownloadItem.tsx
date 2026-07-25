@@ -8,6 +8,7 @@ import DownloadProgressBar from "./DownloadProgressBar";
 interface DownloadItemProps {
   download: DownloadRecord;
   onCancel: (id: string) => void;
+  onRetry: (id: string) => void;
   isCancelling: boolean;
 }
 
@@ -27,24 +28,44 @@ function formatSpeed(bytesPerSec: number): string {
 
 // ─── State display mapping ──────────────────────────────────────────
 
-const STATE_BADGE: Record<
-  DownloadState,
-  { variant: "success" | "warning" | "error" | "muted"; label: string }
-> = {
-  queued: { variant: "muted", label: "Queued" },
-  downloading: { variant: "muted", label: "Downloading" },
-  importPending: { variant: "warning", label: "Pending Import" },
-  importing: { variant: "warning", label: "Importing" },
-  imported: { variant: "success", label: "Imported" },
-  failedPending: { variant: "warning", label: "Retrying" },
-  failed: { variant: "error", label: "Failed" },
-  ignored: { variant: "muted", label: "Ignored" },
-};
+type BadgeDef = { variant: "success" | "warning" | "error" | "muted"; label: string };
 
-const TERMINAL_STATES: Set<DownloadState> = new Set([
-  "imported",
+function resolveBadge(state: DownloadState, retryCount: number | undefined): BadgeDef {
+  const rc = retryCount ?? 0;
+  switch (state) {
+    case "queued":
+      return { variant: "muted", label: "Queued" };
+    case "downloading":
+      return { variant: "muted", label: "Downloading" };
+    case "importPending":
+      return { variant: "warning", label: "Pending Import" };
+    case "importing":
+      return { variant: "warning", label: "Importing" };
+    case "imported":
+      return { variant: "success", label: "Imported" };
+    case "failedPending":
+      return { variant: "warning", label: `Retrying (${rc}/5)` };
+    case "failed":
+      return {
+        variant: "error",
+        label: rc > 0 ? `Failed (retry ${rc}/5)` : "Failed",
+      };
+    case "ignored":
+      return { variant: "muted", label: "Ignored" };
+  }
+}
+
+const SHOW_CANCEL_STATES: Set<DownloadState> = new Set([
+  "queued",
+  "downloading",
+  "importPending",
+  "importing",
+  "failedPending",
+]);
+
+const SHOW_RETRY_STATES: Set<DownloadState> = new Set([
   "failed",
-  "ignored",
+  "failedPending",
 ]);
 
 const SHOW_PROGRESS_STATES: Set<DownloadState> = new Set([
@@ -59,16 +80,18 @@ const SHOW_PROGRESS_STATES: Set<DownloadState> = new Set([
 const DownloadItem: FC<DownloadItemProps> = ({
   download,
   onCancel,
+  onRetry,
   isCancelling,
 }) => {
-  const badge = STATE_BADGE[download.state];
-  const isTerminal = TERMINAL_STATES.has(download.state);
+  const badge = resolveBadge(download.state, download.retry_count);
+  const showCancel = SHOW_CANCEL_STATES.has(download.state);
+  const showRetry = SHOW_RETRY_STATES.has(download.state);
   const showProgress = SHOW_PROGRESS_STATES.has(download.state);
 
   return (
     <Card className="mb-3">
       <div className="space-y-2">
-        {/* Top row: name + cancel button */}
+        {/* Top row: name + action button */}
         <div className="flex items-start justify-between gap-2">
           <div className="min-w-0 flex-1">
             <p className="truncate text-sm font-semibold text-white">
@@ -80,7 +103,7 @@ const DownloadItem: FC<DownloadItemProps> = ({
               <Badge variant={badge.variant}>{badge.label}</Badge>
             </p>
           </div>
-          {!isTerminal && (
+          {showCancel && (
             <Button
               variant="danger"
               size="sm"
@@ -88,6 +111,16 @@ const DownloadItem: FC<DownloadItemProps> = ({
               onClick={() => onCancel(download.id)}
             >
               Cancel
+            </Button>
+          )}
+          {showRetry && (
+            <Button
+              variant="primary"
+              size="sm"
+              loading={isCancelling}
+              onClick={() => onRetry(download.id)}
+            >
+              Retry
             </Button>
           )}
         </div>
@@ -108,7 +141,7 @@ const DownloadItem: FC<DownloadItemProps> = ({
               {download.bitrate && download.bitrate > 0 && ` ${download.bitrate}kbps`}
             </span>
           )}
-          {!isTerminal && download.speed > 0 && (
+          {showProgress && download.speed > 0 && (
             <span>{formatSpeed(download.speed)}</span>
           )}
         </div>

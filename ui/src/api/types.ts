@@ -283,6 +283,8 @@ export interface DownloadRecord {
   year?: number;
   bitrate?: number;
   format?: string;
+  retry_count?: number;
+  retry_after?: string;
 }
 
 /** SSE event type names broadcast from the backend via GET /api/events. */

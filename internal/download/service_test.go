@@ -6,6 +6,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
@@ -48,6 +49,8 @@ func (m *mockStore) Update(ctx context.Context, r *domain.DownloadRecord) error 
 	existing.Speed = r.Speed
 	existing.FilePath = r.FilePath
 	existing.Error = r.Error
+	existing.RetryCount = r.RetryCount
+	existing.RetryAfter = r.RetryAfter
 	return nil
 }
 
@@ -715,5 +718,166 @@ func TestQueueConcurrentWorkerPoolAccess(t *testing.T) {
 
 	if len(pool.submitted()) != 10 {
 		t.Errorf("expected 10 submits, got %d", len(pool.submitted()))
+	}
+}
+
+// ─── Retry: RetryCount, MaxRetries, RetryAfter ────────────────────────
+
+func TestRetryIncrementsRetryCount(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+
+	_ = svc.Retry(context.Background(), id)
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != 1 {
+		t.Errorf("RetryCount = %d, want 1", rec.RetryCount)
+	}
+}
+
+func TestRetryMaxRetriesReached(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: domain.MaxRetries})
+
+	err := svc.Retry(context.Background(), id)
+	if err == nil {
+		t.Fatal("expected error when max retries reached")
+	}
+	if !strings.Contains(err.Error(), "max retries") {
+		t.Errorf("error = %q, want 'max retries'", err)
+	}
+
+	// Record not persisted because error returns before Update().
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != domain.MaxRetries {
+		t.Errorf("RetryCount = %d, want %d (not persisted on error)", rec.RetryCount, domain.MaxRetries)
+	}
+	if rec.State != domain.DownloadFailed {
+		t.Errorf("state = %q, want %q (should stay failed)", rec.State, domain.DownloadFailed)
+	}
+}
+
+func TestRetrySetsRetryAfter(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+
+	before := time.Now().UTC()
+	_ = svc.Retry(context.Background(), id)
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryAfter == "" {
+		t.Fatal("RetryAfter not set")
+	}
+	retryAfter, err := time.Parse(time.RFC3339, rec.RetryAfter)
+	if err != nil {
+		t.Fatalf("RetryAfter is not valid RFC3339: %q", rec.RetryAfter)
+	}
+	backoff := retryAfter.Sub(before)
+	// First retry: 2^1 = 2 minutes.
+	if backoff < 1*time.Minute || backoff > 3*time.Minute {
+		t.Errorf("backoff = %v, want ~2 minutes", backoff)
+	}
+}
+
+func TestRetryIncrementsBackoffExponential(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 3})
+
+	before := time.Now().UTC()
+	_ = svc.Retry(context.Background(), id)
+
+	rec, _ := store.Get(context.Background(), id)
+	retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
+	backoff := retryAfter.Sub(before)
+	// 4th attempt (RetryCount=3 before, incremented to 4): 2^4 = 16 minutes.
+	if backoff < 14*time.Minute || backoff > 18*time.Minute {
+		t.Errorf("backoff = %v, want ~16 minutes (RetryCount was 3, 4th attempt = 2^4)", backoff)
+	}
+	if rec.RetryCount != 4 {
+		t.Errorf("RetryCount = %d, want 4", rec.RetryCount)
+	}
+}
+
+// TestRetryFifthRetryAllowed verifies the 5th retry (RetryCount=4→5) is allowed.
+// Backoff = 2^5 = 32 minutes. This is the last allowed retry with MaxRetries=5.
+func TestRetryFifthRetryAllowed(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 4})
+
+	before := time.Now().UTC()
+	err := svc.Retry(context.Background(), id)
+	if err != nil {
+		t.Fatalf("expected 5th retry to succeed, got: %v", err)
+	}
+
+	rec, _ := store.Get(context.Background(), id)
+	retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
+	backoff := retryAfter.Sub(before)
+	// 5th retry: 2^5 = 32 minutes.
+	if backoff < 30*time.Minute || backoff > 34*time.Minute {
+		t.Errorf("backoff = %v, want ~32 minutes (RetryCount was 4, 5th retry = 2^5)", backoff)
+	}
+	if rec.RetryCount != 5 {
+		t.Errorf("RetryCount = %d, want 5", rec.RetryCount)
+	}
+}
+
+// TestRetrySixthRetryBlocked verifies the 6th retry attempt is blocked.
+func TestRetrySixthRetryBlocked(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 5})
+
+	err := svc.Retry(context.Background(), id)
+	if err == nil {
+		t.Fatal("expected error when retry 6 is attempted")
+	}
+	if !strings.Contains(err.Error(), "max retries") {
+		t.Errorf("error = %q, want 'max retries'", err)
+	}
+}
+
+func TestRetrySetsRetryAfterAndQueuedState(t *testing.T) {
+	// retryPendingDownloads success path clears RetryAfter.
+	// This is tested indirectly: Retry itself sets RetryAfter then transitions
+	// to queued. When the download later succeeds (goes through worker →
+	// imported), failJob shouldn't zero it. But the success path in
+	// retryPendingDownloads explicitly clears it.
+	//
+	// Directly test that Retry sets RetryAfter and the record is in queued state
+	// with RetryAfter set (backoff is informational, cleared when download
+	// succeeds in retry worker).
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+
+	_ = svc.Retry(context.Background(), id)
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.State != domain.DownloadQueued {
+		t.Errorf("state = %q, want queued", rec.State)
+	}
+	if rec.RetryAfter == "" {
+		t.Error("RetryAfter should be set when retrying")
 	}
 }

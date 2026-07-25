@@ -3,6 +3,7 @@ import type { DownloadState } from "../../api/types";
 import {
   useDownloads,
   useCancelDownload,
+  useRetryDownload,
   useClearCompleted,
 } from "../../hooks/use-downloads";
 import { useScanLibrary } from "../../hooks/use-library";
@@ -35,6 +36,7 @@ function DownloadsPage() {
     sseStatus,
   } = useDownloads();
   const cancelMutation = useCancelDownload();
+  const retryMutation = useRetryDownload();
   const clearCompleted = useClearCompleted();
   const scanLibrary = useScanLibrary();
 
@@ -107,6 +109,27 @@ function DownloadsPage() {
       });
     },
     [cancelMutation],
+  );
+
+  // ─── Retry single download ─────────────────────────────────────────
+
+  const handleRetry = useCallback(
+    (id: string) => {
+      setCancellingId(id);
+      retryMutation.mutate(id, {
+        onSuccess: () => {
+          toast.success("Download queued for retry");
+          setCancellingId(null);
+        },
+        onError: (err) => {
+          toast.error(
+            `Retry failed: ${err instanceof Error ? err.message : "Unknown error"}`,
+          );
+          setCancellingId(null);
+        },
+      });
+    },
+    [retryMutation],
   );
 
   // ─── Clear finished ───────────────────────────────────────────────
@@ -234,9 +257,10 @@ function DownloadsPage() {
       {/* Pending tab: queue first, then active */}
       {activeTab === "pending" && (() => {
         const queued = pendingDownloads.filter(d => d.state === "queued");
-        const active = pendingDownloads.filter(d => d.state !== "queued");
+        const failedPending = pendingDownloads.filter(d => d.state === "failedPending");
+        const active = pendingDownloads.filter(d => d.state !== "queued" && d.state !== "failedPending");
 
-        if (queued.length === 0 && active.length === 0) {
+        if (queued.length === 0 && active.length === 0 && failedPending.length === 0) {
           return <p className="py-16 text-center text-sm text-slate-500">No pending downloads</p>;
         }
 
@@ -252,12 +276,29 @@ function DownloadsPage() {
                     key={d.id}
                     download={d}
                     onCancel={handleCancel}
+                    onRetry={handleRetry}
                     isCancelling={cancellingId === d.id}
                   />
                 ))}
               </div>
             )}
-            {active.length > 0 && queued.length > 0 && (
+            {failedPending.length > 0 && (
+              <div className="mb-4">
+                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
+                  Retrying &mdash; {failedPending.length} waiting
+                </h2>
+                {failedPending.map((d) => (
+                  <DownloadItem
+                    key={d.id}
+                    download={d}
+                    onCancel={handleCancel}
+                    onRetry={handleRetry}
+                    isCancelling={cancellingId === d.id}
+                  />
+                ))}
+              </div>
+            )}
+            {(active.length > 0 || failedPending.length > 0) && queued.length > 0 && (
               <hr className="my-4 border-slate-700/50" />
             )}
             {queued.length > 0 && (() => {
@@ -275,6 +316,7 @@ function DownloadsPage() {
                       key={d.id}
                       download={d}
                       onCancel={handleCancel}
+                      onRetry={handleRetry}
                       isCancelling={cancellingId === d.id}
                     />
                   ))}
@@ -312,7 +354,8 @@ function DownloadsPage() {
                 key={d.id}
                 download={d}
                 onCancel={handleCancel}
-                isCancelling={false}
+                onRetry={handleRetry}
+                isCancelling={cancellingId === d.id}
               />
             ))}
           </div>

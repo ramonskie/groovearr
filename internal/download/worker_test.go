@@ -900,3 +900,117 @@ func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 		}
 	}
 }
+
+// ─── failJob RetryCount preservation ────────────────────────────────
+
+func TestFailJobPreservesRetryCount(t *testing.T) {
+	mp := createWorkerTestPlugin("src")
+	mp.downloadErr = fmt.Errorf("connection refused")
+	reg := NewRegistry()
+	_ = reg.Register(mp)
+
+	store := newMockStore()
+	bus := newMockBus()
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID:         "job-retry-preserve",
+		SourceName: "src",
+		Filename:   "t.flac",
+		State:      domain.DownloadQueued,
+		RetryCount: 3,
+		RetryAfter: "2025-01-01T00:00:00Z",
+	})
+
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
+	defer pool.(*workerPoolImpl).Shutdown()
+
+	store.mu.Lock()
+	store.records["job-retry-preserve"].RetryCount = 3
+	store.records["job-retry-preserve"].RetryAfter = "2025-01-01T00:00:00Z"
+	store.mu.Unlock()
+
+	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
+		ID:         "job-retry-preserve",
+		SourceName: "src",
+		Filename:   "t.flac",
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		evts := bus.published()
+		for _, e := range evts {
+			if e.Topic == events.TopicDownloadFailed {
+				return true
+			}
+		}
+		return false
+	})
+
+	r, _ := store.Get(context.Background(), "job-retry-preserve")
+	if r == nil {
+		t.Fatal("record not found")
+	}
+	if r.RetryCount != 3 {
+		t.Errorf("RetryCount = %d, want 3 (failJob should preserve it)", r.RetryCount)
+	}
+	if r.RetryAfter != "2025-01-01T00:00:00Z" {
+		t.Errorf("RetryAfter = %q, want 2025-01-01T00:00:00Z", r.RetryAfter)
+	}
+}
+
+func TestFailJobSoulseekTimeoutPreservesRetryCount(t *testing.T) {
+	mp := createWorkerTestPlugin("soulseek")
+	// Simulate download starts OK, but plugin reports failure on first status check.
+	mp.state = domain.DownloadFailed
+	mp.errorMsg = "peer offline"
+	reg := NewRegistry()
+	_ = reg.Register(mp)
+
+	store := newMockStore()
+	bus := newMockBus()
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID:         "job-slsk-retry",
+		SourceName: "soulseek",
+		Filename:   "t.flac",
+		State:      domain.DownloadQueued,
+		Size:       50_000,
+		RetryCount: 2,
+		RetryAfter: "2025-06-01T00:00:00Z",
+	})
+
+	pool := NewWorkerPool(1, reg, store, bus, testLogger())
+	defer pool.(*workerPoolImpl).Shutdown()
+
+	store.mu.Lock()
+	store.records["job-slsk-retry"].RetryCount = 2
+	store.records["job-slsk-retry"].RetryAfter = "2025-06-01T00:00:00Z"
+	store.mu.Unlock()
+
+	_ = pool.Submit(context.Background(), &domain.DownloadRecord{
+		ID:         "job-slsk-retry",
+		SourceName: "soulseek",
+		Filename:   "t.flac",
+		Size:       50_000,
+	})
+
+	waitFor(t, 5*time.Second, func() bool {
+		evts := bus.published()
+		for _, e := range evts {
+			if e.Topic == events.TopicDownloadFailed {
+				return true
+			}
+		}
+		return false
+	})
+
+	r, _ := store.Get(context.Background(), "job-slsk-retry")
+	if r == nil {
+		t.Fatal("record not found")
+	}
+	if r.RetryCount != 2 {
+		t.Errorf("RetryCount = %d, want 2 (failJob should preserve it)", r.RetryCount)
+	}
+	if r.RetryAfter != "2025-06-01T00:00:00Z" {
+		t.Errorf("RetryAfter = %q, want 2025-06-01T00:00:00Z", r.RetryAfter)
+	}
+}

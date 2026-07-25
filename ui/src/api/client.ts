@@ -187,6 +187,13 @@ export function cancelDownload(id: string): Promise<CancelResponse> {
   );
 }
 
+export function retryDownload(id: string): Promise<CancelResponse> {
+  return request<CancelResponse>(
+    `/api/downloads/${encodeURIComponent(id)}/retry`,
+    { method: "POST" },
+  );
+}
+
 // ─── Library ───────────────────────────────────────────────────────
 
 export function getLibraryTracks(params?: PaginationParams): Promise<Track[]> {

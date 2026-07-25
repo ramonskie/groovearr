@@ -5,6 +5,7 @@ import {
   download,
   downloadBest,
   cancelDownload,
+  retryDownload,
 } from "../api/client";
 import { useDownloadStore } from "../stores/download-poll";
 import type {
@@ -89,6 +90,16 @@ export function useCancelDownload() {
     mutationFn: (id: string) => cancelDownload(id),
     onSuccess: (_data, id) => {
       removeRecord(id);
+      queryClient.invalidateQueries({ queryKey: ["downloads"] });
+    },
+  });
+}
+
+export function useRetryDownload() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => retryDownload(id),
+    onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["downloads"] });
     },
   });

@@ -19,6 +19,10 @@ const (
 	DownloadIgnored       DownloadState = "ignored"
 )
 
+// MaxRetries caps the number of automatic retry attempts for both
+// search resolution (failedPending) and download execution (failed) states.
+const MaxRetries = 5
+
 // PendingSourceName is the sentinel source value used by QueuePending
 // to indicate a record awaiting source resolution before dispatch.
 const PendingSourceName = "pending"

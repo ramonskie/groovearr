@@ -228,7 +228,10 @@ func (p *workerPoolImpl) pollUntilComplete(ctx context.Context, serviceID string
 	ticker := time.NewTicker(progressPollInterval)
 	defer ticker.Stop()
 
-	const downloadTimeout = 10 * time.Minute
+	downloadTimeout := 10 * time.Minute
+	if plugin.Name() == "soulseek" {
+		downloadTimeout = 30 * time.Minute
+	}
 	deadline := time.After(downloadTimeout)
 
 	var lastFilePath string
@@ -342,12 +345,21 @@ func (p *workerPoolImpl) failJob(downloadID, errMsg string) {
 		return // another caller won the race
 	}
 
-	// Persist the error message after the successful state transition.
-	_ = p.store.Update(p.ctx, &domain.DownloadRecord{
-		ID:    downloadID,
-		State: domain.DownloadFailed,
-		Error: errMsg,
-	})
+	// Re-read the record to get the freshest state (including any RetryCount
+	// set by a concurrent Retry() call between our initial Get and TransitionState)
+	// and to preserve all metadata fields (source, filename, artist, title, etc.)
+	// that the sparse Update would otherwise zero out.
+	if fresh, err := p.store.Get(p.ctx, downloadID); err == nil && fresh != nil {
+		record = fresh
+	}
+
+	// Persist the error message while preserving all other record fields.
+	if record == nil {
+		record = &domain.DownloadRecord{ID: downloadID}
+	}
+	record.State = domain.DownloadFailed
+	record.Error = errMsg
+	_ = p.store.Update(p.ctx, record)
 
 	p.publishRecord(downloadID, domain.DownloadFailed, events.TopicDownloadFailed)
 }
