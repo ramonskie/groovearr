@@ -1,4 +1,5 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import { useSearchParams } from "react-router-dom";
 import { Search } from "lucide-react";
 import {
   useLibraryArtists,
@@ -12,10 +13,21 @@ import AlbumDetailView from "./AlbumDetailView";
 import ScanButton from "./ScanButton";
 
 export default function LibraryPage() {
+  const [searchParams, setSearchParams] = useSearchParams();
+  const selectedArtistId: number | null = (() => {
+    const p = searchParams.get("artist");
+    if (!p) return null;
+    const n = parseInt(p, 10);
+    return isNaN(n) ? null : n;
+  })();
+  const selectedAlbumId: number | null = (() => {
+    const p = searchParams.get("album");
+    if (!p) return null;
+    const n = parseInt(p, 10);
+    return isNaN(n) ? null : n;
+  })();
   const [search, setSearch] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
-  const [selectedArtistId, setSelectedArtistId] = useState<number | null>(null);
-  const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear timer on unmount
@@ -38,23 +50,24 @@ export default function LibraryPage() {
   );
 
   const handleSelectArtist = useCallback((artistId: number) => {
-    setSelectedArtistId(artistId);
-    setSelectedAlbumId(null);
+    setSearchParams({ artist: String(artistId) });
     setSearch("");
     setDebouncedQuery("");
-  }, []);
+  }, [setSearchParams]);
 
   const handleBack = useCallback(() => {
     if (selectedAlbumId !== null) {
-      setSelectedAlbumId(null);
+      if (selectedArtistId === null) return;
+      setSearchParams({ artist: String(selectedArtistId) });
     } else {
-      setSelectedArtistId(null);
+      setSearchParams({});
     }
-  }, [selectedAlbumId]);
+  }, [selectedAlbumId, selectedArtistId, setSearchParams]);
 
   const handleSelectAlbum = useCallback((albumId: number) => {
-    setSelectedAlbumId(albumId);
-  }, []);
+    if (selectedArtistId === null) return;
+    setSearchParams({ artist: String(selectedArtistId), album: String(albumId) });
+  }, [selectedArtistId, setSearchParams]);
 
   // Artist list (list view)
   const artists = useLibraryArtists(

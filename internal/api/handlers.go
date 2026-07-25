@@ -1028,18 +1028,23 @@ func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Requ
 	byISRC := make(map[string]*domain.Track, len(libTracks))
 	for i := range libTracks {
 		t := &libTracks[i]
-		byTitle[strings.ToLower(t.Title)] = t
+		byTitle[normalizeKey(t.Title)] = t
 		if t.ISRC != "" {
 			byISRC[t.ISRC] = t
 		}
 	}
-	// Also build index from all artist tracks for ISRC matching across albums.
+	// Also index all artist tracks for cross-album matching (title + ISRC).
 	artistTracks, err := s.store.GetTracksByArtist(ctx, album.ArtistID)
 	if err != nil {
 		s.log.Warn("get tracks by artist failed", "artist_id", album.ArtistID, "error", err, "component", "api")
 	}
 	for i := range artistTracks {
 		t := &artistTracks[i]
+		// Only add to title index if not already present (album tracks take precedence).
+		titleKey := normalizeKey(t.Title)
+		if _, exists := byTitle[titleKey]; !exists {
+			byTitle[titleKey] = t
+		}
 		if t.ISRC != "" {
 			if _, exists := byISRC[t.ISRC]; !exists {
 				byISRC[t.ISRC] = t
@@ -1064,8 +1069,8 @@ func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Requ
 			entry.FileSize = libTrack.FileSize
 			entry.Bitrate = libTrack.Bitrate
 			entry.Format = formatFromPath(libTrack.FilePath)
-		} else if libTrack, ok := byTitle[strings.ToLower(dt.Title)]; ok {
-			// Fallback to title matching.
+		} else if libTrack, ok := byTitle[normalizeKey(dt.Title)]; ok {
+			// Fallback to normalized title matching.
 			entry.Downloaded = true
 			entry.LibraryTrackID = libTrack.ID
 			entry.FilePath = libTrack.FilePath
@@ -1226,12 +1231,25 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	}
 
 	coverPath := filepath.Join(albumDir, "cover.jpg")
-	if _, err := os.Stat(coverPath); os.IsNotExist(err) {
-		http.Error(w, "cover not found", http.StatusNotFound)
+	f, err := os.Open(coverPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("cover not found"))
+		} else {
+			s.log.Error("cover open failed", "path", coverPath, "error", err, "component", "api")
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	http.ServeFile(w, r, coverPath)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		s.log.Error("cover stat failed", "path", coverPath, "error", err, "component", "api")
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
+	http.ServeContent(w, r, "cover.jpg", fi.ModTime(), f)
 }
 
 // handleArtistImage serves the artist.jpg image from the artist's library directory.
@@ -1274,12 +1292,25 @@ func (s *Server) handleArtistImage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	imagePath := filepath.Join(artistDir, "artist.jpg")
-	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
-		http.Error(w, "artist image not found", http.StatusNotFound)
+	f, err := os.Open(imagePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			writeError(w, http.StatusNotFound, fmt.Errorf("artist image not found"))
+		} else {
+			s.log.Error("artist image open failed", "path", imagePath, "error", err, "component", "api")
+			writeError(w, http.StatusInternalServerError, err)
+		}
 		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=86400")
-	http.ServeFile(w, r, imagePath)
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		s.log.Error("artist image stat failed", "path", imagePath, "error", err, "component", "api")
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
+	http.ServeContent(w, r, "artist.jpg", fi.ModTime(), f)
 }
 
 // ─── Playlist handlers ────────────────────────────────────────────────
