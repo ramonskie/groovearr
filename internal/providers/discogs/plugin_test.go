@@ -668,6 +668,35 @@ func TestPlugin_EnrichTrack_NoMatch(t *testing.T) {
 	}
 }
 
+// ─── FlexInt ───────────────────────────────────────────────────────────────
+
+func TestFlexInt_UnmarshalInt(t *testing.T) {
+	var fi FlexInt
+	if err := json.Unmarshal([]byte("2001"), &fi); err != nil {
+		t.Fatalf("unmarshal int: %v", err)
+	}
+	if int(fi) != 2001 {
+		t.Errorf("got %d, want 2001", fi)
+	}
+}
+
+func TestFlexInt_UnmarshalString(t *testing.T) {
+	var fi FlexInt
+	if err := json.Unmarshal([]byte(`"2001"`), &fi); err != nil {
+		t.Fatalf("unmarshal string: %v", err)
+	}
+	if int(fi) != 2001 {
+		t.Errorf("got %d, want 2001", fi)
+	}
+}
+
+func TestFlexInt_UnmarshalInvalid(t *testing.T) {
+	var fi FlexInt
+	if err := json.Unmarshal([]byte("true"), &fi); err == nil {
+		t.Fatal("expected error for bool value")
+	}
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────────────
 
 func writeJSON(w http.ResponseWriter, v any) {

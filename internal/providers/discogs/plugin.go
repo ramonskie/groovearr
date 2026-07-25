@@ -142,7 +142,7 @@ func (p *Plugin) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 			ProviderName: "discogs",
 			ArtistName:   artistName,
 			Title:        r.Title,
-			Year:         r.Year,
+			Year:         int(r.Year),
 			CoverURL:     r.Thumb,
 			Type:         releaseType,
 		})
@@ -204,7 +204,7 @@ func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 			ProviderName: "discogs",
 			ArtistName:   artistName,
 			Title:        r.Title,
-			Year:         r.Year,
+			Year:         int(r.Year),
 			CoverURL:     r.Thumb,
 			Type:         releaseType,
 		})
@@ -286,7 +286,7 @@ func (p *Plugin) EnrichTrack(ctx context.Context, track *domain.Track) (*metadat
 	}
 	md := &metadata.TrackMetadata{}
 	if release.Year > 0 {
-		md.ReleaseDate = strconv.Itoa(release.Year)
+		md.ReleaseDate = strconv.Itoa(int(release.Year))
 	}
 	return md, nil
 }

@@ -22,6 +22,31 @@ const discogsBaseURL = "https://api.discogs.com"
 // Authenticated requests may use higher rates, but we stay conservative.
 const discogsAPIRate = 0.4
 
+// FlexInt handles Discogs JSON fields that are sometimes integers
+// and sometimes strings (e.g., "year" can be 2021 or "2021").
+type FlexInt int
+
+// UnmarshalJSON accepts both JSON numbers and JSON strings.
+func (f *FlexInt) UnmarshalJSON(data []byte) error {
+	// Try integer first.
+	var i int
+	if err := json.Unmarshal(data, &i); err == nil {
+		*f = FlexInt(i)
+		return nil
+	}
+	// Try string.
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		i, err := strconv.Atoi(s)
+		if err != nil {
+			return fmt.Errorf("FlexInt: invalid string %q: %w", s, err)
+		}
+		*f = FlexInt(i)
+		return nil
+	}
+	return fmt.Errorf("FlexInt: expected number or string, got %s", string(data))
+}
+
 // ArtistResult represents a Discogs artist search result.
 type ArtistResult struct {
 	ID       int    `json:"id"`
@@ -46,18 +71,18 @@ type ArtistImage struct {
 
 // ReleaseResult represents a minimal Discogs release from search or artist pages.
 type ReleaseResult struct {
-	ID     int    `json:"id"`
-	Title  string `json:"title"`
-	Year   int    `json:"year"`
-	Type   string `json:"type"` // "release" or "master"
-	Thumb  string `json:"thumb"`
-	Artist string `json:"artist"` // not always present in search results
+	ID     int     `json:"id"`
+	Title  string  `json:"title"`
+	Year   FlexInt `json:"year"`
+	Type   string  `json:"type"` // "release" or "master"
+	Thumb  string  `json:"thumb"`
+	Artist string  `json:"artist"` // not always present in search results
 }
 
 // ReleaseDetail is the full release object from GET /releases/{id}.
 type ReleaseDetail struct {
 	Title      string        `json:"title"`
-	Year       int           `json:"year"`
+	Year       FlexInt       `json:"year"`
 	ArtistName string        `json:"-"` // extracted from artists array
 	Tracklist  []TrackResult `json:"tracklist"`
 	Artists    []struct {
