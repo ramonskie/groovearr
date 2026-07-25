@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect, useCallback } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
 import { Search } from "lucide-react";
 import {
   useLibraryArtists,
@@ -8,12 +8,14 @@ import {
 } from "../../hooks/use-library";
 import ArtistsSection from "./ArtistsSection";
 import ArtistDetailView from "./ArtistDetailView";
+import AlbumDetailView from "./AlbumDetailView";
 import ScanButton from "./ScanButton";
 
 export default function LibraryPage() {
   const [search, setSearch] = useState("");
   const [debouncedQuery, setDebouncedQuery] = useState("");
   const [selectedArtistId, setSelectedArtistId] = useState<number | null>(null);
+  const [selectedAlbumId, setSelectedAlbumId] = useState<number | null>(null);
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Clear timer on unmount
@@ -37,12 +39,21 @@ export default function LibraryPage() {
 
   const handleSelectArtist = useCallback((artistId: number) => {
     setSelectedArtistId(artistId);
+    setSelectedAlbumId(null);
     setSearch("");
     setDebouncedQuery("");
   }, []);
 
   const handleBack = useCallback(() => {
-    setSelectedArtistId(null);
+    if (selectedAlbumId !== null) {
+      setSelectedAlbumId(null);
+    } else {
+      setSelectedArtistId(null);
+    }
+  }, [selectedAlbumId]);
+
+  const handleSelectAlbum = useCallback((albumId: number) => {
+    setSelectedAlbumId(albumId);
   }, []);
 
   // Artist list (list view)
@@ -54,6 +65,12 @@ export default function LibraryPage() {
   const artist = useLibraryArtist(selectedArtistId);
   const artistAlbums = useLibraryArtistAlbums(selectedArtistId);
   const artistTracks = useLibraryArtistTracks(selectedArtistId);
+
+  // Selected album (found in loaded artist albums).
+  const selectedAlbum = useMemo(
+    () => (artistAlbums.data ?? []).find((a) => a.id === selectedAlbumId) ?? null,
+    [artistAlbums.data, selectedAlbumId]
+  );
 
   return (
     <div className="flex flex-col gap-0">
@@ -92,7 +109,7 @@ export default function LibraryPage() {
       )}
 
       {/* Artist detail view */}
-      {selectedArtistId !== null && (
+      {selectedArtistId !== null && selectedAlbumId === null && (
         <ArtistDetailView
           artist={artist.data}
           albums={artistAlbums.data ?? []}
@@ -100,6 +117,16 @@ export default function LibraryPage() {
           isLoadingArtist={artist.isLoading}
           isLoadingAlbums={artistAlbums.isLoading}
           isLoadingTracks={artistTracks.isLoading}
+          onBack={handleBack}
+          onSelectAlbum={handleSelectAlbum}
+        />
+      )}
+
+      {/* Album detail view */}
+      {selectedArtistId !== null && selectedAlbumId !== null && selectedAlbum && (
+        <AlbumDetailView
+          album={selectedAlbum}
+          artistName={artist.data?.name ?? ""}
           onBack={handleBack}
         />
       )}

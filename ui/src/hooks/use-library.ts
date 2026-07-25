@@ -6,6 +6,7 @@ import {
   getLibraryArtist,
   getLibraryArtistAlbums,
   getLibraryArtistTracks,
+  getLibraryAlbumDiscovery,
   scanLibrary,
 } from "../api/client";
 
@@ -53,6 +54,15 @@ export function useLibraryArtistTracks(artistId: number | null) {
     queryKey: ["library", "artist", artistId, "tracks"] as const,
     queryFn: () => getLibraryArtistTracks(artistId!),
     enabled: artistId != null,
+  });
+}
+
+export function useLibraryAlbumDiscovery(albumId: number | null) {
+  return useQuery({
+    queryKey: ["library", "album", albumId, "discovery"] as const,
+    queryFn: () => getLibraryAlbumDiscovery(albumId!),
+    enabled: albumId != null,
+    staleTime: 5 * 60 * 1000, // cache discovery data for 5 minutes
   });
 }
 

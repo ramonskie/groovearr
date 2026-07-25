@@ -66,6 +66,7 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 		DiscNumber:  record.DiscNumber,
 		FilePath:    record.FilePath,
 		FileSize:    fi.Size(),
+		Bitrate:     record.Bitrate,
 		ISRC:        record.ISRC,
 	}
 

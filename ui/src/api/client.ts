@@ -32,6 +32,7 @@ import type {
   DiscoveryAlbum,
   DiscoveryTrack,
   DiscoveryAlbumDownloadResponse,
+  AlbumDiscoveryResponse,
   ApiError,
   QualityProfile,
   QualityProfileCreatePayload,
@@ -226,6 +227,14 @@ export function getLibraryArtistAlbums(artistId: number): Promise<Album[]> {
 
 export function getLibraryArtistTracks(artistId: number): Promise<Track[]> {
   return request<Track[]>(`/api/library/artists/${artistId}/tracks`);
+}
+
+export function getLibraryAlbumDiscovery(
+  albumId: number,
+): Promise<AlbumDiscoveryResponse> {
+  return request<AlbumDiscoveryResponse>(
+    `/api/library/albums/${albumId}/discovery`,
+  );
 }
 
 // ─── Playlists ─────────────────────────────────────────────────────

@@ -350,6 +350,22 @@ func (s *Store) migrate() error {
 		version = 5
 	}
 
+	// Version 6: album discovery cache for merged library/discovery track views.
+	if version < 6 {
+		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS album_discovery_cache (
+			album_id         INTEGER PRIMARY KEY,
+			provider_name    TEXT NOT NULL,
+			provider_album_id TEXT NOT NULL,
+			tracks_json      TEXT NOT NULL,
+			cached_at        TEXT NOT NULL DEFAULT (datetime('now')),
+			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
+		)`); err != nil {
+			s.log.Error("migration v6 exec failed", "error", err, "component", "lib_store")
+			return fmt.Errorf("migration v6: %w", err)
+		}
+		version = 6
+	}
+
 	// Record current version.
 	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
 		s.log.Error("migration: clear version failed", "error", err, "component", "lib_store")

@@ -12,6 +12,7 @@ interface ArtistDetailViewProps {
   isLoadingAlbums: boolean;
   isLoadingTracks: boolean;
   onBack: () => void;
+  onSelectAlbum: (albumId: number) => void;
 }
 
 /** Build album-title lookup map from albums list. */
@@ -35,11 +36,15 @@ function formatSize(bytes?: number): string {
   return `${gb.toFixed(1)} GB`;
 }
 
-function AlbumCard({ album }: { album: Album }) {
+function AlbumCard({ album, onSelect }: { album: Album; onSelect: (id: number) => void }) {
   const [imgError, setImgError] = useState(false);
 
   return (
-    <div className="rounded-lg border border-slate-800 bg-slate-900 transition-colors hover:border-slate-700">
+    <button
+      type="button"
+      onClick={() => onSelect(album.id)}
+      className="cursor-pointer rounded-lg border border-slate-800 bg-slate-900 text-left transition-colors hover:border-slate-700"
+    >
       <div className="relative aspect-square w-full overflow-hidden rounded-t-lg bg-slate-800">
         {!imgError ? (
           <img
@@ -63,7 +68,7 @@ function AlbumCard({ album }: { album: Album }) {
           <p className="mt-1 text-[11px] text-slate-500">{album.year}</p>
         )}
       </div>
-    </div>
+    </button>
   );
 }
 
@@ -75,6 +80,7 @@ export default function ArtistDetailView({
   isLoadingAlbums,
   isLoadingTracks,
   onBack,
+  onSelectAlbum,
 }: ArtistDetailViewProps) {
   const albumMap = buildAlbumMap(albums);
 
@@ -123,7 +129,7 @@ export default function ArtistDetailView({
         ) : (
           <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
             {albums.map((album) => (
-              <AlbumCard key={album.id} album={album} />
+              <AlbumCard key={album.id} album={album} onSelect={onSelectAlbum} />
             ))}
           </div>
         )}

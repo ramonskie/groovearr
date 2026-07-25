@@ -247,6 +247,24 @@ export interface DiscoveryAlbumDownloadResponse {
   errors: string[];
 }
 
+export interface DiscoveryTrackEntry {
+  title: string;
+  track_number: number;
+  duration_ms: number;
+  downloaded: boolean;
+  library_track_id?: number;
+  file_path?: string;
+  file_size?: number;
+  bitrate?: number;
+  format?: string;
+}
+
+export interface AlbumDiscoveryResponse {
+  provider?: string;
+  provider_album_id?: string;
+  tracks: DiscoveryTrackEntry[];
+}
+
 // ─── Downloads ─────────────────────────────────────────────────────
 
 export type DownloadState =

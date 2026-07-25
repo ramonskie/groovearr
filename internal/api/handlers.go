@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -131,6 +133,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
 	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
+	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
 
 	// Playlist routes.
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -837,6 +840,249 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = offset
 	writeJSON(w, http.StatusOK, albums)
+}
+
+// sqlDBProvider is satisfied by types that expose a *sql.DB (e.g. *sqlite.Store).
+type sqlDBProvider interface {
+	DB() *sql.DB
+}
+
+// DiscoveryTrackEntry is a track from discovery merged with library download status.
+type discoveryTrackEntry struct {
+	Title           string `json:"title"`
+	TrackNumber     int    `json:"track_number"`
+	DurationMs      int64  `json:"duration_ms"`
+	Downloaded      bool   `json:"downloaded"`
+	LibraryTrackID  int64  `json:"library_track_id,omitempty"`
+	FilePath        string `json:"file_path,omitempty"`
+	FileSize        int64  `json:"file_size,omitempty"`
+	Bitrate         int    `json:"bitrate,omitempty"`
+	Format          string `json:"format,omitempty"`
+}
+
+// albumDiscoveryResponse is the JSON payload for the discovery endpoint.
+type albumDiscoveryResponse struct {
+	Provider        string                 `json:"provider"`
+	ProviderAlbumID string                 `json:"provider_album_id"`
+	Tracks          []discoveryTrackEntry  `json:"tracks"`
+}
+
+// handleLibraryAlbumDiscovery searches discovery providers for an album's full
+// track list, caches the result, and returns tracks merged with library download status.
+func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Request) {
+	albumIDStr := r.PathValue("albumID")
+	albumID, err := strconv.ParseInt(albumIDStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid album ID"))
+		return
+	}
+
+	ctx := r.Context()
+
+	album, err := s.store.GetAlbum(ctx, albumID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if album == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("album not found"))
+		return
+	}
+
+	artist, err := s.store.GetArtist(ctx, album.ArtistID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if artist == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
+		return
+	}
+
+	// Try the cache first (requires concrete DB access).
+	var cachedProvider, cachedAlbumID, cachedTracksJSON, cachedAt string
+	if dbp, ok := s.store.(sqlDBProvider); ok {
+		err := dbp.DB().QueryRowContext(ctx,
+			`SELECT provider_name, provider_album_id, tracks_json, cached_at FROM album_discovery_cache WHERE album_id = ?`, albumID,
+		).Scan(&cachedProvider, &cachedAlbumID, &cachedTracksJSON, &cachedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("album discovery cache read failed", "album_id", albumID, "error", err, "component", "api")
+		}
+	}
+
+	var discoveryTracks []discovery.TrackInfo
+	if cachedTracksJSON != "" {
+		// Check cache TTL (24h).
+		if cachedAt != "" {
+			if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
+				if time.Since(t) > 24*time.Hour {
+					cachedTracksJSON = "" // expired
+				}
+			} else {
+				cachedTracksJSON = "" // unparseable timestamp = treat as expired
+			}
+		}
+	}
+	if cachedTracksJSON != "" {
+		// Cache hit — unmarshal cached tracks.
+		if uerr := json.Unmarshal([]byte(cachedTracksJSON), &discoveryTracks); uerr != nil {
+			s.log.Warn("album discovery cache corrupt, refetching", "album_id", albumID, "error", uerr, "component", "api")
+			discoveryTracks = nil
+			cachedProvider = ""
+			cachedAlbumID = ""
+		}
+	}
+
+	// Cache miss — search discovery providers.
+	if discoveryTracks == nil && s.discoveryReg != nil {
+		providers := s.discoveryReg.Any()
+		query := artist.Name + " " + album.Title
+		for _, p := range providers {
+			albums, serr := p.SearchAlbums(ctx, query, 5)
+			if serr != nil || len(albums) == 0 {
+				continue
+			}
+			// Find the album that best matches our artist + title.
+			var matched *discovery.AlbumResult
+			for i := range albums {
+				a := &albums[i]
+				if strings.EqualFold(a.ArtistName, artist.Name) && strings.EqualFold(a.Title, album.Title) {
+					matched = a
+					break
+				}
+			}
+			// Fallback: use first result if title matches but artist differs slightly.
+			if matched == nil {
+				for i := range albums {
+					a := &albums[i]
+					if strings.EqualFold(a.Title, album.Title) {
+						matched = a
+						break
+					}
+				}
+			}
+			if matched == nil {
+				continue
+			}
+
+			tracks, terr := p.GetAlbumTracks(ctx, matched.ProviderID)
+			if terr != nil || len(tracks) == 0 {
+				continue
+			}
+
+			discoveryTracks = tracks
+			cachedProvider = matched.ProviderName
+			cachedAlbumID = matched.ProviderID
+
+			// Persist to cache.
+			if dbp, ok := s.store.(sqlDBProvider); ok {
+				tracksJSON, jerr := json.Marshal(tracks)
+				if jerr == nil {
+					_, err := dbp.DB().ExecContext(ctx,
+						`INSERT OR REPLACE INTO album_discovery_cache (album_id, provider_name, provider_album_id, tracks_json, cached_at)
+						 VALUES (?, ?, ?, ?, ?)`,
+						albumID, matched.ProviderName, matched.ProviderID, string(tracksJSON),
+						time.Now().UTC().Format(time.RFC3339),
+					)
+					if err != nil {
+						s.log.Warn("album discovery cache write failed", "album_id", albumID, "error", err, "component", "api")
+					}
+				} else {
+					s.log.Warn("album discovery cache marshal failed", "album_id", albumID, "error", jerr, "component", "api")
+				}
+			}
+			break
+		}
+	}
+
+	if discoveryTracks == nil {
+		// No discovery data — return just library tracks as "downloaded".
+		libTracks, err := s.store.GetTracksByAlbum(ctx, albumID)
+		if err != nil {
+			s.log.Warn("get tracks by album failed", "album_id", albumID, "error", err, "component", "api")
+		}
+		entries := make([]discoveryTrackEntry, 0)
+		for _, t := range libTracks {
+			entries = append(entries, discoveryTrackEntry{
+				Title:          t.Title,
+				TrackNumber:    t.TrackNumber,
+				DurationMs:     int64(t.Duration),
+				Downloaded:     true,
+				LibraryTrackID: t.ID,
+				FilePath:       t.FilePath,
+				FileSize:       t.FileSize,
+				Bitrate:        t.Bitrate,
+				Format:         formatFromPath(t.FilePath),
+			})
+		}
+		writeJSON(w, http.StatusOK, albumDiscoveryResponse{Tracks: entries})
+		return
+	}
+
+	// Build library track index for merge.
+	libTracks, err := s.store.GetTracksByAlbum(ctx, albumID)
+	if err != nil {
+		s.log.Warn("get tracks by album failed", "album_id", albumID, "error", err, "component", "api")
+	}
+	byTitle := make(map[string]*domain.Track, len(libTracks))
+	byISRC := make(map[string]*domain.Track, len(libTracks))
+	for i := range libTracks {
+		t := &libTracks[i]
+		byTitle[strings.ToLower(t.Title)] = t
+		if t.ISRC != "" {
+			byISRC[t.ISRC] = t
+		}
+	}
+	// Also build index from all artist tracks for ISRC matching across albums.
+	artistTracks, err := s.store.GetTracksByArtist(ctx, album.ArtistID)
+	if err != nil {
+		s.log.Warn("get tracks by artist failed", "artist_id", album.ArtistID, "error", err, "component", "api")
+	}
+	for i := range artistTracks {
+		t := &artistTracks[i]
+		if t.ISRC != "" {
+			if _, exists := byISRC[t.ISRC]; !exists {
+				byISRC[t.ISRC] = t
+			}
+		}
+	}
+
+	// Merge discovery tracks with library status.
+	var entries []discoveryTrackEntry
+	for _, dt := range discoveryTracks {
+		entry := discoveryTrackEntry{
+			Title:       dt.Title,
+			TrackNumber: dt.TrackNumber,
+			DurationMs:  dt.DurationMs,
+		}
+
+		// Match by ISRC first (most reliable).
+		if libTrack, ok := byISRC[dt.ISRC]; ok && dt.ISRC != "" {
+			entry.Downloaded = true
+			entry.LibraryTrackID = libTrack.ID
+			entry.FilePath = libTrack.FilePath
+			entry.FileSize = libTrack.FileSize
+			entry.Bitrate = libTrack.Bitrate
+			entry.Format = formatFromPath(libTrack.FilePath)
+		} else if libTrack, ok := byTitle[strings.ToLower(dt.Title)]; ok {
+			// Fallback to title matching.
+			entry.Downloaded = true
+			entry.LibraryTrackID = libTrack.ID
+			entry.FilePath = libTrack.FilePath
+			entry.FileSize = libTrack.FileSize
+			entry.Bitrate = libTrack.Bitrate
+			entry.Format = formatFromPath(libTrack.FilePath)
+		}
+
+		entries = append(entries, entry)
+	}
+
+	resp := albumDiscoveryResponse{
+		Provider:        cachedProvider,
+		ProviderAlbumID: cachedAlbumID,
+		Tracks:          entries,
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
@@ -1826,4 +2072,36 @@ func noCache(next http.Handler) http.Handler {
 		w.Header().Set("Expires", "0")
 		next.ServeHTTP(w, r)
 	})
+}
+
+// formatFromPath extracts the audio format from a file extension.
+func formatFromPath(path string) string {
+	ext := strings.ToUpper(filepath.Ext(path))
+	switch ext {
+	case ".FLAC":
+		return "FLAC"
+	case ".MP3":
+		return "MP3"
+	case ".M4A":
+		return "M4A"
+	case ".ALAC":
+		return "ALAC"
+	case ".AAC":
+		return "AAC"
+	case ".OGG":
+		return "OGG"
+	case ".WAV":
+		return "WAV"
+	case ".AIF", ".AIFF":
+		return "AIFF"
+	case ".WMA":
+		return "WMA"
+	case ".OPUS":
+		return "OPUS"
+	default:
+		if ext != "" {
+			return strings.TrimPrefix(ext, ".")
+		}
+		return ""
+	}
 }
