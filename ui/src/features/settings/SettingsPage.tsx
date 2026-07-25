@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback } from "react";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSearchParams } from "react-router-dom";
@@ -29,10 +29,12 @@ type TabId = (typeof TABS)[number]["id"];
 const AUTO_SAVE_MS = 1000;
 
 export default function SettingsPage() {
-  const [searchParams] = useSearchParams();
-  const [activeTab, setActiveTab] = useState<TabId>(
-    searchParams.get("spotify") === "connected" ? "sources" : "general"
-  );
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab: TabId = (() => {
+    const fromParam = searchParams.get("tab");
+    if (fromParam && TABS.some((t) => t.id === fromParam)) return fromParam as TabId;
+    return searchParams.get("spotify") === "connected" ? "sources" : "general";
+  })();
 
   const { data: config, isLoading, error } = useConfig();
   const updateConfig = useUpdateConfig();
@@ -172,7 +174,14 @@ export default function SettingsPage() {
         <SubTabs
           tabs={TABS.map((t) => ({ id: t.id, label: t.label }))}
           activeTab={activeTab}
-          onTabChange={(id) => setActiveTab(id as TabId)}
+          onTabChange={(id) => {
+            setSearchParams((prev) => {
+              const next = new URLSearchParams(prev);
+              next.set("tab", id);
+              next.delete("spotify");
+              return next;
+            });
+          }}
           className="mb-6"
         />
 

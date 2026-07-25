@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback } from "react";
+import { useSearchParams } from "react-router-dom";
 import type { DownloadState } from "../../api/types";
 import {
   useDownloads,
@@ -44,7 +45,12 @@ function DownloadsPage() {
   useDownloadEvents();
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<Tab>("pending");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const activeTab: Tab = (() => {
+    const fromParam = searchParams.get("downloadTab");
+    if (fromParam === "pending" || fromParam === "finished") return fromParam;
+    return "pending";
+  })();
   const [showAllQueued, setShowAllQueued] = useState(false);
 
   // Track which succeeded downloads we have already triggered a scan for.
@@ -236,7 +242,13 @@ function DownloadsPage() {
                 ? "border-b-2 border-blue-500 text-white"
                 : "text-slate-400 hover:text-slate-300"
             }`}
-            onClick={() => setActiveTab(tab)}
+            onClick={() => {
+              setSearchParams((prev) => {
+                const next = new URLSearchParams(prev);
+                next.set("downloadTab", tab);
+                return next;
+              });
+            }}
           >
             {label}
             {count !== undefined && (

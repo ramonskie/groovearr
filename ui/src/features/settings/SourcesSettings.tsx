@@ -1,5 +1,5 @@
-import { useState } from "react";
 import { useSources } from "../../hooks/use-config";
+import { useSearchParams } from "react-router-dom";
 import Spinner from "../../components/Spinner";
 import SubTabs from "../../components/SubTabs";
 import SoulseekSection from "./SoulseekSection";
@@ -20,7 +20,12 @@ type TabId = (typeof TABS)[number]["id"];
 
 export default function SourcesSettings() {
   const { data: sources, isLoading } = useSources();
-  const [tab, setTab] = useState<TabId>("providers");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const tab: TabId = (() => {
+    const fromParam = searchParams.get("sourceTab");
+    if (fromParam && TABS.some((t) => t.id === fromParam)) return fromParam as TabId;
+    return "providers";
+  })();
 
   if (isLoading) {
     return (
@@ -42,7 +47,13 @@ export default function SourcesSettings() {
       <SubTabs
         tabs={TABS.map((t) => ({ id: t.id, label: t.label }))}
         activeTab={tab}
-        onTabChange={(id) => setTab(id as TabId)}
+        onTabChange={(id) => {
+          setSearchParams((prev) => {
+            const next = new URLSearchParams(prev);
+            next.set("sourceTab", id);
+            return next;
+          });
+        }}
         className="mb-4"
       />
 
