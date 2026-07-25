@@ -17,12 +17,15 @@ import DownloadItem from "./DownloadItem";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
-type Tab = "pending" | "finished";
+type Tab = "pending" | "finished" | "failed";
 
 const TERMINAL_STATES = new Set<DownloadState>([
   "imported",
-  "failed",
   "ignored",
+]);
+
+const FAILED_STATES = new Set<DownloadState>([
+  "failed",
 ]);
 
 // ─── Component ──────────────────────────────────────────────────────
@@ -48,7 +51,7 @@ function DownloadsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab: Tab = (() => {
     const fromParam = searchParams.get("downloadTab");
-    if (fromParam === "pending" || fromParam === "finished") return fromParam;
+    if (fromParam === "pending" || fromParam === "finished" || fromParam === "failed") return fromParam;
     return "pending";
   })();
   const [showAllQueued, setShowAllQueued] = useState(false);
@@ -157,10 +160,13 @@ function DownloadsPage() {
   // ─── Derived data ─────────────────────────────────────────────────
 
   const pendingDownloads =
-    downloads?.filter((d) => !TERMINAL_STATES.has(d.state)) ?? [];
+    downloads?.filter((d) => !TERMINAL_STATES.has(d.state) && !FAILED_STATES.has(d.state)) ?? [];
   const finishedDownloads =
     downloads?.filter((d) => TERMINAL_STATES.has(d.state)) ?? [];
+  const failedDownloads =
+    downloads?.filter((d) => FAILED_STATES.has(d.state)) ?? [];
   const hasFinished = finishedDownloads.length > 0;
+  const hasFailed = failedDownloads.length > 0;
 
   // ─── Loading state ────────────────────────────────────────────────
 
@@ -193,6 +199,7 @@ function DownloadsPage() {
 
   const pendingCount = pendingDownloads.length || undefined;
   const finishedCount = finishedDownloads.length || undefined;
+  const failedCount = failedDownloads.length || undefined;
 
   return (
     <div>
@@ -216,7 +223,7 @@ function DownloadsPage() {
             {sseStatus === "connected" ? "Live" : "Polling"}
           </span>
         </div>
-        {hasFinished && (
+        {hasFinished && activeTab !== "failed" && (
           <Button
             variant="ghost"
             size="sm"
@@ -233,6 +240,7 @@ function DownloadsPage() {
         {([
           ["pending", "Pending", pendingCount],
           ["finished", "Finished", finishedCount],
+          ["failed", "Failed", failedCount],
         ] as const).map(([tab, label, count]) => (
           <button
             key={tab}
@@ -357,7 +365,7 @@ function DownloadsPage() {
         );
       })()}
 
-      {/* Finished tab: terminal downloads */}
+      {/* Finished tab: imported + ignored downloads */}
       {activeTab === "finished" &&
         (hasFinished ? (
           <div>
@@ -374,6 +382,26 @@ function DownloadsPage() {
         ) : (
           <p className="py-16 text-center text-sm text-slate-500">
             No finished downloads
+          </p>
+        ))}
+
+      {/* Failed tab: failed downloads */}
+      {activeTab === "failed" &&
+        (hasFailed ? (
+          <div>
+            {failedDownloads.map((d) => (
+              <DownloadItem
+                key={d.id}
+                download={d}
+                onCancel={handleCancel}
+                onRetry={handleRetry}
+                isCancelling={cancellingId === d.id}
+              />
+            ))}
+          </div>
+        ) : (
+          <p className="py-16 text-center text-sm text-slate-500">
+            No failed downloads
           </p>
         ))}
     </div>
