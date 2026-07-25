@@ -130,6 +130,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
+	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
 
 	// Playlist routes.
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -813,107 +814,14 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 		artists = []domain.Artist{}
 	}
 
-	// Enrich artists without thumb_url from discovery providers.
-	// Runs asynchronously so it doesn't block the response; images appear on
-	// subsequent requests once cached in the database.
-	s.log.Info("enrich: starting background artist image enrichment", "component", "api")
-	go func() {
-		defer func() {
-			if r := recover(); r != nil {
-				s.log.Error("enrich artist images panicked", "recover", r, "component", "api")
-			}
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		defer cancel()
-		s.enrichArtistImages(ctx, artists)
-	}()
+	// Transform local image paths to API URLs for the frontend.
+	for i := range artists {
+		if artists[i].ThumbURL == "artist.jpg" {
+			artists[i].ThumbURL = fmt.Sprintf("/api/artist-image/%d", artists[i].ID)
+		}
+	}
 
 	writeJSON(w, http.StatusOK, artists)
-}
-
-// enrichArtistImages fills in missing artist thumb_url values by searching
-// discovery providers. Results are persisted to the store for future requests.
-// Uses Any() so partially-configured providers (e.g. Deezer without ARL) can
-// still serve public artist search data.
-func (s *Server) enrichArtistImages(ctx context.Context, artists []domain.Artist) {
-	if s.discoveryReg == nil {
-		s.log.Info("enrich artist images: no discovery registry", "component", "api")
-		return
-	}
-	providers := s.discoveryReg.Any()
-	if len(providers) == 0 {
-		s.log.Info("enrich artist images: no discovery-capable providers", "component", "api")
-		return
-	}
-
-	const maxEnrich = 20
-	enriched := 0
-	seen := make(map[int64]bool)
-	total := 0
-
-	for i := range artists {
-		if enriched >= maxEnrich {
-			break
-		}
-		if artists[i].ThumbURL != "" && !isPlaceholderImage(artists[i].ThumbURL) {
-			continue
-		}
-		total++
-		id := artists[i].ID
-		name := artists[i].Name
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-
-		// Try full name first, then primary artist name (first before comma/feat/&).
-		namesToTry := []string{name}
-		if primary := extractPrimaryArtist(name); primary != "" && primary != name {
-			namesToTry = append(namesToTry, primary)
-		}
-
-		var found bool
-		for _, tryName := range namesToTry {
-			if found {
-				break
-			}
-			for _, p := range providers {
-				results, err := p.SearchArtists(ctx, tryName, 1)
-				if err != nil {
-					s.log.Info("enrich: search failed",
-						"provider", p.Name(), "artist", tryName, "error", err, "component", "api")
-					continue
-				}
-				if len(results) == 0 {
-					s.log.Debug("enrich: no results",
-						"provider", p.Name(), "artist", tryName, "component", "api")
-					continue
-				}
-				if !strings.EqualFold(results[0].Name, tryName) && !strings.Contains(strings.ToLower(results[0].Name), strings.ToLower(tryName)) {
-					s.log.Debug("enrich: name mismatch",
-						"provider", p.Name(), "wanted", tryName, "got", results[0].Name, "component", "api")
-					continue
-				}
-				if results[0].ImageURL == "" || isPlaceholderImage(results[0].ImageURL) {
-					s.log.Info("enrich: no image URL",
-						"provider", p.Name(), "artist", tryName, "component", "api")
-					continue
-				}
-				if err := s.store.SetArtistThumbURL(ctx, id, results[0].ImageURL); err != nil {
-					s.log.Warn("failed to persist artist thumb_url",
-						"artist", name, "error", err, "component", "api")
-					continue
-				}
-				enriched++
-				s.log.Info("enriched artist image",
-					"artist", name, "provider", p.Name(), "component", "api")
-				found = true
-				break
-			}
-		}
-	}
-	s.log.Info("enrich artist images done",
-		"enriched", enriched, "total_missing", total, "component", "api")
 }
 
 func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
@@ -964,25 +872,7 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// isPlaceholderImage returns true if the URL is a known empty/default placeholder
-// from Deezer (MD5 of empty string) or other providers.
-func isPlaceholderImage(url string) bool {
-	return strings.Contains(url, "/artist/d41d8cd98f00b204e9800998ecf8427e/")
-}
 
-// extractPrimaryArtist returns the first artist from a comma/ampersand-separated
-// or featured-artist string. Handles non-breaking spaces (\u00a0) commonly found in
-// audio file metadata. Returns empty if no split is needed.
-func extractPrimaryArtist(name string) string {
-	// Replace non-breaking spaces with regular spaces for consistent splitting.
-	name = strings.ReplaceAll(name, "\u00a0", " ")
-	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
-		if idx := strings.Index(name, sep); idx > 0 {
-			return strings.TrimSpace(name[:idx])
-		}
-	}
-	return ""
-}
 
 func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("artistID")
@@ -999,6 +889,9 @@ func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 	if artist == nil {
 		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
 		return
+	}
+	if artist.ThumbURL == "artist.jpg" {
+		artist.ThumbURL = fmt.Sprintf("/api/artist-image/%d", artist.ID)
 	}
 	writeJSON(w, http.StatusOK, artist)
 }
@@ -1093,6 +986,54 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	http.ServeFile(w, r, coverPath)
+}
+
+// handleArtistImage serves the artist.jpg image from the artist's library directory.
+func (s *Server) handleArtistImage(w http.ResponseWriter, r *http.Request) {
+	artistIDStr := r.PathValue("artistID")
+	artistID, err := strconv.ParseInt(artistIDStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
+		return
+	}
+
+	ctx := r.Context()
+	artist, err := s.store.GetArtist(ctx, artistID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if artist == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
+		return
+	}
+
+	cfg := s.cfg.Get()
+	var artistDir string
+
+	// Try to find the artist directory from existing tracks.
+	tracks, _ := s.store.GetTracksByArtist(ctx, artistID)
+	if len(tracks) > 0 && tracks[0].FilePath != "" {
+		// Tracks are stored as {artist}/{album}/track.ext, so parent-of-parent = artist dir.
+		artistDir = filepath.Dir(filepath.Dir(tracks[0].FilePath))
+	} else {
+		// Fallback: construct from library root + artist name.
+		artistDir = filepath.Join(cfg.Library.LibraryPath, artist.Name)
+	}
+
+	// Defense-in-depth: ensure resolved path stays within library root.
+	if cleanDir, cleanRoot := filepath.Clean(artistDir), filepath.Clean(cfg.Library.LibraryPath); !strings.HasPrefix(cleanDir, cleanRoot+string(os.PathSeparator)) && cleanDir != cleanRoot {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
+	imagePath := filepath.Join(artistDir, "artist.jpg")
+	if _, err := os.Stat(imagePath); os.IsNotExist(err) {
+		http.Error(w, "artist image not found", http.StatusNotFound)
+		return
+	}
+	w.Header().Set("Cache-Control", "public, max-age=86400")
+	http.ServeFile(w, r, imagePath)
 }
 
 // ─── Playlist handlers ────────────────────────────────────────────────

@@ -8,8 +8,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/tagging"
@@ -19,6 +21,7 @@ import (
 type enrichmentStore interface {
 	GetTrack(ctx context.Context, id int64) (*domain.Track, error)
 	GetArtist(ctx context.Context, id int64) (*domain.Artist, error)
+	SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error
 	GetAlbum(ctx context.Context, id int64) (*domain.Album, error)
 	GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error)
 	UpsertTrack(ctx context.Context, track *domain.Track) (int64, error)
@@ -31,26 +34,33 @@ type enrichmentStore interface {
 type MetadataEnrichmentHandler struct {
 	log           *slog.Logger
 	registry      *metadata.Registry
+	discoveryReg  *discovery.Registry
 	providerOrder []string // priority order for provider queries
 	libStore      enrichmentStore
 	httpClient    *http.Client
 	tagger        *tagging.Tagger
+
+	enrichMu  sync.Mutex
+	enriching map[int64]chan struct{} // artistID → completion signal for dedup
 }
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
 // metadata providers and applies their results to the library.
-// libStore can be any implementation satisfying the enrichmentStore interface
-// (e.g., library.Store from internal/library).
-func NewMetadataEnrichmentHandler(registry *metadata.Registry, libStore enrichmentStore, logger *slog.Logger) *MetadataEnrichmentHandler {
+// discoveryReg provides discovery providers for artist image enrichment
+// (Deezer, Spotify, etc.). libStore can be any implementation satisfying
+// the enrichmentStore interface (e.g., library.Store from internal/library).
+func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *discovery.Registry, libStore enrichmentStore, logger *slog.Logger) *MetadataEnrichmentHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &MetadataEnrichmentHandler{
-		log:        logger,
-		registry:   registry,
-		libStore:   libStore,
-		httpClient: &http.Client{Timeout: 30 * time.Second},
-		tagger:     tagging.New(logger),
+		log:          logger,
+		registry:     registry,
+		discoveryReg: discoveryReg,
+		libStore:     libStore,
+		httpClient:   &http.Client{Timeout: 30 * time.Second},
+		tagger:       tagging.New(logger),
+		enriching:    make(map[int64]chan struct{}),
 	}
 }
 
@@ -213,6 +223,13 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.D
 		}
 	}
 
+	// Enrich artist image from discovery providers (Deezer, Spotify, etc.).
+	// Runs once after metadata providers; discovery providers have access to
+	// public artist search APIs that return images.
+	if artist.ThumbURL == "" && h.discoveryReg != nil {
+		h.enrichArtistImage(ctx, artist, track)
+	}
+
 	// ── Sync thumb_url with on-disk cover (run once after all providers) ─
 	// The CoverArtHandler (step 3) may have already downloaded cover.jpg,
 	// but album didn't exist in the library yet at that point. Ensure
@@ -315,13 +332,161 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 	return
 }
 
+// downloadArtistImageIfMissing downloads an artist image from result.ImageURL
+// (or ThumbURL as fallback) to artist.jpg in the artist directory.
+// Skips if the file already exists on disk.
+func (h *MetadataEnrichmentHandler) downloadArtistImageIfMissing(ctx context.Context, artist *domain.Artist, track *domain.Track, result *metadata.ArtistImageResult) {
+	if result == nil {
+		return
+	}
+
+	// Determine artist directory (parent of album directory).
+	artistDir := filepath.Dir(filepath.Dir(track.FilePath))
+	artistPath := filepath.Join(artistDir, "artist.jpg")
+
+	// Don't overwrite existing images.
+	if _, err := os.Stat(artistPath); err == nil {
+		return
+	}
+
+	url := result.ImageURL
+	if url == "" {
+		url = result.ThumbURL
+	}
+	if url == "" {
+		return
+	}
+
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+	if err != nil {
+		h.log.Error("create artist image request failed", "url", url, "error", err, "component", "enrichment")
+		return
+	}
+
+	resp, err := h.httpClient.Do(req)
+	if err != nil {
+		h.log.Warn("fetch artist image failed", "artist", artist.Name, "url", url, "error", err, "component", "enrichment")
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return
+	}
+
+	f, err := os.Create(artistPath)
+	if err != nil {
+		h.log.Warn("create artist image file failed", "path", artistPath, "error", err, "component", "enrichment")
+		return
+	}
+	defer f.Close()
+
+	if _, err := io.Copy(f, resp.Body); err != nil {
+		h.log.Warn("write artist image failed", "path", artistPath, "error", err, "component", "enrichment")
+		os.Remove(artistPath) // clean up partial file
+		return
+	}
+
+	// Persist the thumb URL so downstream consumers know the image exists.
+	if err := h.libStore.SetArtistThumbURL(ctx, artist.ID, "artist.jpg"); err != nil {
+		h.log.Warn("set artist thumb url failed", "artist_id", artist.ID, "error", err, "component", "enrichment")
+		os.Remove(artistPath) // clean up so next import can retry
+		return
+	}
+	artist.ThumbURL = "artist.jpg"
+}
+
+// enrichArtistImage tries to find and download an artist image from discovery
+// providers (Deezer, Spotify, etc.). Runs after metadata enrichment so it only
+// fires when the artist still has no thumb_url.
+// Uses an in-memory dedup map so concurrent imports of the same artist only
+// call discovery APIs once — subsequent goroutines wait for the first to finish.
+func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artist *domain.Artist, track *domain.Track) {
+	// Acquire or wait: deduplicate concurrent enrichment of the same artist.
+	h.enrichMu.Lock()
+	if ch, ok := h.enriching[artist.ID]; ok {
+		h.enrichMu.Unlock()
+		<-ch
+		return
+	}
+	ch := make(chan struct{})
+	h.enriching[artist.ID] = ch
+	h.enrichMu.Unlock()
+
+	defer func() {
+		h.enrichMu.Lock()
+		delete(h.enriching, artist.ID)
+		h.enrichMu.Unlock()
+		close(ch)
+	}()
+
+	h.enrichArtistImageLocked(ctx, artist, track)
+}
+
+// enrichArtistImageLocked runs the actual discovery provider search and download.
+// Caller must hold the per-artist dedup slot via enrichArtistImage.
+func (h *MetadataEnrichmentHandler) enrichArtistImageLocked(ctx context.Context, artist *domain.Artist, track *domain.Track) {
+	providers := h.discoveryReg.Any()
+	if len(providers) == 0 {
+		return
+	}
+
+	namesToTry := []string{artist.Name}
+	if primary := primaryArtist(artist.Name); primary != "" && primary != artist.Name {
+		namesToTry = append(namesToTry, primary)
+	}
+
+	for _, tryName := range namesToTry {
+		for _, p := range providers {
+			results, err := p.SearchArtists(ctx, tryName, 1)
+			if err != nil {
+				h.log.Debug("discovery artist search failed",
+					"provider", p.Name(), "artist", tryName, "error", err, "component", "enrichment")
+				continue
+			}
+			if len(results) == 0 || results[0].ImageURL == "" {
+				continue
+			}
+			// Filter out known placeholder images (e.g., Deezer's MD5-of-empty-string).
+			if isPlaceholderImage(results[0].ImageURL) {
+				continue
+			}
+			if !strings.EqualFold(results[0].Name, tryName) && !strings.Contains(strings.ToLower(results[0].Name), strings.ToLower(tryName)) {
+				continue
+			}
+
+			imgResult := &metadata.ArtistImageResult{
+				ImageURL: results[0].ImageURL,
+				Source:   p.Name(),
+			}
+			h.downloadArtistImageIfMissing(ctx, artist, track, imgResult)
+			if artist.ThumbURL != "" {
+				return // found and persisted
+			}
+		}
+	}
+}
+
 // Compile-time interface check.
 var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
 
-// primaryArtist returns the first segment before a comma (e.g., "The Moon, DJ Ghost" → "The Moon").
+// primaryArtist returns the primary artist name by stripping featured/collaboration
+// suffixes. Handles non-breaking spaces (\u00a0) commonly found in audio file metadata
+// and multiple separator patterns: ", ", " & ", " feat. ", " vs. ", " x ".
+// Returns the original name if no separator is found.
 func primaryArtist(artist string) string {
-	if idx := strings.Index(artist, ","); idx > 0 {
-		return strings.TrimSpace(artist[:idx])
+	// Normalize non-breaking spaces.
+	name := strings.ReplaceAll(artist, "\u00a0", " ")
+	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
+		if idx := strings.Index(name, sep); idx > 0 {
+			return strings.TrimSpace(name[:idx])
+		}
 	}
 	return artist
+}
+
+// isPlaceholderImage returns true for known empty/default placeholder URLs
+// from providers like Deezer (MD5 of empty string).
+func isPlaceholderImage(url string) bool {
+	return strings.Contains(url, "/artist/d41d8cd98f00b204e9800998ecf8427e/")
 }

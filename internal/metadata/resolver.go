@@ -143,10 +143,17 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 	return result, nil
 }
 
-// primaryArtist returns the first segment before a comma (e.g., "The Moon, DJ Ghost" → "The Moon").
+// primaryArtist returns the primary artist name by stripping featured/collaboration
+// suffixes. Handles non-breaking spaces (\u00a0) commonly found in audio file metadata
+// and multiple separator patterns: ", ", " & ", " feat. ", " vs. ", " x ".
+// Returns the original name if no separator is found.
 func primaryArtist(artist string) string {
-	if idx := strings.Index(artist, ","); idx > 0 {
-		return strings.TrimSpace(artist[:idx])
+	// Normalize non-breaking spaces.
+	name := strings.ReplaceAll(artist, "\u00a0", " ")
+	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
+		if idx := strings.Index(name, sep); idx > 0 {
+			return strings.TrimSpace(name[:idx])
+		}
 	}
 	return artist
 }

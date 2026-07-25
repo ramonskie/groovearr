@@ -147,7 +147,7 @@ func main() {
 	folderTemplate, libraryRoot := renamerCfg()
 	renamer := library.NewRenamer(folderTemplate, libraryRoot, mainLog)
 
-	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, libStore, mainLog)
+	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, mainLog)
 	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
 
 	// SSE hub — broadcasts real-time download progress to connected clients.
