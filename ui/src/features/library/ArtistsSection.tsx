@@ -28,10 +28,10 @@ function ArtistCard({
     <button
       type="button"
       onClick={() => onSelect(artist.id)}
-      className="group cursor-pointer rounded-lg border border-slate-800 bg-slate-900 text-left transition-colors hover:border-slate-700"
+      className="group flex cursor-pointer flex-col items-center gap-2 rounded-lg p-2 text-center transition-colors hover:bg-slate-800/50"
     >
-      {/* Artist image or letter avatar */}
-      <div className="relative aspect-square w-full overflow-hidden rounded-t-lg" style={{ backgroundColor: bgColor }}>
+      {/* Circular artist image or letter avatar */}
+      <div className="aspect-square w-full overflow-hidden rounded-full" style={{ backgroundColor: bgColor }}>
         {artist.thumb_url && !imgError ? (
           <img
             src={artist.thumb_url}
@@ -42,24 +42,17 @@ function ArtistCard({
           />
         ) : (
           <div className="flex h-full w-full items-center justify-center">
-            <span className="select-none text-4xl font-bold" style={{ color: textColor }}>
+            <span className="select-none text-3xl font-bold" style={{ color: textColor }}>
               {letter}
             </span>
           </div>
         )}
       </div>
 
-      {/* Metadata */}
-      <div className="p-3">
-        <p className="truncate text-sm font-medium text-white" title={artist.name}>
-          {artist.name}
-        </p>
-        {artist.genres && artist.genres.length > 0 && (
-          <p className="mt-1 truncate text-xs text-slate-500">
-            {artist.genres.slice(0, 3).join(", ")}
-          </p>
-        )}
-      </div>
+      {/* Name */}
+      <p className="w-full truncate text-sm font-medium text-white" title={artist.name}>
+        {artist.name}
+      </p>
     </button>
   );
 }
