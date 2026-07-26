@@ -22,7 +22,9 @@ func (f *factory) Name() string        { return pluginName }
 func (f *factory) DisplayName() string { return displayName }
 
 // Capabilities returns the capability domains this plugin provides.
-func (f *factory) Capabilities() []string { return []string{"discovery", "metadata"} }
+// Discogs is metadata-only — search API returns no images and the
+// 25 req/min unauthenticated rate limit makes discovery browsing impractical.
+func (f *factory) Capabilities() []string { return []string{"metadata"} }
 
 // Create builds a Discogs plugin from raw JSON config and runtime resources.
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {

@@ -18,8 +18,8 @@ import (
 
 const discogsBaseURL = "https://api.discogs.com"
 
-// Discogs API rate limit: 0.4 req/s (24/min for unauthenticated requests).
-// Authenticated requests may use higher rates, but we stay conservative.
+// Discogs API rate limit: 0.4 req/s (~24/min, within unauthenticated limit of 25/min).
+// Authenticated requests allow 60/min; bump if a personal access token is configured.
 const discogsAPIRate = 0.4
 
 // FlexInt handles Discogs JSON fields that are sometimes integers

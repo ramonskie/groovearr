@@ -16,8 +16,8 @@ type Config struct {
 	Sources       map[string]json.RawMessage `json:"sources"`
 	Library       LibraryConfig              `json:"library"`
 	Auth          AuthConfig                 `json:"auth"`
-	MetadataOrder []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
-	DownloadOrder []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
+	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
+	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
 }
 
 // LibraryConfig holds music library paths.
@@ -52,8 +52,8 @@ var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 func DefaultConfig() Config {
 	return Config{
 		Sources:       make(map[string]json.RawMessage),
-		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
-		DownloadOrder: []string{"soulseek", "deezer"},
+		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
+		DownloadOrder:  []string{"soulseek", "deezer"},
 		Library: LibraryConfig{
 			DownloadPath:      "./downloads",
 			LibraryPath:       "./music",

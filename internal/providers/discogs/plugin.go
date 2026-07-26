@@ -17,8 +17,8 @@ const pluginName = "discogs"
 const displayName = "Discogs"
 
 // Compile-time interface checks.
-var _ discovery.Provider = (*Plugin)(nil)
 var _ metadata.Provider = (*Plugin)(nil)
+var _ discovery.Provider = (*Plugin)(nil) // for direct ?provider=discogs lookups
 
 // Plugin implements discovery.Provider for Discogs metadata browsing.
 type Plugin struct {
@@ -73,13 +73,17 @@ func (p *Plugin) CapabilityStatus() map[string]string {
 	if p.Connected() {
 		s = "connected"
 	}
-	return map[string]string{"discovery": s, "metadata": s}
+	return map[string]string{"metadata": s}
 }
 
-// ─── discovery.Provider ───────────────────────────────────────────────
+// ─── Discovery methods ────────────────────────────────────────────────
+// These implement discovery.Provider for direct lookups (e.g. via
+// ?provider=discogs), but the factory omits "discovery" capability
+// to exclude Discogs from multi-provider parallel search queries.
 
 // SearchArtists searches for artists by name on Discogs.
-// If search results lack images, fetches full artist detail as fallback.
+// Images come from search results directly; no fallback to avoid
+// rate-limit exhaustion (unauthenticated: 25 req/min).
 func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]discovery.ArtistSummary, error) {
 	artists, err := p.client.SearchArtists(ctx, query, limit)
 	if err != nil {
@@ -92,24 +96,11 @@ func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]
 		if imageURL == "" && a.Thumb != "" {
 			imageURL = a.Thumb
 		}
-		// Fallback: fetch full artist detail for better images.
-		if imageURL == "" {
-			detail, detailErr := p.client.GetArtist(ctx, a.ID)
-			if detailErr != nil {
-				p.log.Debug("discogs get artist image fallback failed",
-					"artist", a.Name, "error", detailErr, "component", "discogs")
-			} else if detail != nil && len(detail.Images) > 0 {
-				// Prefer uri150 (thumbnail), fall back to full uri.
-				imageURL = detail.Images[0].URI150
-				if imageURL == "" {
-					imageURL = detail.Images[0].URI
-				}
-			}
-		}
 		out[i] = discovery.ArtistSummary{
-			ProviderID: strconv.Itoa(a.ID),
-			Name:       a.Name,
-			ImageURL:   imageURL,
+			ProviderID:   strconv.Itoa(a.ID),
+			ProviderName: "discogs",
+			Name:         a.Name,
+			ImageURL:     imageURL,
 		}
 	}
 	return out, nil

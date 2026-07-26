@@ -90,9 +90,6 @@ func TestPlugin_CapabilityStatus_Configured(t *testing.T) {
 	defer cleanup()
 
 	status := p.CapabilityStatus()
-	if status["discovery"] != "configured" {
-		t.Errorf("discovery status = %q, want configured", status["discovery"])
-	}
 	if status["metadata"] != "configured" {
 		t.Errorf("metadata status = %q, want configured", status["metadata"])
 	}
@@ -107,9 +104,6 @@ func TestPlugin_CapabilityStatus_Connected(t *testing.T) {
 
 	_ = p.CheckConnection(context.Background())
 	status := p.CapabilityStatus()
-	if status["discovery"] != "connected" {
-		t.Errorf("discovery status = %q, want connected", status["discovery"])
-	}
 	if status["metadata"] != "connected" {
 		t.Errorf("metadata status = %q, want connected", status["metadata"])
 	}

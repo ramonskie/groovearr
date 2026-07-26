@@ -52,8 +52,8 @@ func TestFactoryName(t *testing.T) {
 			hasMetadata = true
 		}
 	}
-	if !hasDiscovery {
-		t.Error("capabilities missing 'discovery'")
+	if hasDiscovery {
+		t.Error("capabilities should not include 'discovery'")
 	}
 	if !hasMetadata {
 		t.Error("capabilities missing 'metadata'")
