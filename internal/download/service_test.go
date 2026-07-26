@@ -51,6 +51,14 @@ func (m *mockStore) Update(ctx context.Context, r *domain.DownloadRecord) error 
 	existing.Error = r.Error
 	existing.RetryCount = r.RetryCount
 	existing.RetryAfter = r.RetryAfter
+	existing.SourceName = r.SourceName
+	existing.Filename = r.Filename
+	existing.Bitrate = r.Bitrate
+	existing.Format = r.Format
+	existing.Username = r.Username
+	existing.Artist = r.Artist
+	existing.Title = r.Title
+	existing.Album = r.Album
 	return nil
 }
 
@@ -740,6 +748,7 @@ func TestManualRetryResetsRetryCount(t *testing.T) {
 	if rec.State != domain.DownloadQueued {
 		t.Errorf("state = %q, want queued", rec.State)
 	}
+
 	// Queue() already submitted once, Retry() submits again. Verify ID present.
 	found := false
 	for _, sid := range pool.submitted() {
@@ -1361,5 +1370,181 @@ func TestRecoverOrphansResolvedQueuedStillDispatched(t *testing.T) {
 	submitted := pool.submitted()
 	if len(submitted) != 1 || submitted[0] != "r-1" {
 		t.Errorf("submitted = %v, want [r-1] (only resolved records dispatched)", submitted)
+	}
+}
+
+// ─── Retry: async source resolution ──────────────────────────────────
+
+func TestResolveRetrySourcePopulatesFields(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&mockPlugin{
+		name: "soulseek", display: "Soulseek", configured: true, connected: true,
+		searchResults: []domain.TrackResult{
+			{SearchResult: domain.SearchResult{
+				Filename: "found.flac", Size: 999, Bitrate: 320, Quality: "mp3", Username: "peer2",
+			}, Title: "Title", Artist: "Artist"},
+		},
+	})
+
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+	svc.SetRegistry(reg)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer1", "old.flac", 100, DownloadMeta{
+		Artist: "Artist", Title: "Title",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+
+	rec, _ := store.Get(context.Background(), id)
+
+	// The test record must be in failed state with metadata for the search.
+	rec.State = domain.DownloadFailed
+	rec.Artist = "Artist"
+	rec.Title = "Title"
+
+	svc.resolveRetrySource(context.Background(), rec)
+
+	if rec.Filename != "found.flac" {
+		t.Errorf("Filename = %q, want %q", rec.Filename, "found.flac")
+	}
+	if rec.Size != 999 {
+		t.Errorf("Size = %d, want 999", rec.Size)
+	}
+	if rec.Bitrate != 320 {
+		t.Errorf("Bitrate = %d, want 320", rec.Bitrate)
+	}
+	if rec.Format != "mp3" {
+		t.Errorf("Format = %q, want %q", rec.Format, "mp3")
+	}
+	if rec.Username != "peer2" {
+		t.Errorf("Username = %q, want %q", rec.Username, "peer2")
+	}
+}
+
+func TestResolveRetrySourceNoResultsKeepsOriginalSource(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&mockPlugin{
+		name: "soulseek", display: "Soulseek", configured: true, connected: true,
+		searchResults: nil, // no results
+	})
+
+	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger(), nil)
+	svc.SetRegistry(reg)
+
+	rec := &domain.DownloadRecord{
+		ID: "test-1", SourceName: "soulseek", Filename: "old.flac",
+		Artist: "Artist", Title: "Title", State: domain.DownloadFailed,
+	}
+
+	svc.resolveRetrySource(context.Background(), rec)
+
+	if rec.Filename != "old.flac" {
+		t.Errorf("Filename = %q, want %q (original preserved when search finds nothing)", rec.Filename, "old.flac")
+	}
+}
+
+func TestResolveAndSubmitSuccess(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&mockPlugin{
+		name: "soulseek", display: "Soulseek", configured: true, connected: true,
+		searchResults: []domain.TrackResult{
+			{SearchResult: domain.SearchResult{
+				Filename: "found.flac", Size: 888, Bitrate: 320, Quality: "mp3", Username: "peer2",
+			}, Title: "Title", Artist: "Artist"},
+		},
+	})
+
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+	svc.SetRegistry(reg)
+	// Manually add retryingIDs guard so the resolveAndSubmit dehisc can clean it up.
+	svc.retryingMu.Lock()
+	svc.retryingIDs["test-1"] = struct{}{}
+	svc.retryingMu.Unlock()
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "test-1", SourceName: "soulseek", Filename: "old.flac",
+		Artist: "Artist", Title: "Title", State: domain.DownloadQueued,
+	})
+
+	rec, _ := store.Get(context.Background(), "test-1")
+
+	svc.resolveAndSubmit(rec, retryOriginalSnap{})
+
+	// Verify source fields were updated in the store.
+	stored, _ := store.Get(context.Background(), "test-1")
+	if stored.Filename != "found.flac" {
+		t.Errorf("stored Filename = %q, want %q", stored.Filename, "found.flac")
+	}
+
+	// Verify submitted to worker pool.
+	submitted := pool.submitted()
+	if len(submitted) != 1 || submitted[0] != "test-1" {
+		t.Errorf("submitted = %v, want [test-1]", submitted)
+	}
+
+	// Verify guard was removed.
+	svc.retryingMu.Lock()
+	_, guarded := svc.retryingIDs["test-1"]
+	svc.retryingMu.Unlock()
+	if guarded {
+		t.Error("retryingIDs guard not cleaned up after resolveAndSubmit")
+	}
+}
+
+func TestResolveAndSubmitNoSourceTransitionsToFailed(t *testing.T) {
+	reg := NewRegistry()
+	reg.Register(&mockPlugin{
+		name: "soulseek", display: "Soulseek", configured: true, connected: true,
+		searchResults: nil, // no results
+	})
+
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+	svc.SetRegistry(reg)
+	svc.retryingMu.Lock()
+	svc.retryingIDs["test-2"] = struct{}{}
+	svc.retryingMu.Unlock()
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "test-2", SourceName: "soulseek", Filename: "",
+		Artist: "Artist", Title: "Title", State: domain.DownloadQueued,
+	})
+
+	rec, _ := store.Get(context.Background(), "test-2")
+
+	svc.resolveAndSubmit(rec, retryOriginalSnap{})
+
+	stored, _ := store.Get(context.Background(), "test-2")
+	if stored.State != domain.DownloadFailed {
+		t.Errorf("state = %q, want %q", stored.State, domain.DownloadFailed)
+	}
+	if stored.Error == "" {
+		t.Error("expected error message on resolution failure")
+	}
+	if len(pool.submitted()) != 0 {
+		t.Errorf("should not submit to pool on resolution failure, got %d submits", len(pool.submitted()))
+	}
+}
+
+func TestFailRetrySetsFailed(t *testing.T) {
+	store := newMockStore()
+	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "test-3", State: domain.DownloadQueued,
+	})
+
+	rec, _ := store.Get(context.Background(), "test-3")
+	svc.failRetry(context.Background(), rec, "something went wrong")
+
+	stored, _ := store.Get(context.Background(), "test-3")
+	if stored.State != domain.DownloadFailed {
+		t.Errorf("state = %q, want %q", stored.State, domain.DownloadFailed)
+	}
+	if stored.Error != "something went wrong" {
+		t.Errorf("error = %q, want %q", stored.Error, "something went wrong")
 	}
 }

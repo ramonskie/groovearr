@@ -130,6 +130,11 @@ func main() {
 	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog, workerPool)
 	downloadSvc.SetRegistry(registry)
 
+	// Quality profile store (SQLite) — created early so DownloadService
+	// can use it for search resolution during retries.
+	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
+	downloadSvc.SetQualityProfileStore(qualityProfileStore)
+
 	// Build the import handler chain for completed downloads.
 	renamerCfg := func() (template, root string) {
 		c := cfg.Get()
@@ -170,9 +175,6 @@ func main() {
 		download.NewPlaylistLinkerHandler(libStore, mainLog),
 		sseNotifier,
 	)
-
-	// Quality profile store (SQLite).
-	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
 
 	// Playlist service — auto-register plugins that provide playlist sources.
 	playlistReg := playlist.NewRegistry()

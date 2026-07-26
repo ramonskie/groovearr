@@ -10,6 +10,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/quality"
 )
 
 // WorkerPool dispatches download tasks to workers for execution.
@@ -42,15 +43,33 @@ type DownloadMeta struct {
 	Format      string // "flac", "mp3", etc.
 }
 
+// retryOriginalSnap captures original source fields before they are cleared
+// for the UI reset. Used to restore the original source on search failure.
+type retryOriginalSnap struct {
+	sourcename string
+	filename   string
+	size       int64
+	bitrate    int
+	format     string
+	username   string
+}
+
 // DownloadService orchestrates the download lifecycle: queueing, status
 // tracking, cancellation, retry, and worker pool dispatch.
 type DownloadService struct {
-	log        *slog.Logger
-	store      DownloadStore
-	bus        events.IEventAggregator
-	workerPool WorkerPool
-	registry   *Registry // needed for pending source resolution
-	mu         sync.Mutex
+	log                 *slog.Logger
+	store               DownloadStore
+	bus                 events.IEventAggregator
+	workerPool          WorkerPool
+	registry            *Registry // needed for pending source resolution
+	qualityProfileStore quality.ProfileStore
+	mu                  sync.Mutex
+
+	// retryingIDs tracks download IDs currently awaiting retry source
+	// resolution in background goroutines. The dispatcher skips these
+	// to avoid submitting a record before the search completes.
+	retryingIDs map[string]struct{}
+	retryingMu  sync.Mutex
 }
 
 // NewDownloadService creates a DownloadService backed by the given store,
@@ -61,10 +80,11 @@ func NewDownloadService(store DownloadStore, bus events.IEventAggregator, logger
 		logger = slog.Default()
 	}
 	return &DownloadService{
-		log:        logger,
-		store:      store,
-		bus:        bus,
-		workerPool: pool,
+		log:         logger,
+		store:       store,
+		bus:         bus,
+		workerPool:  pool,
+		retryingIDs: make(map[string]struct{}),
 	}
 }
 
@@ -82,6 +102,13 @@ func (s *DownloadService) SetRegistry(registry *Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry = registry
+}
+
+// SetQualityProfileStore sets the quality profile store for retry search resolution.
+func (s *DownloadService) SetQualityProfileStore(store quality.ProfileStore) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.qualityProfileStore = store
 }
 
 // Queue creates a new download record in "queued" state, persists it via the
@@ -483,6 +510,13 @@ func (s *DownloadService) submitQueued(ctx context.Context, pool WorkerPool, que
 		if rec.IsPendingSource() {
 			continue
 		}
+		// Skip records currently being resolved in a background retry goroutine.
+		s.retryingMu.Lock()
+		_, retrying := s.retryingIDs[rec.ID]
+		s.retryingMu.Unlock()
+		if retrying {
+			continue
+		}
 		// Respect retry backoff — don't submit before RetryAfter.
 		if rec.RetryAfter != "" {
 			if t, err := time.Parse(time.RFC3339, rec.RetryAfter); err == nil && time.Now().UTC().Before(t) {
@@ -559,8 +593,13 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 }
 
 // Retry resets a failed download back to "queued" and re-dispatches it to
-// the worker pool. Returns an error if the download is not in a retryable
-// state (only "failed" is retryable), or if max retries have been reached.
+// the worker pool. The record transitions to queued immediately (SSE updates
+// the UI), then a background goroutine searches for alternative download
+// sources via FindBestMatch — if a different source is found, the record is
+// updated before submission to the worker pool.
+//
+// Returns an error if the download is not in a retryable state (only "failed"
+// is retryable).
 func (s *DownloadService) Retry(ctx context.Context, id string) error {
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
@@ -577,14 +616,230 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 		return fmt.Errorf("retry: download %q in state %q is not retryable", id, record.State)
 	}
 
-	// Manual retry — reset count and backoff, dispatch immediately.
+	// Manual retry — reset count and backoff, transition to queued immediately.
+	// Original source fields are preserved; the background goroutine
+	// overwrites them only if a better source is found.
 	record.RetryCount = 0
 	record.RetryAfter = ""
-	return s.dispatchRetry(ctx, record)
+	record.State = domain.DownloadQueued
+	record.Error = ""
+	record.Progress = 0
+
+	s.mu.Lock()
+	registry := s.registry
+	s.mu.Unlock()
+
+	if registry != nil && record.Artist != "" && record.Title != "" {
+		// Registry available with metadata — search for alternative sources
+		// in background. Snapshot original fields before clearing so they
+		// can be restored if the search fails.
+		orig := retryOriginalSnap{
+			sourcename: record.SourceName,
+			filename:   record.Filename,
+			size:       record.Size,
+			bitrate:    record.Bitrate,
+			format:     record.Format,
+			username:   record.Username,
+		}
+
+		// Clear source fields so the UI shows "resolving" until the search
+		// completes and repopulates them.
+		record.Filename = ""
+		record.Size = 0
+		record.Bitrate = 0
+		record.Format = ""
+		record.Username = ""
+
+		// Guard before persist so the dispatcher always skips this record.
+		s.retryingMu.Lock()
+		s.retryingIDs[id] = struct{}{}
+		s.retryingMu.Unlock()
+
+		if err := s.store.Update(ctx, record); err != nil {
+			s.retryingMu.Lock()
+			delete(s.retryingIDs, id)
+			s.retryingMu.Unlock()
+			return fmt.Errorf("retry: %w", err)
+		}
+		s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
+
+		// Copy record for the goroutine so it doesn't race with event
+		// subscribers that may hold the original pointer.
+		recCopy := *record
+		go s.resolveAndSubmit(&recCopy, orig)
+		return nil
+	}
+
+	// No registry or no metadata — dispatch immediately with the original source.
+	if err := s.store.Update(ctx, record); err != nil {
+		return fmt.Errorf("retry: %w", err)
+	}
+	s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
+
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool != nil {
+		if err := pool.Submit(ctx, record); err != nil {
+			return fmt.Errorf("retry dispatch: %w", err)
+		}
+	}
+
+	return nil
+}
+
+// resolveAndSubmit searches for an alternative download source and submits
+// the record to the worker pool. Intended for use in a background goroutine.
+// orig holds the original source fields (cleared by Retry) so they can be
+// restored if the search or persist fails.
+func (s *DownloadService) resolveAndSubmit(record *domain.DownloadRecord, orig retryOriginalSnap) {
+	// Timeout only for the search — network calls can hang. DB operations
+	// use a separate background context so they don't fail due to the
+	// search consuming the timeout budget.
+	searchCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	// Remove from the retrying guard set when done.
+	defer func() {
+		s.retryingMu.Lock()
+		delete(s.retryingIDs, record.ID)
+		s.retryingMu.Unlock()
+	}()
+
+	// Recover from panics so a bug in the search/orchestrator doesn't leave
+	// the record stuck in queued with empty source fields. Transition to
+	// failed so the retry worker can re-attempt.
+	defer func() {
+		if r := recover(); r != nil {
+			s.log.Error("resolveAndSubmit: panic recovered",
+				"download_id", record.ID, "panic", r, "component", "download")
+			s.restoreOriginal(record, orig)
+			s.failRetry(context.Background(), record,
+				fmt.Sprintf("internal error during retry source resolution: %v", r))
+		}
+	}()
+
+	s.resolveRetrySource(searchCtx, record)
+
+	dbCtx := context.Background()
+
+	if record.Filename == "" {
+		// Search found nothing — restore original fields and transition back
+		// to failed so the retry worker can re-attempt with backoff.
+		s.restoreOriginal(record, orig)
+		s.log.Warn("resolveAndSubmit: no source found, returning to failed",
+			"download_id", record.ID, "component", "download")
+		s.failRetry(dbCtx, record, "retry source resolution failed: no matching source found")
+		return
+	}
+
+	// Persist the resolved source so the worker sees it.
+	if err := s.store.Update(dbCtx, record); err != nil {
+		s.log.Error("resolveAndSubmit: persist failed",
+			"download_id", record.ID, "error", err, "component", "download")
+		s.restoreOriginal(record, orig)
+		s.failRetry(dbCtx, record, "retry source resolution failed: "+err.Error())
+		return
+	}
+	s.bus.Publish(dbCtx, events.TopicDownloadStateChanged, record)
+
+	s.mu.Lock()
+	pool := s.workerPool
+	s.mu.Unlock()
+	if pool != nil {
+		if err := pool.Submit(dbCtx, record); err != nil {
+			s.log.Error("resolveAndSubmit: submit failed",
+				"download_id", record.ID, "error", err, "component", "download")
+		}
+	}
+}
+
+// failRetry transitions a record to failed with the given error message,
+// persists it, and publishes the state change event.
+func (s *DownloadService) failRetry(ctx context.Context, record *domain.DownloadRecord, errMsg string) {
+	record.State = domain.DownloadFailed
+	record.Error = errMsg
+	if err := s.store.Update(ctx, record); err != nil {
+		s.log.Error("failRetry: update failed",
+			"download_id", record.ID, "error", err, "component", "download")
+	}
+	s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
+}
+
+// restoreOriginal restores the original source fields from a snapshot taken
+// before Retry() cleared them for the UI reset.
+func (s *DownloadService) restoreOriginal(record *domain.DownloadRecord, orig retryOriginalSnap) {
+	record.SourceName = orig.sourcename
+	record.Filename = orig.filename
+	record.Size = orig.size
+	record.Bitrate = orig.bitrate
+	record.Format = orig.format
+	record.Username = orig.username
+}
+
+// resolveRetrySource searches for a download source for the record.
+// Source fields (SourceName, Filename, Size, Bitrate, Format, Username)
+// are always populated from the best match. Errors are logged but not
+// returned — the caller should fall back to the existing source.
+func (s *DownloadService) resolveRetrySource(ctx context.Context, rec *domain.DownloadRecord) {
+	if rec.Artist == "" || rec.Title == "" {
+		return // can't search without artist+title
+	}
+
+	s.mu.Lock()
+	registry := s.registry
+	profileStore := s.qualityProfileStore
+	s.mu.Unlock()
+
+	if registry == nil {
+		return // no plugins configured
+	}
+
+	orch := NewOrchestrator(registry, s.log)
+
+	var profile *quality.QualityProfile
+	if profileStore != nil {
+		p, err := profileStore.LoadProfileByID(ctx, nil)
+		if err != nil {
+			s.log.Warn("retry: failed to load quality profile, using default",
+				"download_id", rec.ID, "error", err, "component", "download")
+		}
+		profile = p
+	}
+
+	best, err := orch.FindBestMatch(ctx, rec.Title, rec.Artist, rec.Album, 0, "", profile)
+	if err != nil {
+		s.log.Warn("retry: search failed, retrying with original source",
+			"download_id", rec.ID, "artist", rec.Artist, "title", rec.Title, "error", err, "component", "download")
+		return
+	}
+
+	oldKey := rec.SourceName + "/" + rec.Filename
+	newKey := best.SourceName + "/" + best.Track.Filename
+
+	if newKey != oldKey {
+		s.log.Info("retry: found alternative source",
+			"download_id", rec.ID,
+			"old_source", oldKey,
+			"new_source", newKey,
+			"component", "download",
+		)
+	}
+
+	rec.SourceName = best.SourceName
+	rec.Filename = best.Track.Filename
+	rec.Size = best.Track.Size
+	rec.Bitrate = best.Track.Bitrate
+	rec.Format = best.Track.Quality
+	if best.Track.Username != "" {
+		rec.Username = best.Track.Username
+	} else {
+		rec.Username = best.SourceName
+	}
 }
 
 // dispatchRetry transitions a record to queued, persists, and dispatches
-// to the worker pool. Used by both manual Retry and auto-retry worker.
+// to the worker pool. Used by the auto-retry worker.
 func (s *DownloadService) dispatchRetry(ctx context.Context, record *domain.DownloadRecord) error {
 	record.State = domain.DownloadQueued
 	record.Error = ""
@@ -657,6 +912,22 @@ func (s *DownloadService) retryFailedDownloads(ctx context.Context) {
 				continue
 			}
 		}
+
+		// Search for alternative sources before retrying the same one.
+		// Use a short timeout to prevent a hanging plugin from blocking
+		// the entire retry worker loop. Recover from panics so a single
+		// broken record doesn't crash the entire auto-retry worker.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("retry worker: search panicked",
+						"download_id", rec.ID, "panic", r, "component", "download")
+				}
+			}()
+			searchCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			defer cancel()
+			s.resolveRetrySource(searchCtx, &rec)
+		}()
 
 		// Increment retry count and set exponential backoff before dispatch.
 		rec.RetryCount++
