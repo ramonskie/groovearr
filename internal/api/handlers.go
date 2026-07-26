@@ -347,17 +347,36 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		}()
 	}
 
-	// Re-apply metadata provider order to resolvers.
-	if len(updated.MetadataOrder) > 0 {
-		s.metadataResolver.SetProviderOrder(updated.MetadataOrder)
+	// Sync metadata order with available providers before applying.
+	// This ensures newly-configured providers (like Spotify dev mode)
+	// appear in the order without manual UI reordering.
+	syncedMdOrder := mergeAvailableProviders(updated.MetadataOrder, s.mdRegistry.Available())
+	if len(syncedMdOrder) > 0 {
+		s.metadataResolver.SetProviderOrder(syncedMdOrder)
 		if s.enrichmentHandler != nil {
-			s.enrichmentHandler.SetProviderOrder(updated.MetadataOrder)
+			s.enrichmentHandler.SetProviderOrder(syncedMdOrder)
+		}
+		// Persist if the config order is stale (missing available providers).
+		if !stringSlicesEqual(syncedMdOrder, updated.MetadataOrder) {
+			_ = s.cfg.Update(func(cfg *config.Config) error {
+				cfg.MetadataOrder = syncedMdOrder
+				return nil
+			})
 		}
 	}
 
-	// Re-apply download source order.
-	if len(updated.DownloadOrder) > 0 && s.orchestrator != nil {
-		s.orchestrator.SetDownloadOrder(updated.DownloadOrder)
+	// Re-apply download source order, synced with connected providers.
+	// Stale entries for disconnected providers (like Deezer without ARL)
+	// are dropped from the config order on save.
+	if s.orchestrator != nil {
+		syncedDlOrder := connectedNames(s.registry.Configured(), updated.DownloadOrder)
+		s.orchestrator.SetDownloadOrder(syncedDlOrder)
+		if !stringSlicesEqual(syncedDlOrder, updated.DownloadOrder) {
+			_ = s.cfg.Update(func(cfg *config.Config) error {
+				cfg.DownloadOrder = syncedDlOrder
+				return nil
+			})
+		}
 	}
 
 	// Re-register playlist sources from rebuilt plugins.
@@ -2187,4 +2206,68 @@ func formatFromPath(path string) string {
 		}
 		return ""
 	}
+}
+
+// mergeAvailableProviders builds a provider order by keeping existing entries
+// that are still available and appending newly-available providers at the end.
+// Stale entries (providers no longer available) are dropped.
+func mergeAvailableProviders(order []string, available []metadata.Provider) []string {
+	availNames := make(map[string]bool, len(available))
+	for _, p := range available {
+		availNames[p.Name()] = true
+	}
+	var merged []string
+	seen := make(map[string]bool, len(order)+len(available))
+	for _, name := range order {
+		if availNames[name] && !seen[name] {
+			merged = append(merged, name)
+			seen[name] = true
+		}
+	}
+	for _, p := range available {
+		if !seen[p.Name()] {
+			merged = append(merged, p.Name())
+			seen[p.Name()] = true
+		}
+	}
+	return merged
+}
+
+// stringSlicesEqual reports whether two string slices have the same elements
+// in the same order.
+func stringSlicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
+}
+
+// connectedNames extracts names from connected download plugins and appends
+// them after existing order entries for connected providers. Stale entries
+// (disconnected providers) are dropped.
+func connectedNames(plugins []download.Plugin, order []string) []string {
+	valid := make(map[string]bool, len(plugins))
+	for _, p := range plugins {
+		valid[p.Name()] = true
+	}
+	var merged []string
+	seen := make(map[string]bool)
+	for _, name := range order {
+		if valid[name] && !seen[name] {
+			merged = append(merged, name)
+			seen[name] = true
+		}
+	}
+	for _, p := range plugins {
+		if !seen[p.Name()] {
+			merged = append(merged, p.Name())
+			seen[p.Name()] = true
+		}
+	}
+	return merged
 }
