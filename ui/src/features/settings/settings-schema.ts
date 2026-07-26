@@ -1,91 +1,94 @@
 import { z } from "zod";
+import type { SourceInfo } from "../../api/types";
 
-// ─── Form schema (flat — matches UI fields) ────────────────────────
+// ─── Form schema — dynamic source fields + static app fields ───────
 
-export const settingsFormSchema = z.object({
-  // General
-  download_path: z.string().optional(),
+export function buildFormSchema(sources: SourceInfo[]) {
+  const sourceSchemas: Record<string, z.ZodTypeAny> = {};
+  for (const s of sources) {
+    const fieldSchemas: Record<string, z.ZodTypeAny> = {};
+    for (const field of s.config_schema ?? []) {
+      let fieldSchema: z.ZodTypeAny = z.string().optional();
+      if (field.required) {
+        fieldSchema = z.string().min(1, `${field.label} is required`);
+      }
+      if (field.validation?.format === "url") {
+        const urlSchema = z.string().url("Must be a valid URL starting with http:// or https://");
+        if (field.required) {
+          fieldSchema = urlSchema;
+        } else {
+          fieldSchema = z.preprocess(
+            (v) => (v === "" ? undefined : v),
+            urlSchema.optional(),
+          );
+        }
+      }
+      if (field.validation?.format === "email") {
+        fieldSchema = z.string().email("Must be a valid email").optional().or(z.literal(""));
+      }
+      fieldSchemas[field.name] = fieldSchema;
+    }
+    sourceSchemas[s.name] = z.object(fieldSchemas).optional();
+  }
 
-  // Soulseek
-  slskd_url: z.preprocess(
-    (v) => (v === "" ? undefined : v),
-    z
-      .string()
-      .url("Must be a valid URL starting with http:// or https://")
-      .optional(),
-  ),
-  slskd_api_key: z.string().optional(),
+  return z.object({
+    // General
+    download_path: z.string().optional(),
 
-  // Deezer
-  deezer_arl: z.string().optional(),
-  deezer_quality: z.enum(["flac", "mp3_320", "mp3_128"]).optional(),
+    // Dynamic sources
+    sources: z.object(sourceSchemas).optional(),
 
-  // MusicBrainz
-  musicbrainz_email: z.string().optional(),
+    // Library
+    library_path: z.string().optional(),
+    folder_template: z.string().optional(),
+    playlist_path: z.string().optional(),
+    playlist_template: z.string().optional(),
 
-  // Spotify
-  spotify_mode: z.enum(["free", "dev"]).optional(),
-  spotify_client_id: z.string().optional(),
-  spotify_client_secret: z.string().optional(),
-  spotify_redirect_uri: z.string().optional(),
+    // Auth (Security)
+    auth_method: z.enum(["none", "forms"]).optional(),
+    auth_username: z.string().optional(),
+    auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
+    auth_api_key: z.string().optional(),
+    auth_local_bypass_subnets: z.string().optional(),
 
-  // Discogs
-  discogs_consumer_key: z.string().optional(),
-  discogs_consumer_secret: z.string().optional(),
+    // Metadata provider order
+    metadata_order: z.array(z.string()).optional(),
 
-  // Last.fm
-  lastfm_api_key: z.string().optional(),
+    // Download provider order
+    download_order: z.array(z.string()).optional(),
+  });
+}
 
-  // Library
-  library_path: z.string().optional(),
-  folder_template: z.string().optional(),
-  playlist_path: z.string().optional(),
-  playlist_template: z.string().optional(),
-
-  // Auth (Security)
-  auth_method: z.enum(["none", "forms"]).optional(),
-  auth_username: z.string().optional(),
-  auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
-  auth_api_key: z.string().optional(),
-  auth_local_bypass_subnets: z.string().optional(),
-
-  // Metadata provider order
-  metadata_order: z.array(z.string()).optional(),
-
-  // Download provider order
-  download_order: z.array(z.string()).optional(),
-});
-
-export type SettingsFormValues = z.infer<typeof settingsFormSchema>;
+export type SettingsFormValues = z.infer<ReturnType<typeof buildFormSchema>>;
 
 // ─── Default values (used by useForm across sections) ───────────────
 
-export const settingsDefaults: SettingsFormValues = {
-  download_path: "",
-  slskd_url: "",
-  slskd_api_key: "",
-  deezer_arl: "",
-  deezer_quality: "flac",
-  musicbrainz_email: "",
-  spotify_mode: "free",
-  spotify_client_id: "",
-  spotify_client_secret: "",
-  spotify_redirect_uri: "",
-  discogs_consumer_key: "",
-  discogs_consumer_secret: "",
-  lastfm_api_key: "",
-  library_path: "",
-  folder_template: "",
-  playlist_path: "",
-  playlist_template: "",
-  auth_method: "none",
-  auth_username: "",
-  auth_password: "",
-  auth_api_key: "",
-  auth_local_bypass_subnets: "",
-  metadata_order: [],
-  download_order: [],
-};
+export function buildDefaults(sources: SourceInfo[]) {
+  const sourceDefaults: Record<string, Record<string, string>> = {};
+  for (const s of sources) {
+    const fields: Record<string, string> = {};
+    for (const field of s.config_schema ?? []) {
+      fields[field.name] = field.default ?? "";
+    }
+    sourceDefaults[s.name] = fields;
+  }
+
+  return {
+    download_path: "",
+    sources: sourceDefaults,
+    library_path: "",
+    folder_template: "",
+    playlist_path: "",
+    playlist_template: "",
+    auth_method: "none" as const,
+    auth_username: "",
+    auth_password: "",
+    auth_api_key: "",
+    auth_local_bypass_subnets: "",
+    metadata_order: [] as string[],
+    download_order: [] as string[],
+  };
+}
 
 // ─── Source badge variant mapping ───────────────────────────────────
 

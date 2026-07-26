@@ -99,3 +99,63 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"mode":"free","client_id":"","client_secret":"","redirect_uri":"http://localhost:8008/api/spotify/callback","tokens":{"access_token":"","refresh_token":"","expires_at":0}}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:    "mode",
+			Type:    "select",
+			Label:   "Mode",
+			Hint:    "Free: no credentials needed, parses Spotify URLs for metadata via public endpoints. Dev: full API access including search, playlists, and discovery.",
+			Default: "free",
+			Options: []plugin.FieldOption{
+				{Value: "free", Label: "Free (no credentials)"},
+				{Value: "dev", Label: "Developer App"},
+			},
+		},
+		{
+			Name:        "client_id",
+			Type:        "text",
+			Label:       "Client ID",
+			Hint:        "Your Spotify Developer App client ID.",
+			Placeholder: "Enter client ID",
+			DependsOn:   &plugin.FieldDependsOn{Field: "mode", Value: "dev"},
+		},
+		{
+			Name:        "client_secret",
+			Type:        "password",
+			Label:       "Client Secret",
+			Hint:        "Your Spotify Developer App client secret.",
+			Secret:      true,
+			Placeholder: "Enter client secret",
+			DependsOn:   &plugin.FieldDependsOn{Field: "mode", Value: "dev"},
+		},
+		{
+			Name:        "redirect_uri",
+			Type:        "text",
+			Label:       "Redirect URI",
+			Hint:        "Must match the redirect URI configured in your Spotify Developer App.",
+			Placeholder: "http://localhost:8008/api/spotify/callback",
+			Default:     "http://localhost:8008/api/spotify/callback",
+			DependsOn:   &plugin.FieldDependsOn{Field: "mode", Value: "dev"},
+		},
+	}
+}
+
+func (f *factory) Icon() string { return "disc3" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo {
+	return &plugin.OAuthInfo{
+		Enabled:      true,
+		ConnectLabel: "Connect Spotify Account",
+		ConnectURL:   "/api/spotify/login",
+		DependsOn:    &plugin.FieldDependsOn{Field: "mode", Value: "dev"},
+	}
+}
+func (f *factory) UISlots() *plugin.UISlots {
+	return &plugin.UISlots{
+		PlaylistBrowser: true,
+		ImportURLPatterns: []plugin.ImportPattern{
+			{Pattern: `open\.spotify\.com/playlist/([a-zA-Z0-9]+)`, Label: "Spotify playlist URL"},
+		},
+	}
+}

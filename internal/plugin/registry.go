@@ -44,6 +44,13 @@ func (r *Registry) Get(name string) BasePlugin {
 	return r.plugins[name]
 }
 
+// Factory returns the factory for the given plugin name, or nil.
+func (r *Registry) Factory(name string) PluginFactory {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.factories[name]
+}
+
 // Names returns canonical names in registration order.
 func (r *Registry) Names() []string {
 	r.mu.RLock()

@@ -216,7 +216,15 @@ func main() {
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, mainLog, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}
-				return registry.Rebuild(name, rawCfg, res)
+				if err := registry.Rebuild(name, rawCfg, res); err != nil {
+					return err
+				}
+				// Refresh playlist sources so the playlist service picks up the rebuilt
+				// plugin with its new OAuth tokens.
+				if playlistSvc != nil {
+					playlistSvc.RefreshSources(registry)
+				}
+				return nil
 			}, func(name string) {
 				if p := registry.Get(name); p != nil {
 					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)

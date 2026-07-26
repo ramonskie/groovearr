@@ -1,13 +1,13 @@
-import { useEffect, useRef, useCallback } from "react";
+import { useEffect, useRef, useCallback, useMemo } from "react";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSearchParams } from "react-router-dom";
-import { useConfig, useUpdateConfig } from "../../hooks/use-config";
+import { useConfig, useUpdateConfig, useSources } from "../../hooks/use-config";
 import SubTabs from "../../components/SubTabs";
 import Spinner from "../../components/Spinner";
 import {
-  settingsFormSchema,
-  settingsDefaults,
+  buildFormSchema,
+  buildDefaults,
   type SettingsFormValues,
 } from "./settings-schema";
 import GeneralSettings from "./GeneralSettings";
@@ -36,40 +36,41 @@ export default function SettingsPage() {
     return searchParams.get("spotify") === "connected" ? "sources" : "general";
   })();
 
-  const { data: config, isLoading, error } = useConfig();
+  const { data: config, isLoading: configLoading, error } = useConfig();
+  const { data: sources, isLoading: sourcesLoading } = useSources();
   const updateConfig = useUpdateConfig();
 
+  const sourceList = sources ?? [];
+
+  const formSchema = useMemo(() => buildFormSchema(sourceList), [sourceList]);
+  const defaultValues = useMemo(() => buildDefaults(sourceList), [sourceList]);
+
   const form = useForm<SettingsFormValues>({
-    resolver: zodResolver(settingsFormSchema),
-    defaultValues: settingsDefaults,
+    resolver: zodResolver(formSchema),
+    defaultValues,
   });
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const initialLoadDone = useRef(false);
 
-  // Pre-fill form when config loads
+  // Pre-fill form when config + sources first load. Skip subsequent resets
+  // from react-query refetches to avoid overwriting in-progress user edits.
   useEffect(() => {
-    if (config) {
-      const slskd = config.sources?.soulseek ?? {};
-      const dz = config.sources?.deezer ?? {};
-      const mb = config.sources?.musicbrainz ?? {};
-      const sp = config.sources?.spotify ?? {};
-      const spCast = sp as { mode?: string; client_id?: string; client_secret?: string; redirect_uri?: string };
-      const dc = config.sources?.discogs ?? {};
-      const lfm = config.sources?.lastfm ?? {};
+    if (config && sourceList.length > 0 && !initialLoadDone.current) {
+      initialLoadDone.current = true;
+      const sourceValues: Record<string, Record<string, string>> = {};
+      for (const s of sourceList) {
+        const cfgFields: Record<string, string> = {};
+        const pluginCfg = (config.sources?.[s.name] ?? {}) as Record<string, unknown>;
+        for (const field of s.config_schema ?? []) {
+          cfgFields[field.name] = String(pluginCfg[field.name] ?? field.default ?? "");
+        }
+        sourceValues[s.name] = cfgFields;
+      }
+
       form.reset({
         download_path: config.library.download_path ?? "",
-        slskd_url: (slskd as Record<string, string>).slskd_url ?? "",
-        slskd_api_key: (slskd as Record<string, string>).api_key ?? "",
-        deezer_arl: (dz as Record<string, string>).arl ?? "",
-        deezer_quality: ((dz as Record<string, string>).quality as "flac" | "mp3_320" | "mp3_128") ?? "flac",
-        musicbrainz_email: (mb as Record<string, string>).email ?? "",
-        spotify_mode: (spCast.mode as "free" | "dev") ?? "free",
-        spotify_client_id: spCast.client_id ?? "",
-        spotify_client_secret: spCast.client_secret ?? "",
-        spotify_redirect_uri: spCast.redirect_uri ?? "",
-        discogs_consumer_key: (dc as Record<string, string>).consumer_key ?? "",
-        discogs_consumer_secret: (dc as Record<string, string>).consumer_secret ?? "",
-        lastfm_api_key: (lfm as Record<string, string>).api_key ?? "",
+        sources: sourceValues,
         library_path: config.library.library_path ?? "",
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
@@ -83,40 +84,37 @@ export default function SettingsPage() {
         download_order: config.download_order ?? [],
       });
     }
-  }, [config, form]);
+  }, [config, sourceList, form]);
 
   // Auto-save on form change with debounce
   const saveValues = useCallback(
     (values: SettingsFormValues) => {
+      const sourcesPayload: Record<string, Record<string, unknown>> = {};
+      if (values.sources) {
+        for (const [name, fields] of Object.entries(values.sources)) {
+          if (fields && typeof fields === "object") {
+            const cleaned: Record<string, unknown> = {};
+            for (const [k, v] of Object.entries(fields)) {
+              cleaned[k] = v ?? "";
+            }
+            // Preserve server-managed keys (OAuth tokens, etc.) that are
+            // not part of the config schema and not user-editable.
+            const existing = (config?.sources?.[name] ?? {}) as Record<string, unknown>;
+            const schemaFields = new Set(
+              (sourceList.find((s) => s.name === name)?.config_schema ?? []).map((f) => f.name),
+            );
+            for (const [k, v] of Object.entries(existing)) {
+              if (!schemaFields.has(k) && v !== undefined) {
+                cleaned[k] = v;
+              }
+            }
+            sourcesPayload[name] = cleaned;
+          }
+        }
+      }
+
       updateConfig.mutate({
-        sources: {
-          soulseek: {
-            slskd_url: values.slskd_url ?? "",
-            api_key: values.slskd_api_key ?? "",
-          },
-          deezer: {
-            arl: values.deezer_arl ?? "",
-            quality: values.deezer_quality ?? "flac",
-          },
-          musicbrainz: {
-            email: values.musicbrainz_email ?? "",
-          },
-          spotify: {
-            mode: values.spotify_mode ?? "free",
-            client_id: values.spotify_client_id ?? "",
-            client_secret: values.spotify_client_secret ?? "",
-            redirect_uri: values.spotify_redirect_uri ?? "",
-            // Preserve tokens obtained via OAuth — they are server-managed, not user-editable.
-            tokens: (config?.sources?.spotify as Record<string, unknown>)?.tokens ?? {},
-          },
-          discogs: {
-            consumer_key: values.discogs_consumer_key ?? "",
-            consumer_secret: values.discogs_consumer_secret ?? "",
-          },
-          lastfm: {
-            api_key: values.lastfm_api_key ?? "",
-          },
-        },
+        sources: sourcesPayload,
         library: {
           download_path: values.download_path ?? "",
           library_path: values.library_path ?? "",
@@ -137,7 +135,7 @@ export default function SettingsPage() {
         download_order: values.download_order,
       });
     },
-    [updateConfig, config],
+    [updateConfig, config, sourceList],
   );
 
   useEffect(() => {
@@ -150,7 +148,7 @@ export default function SettingsPage() {
     return () => sub.unsubscribe();
   }, [form, saveValues]);
 
-  if (isLoading) {
+  if (configLoading || sourcesLoading) {
     return (
       <div className="flex items-center justify-center py-16">
         <Spinner size="lg" />

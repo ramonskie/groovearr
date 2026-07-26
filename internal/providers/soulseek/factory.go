@@ -48,3 +48,29 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"slskd_url":"","api_key":"","search_timeout":90,"min_upload_speed":0}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:        "slskd_url",
+			Type:        "text",
+			Label:       "slskd URL",
+			Hint:        "Full URL to your slskd instance (e.g. https://slskd.example.com:5030).",
+			Required:    true,
+			Placeholder: "https://slskd.example.com:5030",
+			Validation:  &plugin.FieldValidation{Format: "url"},
+		},
+		{
+			Name:        "api_key",
+			Type:        "password",
+			Label:       "API Key",
+			Hint:        "Your slskd API key from the slskd web interface.",
+			Secret:      true,
+			Placeholder: "Enter API key",
+		},
+	}
+}
+
+func (f *factory) Icon() string          { return "globe" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots       { return nil }

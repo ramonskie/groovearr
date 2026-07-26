@@ -41,3 +41,27 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"consumer_key":"","consumer_secret":""}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:        "consumer_key",
+			Type:        "text",
+			Label:       "Consumer Key (optional)",
+			Hint:        "Discogs API consumer key. Leave empty for anonymous access (lower rate limits).",
+			Placeholder: "Consumer key",
+		},
+		{
+			Name:        "consumer_secret",
+			Type:        "password",
+			Label:       "Consumer Secret (optional)",
+			Hint:        "Discogs API consumer secret. Only needed with consumer key.",
+			Secret:      true,
+			Placeholder: "Consumer secret",
+		},
+	}
+}
+
+func (f *factory) Icon() string                  { return "disc" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots       { return nil }

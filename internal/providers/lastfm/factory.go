@@ -40,3 +40,19 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"api_key":""}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:        "api_key",
+			Type:        "text",
+			Label:       "API Key",
+			Hint:        "Free API key from last.fm/api/account/create. Required for artist images, metadata, and discovery.",
+			Placeholder: "Your Last.fm API key",
+		},
+	}
+}
+
+func (f *factory) Icon() string                  { return "radio" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots       { return nil }
