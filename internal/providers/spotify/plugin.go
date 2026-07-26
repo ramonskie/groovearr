@@ -364,10 +364,11 @@ func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]
 	var out []discovery.ArtistSummary
 	for _, a := range page.Items {
 		out = append(out, discovery.ArtistSummary{
-			ProviderID: a.ID,
-			Name:       a.Name,
-			ImageURL:   bestImage(a.Images, 300),
-			Genres:     a.Genres,
+			ProviderID:   a.ID,
+			ProviderName: "spotify",
+			Name:         a.Name,
+			ImageURL:     bestImage(a.Images, 300),
+			Genres:       a.Genres,
 		})
 	}
 	return out, nil

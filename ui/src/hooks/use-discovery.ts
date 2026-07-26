@@ -21,18 +21,18 @@ export function useDiscoverySearch() {
   });
 }
 
-export function useArtistAlbums(artistId: string | null) {
+export function useArtistAlbums(artistId: string | null, provider?: string) {
   return useQuery({
-    queryKey: ["discovery", "artistAlbums", artistId],
-    queryFn: () => getArtistAlbums(artistId!),
+    queryKey: ["discovery", "artistAlbums", artistId, provider],
+    queryFn: () => getArtistAlbums(artistId!, provider),
     enabled: !!artistId,
   });
 }
 
-export function useAlbumTracks(albumId: string | null) {
+export function useAlbumTracks(albumId: string | null, provider?: string) {
   return useQuery({
-    queryKey: ["discovery", "albumTracks", albumId],
-    queryFn: () => getAlbumTracks(albumId!),
+    queryKey: ["discovery", "albumTracks", albumId, provider],
+    queryFn: () => getAlbumTracks(albumId!, provider),
     enabled: !!albumId,
   });
 }

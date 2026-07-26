@@ -96,9 +96,10 @@ func (p *Plugin) SearchArtists(ctx context.Context, query string, limit int) ([]
 			providerID = a.Name + "||" + a.MBID
 		}
 		out[i] = discovery.ArtistSummary{
-			ProviderID: providerID,
-			Name:       a.Name,
-			ImageURL:   a.ImageURL,
+			ProviderID:   providerID,
+			ProviderName: "lastfm",
+			Name:         a.Name,
+			ImageURL:     a.ImageURL,
 		}
 	}
 	return out, nil

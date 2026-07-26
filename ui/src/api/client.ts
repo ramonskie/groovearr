@@ -309,15 +309,17 @@ export function discoverySearch(query: string, type?: string) {
   return request<DiscoverySearchResponse>(`/api/discover/search?${params}`);
 }
 
-export function getArtistAlbums(artistId: string) {
+export function getArtistAlbums(artistId: string, provider?: string) {
+  const qs = provider ? `?provider=${encodeURIComponent(provider)}` : "";
   return request<DiscoveryAlbum[]>(
-    `/api/discover/artists/${encodeURIComponent(artistId)}/albums`,
+    `/api/discover/artists/${encodeURIComponent(artistId)}/albums${qs}`,
   );
 }
 
-export function getAlbumTracks(albumId: string) {
+export function getAlbumTracks(albumId: string, provider?: string) {
+  const qs = provider ? `?provider=${encodeURIComponent(provider)}` : "";
   return request<DiscoveryTrack[]>(
-    `/api/discover/albums/${encodeURIComponent(albumId)}/tracks`,
+    `/api/discover/albums/${encodeURIComponent(albumId)}/tracks${qs}`,
   );
 }
 

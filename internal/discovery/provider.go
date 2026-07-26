@@ -32,10 +32,11 @@ type Provider interface {
 
 // ArtistSummary is a lightweight artist result from search.
 type ArtistSummary struct {
-	ProviderID string   `json:"provider_id"` // provider-specific ID (e.g. spotify:artist:xxx)
-	Name       string   `json:"name"`
-	ImageURL   string   `json:"image_url,omitempty"`
-	Genres     []string `json:"genres,omitempty"`
+	ProviderID   string   `json:"provider_id"`
+	ProviderName string   `json:"provider_name"`
+	Name         string   `json:"name"`
+	ImageURL     string   `json:"image_url,omitempty"`
+	Genres       []string `json:"genres,omitempty"`
 }
 
 // AlbumResult is an album from search or artist discography.

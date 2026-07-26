@@ -22,15 +22,17 @@ export default function DiscoverPage() {
   const [query, setQuery] = useState("");
   const [view, setView] = useState<View>("search");
   const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
+  const [selectedArtistProvider, setSelectedArtistProvider] = useState("");
   const [selectedArtistName, setSelectedArtistName] = useState("");
   const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
+  const [selectedAlbumProvider, setSelectedAlbumProvider] = useState("");
   const [selectedAlbumName, setSelectedAlbumName] = useState("");
   const [coverUrl, setCoverUrl] = useState("");
 
   const { data: providers } = useDiscoveryProviders();
   const searchMutation = useDiscoverySearch();
-  const { data: albums } = useArtistAlbums(selectedArtistId);
-  const { data: tracks } = useAlbumTracks(selectedAlbumId);
+  const { data: albums } = useArtistAlbums(selectedArtistId, selectedArtistProvider);
+  const { data: tracks } = useAlbumTracks(selectedAlbumId, selectedAlbumProvider);
   const downloadAlbumMutation = useDownloadAlbum();
 
   const noProviders = providers && providers.length === 0;
@@ -47,12 +49,14 @@ export default function DiscoverPage() {
 
   const handleArtistClick = useCallback((artist: ArtistSummary) => {
     setSelectedArtistId(artist.provider_id);
+    setSelectedArtistProvider(artist.provider_name ?? "");
     setSelectedArtistName(artist.name);
     setView("artist");
   }, []);
 
   const handleAlbumClick = useCallback((album: DiscoveryAlbum) => {
     setSelectedAlbumId(album.provider_id);
+    setSelectedAlbumProvider(album.provider_name);
     setSelectedAlbumName(album.title);
     setCoverUrl(album.cover_url ?? "");
     setView("album");
@@ -62,9 +66,11 @@ export default function DiscoverPage() {
     if (view === "album") {
       setView("artist");
       setSelectedAlbumId(null);
+      setSelectedAlbumProvider("");
     } else if (view === "artist") {
       setView("search");
       setSelectedArtistId(null);
+      setSelectedArtistProvider("");
     }
   }, [view]);
 

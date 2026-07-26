@@ -1903,8 +1903,25 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	providers := s.discoveryReg.Any()
-	ctx := r.Context()
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		providers = s.discoveryReg.Any() // fallback: use any configured provider
+	}
+	if len(providers) == 0 {
+		s.log.Warn("discover search: no discovery providers found",
+			"component", "discover")
+		writeJSON(w, http.StatusOK, map[string]any{
+			"artists": []discovery.ArtistSummary{},
+			"albums":  []discovery.AlbumResult{},
+		})
+		return
+	}
+
+	// Query all configured providers in parallel with a total timeout.
+	// merge and deduplicate — entries with images replace those without.
+	const searchTimeout = 5 * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
+	defer cancel()
 
 	type providerResult struct {
 		artists []discovery.ArtistSummary
@@ -1913,25 +1930,25 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	results := make([]providerResult, len(providers))
 
-	// Query all providers in parallel.
 	var wg sync.WaitGroup
 	for i, p := range providers {
 		wg.Add(1)
 		go func(idx int, provider discovery.Provider) {
 			defer wg.Done()
-			s.log.Info("discover querying provider", "provider", provider.Name(), "component", "discover")
 			if searchType == "" || searchType == "artist" {
 				a, err := provider.SearchArtists(ctx, q, 10)
 				if err != nil {
-					s.log.Error("discover search artists error", "provider", provider.Name(), "error", err, "component", "discover")
+					s.log.Warn("discover search artists error",
+						"provider", provider.Name(), "error", err, "component", "discover")
+					results[idx].err = err
 				}
 				results[idx].artists = a
-				results[idx].err = err
 			}
 			if searchType == "" || searchType == "album" {
 				a, err := provider.SearchAlbums(ctx, q, 10)
 				if err != nil {
-					s.log.Error("discover search albums error", "provider", provider.Name(), "error", err, "component", "discover")
+					s.log.Warn("discover search albums error",
+						"provider", provider.Name(), "error", err, "component", "discover")
 					if results[idx].err == nil {
 						results[idx].err = err
 					}
@@ -1942,15 +1959,16 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	}
 	wg.Wait()
 
-	// Merge artists: collect all, then deduplicate by normalized name.
-	// Process providers in registration order for deterministic results.
+	// Merge artists: collect from all providers in order, deduplicate by
+	// normalized name. Prefer results with images over those without.
+	// Earlier providers win when image quality is equal.
 	var allArtists []discovery.ArtistSummary
 	for idx := range providers {
-		r := results[idx]
-		if r.err != nil {
-			s.log.Warn("discover provider had errors, using partial results", "provider", providers[idx].Name(), "component", "discover")
+		if results[idx].err != nil {
+			s.log.Debug("discover provider had errors, using partial results",
+				"provider", providers[idx].Name(), "component", "discover")
 		}
-		for _, a := range r.artists {
+		for _, a := range results[idx].artists {
 			allArtists = append(allArtists, a)
 		}
 	}
@@ -1958,13 +1976,26 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	var mergedArtists []discovery.ArtistSummary
 	for _, a := range allArtists {
 		key := normalizeKey(a.Name)
-		if _, ok := artistMap[key]; !ok {
+		if existing, ok := artistMap[key]; ok {
+			// Prefer entry with image over entry without.
+			if existing.ImageURL == "" && a.ImageURL != "" {
+				artistMap[key] = a
+				// Replace in ordered list.
+				for i := range mergedArtists {
+					if normalizeKey(mergedArtists[i].Name) == key {
+						mergedArtists[i] = a
+						break
+					}
+				}
+			}
+		} else {
 			artistMap[key] = a
 			mergedArtists = append(mergedArtists, a)
 		}
 	}
 
-	// Merge albums: collect all, then deduplicate.
+	// Merge albums: collect from all providers in order, deduplicate.
+	// Prefer results with cover art over those without.
 	var allAlbums []discovery.AlbumResult
 	for idx := range providers {
 		for _, a := range results[idx].albums {
@@ -1975,13 +2006,25 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	var mergedAlbums []discovery.AlbumResult
 	for _, a := range allAlbums {
 		key := normalizeKey(a.ArtistName + "|" + a.Title)
-		if _, ok := albumMap[key]; !ok {
+		if existing, ok := albumMap[key]; ok {
+			if existing.CoverURL == "" && a.CoverURL != "" {
+				albumMap[key] = a
+				for i := range mergedAlbums {
+					if normalizeKey(mergedAlbums[i].ArtistName+"|"+mergedAlbums[i].Title) == key {
+						mergedAlbums[i] = a
+						break
+					}
+				}
+			}
+		} else {
 			albumMap[key] = a
 			mergedAlbums = append(mergedAlbums, a)
 		}
 	}
 
-	s.log.Info("discover search results", "artists", len(mergedArtists), "albums", len(mergedAlbums), "providers", len(providers), "component", "discover")
+	s.log.Info("discover search results",
+		"artists", len(mergedArtists), "albums", len(mergedAlbums),
+		"providers", len(providers), "component", "discover")
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artists": mergedArtists,
 		"albums":  mergedAlbums,
@@ -2022,14 +2065,29 @@ func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	providers := s.discoveryReg.Any()
-	if len(providers) == 0 {
+	ctx := r.Context()
+	providerName := r.URL.Query().Get("provider")
+
+	// Try the specified provider first.
+	if providerName != "" {
+		if p := s.discoveryReg.Get(providerName); p != nil {
+			if albums, err := p.GetArtistAlbums(ctx, artistID, 50); err == nil && albums != nil {
+				writeJSON(w, http.StatusOK, albums)
+				return
+			}
+		}
+	}
+
+	// Fallback: try all providers (legacy behavior).
+	allProviders := s.discoveryReg.Any()
+	if len(allProviders) == 0 {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-
-	ctx := r.Context()
-	for _, p := range providers {
+	for _, p := range allProviders {
+		if providerName != "" && p.Name() == providerName {
+			continue // already tried
+		}
 		albums, err := p.GetArtistAlbums(ctx, artistID, 50)
 		if err == nil && albums != nil {
 			writeJSON(w, http.StatusOK, albums)
@@ -2050,14 +2108,29 @@ func (s *Server) handleDiscoverAlbumTracks(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	providers := s.discoveryReg.Any()
-	if len(providers) == 0 {
+	ctx := r.Context()
+	providerName := r.URL.Query().Get("provider")
+
+	// Try the specified provider first.
+	if providerName != "" {
+		if p := s.discoveryReg.Get(providerName); p != nil {
+			if tracks, err := p.GetAlbumTracks(ctx, albumID); err == nil && tracks != nil {
+				writeJSON(w, http.StatusOK, tracks)
+				return
+			}
+		}
+	}
+
+	// Fallback: try all providers (legacy behavior).
+	allProviders := s.discoveryReg.Any()
+	if len(allProviders) == 0 {
 		writeJSON(w, http.StatusOK, []any{})
 		return
 	}
-
-	ctx := r.Context()
-	for _, p := range providers {
+	for _, p := range allProviders {
+		if providerName != "" && p.Name() == providerName {
+			continue
+		}
 		tracks, err := p.GetAlbumTracks(ctx, albumID)
 		if err == nil && tracks != nil {
 			writeJSON(w, http.StatusOK, tracks)
@@ -2078,7 +2151,10 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	providers := s.discoveryReg.Any()
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		providers = s.discoveryReg.Any()
+	}
 	if len(providers) == 0 {
 		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
 		return
@@ -2210,7 +2286,6 @@ func formatFromPath(path string) string {
 
 // mergeAvailableProviders builds a provider order by keeping existing entries
 // that are still available and appending newly-available providers at the end.
-// Stale entries (providers no longer available) are dropped.
 func mergeAvailableProviders(order []string, available []metadata.Provider) []string {
 	availNames := make(map[string]bool, len(available))
 	for _, p := range available {

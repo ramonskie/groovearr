@@ -268,6 +268,7 @@ export interface DiscoveryProvider {
 
 export interface ArtistSummary {
   provider_id: string;
+  provider_name: string;
   name: string;
   image_url?: string;
   genres?: string[];

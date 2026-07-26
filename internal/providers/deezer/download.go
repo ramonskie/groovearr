@@ -1137,9 +1137,10 @@ func (d *DownloadClient) SearchArtists(ctx context.Context, query string, limit 
 	out := make([]discovery.ArtistSummary, len(artists))
 	for i, a := range artists {
 		out[i] = discovery.ArtistSummary{
-			ProviderID: strconv.Itoa(a.ID),
-			Name:       a.Name,
-			ImageURL:   a.PictureMed,
+			ProviderID:   strconv.Itoa(a.ID),
+			ProviderName: "deezer",
+			Name:         a.Name,
+			ImageURL:     a.PictureMed,
 		}
 	}
 	return out, nil
