@@ -731,20 +731,14 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 	switch rec.State {
 	case domain.DownloadFailed:
 		if err := s.downloadSvc.Retry(r.Context(), id); err != nil {
-			if strings.Contains(err.Error(), "max retries") {
-				writeError(w, http.StatusConflict, err)
-			} else {
-				writeError(w, http.StatusInternalServerError, err)
-			}
+			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "retrying"})
 	case domain.DownloadFailedPending:
-		if rec.RetryCount >= domain.MaxRetries {
-			writeError(w, http.StatusConflict, fmt.Errorf("download %q reached max retries (%d)", id, domain.MaxRetries))
-			return
-		}
-		// Re-trigger search resolution immediately by setting RetryAfter to now.
+		// Re-trigger search resolution immediately. Reset retry count so
+		// manual retry is not blocked by the auto-retry limit.
+		rec.RetryCount = 0
 		rec.RetryAfter = time.Now().UTC().Format(time.RFC3339)
 		if err := s.downloadSvc.UpdateDownload(r.Context(), rec); err != nil {
 			writeError(w, http.StatusInternalServerError, err)

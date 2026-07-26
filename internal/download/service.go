@@ -49,6 +49,7 @@ type DownloadService struct {
 	store      DownloadStore
 	bus        events.IEventAggregator
 	workerPool WorkerPool
+	registry   *Registry // needed for pending source resolution
 	mu         sync.Mutex
 }
 
@@ -73,6 +74,14 @@ func (s *DownloadService) SetWorkerPool(pool WorkerPool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.workerPool = pool
+}
+
+// SetRegistry sets the plugin registry for pending source resolution.
+// Set before calling RecoverOrphans for full startup recovery.
+func (s *DownloadService) SetRegistry(registry *Registry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registry = registry
 }
 
 // Queue creates a new download record in "queued" state, persists it via the
@@ -213,29 +222,211 @@ func (s *DownloadService) Dispatch(ctx context.Context, record *domain.DownloadR
 	return pool.Submit(ctx, record)
 }
 
-// RecoverOrphans re-submits all download records stuck in "queued" state
-// to the worker pool. Called at startup to recover items that were inserted
-// into the DB but failed pool submission (e.g., pool was at capacity).
+// RecoverOrphans recovers download records left in non-terminal states after a
+// previous run's shutdown (container restart, crash, etc.).
+//
+// Recovery strategy per state:
+//   - queued:        re-submit to worker pool (existing behavior)
+//   - downloading:   transition to failed (worker goroutine died, retry picks up)
+//   - importPending: re-publish download:completed event (file already on disk,
+//     CompletedDownloadService picks up the import chain)
+//   - importing:     transition to failed (import chain interrupted mid-flight,
+//     safer to re-download than guess partial completion)
 func (s *DownloadService) RecoverOrphans(ctx context.Context) {
 	s.mu.Lock()
 	pool := s.workerPool
 	s.mu.Unlock()
-	if pool == nil {
+
+	active, err := s.store.ListActive(ctx)
+	if err != nil {
+		s.log.Error("recover orphans: list active failed", "error", err, "component", "download")
+		return
+	}
+	if len(active) == 0 {
+		return
+	}
+
+	var queued []domain.DownloadRecord
+	var downloading, importPending, importing int
+
+	for _, rec := range active {
+		switch rec.State {
+		case domain.DownloadQueued:
+			// Separated into resolved vs pending later (lines 312–321).
+			queued = append(queued, rec)
+
+		case domain.DownloadDownloading:
+			if ok, err := s.store.TransitionState(ctx, rec.ID, domain.DownloadDownloading, domain.DownloadFailed); err != nil {
+				s.log.Error("recover orphans: downloading->failed transition failed", "download_id", rec.ID, "error", err, "component", "download")
+				continue
+			} else if !ok {
+				s.log.Warn("recover orphans: downloading state changed, skipping", "download_id", rec.ID, "component", "download")
+				continue
+			}
+			rec.State = domain.DownloadFailed
+			rec.Error = "download interrupted by server restart"
+			if err := s.store.Update(ctx, &rec); err != nil {
+				s.log.Warn("recover orphans: update error field failed", "download_id", rec.ID, "error", err, "component", "download")
+			}
+			s.bus.Publish(ctx, events.TopicDownloadFailed, &rec)
+			downloading++
+
+		case domain.DownloadImportPending:
+			// File is already on disk from the previous run — just re-trigger
+			// the import chain. No CAS check needed here: the record stays in
+			// importPending state, and CompletedDownloadService re-reads it
+			// from the store and checks state before importing anyway.
+			s.log.Info("recover orphans: re-triggering import", "download_id", rec.ID, "component", "download")
+			s.bus.Publish(ctx, events.TopicDownloadCompleted, &rec)
+			importPending++
+
+		case domain.DownloadFailedPending:
+			// Handled by the playlist service's retry worker. Log at debug
+			// level to avoid noise — these are expected on every restart.
+			s.log.Debug("recover orphans: skipping failedPending, handled by playlist retry worker", "download_id", rec.ID, "component", "download")
+
+		case domain.DownloadImporting:
+			if ok, err := s.store.TransitionState(ctx, rec.ID, domain.DownloadImporting, domain.DownloadFailed); err != nil {
+				s.log.Error("recover orphans: importing->failed transition failed", "download_id", rec.ID, "error", err, "component", "download")
+				continue
+			} else if !ok {
+				s.log.Warn("recover orphans: importing state changed, skipping", "download_id", rec.ID, "component", "download")
+				continue
+			}
+			rec.State = domain.DownloadFailed
+			rec.Error = "import interrupted by server restart"
+			if err := s.store.Update(ctx, &rec); err != nil {
+				s.log.Warn("recover orphans: update error field failed", "download_id", rec.ID, "error", err, "component", "download")
+			}
+			s.bus.Publish(ctx, events.TopicDownloadFailed, &rec)
+			importing++
+		}
+	}
+
+	// Separate resolved (ready for pool) from pending (need source resolution).
+	var resolved []domain.DownloadRecord
+	var pendingCount int
+	for _, rec := range queued {
+		if rec.IsPendingSource() {
+			pendingCount++
+		} else {
+			resolved = append(resolved, rec)
+		}
+	}
+
+	// Re-submit resolved records to the worker pool.
+	if len(resolved) > 0 && pool != nil {
+		s.log.Info("recover orphans: re-submitting resolved", "count", len(resolved), "component", "download")
+		recovered, _ := s.submitQueued(ctx, pool, resolved, false)
+		s.log.Info("recover orphans: resolved done", "recovered", recovered, "total", len(resolved), "component", "download")
+	}
+
+	// Resolve pending source records (search + dispatch).
+	if pendingCount > 0 {
+		s.ResolvePendingSources(ctx)
+	}
+
+	if downloading+importPending+importing > 0 {
+		s.log.Info("recover orphans: state recovery complete",
+			"downloading", downloading,
+			"importPending", importPending,
+			"importing", importing,
+			"pendingQueued", pendingCount,
+			"component", "download",
+		)
+	}
+}
+
+// ResolvePendingSources resolves all queued downloads that are in pending
+// source state (source_name="pending", no filename). For each record it:
+//  1. Searches for a matching download via the orchestrator
+//  2. Updates the record with resolved source/filename
+//  3. Dispatches to the worker pool
+//
+// On resolution failure, the record transitions to failedPending for the
+// playlist retry worker to handle with backoff.
+func (s *DownloadService) ResolvePendingSources(ctx context.Context) {
+	s.mu.Lock()
+	pool := s.workerPool
+	registry := s.registry
+	s.mu.Unlock()
+
+	if registry == nil {
+		s.log.Warn("resolve pending: no registry, skipping resolution", "component", "download")
 		return
 	}
 
 	queued, err := s.store.ListByState(ctx, domain.DownloadQueued)
 	if err != nil {
-		s.log.Error("recover orphans: list failed", "error", err, "component", "download")
-		return
-	}
-	if len(queued) == 0 {
+		s.log.Error("resolve pending: list queued failed", "error", err, "component", "download")
 		return
 	}
 
-	s.log.Info("recover orphans: re-submitting", "count", len(queued), "component", "download")
-	recovered, _ := s.submitQueued(ctx, pool, queued, false) // false = log errors, don't stop
-	s.log.Info("recover orphans: done", "recovered", recovered, "total", len(queued), "component", "download")
+	var pending []domain.DownloadRecord
+	for _, rec := range queued {
+		if rec.IsPendingSource() {
+			pending = append(pending, rec)
+		}
+	}
+	if len(pending) == 0 {
+		return
+	}
+
+	s.log.Info("resolve pending: resolving sources", "count", len(pending), "component", "download")
+	orch := NewOrchestrator(registry, s.log)
+	resolved := 0
+
+	for _, rec := range pending {
+		if rec.State.Terminal() {
+			continue // state changed while we were scanning
+		}
+		if rec.Artist == "" || rec.Title == "" {
+			s.log.Warn("resolve pending: missing artist/title", "download_id", rec.ID, "component", "download")
+			continue
+		}
+
+		best, err := orch.FindBestMatch(ctx, rec.Title, rec.Artist, rec.Album, 0, "", nil)
+		if err != nil {
+			s.log.Warn("resolve pending: search failed", "download_id", rec.ID, "artist", rec.Artist, "title", rec.Title, "error", err, "component", "download")
+			rec.State = domain.DownloadFailedPending
+			rec.Error = err.Error()
+			rec.RetryCount = 1
+			rec.RetryAfter = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)
+			_ = s.store.Update(ctx, &rec)
+			continue
+		}
+
+		// Populate resolved fields.
+		username := best.Track.Username
+		if username == "" {
+			username = best.SourceName
+		}
+		rec.SourceName = best.SourceName
+		rec.Username = username
+		rec.Filename = best.Track.Filename
+		rec.Size = best.Track.Size
+		rec.Bitrate = best.Track.Bitrate
+		rec.Format = best.Track.Quality
+		rec.DisplayName = rec.Artist + " - " + rec.Title
+
+		if err := s.store.Update(ctx, &rec); err != nil {
+			s.log.Error("resolve pending: update failed", "download_id", rec.ID, "error", err, "component", "download")
+			continue
+		}
+
+		// Dispatch to worker pool.
+		if pool != nil {
+			if err := pool.Submit(ctx, &rec); err != nil {
+				s.log.Error("resolve pending: dispatch failed", "download_id", rec.ID, "error", err, "component", "download")
+				continue
+			}
+		}
+		resolved++
+	}
+
+	if resolved > 0 {
+		s.log.Info("resolve pending: done", "resolved", resolved, "component", "download")
+	}
 }
 
 const dispatchInterval = 60 * time.Second
@@ -386,18 +577,15 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 		return fmt.Errorf("retry: download %q in state %q is not retryable", id, record.State)
 	}
 
-	record.RetryCount++
-	if record.RetryCount > domain.MaxRetries {
-		s.log.Warn("retry: max retries reached", "download_id", id, "retry_count", record.RetryCount, "component", "download")
-		return fmt.Errorf("retry: download %q reached max retries (%d)", id, domain.MaxRetries)
-	}
+	// Manual retry — reset count and backoff, dispatch immediately.
+	record.RetryCount = 0
+	record.RetryAfter = ""
+	return s.dispatchRetry(ctx, record)
+}
 
-	// Exponential backoff for download retries: 2m, 4m, 8m, 16m, 32m.
-	backoffMin := 1 << (record.RetryCount) // 2, 4, 8, 16, 32
-	if backoffMin > 60 {
-		backoffMin = 60
-	}
-	record.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
+// dispatchRetry transitions a record to queued, persists, and dispatches
+// to the worker pool. Used by both manual Retry and auto-retry worker.
+func (s *DownloadService) dispatchRetry(ctx context.Context, record *domain.DownloadRecord) error {
 	record.State = domain.DownloadQueued
 	record.Error = ""
 	record.Progress = 0
@@ -469,7 +657,16 @@ func (s *DownloadService) retryFailedDownloads(ctx context.Context) {
 				continue
 			}
 		}
-		if err := s.Retry(ctx, rec.ID); err != nil {
+
+		// Increment retry count and set exponential backoff before dispatch.
+		rec.RetryCount++
+		backoffMin := 1 << rec.RetryCount // 2, 4, 8, 16, 32
+		if backoffMin > 60 {
+			backoffMin = 60
+		}
+		rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
+
+		if err := s.dispatchRetry(ctx, &rec); err != nil {
 			s.log.Warn("retry worker: retry failed", "download_id", rec.ID, "error", err, "component", "download")
 			continue
 		}

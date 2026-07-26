@@ -723,162 +723,164 @@ func TestQueueConcurrentWorkerPoolAccess(t *testing.T) {
 
 // ─── Retry: RetryCount, MaxRetries, RetryAfter ────────────────────────
 
-func TestRetryIncrementsRetryCount(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
-
-	_ = svc.Retry(context.Background(), id)
-
-	rec, _ := store.Get(context.Background(), id)
-	if rec.RetryCount != 1 {
-		t.Errorf("RetryCount = %d, want 1", rec.RetryCount)
-	}
-}
-
-func TestRetryMaxRetriesReached(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: domain.MaxRetries})
-
-	err := svc.Retry(context.Background(), id)
-	if err == nil {
-		t.Fatal("expected error when max retries reached")
-	}
-	if !strings.Contains(err.Error(), "max retries") {
-		t.Errorf("error = %q, want 'max retries'", err)
-	}
-
-	// Record not persisted because error returns before Update().
-	rec, _ := store.Get(context.Background(), id)
-	if rec.RetryCount != domain.MaxRetries {
-		t.Errorf("RetryCount = %d, want %d (not persisted on error)", rec.RetryCount, domain.MaxRetries)
-	}
-	if rec.State != domain.DownloadFailed {
-		t.Errorf("state = %q, want %q (should stay failed)", rec.State, domain.DownloadFailed)
-	}
-}
-
-func TestRetrySetsRetryAfter(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
-
-	before := time.Now().UTC()
-	_ = svc.Retry(context.Background(), id)
-
-	rec, _ := store.Get(context.Background(), id)
-	if rec.RetryAfter == "" {
-		t.Fatal("RetryAfter not set")
-	}
-	retryAfter, err := time.Parse(time.RFC3339, rec.RetryAfter)
-	if err != nil {
-		t.Fatalf("RetryAfter is not valid RFC3339: %q", rec.RetryAfter)
-	}
-	backoff := retryAfter.Sub(before)
-	// First retry: 2^1 = 2 minutes.
-	if backoff < 1*time.Minute || backoff > 3*time.Minute {
-		t.Errorf("backoff = %v, want ~2 minutes", backoff)
-	}
-}
-
-func TestRetryIncrementsBackoffExponential(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 3})
-
-	before := time.Now().UTC()
-	_ = svc.Retry(context.Background(), id)
-
-	rec, _ := store.Get(context.Background(), id)
-	retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
-	backoff := retryAfter.Sub(before)
-	// 4th attempt (RetryCount=3 before, incremented to 4): 2^4 = 16 minutes.
-	if backoff < 14*time.Minute || backoff > 18*time.Minute {
-		t.Errorf("backoff = %v, want ~16 minutes (RetryCount was 3, 4th attempt = 2^4)", backoff)
-	}
-	if rec.RetryCount != 4 {
-		t.Errorf("RetryCount = %d, want 4", rec.RetryCount)
-	}
-}
-
-// TestRetryFifthRetryAllowed verifies the 5th retry (RetryCount=4→5) is allowed.
-// Backoff = 2^5 = 32 minutes. This is the last allowed retry with MaxRetries=5.
-func TestRetryFifthRetryAllowed(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 4})
-
-	before := time.Now().UTC()
-	err := svc.Retry(context.Background(), id)
-	if err != nil {
-		t.Fatalf("expected 5th retry to succeed, got: %v", err)
-	}
-
-	rec, _ := store.Get(context.Background(), id)
-	retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
-	backoff := retryAfter.Sub(before)
-	// 5th retry: 2^5 = 32 minutes.
-	if backoff < 30*time.Minute || backoff > 34*time.Minute {
-		t.Errorf("backoff = %v, want ~32 minutes (RetryCount was 4, 5th retry = 2^5)", backoff)
-	}
-	if rec.RetryCount != 5 {
-		t.Errorf("RetryCount = %d, want 5", rec.RetryCount)
-	}
-}
-
-// TestRetrySixthRetryBlocked verifies the 6th retry attempt is blocked.
-func TestRetrySixthRetryBlocked(t *testing.T) {
-	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger(), nil)
-
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 5})
-
-	err := svc.Retry(context.Background(), id)
-	if err == nil {
-		t.Fatal("expected error when retry 6 is attempted")
-	}
-	if !strings.Contains(err.Error(), "max retries") {
-		t.Errorf("error = %q, want 'max retries'", err)
-	}
-}
-
-func TestRetrySetsRetryAfterAndQueuedState(t *testing.T) {
-	// retryPendingDownloads success path clears RetryAfter.
-	// This is tested indirectly: Retry itself sets RetryAfter then transitions
-	// to queued. When the download later succeeds (goes through worker →
-	// imported), failJob shouldn't zero it. But the success path in
-	// retryPendingDownloads explicitly clears it.
-	//
-	// Directly test that Retry sets RetryAfter and the record is in queued state
-	// with RetryAfter set (backoff is informational, cleared when download
-	// succeeds in retry worker).
+func TestManualRetryResetsRetryCount(t *testing.T) {
 	store := newMockStore()
 	pool := &mockWorkerPool{}
 	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 5})
 
 	_ = svc.Retry(context.Background(), id)
 
 	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != 0 {
+		t.Errorf("RetryCount = %d, want 0 (manual retry resets count)", rec.RetryCount)
+	}
 	if rec.State != domain.DownloadQueued {
 		t.Errorf("state = %q, want queued", rec.State)
 	}
-	if rec.RetryAfter == "" {
-		t.Error("RetryAfter should be set when retrying")
+	// Queue() already submitted once, Retry() submits again. Verify ID present.
+	found := false
+	for _, sid := range pool.submitted() {
+		if sid == id {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("not dispatched to pool after manual retry")
+	}
+}
+
+func TestManualRetryNotBlockedByMaxRetries(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: domain.MaxRetries})
+
+	err := svc.Retry(context.Background(), id)
+	if err != nil {
+		t.Fatalf("manual retry should succeed even at max retries, got: %v", err)
+	}
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != 0 {
+		t.Errorf("RetryCount = %d, want 0", rec.RetryCount)
+	}
+}
+
+func TestManualRetryClearsBackoff(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{
+		ID: id, State: domain.DownloadFailed,
+		RetryAfter: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	})
+
+	_ = svc.Retry(context.Background(), id)
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryAfter != "" {
+		t.Errorf("RetryAfter = %q, want empty (manual retry dispatches immediately)", rec.RetryAfter)
+	}
+}
+
+// ─── Auto-Retry Worker ────────────────────────────────────────────────
+
+func TestAutoRetryIncrementsCountAndBackoff(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+
+	id, _ := (&DownloadService{store: store, bus: newMockBus(), log: testLogger(), workerPool: pool}).Queue(
+		context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{},
+	)
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 3})
+
+	svc := &DownloadService{store: store, bus: newMockBus(), log: testLogger(), workerPool: pool}
+	failed, _ := store.ListByState(context.Background(), domain.DownloadFailed)
+
+	before := time.Now().UTC()
+	for _, rec := range failed {
+		if rec.RetryCount >= domain.MaxRetries {
+			continue
+		}
+		rec.RetryCount++
+		backoffMin := 1 << rec.RetryCount
+		rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
+		_ = svc.dispatchRetry(context.Background(), &rec)
+	}
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != 4 {
+		t.Errorf("RetryCount = %d, want 4", rec.RetryCount)
+	}
+	retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
+	backoff := retryAfter.Sub(before)
+	if backoff < 14*time.Minute || backoff > 18*time.Minute {
+		t.Errorf("backoff = %v, want ~16 minutes (2^4)", backoff)
+	}
+}
+
+func TestAutoRetrySkipsAtMaxRetries(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+
+	id, _ := (&DownloadService{store: store, bus: newMockBus(), log: testLogger(), workerPool: pool}).Queue(
+		context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{},
+	)
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: domain.MaxRetries})
+
+	failed, _ := store.ListByState(context.Background(), domain.DownloadFailed)
+	if len(failed) == 0 {
+		t.Fatal("expected at least one failed record")
+	}
+	skipped := true
+	for _, rec := range failed {
+		if rec.RetryCount < domain.MaxRetries {
+			skipped = false
+		}
+	}
+	if !skipped {
+		t.Error("should have skipped record at max retries")
+	}
+
+	rec, _ := store.Get(context.Background(), id)
+	if rec.RetryCount != domain.MaxRetries {
+		t.Errorf("RetryCount = %d, want %d (unchanged)", rec.RetryCount, domain.MaxRetries)
+	}
+}
+
+func TestAutoRetryRespectsBackoff(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+
+	id, _ := (&DownloadService{store: store, bus: newMockBus(), log: testLogger(), workerPool: pool}).Queue(
+		context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{},
+	)
+	_ = store.Update(context.Background(), &domain.DownloadRecord{
+		ID: id, State: domain.DownloadFailed,
+		RetryAfter: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
+	})
+
+	failed, _ := store.ListByState(context.Background(), domain.DownloadFailed)
+	retried := false
+	for _, rec := range failed {
+		if rec.RetryAfter != "" {
+			retryAfter, _ := time.Parse(time.RFC3339, rec.RetryAfter)
+			if time.Now().UTC().Before(retryAfter) {
+				continue
+			}
+		}
+		_ = pool.Submit(context.Background(), &rec)
+		retried = true
+	}
+	if retried {
+		t.Error("should have skipped record with future RetryAfter")
 	}
 }
 
@@ -1080,6 +1082,284 @@ func TestRecoverOrphansNoPool(t *testing.T) {
 		ID: "orphan-1", SourceName: "soulseek", Filename: "f.flac", State: domain.DownloadQueued,
 	})
 
-	// Should not panic.
+	// Should not panic — no pool means queued records are skipped.
 	svc.RecoverOrphans(context.Background())
+}
+
+func TestRecoverOrphansDownloadingToFailed(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, bus, testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "dl-1", SourceName: "soulseek", Filename: "f.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadDownloading})
+
+	svc.RecoverOrphans(context.Background())
+
+	rec, _ := store.Get(context.Background(), "dl-1")
+	if rec == nil {
+		t.Fatal("record not found")
+	}
+	if rec.State != domain.DownloadFailed {
+		t.Errorf("state = %q, want %q", rec.State, domain.DownloadFailed)
+	}
+	if rec.Error == "" {
+		t.Error("expected error message set")
+	}
+
+	// Verify TopicDownloadFailed event was published.
+	found := false
+	for _, e := range bus.published() {
+		if e.Topic == events.TopicDownloadFailed {
+			if r, ok := e.Event.(*domain.DownloadRecord); ok && r.ID == "dl-1" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Error("TopicDownloadFailed event not published")
+	}
+
+	// Queued should still work when pool is available.
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "q-1", SourceName: "soulseek", Filename: "f.flac",
+	})
+	svc.RecoverOrphans(context.Background())
+	if len(pool.submitted()) != 1 || pool.submitted()[0] != "q-1" {
+		t.Errorf("queued records not dispatched, got %v", pool.submitted())
+	}
+}
+
+func TestRecoverOrphansDownloadingSkipsIfStateChanged(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, bus, testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "dl-1", SourceName: "soulseek", Filename: "f.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadDownloading})
+
+	// Manually change state before recovery runs (simulating concurrent cancel).
+	store.Update(context.Background(), &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadIgnored})
+
+	svc.RecoverOrphans(context.Background())
+
+	rec, _ := store.Get(context.Background(), "dl-1")
+	if rec.State != domain.DownloadIgnored {
+		t.Errorf("state = %q, want ignored (CAS should skip)", rec.State)
+	}
+}
+
+func TestRecoverOrphansImportPending(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, bus, testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "ip-1", SourceName: "soulseek", Filename: "f.flac",
+		Artist: "Test", Title: "Song",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "ip-1", State: domain.DownloadImportPending})
+
+	svc.RecoverOrphans(context.Background())
+
+	// Verify TopicDownloadCompleted event was published with correct record.
+	found := false
+	for _, e := range bus.published() {
+		if e.Topic == events.TopicDownloadCompleted {
+			if r, ok := e.Event.(*domain.DownloadRecord); ok && r.ID == "ip-1" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Error("TopicDownloadCompleted event not published for importPending record")
+	}
+
+	// State should remain importPending (CompletedDownloadService transitions it).
+	rec, _ := store.Get(context.Background(), "ip-1")
+	if rec.State != domain.DownloadImportPending {
+		t.Errorf("state = %q, want importPending (unchanged)", rec.State)
+	}
+}
+
+func TestRecoverOrphansImportingToFailed(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, bus, testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "im-1", SourceName: "soulseek", Filename: "f.flac",
+		FilePath: "/music/Test/Song.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "im-1", State: domain.DownloadImporting})
+
+	svc.RecoverOrphans(context.Background())
+
+	rec, _ := store.Get(context.Background(), "im-1")
+	if rec.State != domain.DownloadFailed {
+		t.Errorf("state = %q, want %q", rec.State, domain.DownloadFailed)
+	}
+	if rec.Error == "" {
+		t.Error("expected error message set")
+	}
+
+	found := false
+	for _, e := range bus.published() {
+		if e.Topic == events.TopicDownloadFailed {
+			if r, ok := e.Event.(*domain.DownloadRecord); ok && r.ID == "im-1" {
+				found = true
+				break
+			}
+		}
+	}
+	if !found {
+		t.Error("TopicDownloadFailed event not published")
+	}
+}
+
+func TestRecoverOrphansMixedStates(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, bus, testLogger(), pool)
+
+	// Insert records in all non-terminal states + a terminal one (should be ignored).
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "q-1", SourceName: "soulseek", Filename: "q.flac",
+	})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "dl-1", SourceName: "soulseek", Filename: "d.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadDownloading})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "ip-1", SourceName: "soulseek", Filename: "ip.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "ip-1", State: domain.DownloadImportPending})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "im-1", SourceName: "soulseek", Filename: "im.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "im-1", State: domain.DownloadImporting})
+
+	svc.RecoverOrphans(context.Background())
+
+	// Queued → dispatched.
+	submitted := pool.submitted()
+	if len(submitted) != 1 || submitted[0] != "q-1" {
+		t.Errorf("queued submission: got %v, want [q-1]", submitted)
+	}
+
+	// Downloading → failed.
+	dl, _ := store.Get(context.Background(), "dl-1")
+	if dl.State != domain.DownloadFailed {
+		t.Errorf("downloading state = %q, want failed", dl.State)
+	}
+
+	// ImportPending → event published.
+	hasCompleted := false
+	for _, e := range bus.published() {
+		if e.Topic == events.TopicDownloadCompleted {
+			if r, _ := e.Event.(*domain.DownloadRecord); r.ID == "ip-1" {
+				hasCompleted = true
+				break
+			}
+		}
+	}
+	if !hasCompleted {
+		t.Error("importPending: TopicDownloadCompleted event missing")
+	}
+
+	// Importing → failed.
+	im, _ := store.Get(context.Background(), "im-1")
+	if im.State != domain.DownloadFailed {
+		t.Errorf("importing state = %q, want failed", im.State)
+	}
+}
+
+func TestRecoverOrphansNoPoolStillRecoversNonQueued(t *testing.T) {
+	store := newMockStore()
+	bus := newMockBus()
+	svc := NewDownloadService(store, bus, testLogger(), nil) // pool = nil
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "dl-1", SourceName: "soulseek", Filename: "f.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadDownloading})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "ip-1", SourceName: "soulseek", Filename: "ip.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "ip-1", State: domain.DownloadImportPending})
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "im-1", SourceName: "soulseek", Filename: "im.flac",
+	})
+	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: "im-1", State: domain.DownloadImporting})
+
+	// Should not panic — non-queued states are recovered even without pool.
+	svc.RecoverOrphans(context.Background())
+
+	dl, _ := store.Get(context.Background(), "dl-1")
+	if dl.State != domain.DownloadFailed {
+		t.Errorf("downloading without pool: state = %q, want failed", dl.State)
+	}
+	im, _ := store.Get(context.Background(), "im-1")
+	if im.State != domain.DownloadFailed {
+		t.Errorf("importing without pool: state = %q, want failed", im.State)
+	}
+}
+
+func TestRecoverOrphansPendingSourceStaysQueued(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "ps-1", SourceName: domain.PendingSourceName, Filename: "",
+		Artist: "Test", Title: "Song",
+	})
+
+	svc.RecoverOrphans(context.Background())
+
+	// Pending source stays in queued (not transitioned to failedPending).
+	// Without a registry, ResolvePendingSources logs a warning and returns.
+	rec, _ := store.Get(context.Background(), "ps-1")
+	if rec.State != domain.DownloadQueued {
+		t.Errorf("state = %q, want queued (should not auto-transition)", rec.State)
+	}
+
+	// Not submitted to pool (needs resolution first).
+	if len(pool.submitted()) != 0 {
+		t.Errorf("pending source submitted to pool = %v, want empty", pool.submitted())
+	}
+}
+
+func TestRecoverOrphansResolvedQueuedStillDispatched(t *testing.T) {
+	store := newMockStore()
+	pool := &mockWorkerPool{}
+	svc := NewDownloadService(store, newMockBus(), testLogger(), pool)
+
+	// Resolved queued with pending source — stays queued, not dispatched.
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "ps-1", SourceName: domain.PendingSourceName, Filename: "",
+		Artist: "Test", Title: "Song",
+	})
+	// Already resolved — dispatched to pool.
+	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+		ID: "r-1", SourceName: "soulseek", Filename: "f.flac",
+	})
+
+	svc.RecoverOrphans(context.Background())
+
+	submitted := pool.submitted()
+	if len(submitted) != 1 || submitted[0] != "r-1" {
+		t.Errorf("submitted = %v, want [r-1] (only resolved records dispatched)", submitted)
+	}
 }

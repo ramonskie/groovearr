@@ -128,10 +128,7 @@ func main() {
 
 	// Download service — queues downloads and dispatches to workers.
 	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog, workerPool)
-
-	// Recover orphaned queued records from previous runs (pool-at-capacity rejects).
-	mainLog.Info("recovering orphaned downloads", "component", "main")
-	go downloadSvc.RecoverOrphans(context.Background())
+	downloadSvc.SetRegistry(registry)
 
 	// Build the import handler chain for completed downloads.
 	renamerCfg := func() (template, root string) {
@@ -201,6 +198,13 @@ func main() {
 	// Start background dispatch scanner — recovers queued downloads that
 	// failed pool submission (e.g., pool at capacity during batch imports).
 	downloadSvc.StartDispatcher(bgCtx)
+
+	// Recover orphaned downloads left in non-terminal states from a previous
+	// run's shutdown (container restart, crash, etc.). Must run AFTER all event
+	// subscriptions (CompletedDownloadService, SSENotifier) are registered so
+	// re-published events reach their handlers.
+	mainLog.Info("recovering orphaned downloads", "component", "main")
+	go downloadSvc.RecoverOrphans(context.Background())
 
 	// Download orchestrator for search and download-best selection.
 	orch := download.NewOrchestrator(registry, mainLog)
