@@ -66,7 +66,13 @@ func (m *mockDLPlugin) Search(ctx context.Context, query string) ([]domain.Track
 	return filtered, nil, nil
 }
 
-func (m *mockDLPlugin) Download(ctx context.Context, username, filename string, fileSize int64) (string, error) {
+// ─── MonitoredProvider implementation ──────────────────────────────
+
+func (m *mockDLPlugin) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
+	filename := meta.Filename
+	if filename == "" {
+		filename = meta.Title
+	}
 	pluginID := "mock-dl-" + filename[:min(8, len(filename))]
 	m.mu.Lock()
 	m.records[pluginID] = &domain.DownloadRecord{
@@ -81,7 +87,7 @@ func (m *mockDLPlugin) Download(ctx context.Context, username, filename string, 
 		_ = os.WriteFile(outPath, validFLAC(), 0o644)
 
 		// Simulate Deezer plugin's GetTrack enrichment: set metadata
-		// before marking as DownloadImported so the worker syncs it.
+		// before marking as DownloadImported so the monitor syncs it.
 		meta := trackMeta(filename)
 		m.mu.Lock()
 		r := m.records[pluginID]
@@ -94,10 +100,10 @@ func (m *mockDLPlugin) Download(ctx context.Context, username, filename string, 
 	return pluginID, nil
 }
 
-func (m *mockDLPlugin) GetDownloadStatus(ctx context.Context, id string) (*domain.DownloadRecord, error) {
+func (m *mockDLPlugin) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	r, ok := m.records[id]
+	r, ok := m.records[providerID]
 	if !ok {
 		return nil, os.ErrNotExist
 	}
@@ -105,26 +111,31 @@ func (m *mockDLPlugin) GetDownloadStatus(ctx context.Context, id string) (*domai
 	return &cp, nil
 }
 
-func (m *mockDLPlugin) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	out := make([]domain.DownloadRecord, 0, len(m.records))
-	for _, r := range m.records {
-		out = append(out, *r)
-	}
-	return out, nil
+func (m *mockDLPlugin) GetProgress(ctx context.Context, providerID string) (*download.Progress, error) {
+	return nil, nil
 }
 
-func (m *mockDLPlugin) CancelDownload(ctx context.Context, id string, remove bool) error {
+func (m *mockDLPlugin) Cancel(ctx context.Context, providerID string, remove bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if r, ok := m.records[id]; ok {
+	if r, ok := m.records[providerID]; ok {
 		r.State = domain.DownloadIgnored
 	}
 	return nil
 }
 
-func (m *mockDLPlugin) ClearCompleted(ctx context.Context) error { return nil }
+func (m *mockDLPlugin) ActiveDownloads() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	ids := make([]string, 0, len(m.records))
+	for id := range m.records {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+func (m *mockDLPlugin) MaxConcurrent() int              { return 0 }
+func (m *mockDLPlugin) DownloadTimeout() time.Duration   { return 30 * time.Second }
 
 // ─── Mock playlist source ─────────────────────────────────────────────
 
@@ -288,10 +299,13 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	// Event bus.
 	eventBus := events.NewInMemoryEventBus(testLogger())
 
-	// Worker pool + download service.
-	workerPool := download.NewWorkerPool(3, reg, dlStore, eventBus, testLogger())
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger(), workerPool)
-	defer workerPool.Shutdown()
+	// Download service — MonitoringService handles dispatch externally.
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger())
+
+	// Monitoring service — drives the state machine by polling providers.
+	monitor := download.NewMonitoringService(dlStore, reg, eventBus, testLogger())
+	monitor.Start(context.Background())
+	defer monitor.Shutdown()
 
 	// Renamer: library path.
 	renamer := library.NewRenamer("{artist}/{album}/{title}", libPath, nil)

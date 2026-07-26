@@ -56,6 +56,8 @@ type Client struct {
 	downloadUsernames map[string]string                 // downloadID → username
 }
 
+var _ download.MonitoredProvider = (*Client)(nil)
+
 // New creates a Soulseek client from a raw JSON config blob, download path, and logger.
 // The raw config is unmarshalled into a local SoulseekConfig.
 func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client, error) {
@@ -204,11 +206,16 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 	}
 }
 
-// Download enqueues a file for download via slskd.
-func (c *Client) Download(ctx context.Context, username, filename string, fileSize int64) (string, error) {
+// StartDownload enqueues a file for download via slskd.
+// Implements download.MonitoredProvider.
+func (c *Client) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
 	if !c.IsConfigured() {
 		return "", fmt.Errorf("soulseek: not configured")
 	}
+
+	username := meta.Username
+	filename := meta.Filename
+	fileSize := meta.Size
 
 	downloadReq := []map[string]any{{
 		"filename": filename,
@@ -443,7 +450,7 @@ func (c *Client) Connected() bool {
 	return c.connected
 }
 
-// GetProgress implements download.DownloadProgressor by delegating to the
+// GetProgress implements download.MonitoredProvider by delegating to the
 // slskd API for current transfer state.
 func (c *Client) GetProgress(ctx context.Context, downloadID string) (*download.Progress, error) {
 	status, err := c.GetDownloadStatus(ctx, downloadID)
@@ -457,6 +464,41 @@ func (c *Client) GetProgress(ctx context.Context, downloadID string) (*download.
 		Speed:       status.Speed,
 	}, nil
 }
+
+// GetStatus returns the current state of a tracked download.
+// Implements download.MonitoredProvider.
+func (c *Client) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
+	return c.GetDownloadStatus(ctx, providerID)
+}
+
+// Cancel cancels an active download. If remove is true, the provider also drops
+// internal tracking of the download.
+// Implements download.MonitoredProvider.
+func (c *Client) Cancel(ctx context.Context, providerID string, remove bool) error {
+	return c.CancelDownload(ctx, providerID, remove)
+}
+
+// ActiveDownloads returns the provider-managed IDs of all currently tracked downloads.
+// Implements download.MonitoredProvider.
+func (c *Client) ActiveDownloads() []string {
+	c.downloadsMu.RLock()
+	defer c.downloadsMu.RUnlock()
+	ids := make([]string, 0, len(c.downloads))
+	for id := range c.downloads {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// MaxConcurrent returns the maximum number of concurrent downloads allowed.
+// Returns 0 for unlimited — slskd handles its own concurrency limits.
+// Implements download.MonitoredProvider.
+func (c *Client) MaxConcurrent() int { return 0 }
+
+// DownloadTimeout returns the per-provider timeout duration. Downloads exceeding
+// this duration are considered stalled.
+// Implements download.MonitoredProvider.
+func (c *Client) DownloadTimeout() time.Duration { return 30 * time.Minute }
 
 // doRequest makes an HTTP request to slskd's /api/v0/ endpoint.
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, body io.Reader) (json.RawMessage, error) {

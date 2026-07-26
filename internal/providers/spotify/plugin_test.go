@@ -7,7 +7,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
@@ -513,63 +512,6 @@ func TestPlugin_IsConfigured_DevMode_NoCredentials(t *testing.T) {
 	}
 }
 
-// ─── Download ─────────────────────────────────────────────────────────
-
-func TestPlugin_Download_Error(t *testing.T) {
-	p := &Plugin{cfg: &SpotifyConfig{Mode: "free"}}
-	id, err := p.Download(context.Background(), "user", "file", 1024)
-	if id != "" {
-		t.Errorf("expected empty download ID, got %q", id)
-	}
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "downloading") {
-		t.Errorf("error = %q, should mention 'downloading'", err.Error())
-	}
-}
-
-// ─── Download tracking (no-ops) ───────────────────────────────────────
-
-func TestPlugin_GetDownloads_Empty(t *testing.T) {
-	p := &Plugin{cfg: &SpotifyConfig{Mode: "free"}}
-	records, err := p.GetDownloads(context.Background())
-	if err != nil {
-		t.Errorf("unexpected error: %v", err)
-	}
-	if len(records) != 0 {
-		t.Errorf("expected 0 downloads, got %d", len(records))
-	}
-}
-
-func TestPlugin_GetDownloadStatus_NotFound(t *testing.T) {
-	p := &Plugin{cfg: &SpotifyConfig{Mode: "free"}}
-	rec, err := p.GetDownloadStatus(context.Background(), "any-id")
-	if rec != nil {
-		t.Error("expected nil record")
-	}
-	if err == nil {
-		t.Fatal("expected error, got nil")
-	}
-	if !strings.Contains(err.Error(), "no downloads") {
-		t.Errorf("error = %q, should mention 'no downloads'", err.Error())
-	}
-}
-
-func TestPlugin_CancelDownload_Noop(t *testing.T) {
-	p := &Plugin{cfg: &SpotifyConfig{Mode: "free"}}
-	if err := p.CancelDownload(context.Background(), "any-id", true); err != nil {
-		t.Errorf("expected nil error, got: %v", err)
-	}
-}
-
-func TestPlugin_ClearCompleted_Noop(t *testing.T) {
-	p := &Plugin{cfg: &SpotifyConfig{Mode: "free"}}
-	if err := p.ClearCompleted(context.Background()); err != nil {
-		t.Errorf("expected nil error, got: %v", err)
-	}
-}
-
 // ─── Name / DisplayName ───────────────────────────────────────────────
 
 func TestPlugin_Name(t *testing.T) {
@@ -729,9 +671,4 @@ type downloadPlugin interface {
 	CheckConnection(ctx context.Context) error
 	Connected() bool
 	Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error)
-	Download(ctx context.Context, username, filename string, fileSize int64) (string, error)
-	GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error)
-	GetDownloadStatus(ctx context.Context, downloadID string) (*domain.DownloadRecord, error)
-	CancelDownload(ctx context.Context, downloadID string, remove bool) error
-	ClearCompleted(ctx context.Context) error
 }

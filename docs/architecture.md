@@ -13,14 +13,20 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
   │ hot-reload               │                           │
   │                          ├─ soulseek.Client          ├─ CompletedDownloadService
   │                          └─ deezer.DownloadClient    ├─ SSENotifier
+  │                          │                           │
+  │                          │ download.MonitoringService│
+  │                          │ poll loop (1s ticker)     │
+  │                          │ state machine driver      │
+  │                          │ orphan recovery           │
+  │                          │ Provider: MonitoredProv…  │
   │                                                     │
   ├─ library.sqlite.Store    download.DownloadService    api.Server
   │  SQLite (artists,        │ queue/cancel/retry        │ HTTP :8008
   │  albums, tracks,         │                           │ embedded SPA
-  │  playlists)              download.WorkerPool         │ 26 endpoints
-  │                          │ bounded goroutines        │ SSE stream
-  ├─ library.Scanner         │ per-job contexts          │
-  │  filesystem → SQLite     │ state machine             │
+  │  playlists)              │                           │ 26 endpoints
+  │                          │                           │ SSE stream
+  ├─ library.Scanner         │                           │
+  │  filesystem → SQLite     │                           │
   │                                                     │
   ├─ library.Renamer         download.Orchestrator       playlist.Service
   │  folder template         │ route search/download     │ import/sync
@@ -46,7 +52,7 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/api` | HTTP server + 26 REST handlers + SSE endpoint | `Server`, handlers |
 | `internal/config` | JSON config load/validate/persist (thread-safe) | `Config`, `Persistence` |
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
-| `internal/download` | Plugin contract, registry, worker pool, import pipeline | `Plugin`, `Registry`, `WorkerPool`, `DownloadService`, `Orchestrator`, import handlers |
+| `internal/download` | Plugin contract, registry, monitoring poll loop, import pipeline | `Plugin`, `MonitoredProvider`, `MonitoringService`, `Registry`, `DownloadService`, `Orchestrator`, import handlers |
 | `internal/metadata` | Metadata provider interface + resolver + registry | `Provider`, `MetadataResolver`, `Registry`, `CoverResult`, `TrackMetadata` |
 | `internal/providers/musicbrainz` | MusicBrainz metadata provider (recording search, release lookup) | `Client` (implements `metadata.Provider`) |
 | `internal/providers/coverartarchive` | Cover Art Archive (MBID-based cover lookup) | `Client` (implements `metadata.Provider`) |
@@ -133,13 +139,13 @@ SearchResult          TrackResult           AlbumResult
                     ┌──────────┐
                     │  queued  │  DownloadService.Queue()
                     └────┬─────┘
-                         │ WorkerPool.Submit()
+                         │ MonitoringService detects (DB scan)
                     ┌────▼──────┐
-               ┌────│downloading│  Plugin.Download() + poll progress
+               ┌────│downloading│  MonitoredProvider.StartDownload() + MonitorService polls
                │    └────┬──────┘
-               │         │ Plugin.GetDownloadStatus() → imported
+               │         │ MonitoredProvider.GetStatus() → imported
                │    ┌────▼──────────┐
-               │    │ importPending │  Worker fires TopicDownloadCompleted
+               │    │ importPending │  MonitoringService fires TopicDownloadCompleted
                │    └────┬──────────┘
                │         │ CompletedDownloadService picks up
                │    ┌────▼────┐
@@ -157,7 +163,7 @@ SearchResult          TrackResult           AlbumResult
                │    ┌────▼────┐         ┌────────┐
                └───►│ failed  │         │imported│
                     └────┬────┘         └────────┘
-                         │ Retry
+                         │ MonitoringService retry scan
                          └──→ queued
 ```
 
@@ -167,10 +173,15 @@ SearchResult          TrackResult           AlbumResult
 DownloadService.Queue()
   └─ Publish(TopicDownloadQueued, record)
 
-WorkerPool.processJob()
-  ├─ Publish(TopicDownloadStateChanged, record)  // queued→downloading
-  ├─ Publish(TopicDownloadProgress, record)       // per polling tick
-  └─ Publish(TopicDownloadCompleted, record)      // download done
+MonitoringService.tick() (1s poll loop)
+  ├─ startQueuedDownloads() → TransitionState(queued→downloading)
+  │   └─ Publish(TopicDownloadStateChanged, record)
+  ├─ pollActiveDownloads() → GetStatus / GetProgress per active download
+  │   └─ Publish(TopicDownloadProgress, record)             // per tick
+  ├─ handleProviderState() → on provider-reported completion
+  │   └─ Publish(TopicDownloadCompleted, record)            // download done
+  └─ failRecord() → on error
+      └─ Publish(TopicDownloadFailed, record)
 
 CompletedDownloadService (subscribes to TopicDownloadCompleted)
   ├─ Publish(TopicImportStarted, record)          // importing
@@ -187,31 +198,55 @@ SSENotifier (subscribes to state/progress/completed/failed)
 | Topic Constant | String | Payload | Trigger |
 |----------------|--------|---------|---------|
 | `TopicDownloadQueued` | `download:queued` | `*DownloadRecord` | `DownloadService.Queue()` |
-| `TopicDownloadStateChanged` | `download:stateChanged` | `*DownloadRecord` | Worker state transitions |
-| `TopicDownloadProgress` | `download:progress` | `*DownloadRecord` | Worker progress poll |
-| `TopicDownloadCompleted` | `download:completed` | `*DownloadRecord` | Worker on download done |
-| `TopicDownloadFailed` | `download:failed` | `*DownloadRecord` | Worker on download failure |
+| `TopicDownloadStateChanged` | `download:stateChanged` | `*DownloadRecord` | MonitoringService state transitions |
+| `TopicDownloadProgress` | `download:progress` | `*DownloadRecord` | MonitoringService progress poll |
+| `TopicDownloadCompleted` | `download:completed` | `*DownloadRecord` | MonitoringService on download done |
+| `TopicDownloadFailed` | `download:failed` | `*DownloadRecord` | MonitoringService on download failure |
 | `TopicImportStarted` | `import:started` | `*DownloadRecord` | CompletedDownloadService start |
 | `TopicImportCompleted` | `import:completed` | `*DownloadRecord` | Import handler chain success |
 | `TopicImportFailed` | `import:failed` | `*DownloadRecord` | Import handler chain failure |
 
 ## Plugin System
 
-### Download Plugin Interface
+### Download Plugin Interfaces
+
+Plugins implement two interfaces: `Plugin` for search/discovery and `MonitoredProvider` for the download lifecycle. The `Plugin` interface extends `plugin.BasePlugin` (name, connection check, configuration). `MonitoredProvider` replaces the download-specific methods that were previously on `Plugin`, giving each provider ownership of its own download goroutines.
 
 ```go
+// Plugin: search and discovery (extends plugin.BasePlugin)
 type Plugin interface {
-    Name() string
-    DisplayName() string
-    IsConfigured() bool
-    CheckConnection(ctx context.Context) error
+    plugin.BasePlugin
+
+    // Search queries the source and returns matching tracks and albums.
     Search(ctx context.Context, query string) ([]TrackResult, []AlbumResult, error)
-    Download(ctx context.Context, username, filename string, fileSize int64) (string, error)
-    GetDownloads(ctx context.Context) ([]DownloadRecord, error)
-    GetDownloadStatus(ctx context.Context, downloadID string) (*DownloadRecord, error)
-    CancelDownload(ctx context.Context, downloadID string, remove bool) error
-    ClearCompleted(ctx context.Context) error
-    Connected() bool
+}
+
+// MonitoredProvider: download lifecycle (each provider owns its downloads)
+type MonitoredProvider interface {
+    // StartDownload initiates a non-blocking download. Returns a
+    // provider-managed download ID for subsequent status queries.
+    StartDownload(ctx context.Context, meta DownloadMeta) (string, error)
+
+    // GetStatus returns the current state of a tracked download.
+    GetStatus(ctx context.Context, providerID string) (*DownloadRecord, error)
+
+    // GetProgress returns live byte-level progress for a download.
+    // Providers that do not support progress reporting return nil, nil.
+    GetProgress(ctx context.Context, providerID string) (*Progress, error)
+
+    // Cancel cancels an active download. If remove is true, the provider
+    // drops internal tracking.
+    Cancel(ctx context.Context, providerID string, remove bool) error
+
+    // ActiveDownloads returns all provider-managed active download IDs.
+    ActiveDownloads() []string
+
+    // MaxConcurrent returns the per-provider concurrency limit.
+    // Return 0 for unlimited.
+    MaxConcurrent() int
+
+    // DownloadTimeout returns the per-provider timeout duration.
+    DownloadTimeout() time.Duration
 }
 
 // Optional: live-progress search
@@ -219,21 +254,15 @@ type SearchPlugin interface {
     Plugin
     SearchWithProgress(ctx, query, callback) (tracks, albums, error)
 }
-
-// Optional: byte-level download progress
-type DownloadProgressor interface {
-    Plugin
-    GetProgress(ctx, downloadID) (*Progress, error)
-}
 ```
 
-**Current plugins:** Soulseek (slskd REST API), Deezer (ARL + Blowfish decrypt).
+**Current plugins:** Soulseek (slskd REST API), Deezer (ARL + Blowfish decrypt) — both implement `Plugin` + `MonitoredProvider`. Soulseek returns `MonitoredProvider` via `Connected()`. Deezer additionally implements `SearchPlugin` and `metadata.Provider`.
 
 ### Adding a Plugin
 
-1. Implement `download.Plugin` in a new package under `internal/download/<source>/`
+1. Implement both `download.Plugin` and `download.MonitoredProvider` in a new package under `internal/download/<source>/`
 2. Register in `cmd/groovearr/main.go`: `registry.Register(myPlugin)`
-3. That's it — search, download, cancel all work through the registry
+3. That's it — search goes through `Plugin`, downloads go through `MonitoredProvider`
 
 ### Playlist Source Interface
 
@@ -308,15 +337,15 @@ receives its dependencies through constructor functions:
 store := sqlite.New(dbPath)
 scanner := library.NewScanner(store)
 eventBus := events.NewInMemoryEventBus()
-downloadSvc := download.NewDownloadService(dlStore, eventBus)
-workerPool := download.NewWorkerPool(0, registry, dlStore, eventBus)
-downloadSvc.SetWorkerPool(workerPool)
+downloadSvc := download.NewDownloadService(dlStore, eventBus, logger)
+monitor := download.NewMonitoringService(dlStore, registry, eventBus, logger)
+monitor.Start(ctx)
 srv := api.NewServer(addr, cfg, registry, downloadSvc, store, scanner, playlistSvc, eventBus, sseHub)
 ```
 
 ## Concurrency Model
 
-- **Worker pool**: bounded goroutines (default 3). Each job gets a cancellable `context`.
+- **Monitoring ticker**: single goroutine poll loop at 1-second intervals. Scans DB for queued downloads, polls provider status, drives state transitions. Per-plugin concurrency gates via buffered channel semaphores.
 - **Event bus**: handlers run in separate goroutines per event, with panic recovery.
 - **Config**: `sync.RWMutex` for thread-safe reads/writes.
 - **SSE Hub**: `sync.RWMutex`-protected client registry, non-blocking broadcast with overflow drop.

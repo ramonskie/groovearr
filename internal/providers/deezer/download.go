@@ -214,9 +214,6 @@ func (c *DownloadClient) CapabilityStatus() map[string]string {
 	}
 }
 
-// MaxConcurrentDownloads limits Deezer to 2 concurrent downloads to avoid CDN throttling.
-func (c *DownloadClient) MaxConcurrentDownloads() int { return 2 }
-
 // UserID returns the authenticated Deezer user ID, or 0 if not authenticated.
 func (c *DownloadClient) UserID() int {
 	c.tokenMu.RLock()
@@ -301,8 +298,10 @@ func (c *DownloadClient) Search(ctx context.Context, query string) ([]domain.Tra
 	return results, albumResults, nil
 }
 
-// Download initiates a Deezer download. filename is "track_id||display_name".
-func (c *DownloadClient) Download(ctx context.Context, username, filename string, fileSize int64) (string, error) {
+// StartDownload initiates a non-blocking Deezer download. Returns a
+// provider-managed download ID for subsequent status queries.
+// Implements download.MonitoredProvider.
+func (c *DownloadClient) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
 	if !c.IsConfigured() {
 		c.log.Error("download failed: ARL not set", "component", "deezer")
 		return "", fmt.Errorf("deezer: ARL token not set")
@@ -312,16 +311,23 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 		return "", fmt.Errorf("deezer auth: %w", err)
 	}
 
-	parts := strings.SplitN(filename, "||", 2)
-	if len(parts) < 1 {
-		c.log.Error("download invalid filename", "filename", filename, "component", "deezer")
-		return "", fmt.Errorf("deezer: invalid filename format, expected 'track_id||display'")
+	trackID := meta.TrackID
+	displayName := meta.Artist + " - " + meta.Title
+
+	// Fallback: parse track ID from filename for cross-provider retries
+	// where the original download (e.g., Soulseek) didn't set TrackID.
+	// Filename format: "trackID||displayName" from the queue path.
+	if trackID == "" {
+		if parts := strings.SplitN(meta.Filename, "||", 2); len(parts) >= 1 && parts[0] != "" {
+			trackID = parts[0]
+		}
 	}
-	trackID := parts[0]
-	displayName := trackID
-	if len(parts) > 1 {
-		displayName = parts[1]
+	if trackID == "" {
+		c.log.Error("download failed: track ID not available", "component", "deezer")
+		return "", fmt.Errorf("deezer: track ID not provided (set TrackID in DownloadMeta or use 'id||display' filename format)")
 	}
+
+	filename := trackID + "||" + displayName
 
 	downloadID := fmt.Sprintf("deezer-%s-%d", trackID, time.Now().UnixNano())
 
@@ -341,8 +347,7 @@ func (c *DownloadClient) Download(ctx context.Context, username, filename string
 
 	c.log.Info("download queued", "downloadID", downloadID, "displayName", displayName, "component", "deezer")
 
-	// Derive from the worker's context so cancellation propagates.
-	// Also store our own cancel for plugin-level CancelDownload() calls.
+	// Derive from the caller's context so cancellation propagates.
 	dlCtx, cancel := context.WithCancel(ctx)
 	c.cancelMu.Lock()
 	c.cancelFuncs[downloadID] = cancel
@@ -405,6 +410,33 @@ func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, 
 	return nil
 }
 
+// GetStatus implements download.MonitoredProvider by wrapping GetDownloadStatus.
+func (c *DownloadClient) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
+	return c.GetDownloadStatus(ctx, providerID)
+}
+
+// Cancel implements download.MonitoredProvider by wrapping CancelDownload.
+func (c *DownloadClient) Cancel(ctx context.Context, providerID string, remove bool) error {
+	return c.CancelDownload(ctx, providerID, remove)
+}
+
+// ActiveDownloads returns the provider-managed IDs of all currently tracked downloads.
+func (c *DownloadClient) ActiveDownloads() []string {
+	c.downloadsMu.RLock()
+	defer c.downloadsMu.RUnlock()
+	ids := make([]string, 0, len(c.downloads))
+	for id := range c.downloads {
+		ids = append(ids, id)
+	}
+	return ids
+}
+
+// MaxConcurrent returns the maximum number of concurrent downloads for this provider.
+func (c *DownloadClient) MaxConcurrent() int { return 2 }
+
+// DownloadTimeout returns the per-provider timeout duration.
+func (c *DownloadClient) DownloadTimeout() time.Duration { return 10 * time.Minute }
+
 // ClearCompleted removes terminal-state downloads.
 func (c *DownloadClient) ClearCompleted(ctx context.Context) error {
 	c.downloadsMu.Lock()
@@ -425,7 +457,7 @@ func (c *DownloadClient) Connected() bool {
 	return c.authenticated || c.publicHealthy
 }
 
-// GetProgress implements download.DownloadProgressor by retrieving the current
+// GetProgress implements download.MonitoredProvider by retrieving the current
 // transfer state from the in-memory download map.
 func (c *DownloadClient) GetProgress(ctx context.Context, downloadID string) (*download.Progress, error) {
 	c.downloadsMu.RLock()
@@ -1247,8 +1279,9 @@ func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit i
 
 // ─── metadata.Provider (public API, no ARL needed) ─────────────────────
 
-// Compile-time check.
+// Compile-time checks.
 var _ metadata.Provider = (*DownloadClient)(nil)
+var _ download.MonitoredProvider = (*DownloadClient)(nil)
 
 // SearchAlbum finds the album title for a track via Deezer's public search API.
 func (c *DownloadClient) SearchAlbum(ctx context.Context, artist, title string) string {

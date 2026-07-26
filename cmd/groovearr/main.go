@@ -123,17 +123,18 @@ func main() {
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
-	// Worker pool — picks up queued downloads and drives state machine.
-	workerPool := download.NewWorkerPool(currentCfg.Library.MaxDownloadWorkers, registry, dlStore, eventBus, mainLog)
+	// Monitoring service — scans DB for queued downloads and drives state machine.
+	monitor := download.NewMonitoringService(dlStore, registry, eventBus, mainLog)
 
-	// Download service — queues downloads and dispatches to workers.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog, workerPool)
+	// Download service — queues downloads. Dispatch handled by MonitoringService.
+	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog)
 	downloadSvc.SetRegistry(registry)
 
 	// Quality profile store (SQLite) — created early so DownloadService
 	// can use it for search resolution during retries.
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
 	downloadSvc.SetQualityProfileStore(qualityProfileStore)
+	monitor.SetQualityProfileStore(qualityProfileStore)
 
 	// Build the import handler chain for completed downloads.
 	renamerCfg := func() (template, root string) {
@@ -191,22 +192,13 @@ func main() {
 		return cfg.Get()
 	}, qualityProfileStore, metadataResolver, mainLog)
 
-	// Start auto-retry workers for failed and failedPending downloads.
-	// Retry workers periodically scan for retryable downloads and re-attempt
-	// resolution/dispatch with exponential backoff (max 5 retries).
-	downloadSvc.StartRetryWorker(bgCtx, 2*time.Minute)
+	// Start playlist retry worker — periodically scans for retryable playlist
+	// downloads (e.g., expired tokens) and re-attempts resolution.
 	playlistSvc.StartRetryWorker(bgCtx, 1*time.Minute)
 
-	// Start background dispatch scanner — recovers queued downloads that
-	// failed pool submission (e.g., pool at capacity during batch imports).
-	downloadSvc.StartDispatcher(bgCtx)
-
-	// Recover orphaned downloads left in non-terminal states from a previous
-	// run's shutdown (container restart, crash, etc.). Must run AFTER all event
-	// subscriptions (CompletedDownloadService, SSENotifier) are registered so
-	// re-published events reach their handlers.
-	mainLog.Info("recovering orphaned downloads", "component", "main")
-	go downloadSvc.RecoverOrphans(context.Background())
+	// Start monitoring service — recovers orphans, resolves pending sources,
+	// and starts the main polling loop for downloads at 1-second intervals.
+	monitor.Start(bgCtx)
 
 	// Download orchestrator for search and download-best selection.
 	orch := download.NewOrchestrator(registry, mainLog)
@@ -274,8 +266,8 @@ func main() {
 		mainLog.Info("shutting down", "component", "main")
 		mainLog.Info("background workers stopping", "component", "main")
 		bgCancel()
-		mainLog.Info("worker pool shutting down", "component", "main")
-		workerPool.Shutdown()
+		mainLog.Info("monitoring service shutting down", "component", "main")
+		monitor.Shutdown()
 		mainLog.Info("server stopped", "component", "main")
 		srv.Shutdown(context.Background())
 	}()
