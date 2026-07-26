@@ -57,7 +57,7 @@ downloadSvc := download.NewDownloadService(dlStore, eventBus)
 
 ```go
 // Some dependencies are set later (circular dependency avoidance)
-downloadSvc.SetWorkerPool(workerPool)
+downloadSvc.SetRegistry(registry)
 ```
 
 ### Interfaces over concrete types
@@ -69,7 +69,7 @@ Every store and service has an interface defined in its package:
 | `library.Store` | `internal/library/store.go` | `internal/library/sqlite/store.go` |
 | `download.DownloadStore` | `internal/download/store.go` | `internal/download/sqlite/store.go` |
 | `download.Plugin` | `internal/download/plugin.go` | `internal/download/soulseek/`, `internal/download/deezer/` |
-| `download.WorkerPool` | `internal/download/service.go` | `workerPoolImpl` in `internal/download/worker.go` |
+| `download.MonitoredProvider` | `internal/download/provider.go` | `internal/download/soulseek/`, `internal/download/deezer/` |
 | `events.IEventAggregator` | `internal/events/bus.go` | `InMemoryEventBus` |
 | `playlist.Source` | `internal/playlist/source.go` | `internal/playlist/deezer/` |
 
@@ -86,9 +86,9 @@ No special alignment — standard Go conventions.
 
 ### Context propagation
 
-All I/O operations accept `context.Context` as the first parameter. The worker pool
-creates per-job cancellable contexts so `Cancel()` can stop individual downloads
-without affecting others.
+All I/O operations accept `context.Context` as the first parameter. The monitoring
+service creates per-download contexts with per-provider timeouts (`DownloadTimeout()`)
+so stalled downloads are detected without affecting healthy downloads.
 
 ### Concurrency
 
@@ -96,7 +96,7 @@ without affecting others.
 |-----------|---------|-----------|
 | `config.Persistence` | `sync.RWMutex` | Many readers, rare writers |
 | `event.InMemoryEventBus` | `sync.RWMutex` + goroutine per handler | Non-blocking publish |
-| `workerPoolImpl` | Bounded goroutines + channel | Backpressure, graceful shutdown |
+| `MonitoringService` | Ticker (1s) + provider-owned goroutines | Polls provider status, drives download state machine |
 | `sse.SSEHub` | `sync.RWMutex` + buffered channels | Fan-out, overflow protection |
 | `playlist.Service` | Per-playlist `sync.Mutex` | No concurrent syncs of same playlist |
 
@@ -161,36 +161,59 @@ make cover         # with coverage report
 
 1. Create a package under `internal/download/<source>/`
 
-2. Implement the `download.Plugin` interface:
+2. Implement the `download.Plugin` interface for **registration and search** only:
 
 ```go
 type MyPlugin struct {
     // source-specific fields
 }
 
+var _ download.Plugin = (*MyPlugin)(nil)  // compile-time interface check
+
 func (p *MyPlugin) Name() string                                   { return "mysource" }
 func (p *MyPlugin) DisplayName() string                            { return "My Source" }
 func (p *MyPlugin) IsConfigured() bool                             { return true }
 func (p *MyPlugin) CheckConnection(ctx context.Context) error      { ... }
 func (p *MyPlugin) Search(ctx context.Context, query string) ([]TrackResult, []AlbumResult, error) { ... }
-func (p *MyPlugin) Download(ctx context.Context, username, filename string, fileSize int64) (string, error) { ... }
-func (p *MyPlugin) GetDownloads(ctx context.Context) ([]DownloadRecord, error) { ... }
-func (p *MyPlugin) GetDownloadStatus(ctx context.Context, downloadID string) (*DownloadRecord, error) { ... }
-func (p *MyPlugin) CancelDownload(ctx context.Context, downloadID string, remove bool) error { ... }
-func (p *MyPlugin) ClearCompleted(ctx context.Context) error       { return nil }
 func (p *MyPlugin) Connected() bool                                { return p.configured }
 ```
 
-3. **Optional**: implement `DownloadProgressor` for byte-level progress:
-
-```go
-func (p *MyPlugin) GetProgress(ctx context.Context, downloadID string) (*download.Progress, error) { ... }
-```
-
-4. **Optional**: implement `SearchPlugin` for incremental search results:
+3. **Optional**: implement `download.SearchPlugin` for incremental search results:
 
 ```go
 func (p *MyPlugin) SearchWithProgress(ctx context.Context, query string, cb func(...)) (...) { ... }
+```
+
+4. Implement `download.MonitoredProvider` for all download lifecycle methods:
+
+```go
+var _ download.MonitoredProvider = (*MyPlugin)(nil)  // compile-time check
+
+// StartDownload initiates a non-blocking download and returns a provider-managed
+// download ID immediately. Callers (MonitoringService) do not block on this call.
+func (p *MyPlugin) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) { ... }
+
+// GetStatus returns the current state of a tracked download.
+// Called by MonitoringService every 1s.
+func (p *MyPlugin) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) { ... }
+
+// GetProgress returns live byte-level transfer progress.
+// Return nil, nil if the provider cannot report progress.
+func (p *MyPlugin) GetProgress(ctx context.Context, providerID string) (*download.Progress, error) { ... }
+
+// Cancel cancels an active download. If remove is true, also drop internal tracking.
+func (p *MyPlugin) Cancel(ctx context.Context, providerID string, remove bool) error { ... }
+
+// ActiveDownloads returns provider-managed IDs of all currently tracked downloads.
+func (p *MyPlugin) ActiveDownloads() []string { ... }
+
+// MaxConcurrent returns the maximum concurrent downloads for this provider.
+// Return 0 for unlimited.
+func (p *MyPlugin) MaxConcurrent() int { ... }
+
+// DownloadTimeout returns the per-provider timeout. Downloads exceeding this
+// duration are considered stalled by the monitoring service.
+func (p *MyPlugin) DownloadTimeout() time.Duration { ... }
 ```
 
 5. Register in `cmd/groovearr/main.go`:
@@ -271,9 +294,9 @@ internal/
 
 Download states use `TransitionState(old, new)` — a SQL `UPDATE ... WHERE state=?`
 that fails if another goroutine changed the state. Used for:
-- `queued → downloading` (worker picks up job)
+- `queued → downloading` (monitoring service picks up job)
 - `importPending → importing` (import handler starts)
-- `* → failed` infailJob (prevents overwriting `ignored`)
+- `* → failed` in failRecord (prevents overwriting `ignored`)
 
 ### Import handler chain
 
@@ -282,9 +305,23 @@ Each handler does one thing. The chain stops on first error (fail-fast).
 
 ### Event-driven decoupling
 
-The download pipeline communicates entirely through the event bus. The worker pool
-doesn't know about SSE, the import service doesn't know about the worker pool.
-New subscribers can be added without modifying existing code.
+The download pipeline communicates entirely through the event bus. The monitoring
+service doesn't know about SSE, the import service doesn't know about the monitoring
+service. New subscribers can be added without modifying existing code.
+
+### Monitoring polling pattern
+
+The `MonitoringService` runs a single ticker-based goroutine (1s interval) that
+orchestrates all download state transitions:
+
+- Scans the store for queued records and calls `StartDownload` on providers
+- Polls active downloads via `GetStatus` + `GetProgress` every tick
+- Syncs with providers via `ActiveDownloads` to detect externally-started downloads
+- Detects cancellations by re-reading store state each tick
+- Runs periodic retry scanning for failed downloads with exponential backoff
+
+Orphan recovery on startup: `downloading` records are marked failed, `importPending`
+records re-trigger the import chain, `importing` records are marked failed.
 
 ### Plugin registry pattern
 

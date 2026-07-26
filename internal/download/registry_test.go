@@ -33,13 +33,6 @@ func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult
 	}
 	return nil, nil, nil
 }
-func (m *mockPlugin) Download(ctx context.Context, u, f string, s int64) (string, error) { return "mock-dl-1", nil }
-func (m *mockPlugin) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error)   { return nil, nil }
-func (m *mockPlugin) GetDownloadStatus(ctx context.Context, id string) (*domain.DownloadRecord, error) {
-	return nil, nil
-}
-func (m *mockPlugin) CancelDownload(ctx context.Context, id string, remove bool) error { return nil }
-func (m *mockPlugin) ClearCompleted(ctx context.Context) error                          { return nil }
 
 func TestRegistryRegister(t *testing.T) {
 	r := NewRegistry()

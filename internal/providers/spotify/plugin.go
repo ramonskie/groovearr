@@ -24,8 +24,7 @@ var _ metadata.Provider = (*Plugin)(nil)
 // Plugin implements download.Plugin for Spotify metadata-only access.
 // Free mode resolves Spotify URLs via oEmbed. Dev mode uses the
 // authenticated Spotify Web API for search and playlist support.
-// Spotify does NOT support downloading — all download methods are no-ops
-// that return appropriate errors or empty results.
+// Spotify does NOT support downloading.
 type Plugin struct {
 	cfg    *SpotifyConfig
 	dlPath string
@@ -259,35 +258,6 @@ func (p *Plugin) searchDev(ctx context.Context, query string) ([]domain.TrackRes
 	}
 
 	return tracks, albums, nil
-}
-
-// ─── download.Plugin: Download ────────────────────────────────────────
-
-// Download always returns an error — Spotify does not support downloading.
-func (p *Plugin) Download(_ context.Context, _, _ string, _ int64) (string, error) {
-	return "", fmt.Errorf("spotify does not support downloading")
-}
-
-// ─── download.Plugin: Download tracking ───────────────────────────────
-
-// GetDownloads returns an empty list — Spotify never has active downloads.
-func (p *Plugin) GetDownloads(_ context.Context) ([]domain.DownloadRecord, error) {
-	return nil, nil
-}
-
-// GetDownloadStatus always returns not-found — Spotify never downloads.
-func (p *Plugin) GetDownloadStatus(_ context.Context, _ string) (*domain.DownloadRecord, error) {
-	return nil, fmt.Errorf("spotify: no downloads")
-}
-
-// CancelDownload is a no-op — Spotify never has active downloads.
-func (p *Plugin) CancelDownload(_ context.Context, _ string, _ bool) error {
-	return nil
-}
-
-// ClearCompleted is a no-op — Spotify never accumulates completed downloads.
-func (p *Plugin) ClearCompleted(_ context.Context) error {
-	return nil
 }
 
 // ─── Type mappers ─────────────────────────────────────────────────────

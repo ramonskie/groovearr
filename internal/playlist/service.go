@@ -366,11 +366,6 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 			continue
 		}
 
-		// Dispatch to worker pool.
-		if err := s.downloadSvc.Dispatch(ctx, rec); err != nil {
-			s.log.Error("dispatch failed", "download_id", rec.ID, "error", err, "component", "playlist")
-			continue
-		}
 		resolved++
 	}
 
@@ -942,10 +937,6 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 			continue
 		}
 
-		if err := s.downloadSvc.Dispatch(ctx, rec); err != nil {
-			s.log.Error("pending retry worker: dispatch failed", "download_id", rec.ID, "error", err, "component", "playlist")
-			continue
-		}
 		retried++
 	}
 	if retried > 0 {
