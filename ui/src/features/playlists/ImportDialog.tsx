@@ -1,8 +1,10 @@
-import { useState, type FC } from "react";
+import { useState, type FC, useMemo } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
 import { X } from "lucide-react";
 import { toast } from "sonner";
 import { useImportPlaylist } from "../../hooks/use-playlists";
+import { useSources } from "../../hooks/use-config";
+import type { ImportPattern } from "../../api/types";
 import Button from "../../components/Button";
 
 interface ImportDialogProps {
@@ -15,37 +17,34 @@ interface ParsedPlaylist {
   id: string;
 }
 
-const urlPatterns: { source: string; pattern: RegExp; extract: (m: RegExpMatchArray) => string }[] = [
-  // Spotify: https://open.spotify.com/playlist/{id}?si=...
-  {
-    source: "spotify",
-    pattern: /open\.spotify\.com\/playlist\/([a-zA-Z0-9]+)/,
-    extract: (m) => m[1],
-  },
-  // Deezer: https://www.deezer.com/.../playlist/{id}/
-  {
-    source: "deezer",
-    pattern: /\/playlist\/(\d+)\//,
-    extract: (m) => m[1],
-  },
-];
+/** Collect import URL patterns from all sources. */
+function collectPatterns(sources: { name: string; display_name: string; ui_slots?: { import_url_patterns?: ImportPattern[] } }[]) {
+  const result: { source: string; displayName: string; pattern: RegExp; isFallback: boolean }[] = [];
+  for (const s of sources) {
+    for (const p of s.ui_slots?.import_url_patterns ?? []) {
+      result.push({
+        source: s.name,
+        displayName: s.display_name,
+        pattern: new RegExp(p.pattern, "i"),
+        isFallback: p.is_fallback ?? false,
+      });
+    }
+  }
+  // Sort: non-fallback first, then fallbacks
+  result.sort((a, b) => (a.isFallback ? 1 : 0) - (b.isFallback ? 1 : 0));
+  return result;
+}
 
-/** Parse a playlist URL or ID into its source and identifier. */
-function parsePlaylistURL(input: string): ParsedPlaylist | null {
+/** Parse a playlist URL or ID using collected patterns. */
+function parsePlaylistURL(input: string, patterns: ReturnType<typeof collectPatterns>): ParsedPlaylist | null {
   const trimmed = input.trim();
   if (!trimmed) return null;
 
-  // Try known URL patterns first.
-  for (const { source, pattern, extract } of urlPatterns) {
+  for (const { source, pattern } of patterns) {
     const match = trimmed.match(pattern);
     if (match) {
-      return { source, id: extract(match) };
+      return { source, id: match[1] };
     }
-  }
-
-  // Fallback: raw numeric ID → Deezer.
-  if (/^\d+$/.test(trimmed)) {
-    return { source: "deezer", id: trimmed };
   }
 
   return null;
@@ -54,20 +53,28 @@ function parsePlaylistURL(input: string): ParsedPlaylist | null {
 const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
   const [input, setInput] = useState("");
   const importMutation = useImportPlaylist();
+  const { data: sources } = useSources();
+
+  const patterns = useMemo(() => collectPatterns(sources ?? []), [sources]);
+
+  const sourceLabels = useMemo(() => {
+    const names = [...new Set(patterns.map((p) => p.displayName))];
+    if (names.length === 0) return "a supported source";
+    if (names.length === 1) return names[0];
+    return names.slice(0, -1).join(", ") + " or " + names[names.length - 1];
+  }, [patterns]);
 
   const handleImport = () => {
-    const parsed = parsePlaylistURL(input);
+    const parsed = parsePlaylistURL(input, patterns);
     if (!parsed) {
-      toast.error("Invalid playlist URL — expected a Spotify or Deezer playlist link, or a numeric Deezer ID");
+      toast.error(`Invalid playlist URL — expected a playlist link from ${sourceLabels}`);
       return;
     }
     importMutation.mutate(
       { source: parsed.source, playlist_id: parsed.id },
       {
         onSuccess: (data) => {
-          toast.success(
-            `Imported "${data.playlist.name}" with ${data.linked} linked tracks`,
-          );
+          toast.success(`Imported "${data.playlist.name}" with ${data.linked} linked tracks`);
           setInput("");
           onOpenChange(false);
         },
@@ -107,14 +114,14 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
               type="text"
               value={input}
               onChange={(e) => setInput(e.target.value)}
-              placeholder="https://open.spotify.com/playlist/... or https://www.deezer.com/.../playlist/.../"
+              placeholder={`Paste a ${sourceLabels} playlist URL`}
               className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-purple-500 focus:outline-none"
               onKeyDown={(e) => {
                 if (e.key === "Enter") handleImport();
               }}
             />
             <p className="mt-1.5 text-xs text-slate-600">
-              Paste a Spotify or Deezer playlist URL. A numeric Deezer ID also works.
+              Paste a playlist URL from {sourceLabels}.
             </p>
           </div>
 

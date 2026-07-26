@@ -16,6 +16,9 @@ func NewRegistry(inner *plugin.Registry) *Registry {
 	return &Registry{inner: inner}
 }
 
+// Inner returns the underlying plugin.Registry for cross-domain access.
+func (r *Registry) Inner() *plugin.Registry { return r.inner }
+
 // Get returns a discovery provider by canonical name.
 func (r *Registry) Get(name string) Provider {
 	p := r.inner.Get(name)

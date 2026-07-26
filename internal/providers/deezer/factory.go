@@ -52,3 +52,40 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"arl":"","quality":"flac","allow_fallback":true,"access_token":""}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:        "arl",
+			Type:        "password",
+			Label:       "ARL Token",
+			Hint:        "Your Deezer ARL token for authentication.",
+			Secret:      true,
+			Placeholder: "Enter ARL token",
+		},
+		{
+			Name:    "quality",
+			Type:    "select",
+			Label:   "Quality",
+			Hint:    "Preferred download quality for Deezer tracks.",
+			Default: "flac",
+			Options: []plugin.FieldOption{
+				{Value: "flac", Label: "FLAC Lossless"},
+				{Value: "mp3_320", Label: "MP3 320kbps"},
+				{Value: "mp3_128", Label: "MP3 128kbps"},
+			},
+		},
+	}
+}
+
+func (f *factory) Icon() string                  { return "music2" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots {
+	return &plugin.UISlots{
+		PlaylistBrowser: true,
+		ImportURLPatterns: []plugin.ImportPattern{
+			{Pattern: `/playlist/(\d+)(?:[/?#]|$)`, Label: "Deezer playlist URL"},
+			{Pattern: `^(\d+)$`, Label: "Numeric Deezer ID", IsFallback: true},
+		},
+	}
+}

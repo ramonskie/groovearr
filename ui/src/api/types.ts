@@ -135,6 +135,57 @@ export interface QualityProfileUpdatePayload {
 
 export type SourceStatus = "not_configured" | "configured" | "connected";
 
+// ─── Plugin Config Schema (manifest-based UI) ────────────────────
+
+export interface FieldOption {
+  value: string;
+  label: string;
+}
+
+export interface FieldDependsOn {
+  field: string;
+  value: string;
+}
+
+export interface FieldValidation {
+  format?: string;  // "url", "email"
+  min?: number;
+  max?: number;
+  pattern?: string; // regex
+}
+
+export interface ConfigField {
+  name: string;
+  type: "text" | "password" | "select" | "number";
+  label: string;
+  hint?: string;
+  required: boolean;
+  placeholder?: string;
+  default?: string;
+  options?: FieldOption[];
+  depends_on?: FieldDependsOn;
+  secret?: boolean;
+  validation?: FieldValidation;
+}
+
+export interface OAuthConfig {
+  enabled: boolean;
+  connect_label: string;
+  connect_url: string;
+  depends_on?: FieldDependsOn;
+}
+
+export interface ImportPattern {
+  pattern: string;
+  label: string;
+  is_fallback?: boolean;
+}
+
+export interface UISlots {
+  playlist_browser: boolean;
+  import_url_patterns?: ImportPattern[];
+}
+
 export interface SourceInfo {
   name: string;
   display_name: string;
@@ -142,6 +193,14 @@ export interface SourceInfo {
   status: SourceStatus;
   /** Per-capability status: {"download": "connected", "metadata": "connected"} */
   capabilities?: Record<string, SourceStatus>;
+  /** Provider icon identifier (maps to Lucide icon in providerIcons.ts) */
+  icon?: string;
+  /** Configuration fields for rendering the settings card */
+  config_schema?: ConfigField[];
+  /** OAuth configuration (shown as connect button if enabled) */
+  oauth?: OAuthConfig;
+  /** Optional UI feature flags */
+  ui_slots?: UISlots;
 }
 
 export interface TestConnectionResponse {

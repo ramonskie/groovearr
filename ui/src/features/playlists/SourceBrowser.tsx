@@ -10,23 +10,22 @@ import {
 import Card from "../../components/Card";
 import DataTable, { type ColumnDef } from "../../components/DataTable";
 import Button from "../../components/Button";
-import Badge from "../../components/Badge";
 import Spinner from "../../components/Spinner";
 
-interface DeezerBrowserProps {
+interface Props {
+  sourceName: string;
+  displayName: string;
   isOpen: boolean;
-  /** Already-imported playlists — used to resolve numeric IDs for Sync. */
   importedPlaylists: Playlist[];
 }
 
-const DeezerBrowser: FC<DeezerBrowserProps> = ({ isOpen, importedPlaylists }) => {
+const SourceBrowser: FC<Props> = ({ sourceName, displayName, isOpen, importedPlaylists }) => {
   const { data, isLoading, error } = useBrowsePlaylistSource(
-    isOpen ? "deezer" : "",
+    isOpen ? sourceName : "",
   );
   const importMutation = useImportPlaylist();
   const syncMutation = useSyncPlaylist();
 
-  // Build a lookup: source_playlist_id → numeric id
   const importedById = useMemo(() => {
     const map = new Map<string, number>();
     for (const p of importedPlaylists) {
@@ -55,12 +54,9 @@ const DeezerBrowser: FC<DeezerBrowserProps> = ({ isOpen, importedPlaylists }) =>
               loading={syncMutation.isPending && syncMutation.variables === numericId}
               onClick={() => {
                 syncMutation.mutate(numericId, {
-                  onSuccess: () =>
-                    toast.success(`Syncing "${row.name}"`),
+                  onSuccess: () => toast.success(`Syncing "${row.name}"`),
                   onError: (err) =>
-                    toast.error(
-                      err instanceof Error ? err.message : "Sync failed",
-                    ),
+                    toast.error(err instanceof Error ? err.message : "Sync failed"),
                 });
               }}
               title="Sync playlist"
@@ -80,14 +76,12 @@ const DeezerBrowser: FC<DeezerBrowserProps> = ({ isOpen, importedPlaylists }) =>
             }
             onClick={() => {
               importMutation.mutate(
-                { source: "deezer", playlist_id: row.source_id },
+                { source: sourceName, playlist_id: row.source_id },
                 {
                   onSuccess: (data) =>
                     toast.success(`Imported "${data.playlist.name}"`),
                   onError: (err) =>
-                    toast.error(
-                      err instanceof Error ? err.message : "Import failed",
-                    ),
+                    toast.error(err instanceof Error ? err.message : "Import failed"),
                 },
               );
             }}
@@ -100,30 +94,22 @@ const DeezerBrowser: FC<DeezerBrowserProps> = ({ isOpen, importedPlaylists }) =>
   ];
 
   return (
-    <Card title="Browse Deezer Playlists" className="mt-4">
+    <Card title={`Browse ${displayName} Playlists`} className="mt-4">
       {isLoading ? (
-        <div className="flex justify-center py-4">
-          <Spinner />
-        </div>
+        <div className="flex justify-center py-4"><Spinner /></div>
       ) : error ? (
         <p className="text-sm text-red-400">
-          {error instanceof Error
-            ? error.message
-            : "Failed to load Deezer playlists"}
+          {error instanceof Error ? error.message : `Failed to load ${displayName} playlists`}
         </p>
       ) : data && data.length > 0 ? (
-        <DataTable
-          columns={columns}
-          data={data as Row[]}
-          emptyMessage="No Deezer playlists found."
-        />
+        <DataTable columns={columns} data={data as Row[]} emptyMessage={`No ${displayName} playlists found.`} />
       ) : (
         <p className="py-4 text-center text-sm text-slate-500">
-          No Deezer playlists found.
+          No {displayName} playlists found.
         </p>
       )}
     </Card>
   );
 };
 
-export default DeezerBrowser;
+export default SourceBrowser;

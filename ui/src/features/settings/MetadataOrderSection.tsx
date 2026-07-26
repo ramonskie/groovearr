@@ -22,12 +22,12 @@ export default function MetadataOrderSection() {
   const dragItem = useRef<DragState | null>(null);
 
   // Build ordered list: metadata-capable providers in metadata_order first,
-  // then any configured metadata providers not yet in the order list.
-  const configured = (sources ?? [])
-    .filter((s) => hasMetadata(s) && s.configured)
+  // then any connected metadata providers not yet in the order list.
+  const connected = (sources ?? [])
+    .filter((s) => hasMetadata(s) && s.capabilities?.metadata === "connected")
     .map((s) => s.name);
 
-  const ordered = [...new Set([...metadataOrder, ...configured])].filter((name) =>
+  const ordered = [...new Set([...metadataOrder, ...connected])].filter((name) =>
     (sources ?? []).some((s) => s.name === name && hasMetadata(s)),
   );
 

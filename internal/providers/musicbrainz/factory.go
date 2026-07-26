@@ -47,3 +47,20 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{"email":""}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+	return []plugin.ConfigField{
+		{
+			Name:        "email",
+			Type:        "text",
+			Label:       "Email (optional)",
+			Hint:        "Used in the User-Agent header per MusicBrainz API guidelines. Leave empty for anonymous access.",
+			Placeholder: "you@example.com",
+			Validation:  &plugin.FieldValidation{Format: "email"},
+		},
+	}
+}
+
+func (f *factory) Icon() string                  { return "database" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots       { return nil }

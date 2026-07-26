@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -286,6 +287,9 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Snapshot old sources before update to skip rebuilding unchanged plugins.
+	oldSources := s.cfg.Get().Sources
+
 	err := s.cfg.Update(func(cfg *config.Config) error {
 		// Merge partial onto a copy first to validate, then apply to live config.
 		merged := *cfg
@@ -311,13 +315,36 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rebuild all configured plugins with new config.
+	// Rebuild only plugins whose config changed.
 	updated := s.cfg.Get()
 	resources := plugin.PluginResources{DownloadPath: updated.Library.DownloadPath, Logger: s.log}
-	for name := range updated.Sources {
-		if err := s.registry.Rebuild(name, updated.Sources[name], resources); err != nil {
-			s.log.Error("reload failed", "name", name, "error", err, "component", "api")
+	var rebuilt []string
+	for name, newCfg := range updated.Sources {
+		oldCfg, existed := oldSources[name]
+		if existed && bytes.Equal(oldCfg, newCfg) {
+			continue
 		}
+		if err := s.registry.Rebuild(name, newCfg, resources); err != nil {
+			s.log.Error("reload failed", "name", name, "error", err, "component", "api")
+			continue
+		}
+		rebuilt = append(rebuilt, name)
+	}
+
+	// Re-check connectivity on rebuilt plugins so badges reflect current
+	// state without waiting for the periodic health checker (every 5 min).
+	if len(rebuilt) > 0 {
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			for _, name := range rebuilt {
+				if p := s.registry.Get(name); p != nil && p.IsConfigured() {
+					if err := p.CheckConnection(ctx); err != nil {
+						s.log.Debug("post-rebuild connection check failed", "name", name, "error", err, "component", "api")
+					}
+				}
+			}
+		}()
 	}
 
 	// Re-apply metadata provider order to resolvers.
@@ -368,7 +395,8 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 		}
 		if p := s.registry.Get(name); p != nil {
 			seen[name] = true
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
+			schema := resolveSchema(s.registry.Inner(), name)
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
 		}
 	}
 
@@ -379,7 +407,8 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 		}
 		if p := s.mdRegistry.Get(name); p != nil {
 			seen[name] = true
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
+			schema := resolveSchema(s.mdRegistry.Inner(), name)
+			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
 		}
 	}
 
@@ -390,14 +419,31 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[p.Name()] = true
-			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus()))
+			schema := resolveSchema(s.discoveryReg.Inner(), p.Name())
+			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
 		}
 	}
 
 	writeJSON(w, http.StatusOK, sources)
 }
 
-func sourceEntry(name, displayName string, configured, connected bool, caps map[string]string) map[string]any {
+// resolveSchema looks up the factory for a source name in the plugin registry
+// and returns its ConfigSchemaProvider if the factory implements that interface.
+func resolveSchema(reg *plugin.Registry, name string) plugin.ConfigSchemaProvider {
+	if reg == nil {
+		return nil
+	}
+	f := reg.Factory(name)
+	if f == nil {
+		return nil
+	}
+	if sp, ok := f.(plugin.ConfigSchemaProvider); ok {
+		return sp
+	}
+	return nil
+}
+
+func sourceEntry(name, displayName string, configured, connected bool, caps map[string]string, schema plugin.ConfigSchemaProvider) map[string]any {
 	status := "not_configured"
 	if configured {
 		status = "configured"
@@ -413,6 +459,18 @@ func sourceEntry(name, displayName string, configured, connected bool, caps map[
 	}
 	if len(caps) > 0 {
 		entry["capabilities"] = caps
+	}
+	if schema != nil {
+		entry["icon"] = schema.Icon()
+		if fields := schema.ConfigSchema(); fields != nil {
+			entry["config_schema"] = fields
+		}
+		if oa := schema.OAuthConfig(); oa != nil {
+			entry["oauth"] = oa
+		}
+		if slots := schema.UISlots(); slots != nil {
+			entry["ui_slots"] = slots
+		}
 	}
 	return entry
 }

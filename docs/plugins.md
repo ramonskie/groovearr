@@ -1,8 +1,10 @@
 # Groovearr — Plugin Developer Guide
 
 > How sources integrate with Groovearr via the plugin registry.
-> Covers `plugin.BasePlugin`, `download.Plugin`, `plugin.PluginFactory`, optional interfaces,
-> capability-based routing, config conventions, and a complete walkthrough for adding a new source.
+> Covers `plugin.BasePlugin`, `download.Plugin`, `plugin.PluginFactory`, `ConfigSchemaProvider`,
+> optional interfaces, capability-based routing, config conventions, and a complete walkthrough
+> for adding a new source. The UI is fully data-driven — plugin factories declare their config
+> fields, icons, and feature flags; the frontend renders settings cards and controls automatically.
 
 ## Overview
 
@@ -36,6 +38,8 @@ internal/plugin/           ← Shared framework: BasePlugin, PluginFactory, Regi
 - Event bus integration (progress, completion, failure)
 - Config hot-reload without restart
 - Sensitive field auto-masking in config dumps
+- **Settings UI auto-generated from config schema** — zero frontend code needed
+- **Provider icon, OAuth button, playlist browser — all declared in Go**
 
 **Example: the full wiring in `main.go`:**
 
@@ -209,6 +213,109 @@ for _, p := range registry.All() {
     }
 }
 ```
+
+### ConfigSchemaProvider — Manifest-Driven UI
+
+Implement when the plugin needs a settings card, OAuth connect button, playlist browser,
+or custom URL import patterns in the frontend. **No React components are written per provider** —
+the UI auto-generates everything from this interface.
+
+```go
+// internal/plugin/config_schema.go
+type ConfigSchemaProvider interface {
+    ConfigSchema() []ConfigField    // fields for settings card (nil or empty = no card)
+    Icon() string                   // icon ID ("globe", "music2", "disc3", "disc", "radio", "database")
+    OAuthConfig() *OAuthInfo        // OAuth connect button config (nil = no button)
+    UISlots() *UISlots              // optional features: playlist browser, import URL patterns
+}
+```
+
+**ConfigField — describes one settings form field:**
+```go
+type ConfigField struct {
+    Name        string          `json:"name"`                   // matches JSON config key
+    Type        string          `json:"type"`                   // "text", "password", "select"
+    Label       string          `json:"label"`                  // form field label
+    Hint        string          `json:"hint,omitempty"`         // help text below field
+    Required    bool            `json:"required"`               // form validation
+    Placeholder string          `json:"placeholder,omitempty"`  // input placeholder
+    Default     string          `json:"default,omitempty"`      // default value
+    Options     []FieldOption   `json:"options,omitempty"`      // select dropdown options
+    DependsOn   *FieldDependsOn `json:"depends_on,omitempty"`   // conditional visibility
+    Secret      bool            `json:"secret,omitempty"`       // mask value (password type)
+    Validation  *FieldValidation `json:"validation,omitempty"`  // "url", "email"
+}
+```
+
+**Field types supported:** `"text"`, `"password"`, `"select"`
+
+**OAuthInfo — OAuth connect button:**
+```go
+type OAuthInfo struct {
+    Enabled      bool            `json:"enabled"`
+    ConnectLabel string          `json:"connect_label"`            // button text
+    ConnectURL   string          `json:"connect_url"`              // e.g. "/api/spotify/login"
+    DependsOn    *FieldDependsOn `json:"depends_on,omitempty"`     // show only when field matches value
+}
+```
+
+**UISlots — optional frontend features:**
+```go
+type UISlots struct {
+    PlaylistBrowser  bool            `json:"playlist_browser"`        // show "Browse X Playlists" button
+    ImportURLPatterns []ImportPattern `json:"import_url_patterns,omitempty"` // URL patterns for import dialog
+}
+
+type ImportPattern struct {
+    Pattern    string `json:"pattern"`               // regex with capture group for playlist ID
+    Label      string `json:"label"`                 // human-readable description
+    IsFallback bool   `json:"is_fallback,omitempty"` // try only after all non-fallback patterns
+}
+```
+
+**Example — minimal provider (no config fields, no special features):**
+```go
+func (f *factory) ConfigSchema() []plugin.ConfigField { return nil }
+func (f *factory) Icon() string                        { return "image" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo       { return nil }
+func (f *factory) UISlots() *plugin.UISlots             { return nil }
+```
+
+**Example — full-featured provider (Deezer):**
+```go
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+    return []plugin.ConfigField{
+        {Name: "arl", Type: "password", Label: "ARL Token", Hint: "...", Secret: true},
+        {Name: "quality", Type: "select", Label: "Quality", Default: "flac",
+            Options: []plugin.FieldOption{
+                {Value: "flac", Label: "FLAC Lossless"},
+                {Value: "mp3_320", Label: "MP3 320kbps"},
+            }},
+    }
+}
+func (f *factory) Icon() string { return "music2" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots {
+    return &plugin.UISlots{
+        PlaylistBrowser: true,
+        ImportURLPatterns: []plugin.ImportPattern{
+            {Pattern: `/playlist/(\d+)(?:[/?#]|$)`, Label: "Deezer playlist URL"},
+            {Pattern: `^(\d+)$`, Label: "Numeric Deezer ID", IsFallback: true},
+        },
+    }
+}
+```
+
+**Available icon IDs:** `"globe"`, `"music2"`, `"disc3"`, `"disc"`, `"radio"`, `"database"`, `"image"`
+(Maps to Lucide icons: Globe, Music2, Disc3, Disc, Radio, Database, Image)
+
+**What the frontend auto-generates from these declarations:**
+- Settings card with config fields (text, password, select inputs)
+- Connection status badge (not_configured / configured / connected)
+- Test Connection button (calls `CheckConnection()`)
+- OAuth connect button (shown when `OAuthConfig.Enabled && condition met`)
+- "Browse {DisplayName} Playlists" button in Playlists page
+- URL import patterns in the Import Playlist dialog
 
 ---
 
@@ -767,7 +874,40 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
     return json.RawMessage(`{"access_token":"","country_code":"US","quality":"lossless"}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField {
+    return []plugin.ConfigField{
+        {
+            Name: "access_token", Type: "password", Label: "Access Token",
+            Hint: "Your Tidal API access token.", Secret: true,
+            Placeholder: "Enter access token",
+        },
+        {
+            Name: "country_code", Type: "text", Label: "Country Code",
+            Hint: "Two-letter ISO country code (e.g. US, GB, DE).",
+            Default: "US",
+        },
+        {
+            Name: "quality", Type: "select", Label: "Quality",
+            Hint: "Preferred audio quality.", Default: "lossless",
+            Options: []plugin.FieldOption{
+                {Value: "lossless", Label: "Lossless (FLAC)"},
+                {Value: "high", Label: "High (AAC 320kbps)"},
+                {Value: "normal", Label: "Normal (AAC 96kbps)"},
+            },
+        },
+    }
+}
+
+func (f *factory) Icon() string                  { return "music2" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
+func (f *factory) UISlots() *plugin.UISlots       { return nil }
 ```
+
+**Step 4 results:** After registration + `InitAll`, Tidal automatically appears in:
+- Settings → Download Sources (as a card with all three fields + Test Connection button)
+- The import dialog's source selectors (when playlist capability is added)
+- Any capability-based routing queries for `"download"`
 
 ### Step 4: Register in main.go
 
@@ -888,6 +1028,7 @@ and declare `Capabilities() []string{"download", "metadata"}`. Each domain queri
 |-----------|---------|---------|-----------|
 | `BasePlugin` | `internal/plugin` | Identity, readiness, connectivity | **Yes** (via download.Plugin) |
 | `PluginFactory` | `internal/plugin` | Self-registration with capabilities | **Yes** |
+| `ConfigSchemaProvider` | `internal/plugin` | UI manifest (config fields, icon, OAuth, slots) | No (recommended) |
 | `download.Plugin` | `internal/download` | Download source contract (extends BasePlugin) | **Yes** (for download sources) |
 | `SearchPlugin` | `internal/download` | Incremental search with progress callback | No |
 | `DownloadProgressor` | `internal/download` | Byte-level download progress polling | No |
@@ -911,6 +1052,10 @@ and declare `Capabilities() []string{"download", "metadata"}`. Each domain queri
 |------|---------|-------------|---------|
 | `BasePlugin` | `internal/plugin` | `plugin.go` | Minimal plugin contract |
 | `PluginFactory` | `internal/plugin` | `factory.go` | Factory with capabilities |
+| `ConfigField` | `internal/plugin` | `config_schema.go` | Config form field descriptor |
+| `ConfigSchemaProvider` | `internal/plugin` | `config_schema.go` | UI manifest interface |
+| `OAuthInfo` | `internal/plugin` | `config_schema.go` | OAuth button config |
+| `UISlots` | `internal/plugin` | `config_schema.go` | Optional frontend features |
 | `PluginResources` | `internal/plugin` | `factory.go` | Runtime resources for `Create()` |
 | `plugin.Registry` | `internal/plugin` | `registry.go` | Generic plugin registry |
 | `download.Registry` | `internal/download` | `registry.go` | Type-safe wrapper for download plugins |
@@ -929,7 +1074,8 @@ and declare `Capabilities() []string{"download", "metadata"}`. Each domain queri
 
 ```
 internal/providers/<source>/
-  factory.go       — plugin.PluginFactory, config struct, DefaultConfig()
+  factory.go       — plugin.PluginFactory, config struct, DefaultConfig(),
+                     ConfigSchema(), Icon(), OAuthConfig(), UISlots()
   client.go        — download.Plugin implementation (or download.go)
   api.go           — API response types (optional)
   playlist.go      — playlist.Source implementation (optional, in same package)
