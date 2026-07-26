@@ -2,12 +2,7 @@ import { useSources } from "../../hooks/use-config";
 import { useSearchParams } from "react-router-dom";
 import Spinner from "../../components/Spinner";
 import SubTabs from "../../components/SubTabs";
-import SoulseekSection from "./SoulseekSection";
-import DeezerSection from "./DeezerSection";
-import MusicBrainzSection from "./MusicBrainzSection";
-import SpotifySection from "./SpotifySection";
-import DiscogsSection from "./DiscogsSection";
-import LastFmSection from "./LastFmSection";
+import ProviderSection from "./ProviderSection";
 import MetadataOrderSection from "./MetadataOrderSection";
 import DownloadOrderSection from "./DownloadOrderSection";
 
@@ -35,13 +30,6 @@ export default function SourcesSettings() {
     );
   }
 
-  const soulseekSource = sources?.find((s) => s.name === "soulseek");
-  const deezerSource = sources?.find((s) => s.name === "deezer");
-  const mbSource = sources?.find((s) => s.name === "musicbrainz");
-  const spotifySource = sources?.find((s) => s.name === "spotify");
-  const discogsSource = sources?.find((s) => s.name === "discogs");
-  const lastfmSource = sources?.find((s) => s.name === "lastfm");
-
   return (
     <div>
       <SubTabs
@@ -59,12 +47,12 @@ export default function SourcesSettings() {
 
       {tab === "providers" && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-          <SoulseekSection source={soulseekSource} />
-          <DeezerSection source={deezerSource} />
-          <MusicBrainzSection source={mbSource} />
-          <SpotifySection source={spotifySource} />
-          <DiscogsSection source={discogsSource} />
-          <LastFmSection source={lastfmSource} />
+          {(sources ?? [])
+            .filter((s) => (s.config_schema && s.config_schema.length > 0) || s.oauth?.enabled)
+            .sort((a, b) => a.display_name.localeCompare(b.display_name))
+            .map((source) => (
+              <ProviderSection key={source.name} source={source} />
+            ))}
         </div>
       )}
 

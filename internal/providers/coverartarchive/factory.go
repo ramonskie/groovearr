@@ -33,3 +33,8 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 func (f *factory) DefaultConfig() json.RawMessage {
 	return json.RawMessage(`{}`)
 }
+
+func (f *factory) ConfigSchema() []plugin.ConfigField { return nil }
+func (f *factory) Icon() string                        { return "image" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo       { return nil }
+func (f *factory) UISlots() *plugin.UISlots             { return nil }

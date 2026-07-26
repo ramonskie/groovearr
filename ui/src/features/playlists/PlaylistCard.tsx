@@ -4,6 +4,8 @@ import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { Playlist, PlaylistTrackDownloadStatus } from "../../api/types";
 import { useSyncPlaylist, useDownloadMissing, usePlaylist, useDeletePlaylist } from "../../hooks/use-playlists";
+import { useSources } from "../../hooks/use-config";
+import { getProviderIcon } from "../settings/providerIcons";
 import Button from "../../components/Button";
 import Badge from "../../components/Badge";
 import Spinner from "../../components/Spinner";
@@ -29,12 +31,18 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
   const syncMutation = useSyncPlaylist();
   const downloadMissingMutation = useDownloadMissing();
   const deleteMutation = useDeletePlaylist();
+  const { data: sources } = useSources();
 
   const { data: trackData, isLoading: tracksLoading } = usePlaylist(
     expanded ? playlist.id : 0,
   );
 
   const isSynced = !!playlist.synced_at;
+
+  // Resolve provider display name and icon from sources list
+  const sourceInfo = (sources ?? []).find((s) => s.name === playlist.source);
+  const SourceIcon = getProviderIcon(sourceInfo?.icon);
+  const sourceDisplayName = sourceInfo?.display_name ?? playlist.source;
 
   const handleSync = (e: React.MouseEvent) => {
     e.stopPropagation();
@@ -105,7 +113,10 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2">
             <h4 className="truncate text-sm font-semibold text-white">{playlist.name}</h4>
-            <Badge variant="muted">{playlist.source}</Badge>
+            <Badge variant="muted">
+              <SourceIcon size={10} className="mr-1" />
+              {sourceDisplayName}
+            </Badge>
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-xs text-slate-400">{playlist.track_count} tracks</span>
