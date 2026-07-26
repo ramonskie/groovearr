@@ -46,12 +46,13 @@ func (f *factory) Name() string        { return pluginName }
 func (f *factory) DisplayName() string { return displayName }
 
 // Capabilities returns the capability domains this plugin provides.
-// Free mode: ["metadata"]. Dev mode: ["metadata", "discovery", "playlist"].
+// Free mode: no capabilities (URL-based metadata only, no API access).
+// Dev mode: ["metadata", "discovery", "playlist"] — requires valid OAuth token.
 func (f *factory) Capabilities() []string {
 	if f.mode == "dev" {
 		return []string{"metadata", "discovery", "playlist"}
 	}
-	return []string{"metadata"}
+	return nil
 }
 
 // Create builds a Spotify plugin from raw JSON config and runtime resources.

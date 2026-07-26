@@ -78,11 +78,11 @@ func TestFactoryName(t *testing.T) {
 }
 
 func TestFactoryCapabilities(t *testing.T) {
-	// Default factory (free mode) — metadata only.
+	// Free mode — no capabilities (requires dev mode with valid token).
 	freeFactory := NewFactory("free")
 	caps := freeFactory.Capabilities()
-	if len(caps) != 1 || caps[0] != "metadata" {
-		t.Errorf("free mode capabilities = %v, want [metadata]", caps)
+	if len(caps) != 0 {
+		t.Errorf("free mode capabilities = %v, want []", caps)
 	}
 
 	// Dev mode factory — metadata + playlist.
@@ -118,10 +118,10 @@ func TestFactoryCreate(t *testing.T) {
 }
 
 func TestFactoryCreateSyncsModeToConfig(t *testing.T) {
-	// Default factory starts as free — capabilities should be metadata only.
+	// Free mode factory starts with no capabilities.
 	f := NewFactory("free")
-	if caps := f.Capabilities(); len(caps) != 1 || caps[0] != "metadata" {
-		t.Fatalf("default capabilities = %v, want [metadata]", caps)
+	if caps := f.Capabilities(); len(caps) != 0 {
+		t.Fatalf("free mode capabilities = %v, want []", caps)
 	}
 
 	// Creating a plugin with dev config should sync the factory mode.

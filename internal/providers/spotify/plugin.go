@@ -13,11 +13,13 @@ import (
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/provider"
 )
 
-// Compile-time interface check.
+// Compile-time interface checks.
 var _ download.Plugin = (*Plugin)(nil)
+var _ metadata.Provider = (*Plugin)(nil)
 
 // Plugin implements download.Plugin for Spotify metadata-only access.
 // Free mode resolves Spotify URLs via oEmbed. Dev mode uses the
@@ -85,10 +87,7 @@ func (p *Plugin) IsConfigured() bool {
 // Spotify never supports downloading — the "download" capability is omitted.
 func (p *Plugin) CapabilityStatus() map[string]string {
 	if p.cfg.Mode == "free" {
-		return map[string]string{
-			"playlist":  "not_configured",
-			"discovery": "not_configured",
-		}
+		return nil
 	}
 
 	s := "not_configured"
@@ -98,7 +97,12 @@ func (p *Plugin) CapabilityStatus() map[string]string {
 			s = "connected"
 		}
 	}
+	metaStatus := "not_configured"
+	if p.cfg.Tokens.AccessToken != "" {
+		metaStatus = s
+	}
 	return map[string]string{
+		"metadata":  metaStatus,
 		"playlist":  s,
 		"discovery": s,
 	}
@@ -413,4 +417,167 @@ func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 		})
 	}
 	return out, nil
+}
+
+// ─── metadata.Provider ────────────────────────────────────────────────
+
+// IsMetadataAvailable returns true when Spotify is in dev mode with a valid
+// access token. Free mode cannot perform metadata lookups via the API.
+func (p *Plugin) IsMetadataAvailable() bool {
+	return p.cfg.Mode == "dev" && p.cfg.Tokens.AccessToken != ""
+}
+
+// SearchAlbum finds the album title for a track via the Spotify Web API.
+// Returns empty string when no match is found or the API is unavailable.
+func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) string {
+	if p.api == nil || artist == "" || title == "" {
+		return ""
+	}
+	query := fmt.Sprintf("track:%s artist:%s", title, artist)
+	result, err := p.api.SearchTracks(ctx, query, 3, 0)
+	if err != nil {
+		p.log.Warn("spotify search album failed", "error", err, "artist", artist, "title", title, "component", "spotify")
+		return ""
+	}
+	for _, t := range result.Items {
+		if t.Album.Name != "" {
+			return t.Album.Name
+		}
+	}
+	return ""
+}
+
+// SearchCover looks up album cover art via the Spotify Web API.
+// Returns nil, nil when no match is found or parameters are empty.
+func (p *Plugin) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
+	if p.api == nil || artist == "" || album == "" {
+		return nil, nil
+	}
+	query := fmt.Sprintf("album:%s artist:%s", album, artist)
+	result, err := p.api.SearchAlbums(ctx, query, 3, 0)
+	if err != nil {
+		p.log.Warn("spotify search cover failed", "error", err, "artist", artist, "album", album, "component", "spotify")
+		return nil, err
+	}
+	for _, a := range result.Items {
+		if len(a.Images) > 0 {
+			img := a.Images[0]
+			w, h := 0, 0
+			if img.Width != nil {
+				w = *img.Width
+			}
+			if img.Height != nil {
+				h = *img.Height
+			}
+			thumbURL := ""
+			if len(a.Images) > 2 {
+				thumbURL = a.Images[2].URL
+			} else if len(a.Images) > 1 {
+				thumbURL = a.Images[1].URL
+			}
+			return &metadata.CoverResult{
+				ImageURL: img.URL,
+				Width:    w,
+				Height:   h,
+				Source:   "spotify",
+				ThumbURL: thumbURL,
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
+// SearchArtistImage looks up an artist image via the Spotify Web API.
+// Returns nil, nil when no match is found or the artist name is empty.
+func (p *Plugin) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
+	if p.api == nil || artist == "" {
+		return nil, nil
+	}
+	result, err := p.api.SearchArtists(ctx, artist, 1, 0)
+	if err != nil {
+		p.log.Warn("spotify search artist image failed", "error", err, "artist", artist, "component", "spotify")
+		return nil, err
+	}
+	for _, a := range result.Items {
+		if len(a.Images) > 0 {
+			img := a.Images[0]
+			w, h := 0, 0
+			if img.Width != nil {
+				w = *img.Width
+			}
+			if img.Height != nil {
+				h = *img.Height
+			}
+			thumbURL := ""
+			if len(a.Images) > 2 {
+				thumbURL = a.Images[2].URL
+			} else if len(a.Images) > 1 {
+				thumbURL = a.Images[1].URL
+			}
+			return &metadata.ArtistImageResult{
+				ImageURL: img.URL,
+				Width:    w,
+				Height:   h,
+				Source:   "spotify",
+				ThumbURL: thumbURL,
+			}, nil
+		}
+	}
+	return nil, nil
+}
+
+// EnrichTrack fetches ISRC, genres, release date, and label for a track
+// via the Spotify Web API. Uses the Spotify track ID from track.ExternalIDs
+// when available (fast path). Otherwise searches by title.
+// Returns nil, nil when no match is found or the API is unavailable.
+func (p *Plugin) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
+	if p.api == nil || track.Title == "" {
+		return nil, nil
+	}
+
+	var t *Track
+	// Fast path: resolve by existing Spotify track ID.
+	if id := track.ExternalIDs["spotify"]; id != "" {
+		if resolved, err := p.api.GetTrack(ctx, id); err == nil {
+			t = resolved
+		} else {
+			p.log.Warn("spotify get track failed", "error", err, "track_id", id, "component", "spotify")
+		}
+	}
+	// Slow path: search by title.
+	if t == nil {
+		result, err := p.api.SearchTracks(ctx, track.Title, 1, 0)
+		if err != nil {
+			p.log.Warn("spotify enrich track search failed", "error", err, "track", track.Title, "component", "spotify")
+			return nil, err
+		}
+		if len(result.Items) == 0 {
+			return nil, nil
+		}
+		t = &result.Items[0]
+	}
+
+	meta := &metadata.TrackMetadata{
+		ISRC:        t.ExternalIDs.ISRC,
+		ReleaseDate: t.Album.ReleaseDate,
+		ExternalIDs: map[string]string{"spotify": t.ID},
+	}
+	// Fetch full album details for label and genres.
+	if t.Album.ID != "" {
+		if album, err := p.api.GetAlbum(ctx, t.Album.ID); err == nil {
+			meta.Label = album.Label
+			meta.Genres = album.Genres
+		} else {
+			p.log.Warn("spotify get album failed", "error", err, "album_id", t.Album.ID, "component", "spotify")
+		}
+	}
+	// Fallback to artist genres if album returned none.
+	if len(meta.Genres) == 0 && len(t.Artists) > 0 && t.Artists[0].ID != "" {
+		if artist, err := p.api.GetArtist(ctx, t.Artists[0].ID); err == nil {
+			meta.Genres = artist.Genres
+		} else {
+			p.log.Warn("spotify get artist failed", "error", err, "artist_id", t.Artists[0].ID, "component", "spotify")
+		}
+	}
+	return meta, nil
 }
