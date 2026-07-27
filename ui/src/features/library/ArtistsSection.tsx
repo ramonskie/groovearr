@@ -28,7 +28,7 @@ function ArtistCard({
     <button
       type="button"
       onClick={() => onSelect(artist.id)}
-      className="group flex cursor-pointer flex-col items-center gap-2 rounded-lg p-2 text-center transition-colors hover:bg-slate-800/50"
+      className="flex cursor-pointer flex-col items-center gap-2 rounded-lg p-2 text-center transition-colors hover:bg-slate-800/50"
     >
       {/* Circular artist image or letter avatar */}
       <div className="aspect-square w-full overflow-hidden rounded-full" style={{ backgroundColor: bgColor }}>

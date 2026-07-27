@@ -1277,6 +1277,34 @@ func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit i
 	return out, nil
 }
 
+// GetArtistTopTracks implements discovery.TopTrackProvider.
+func (d *DownloadClient) GetArtistTopTracks(ctx context.Context, providerArtistID string, limit int) ([]discovery.TrackInfo, error) {
+	id, err := strconv.Atoi(providerArtistID)
+	if err != nil {
+		d.log.Error("get artist top tracks invalid id", "error", err, "id", providerArtistID, "component", "deezer")
+		return nil, err
+	}
+	tracks, err := d.api.GetArtistTopTracks(ctx, id, limit)
+	if err != nil {
+		d.log.Error("get artist top tracks failed", "error", err, "artistID", id, "component", "deezer")
+		return nil, err
+	}
+	out := make([]discovery.TrackInfo, 0, len(tracks))
+	for _, t := range tracks {
+		artistName := t.Artist.Name
+		out = append(out, discovery.TrackInfo{
+			ProviderID:  strconv.Itoa(t.ID),
+			ArtistName:  artistName,
+			AlbumTitle:  t.Album.Title,
+			Title:       t.Title,
+			TrackNumber: t.TrackPos,
+			DiscNumber:  t.DiskNumber,
+			DurationMs:  int64(t.Duration) * 1000,
+		})
+	}
+	return out, nil
+}
+
 // ─── metadata.Provider (public API, no ARL needed) ─────────────────────
 
 // Compile-time checks.

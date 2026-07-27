@@ -302,6 +302,12 @@ export interface DiscoverySearchResponse {
   albums?: DiscoveryAlbum[];
 }
 
+export interface ArtistOverview {
+  artist: ArtistSummary;
+  top_tracks: DiscoveryTrack[];
+  discography: Record<string, number>;
+}
+
 export interface DiscoveryAlbumDownloadResponse {
   queued: number;
   total: number;
@@ -400,6 +406,7 @@ export interface DownloadResponse {
 export interface DownloadBestRequest {
   title: string;
   artist?: string;
+  album?: string;
   duration?: number;
   exclude_source?: string;
 }

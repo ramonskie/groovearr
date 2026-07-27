@@ -351,6 +351,21 @@ func (p *Plugin) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 	return spotifyArtistAlbums(p.api, ctx, providerArtistID, limit, p.log)
 }
 
+// GetArtistTopTracks implements discovery.TopTrackProvider.
+func (p *Plugin) GetArtistTopTracks(ctx context.Context, providerArtistID string, limit int) ([]discovery.TrackInfo, error) {
+	if p.api == nil {
+		return nil, fmt.Errorf("spotify: discovery requires dev mode")
+	}
+	tracks, err := spotifyArtistTopTracks(p.api, ctx, providerArtistID, p.log)
+	if err != nil {
+		return nil, err
+	}
+	if limit > 0 && len(tracks) > limit {
+		tracks = tracks[:limit]
+	}
+	return tracks, nil
+}
+
 func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]discovery.TrackInfo, error) {
 	if p.api == nil {
 		return nil, fmt.Errorf("spotify: discovery requires dev mode")

@@ -44,6 +44,36 @@ func spotifyArtistAlbums(api *API, ctx context.Context, providerArtistID string,
 	return out, nil
 }
 
+// spotifyArtistTopTracks fetches an artist's top tracks.
+func spotifyArtistTopTracks(api *API, ctx context.Context, providerArtistID string, log *slog.Logger) ([]discovery.TrackInfo, error) {
+	tracks, err := api.GetArtistTopTracks(ctx, providerArtistID)
+	if err != nil {
+		if log != nil {
+			log.Error("spotify get artist top tracks failed", "error", err, "component", "spotify_discover")
+		}
+		return nil, err
+	}
+
+	out := make([]discovery.TrackInfo, 0, len(tracks))
+	for _, t := range tracks {
+		artistName := ""
+		albumTitle := t.Album.Name
+		if len(t.Artists) > 0 {
+			artistName = t.Artists[0].Name
+		}
+		out = append(out, discovery.TrackInfo{
+			ProviderID:  t.ID,
+			ArtistName:  artistName,
+			AlbumTitle:  albumTitle,
+			Title:       t.Name,
+			TrackNumber: t.TrackNumber,
+			DiscNumber:  t.DiscNumber,
+			DurationMs:  int64(t.DurationMs),
+		})
+	}
+	return out, nil
+}
+
 // spotifyAlbumTracks fetches all tracks for an album (shared by Plugin).
 func spotifyAlbumTracks(api *API, ctx context.Context, providerAlbumID string, log *slog.Logger) ([]discovery.TrackInfo, error) {
 	album, err := api.GetAlbum(ctx, providerAlbumID)

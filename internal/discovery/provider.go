@@ -30,6 +30,12 @@ type Provider interface {
 	SearchAlbums(ctx context.Context, query string, limit int) ([]AlbumResult, error)
 }
 
+// TopTrackProvider is an optional extension for discovery providers that
+// can return an artist's most popular tracks. Type-assert from Provider.
+type TopTrackProvider interface {
+	GetArtistTopTracks(ctx context.Context, providerArtistID string, limit int) ([]TrackInfo, error)
+}
+
 // ArtistSummary is a lightweight artist result from search.
 type ArtistSummary struct {
 	ProviderID   string   `json:"provider_id"`

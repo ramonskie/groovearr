@@ -33,7 +33,9 @@ import type {
   DiscoveryTrack,
   DiscoveryAlbumDownloadResponse,
   AlbumDiscoveryResponse,
+  ArtistSummary,
   ApiError,
+  ArtistOverview,
   QualityProfile,
   QualityProfileCreatePayload,
   QualityProfileUpdatePayload,
@@ -317,6 +319,20 @@ export function discoverySearch(query: string, type?: string) {
   const params = new URLSearchParams({ q: query });
   if (type) params.set("type", type);
   return request<DiscoverySearchResponse>(`/api/discover/search?${params}`);
+}
+
+/** Resolve a library artist name to a discovery provider's ArtistSummary. */
+export function resolveDiscoveryArtist(name: string) {
+  return request<ArtistSummary>(
+    `/api/discover/artists/resolve?q=${encodeURIComponent(name)}`,
+  );
+}
+
+/** Fetch artist overview: top tracks + discography stats from discovery provider. */
+export function getArtistOverview(name: string) {
+  return request<ArtistOverview>(
+    `/api/discover/artists/overview?q=${encodeURIComponent(name)}`,
+  );
 }
 
 export function getArtistAlbums(artistId: string, provider?: string) {

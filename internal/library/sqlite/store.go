@@ -224,6 +224,19 @@ func (s *Store) migrate() error {
 			cached_at        TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
 		)`,
+
+		// ── Artist overview cache ──
+		`CREATE TABLE IF NOT EXISTS artist_overview_cache (
+			normalized_name    TEXT PRIMARY KEY,
+			artist_name        TEXT NOT NULL DEFAULT '',
+			provider_name      TEXT NOT NULL,
+			provider_artist_id TEXT NOT NULL,
+			image_url          TEXT NOT NULL DEFAULT '',
+			genres_json        TEXT NOT NULL DEFAULT '[]',
+			top_tracks_json    TEXT,
+			discography_json   TEXT NOT NULL,
+			cached_at          TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	// Wrap schema init in a transaction so partial failures don't leave the

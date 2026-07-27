@@ -1,9 +1,10 @@
 import {
   useState,
   useCallback,
+  useEffect,
   type FormEvent,
 } from "react";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { toast } from "sonner";
 import {
   useDiscoveryProviders,
@@ -17,66 +18,111 @@ import type { ArtistSummary, DiscoveryAlbum, DiscoveryTrack } from "../../api/ty
 
 type View = "search" | "artist" | "album";
 
+/** Derive view + IDs from URL search params. */
+function paramsToView(sp: URLSearchParams): {
+  view: View;
+  artistId: string | null;
+  artistProvider: string;
+  artistName: string;
+  albumId: string | null;
+  albumProvider: string;
+  albumName: string;
+} {
+  const aid = sp.get("artist_id")?.trim() || null;
+  const aProvider = sp.get("provider")?.trim() || "";
+  const aName = sp.get("artist_name")?.trim() || "";
+  const alid = sp.get("album_id")?.trim() || null;
+  const alProvider = sp.get("album_provider")?.trim() || aProvider;
+  const alName = sp.get("album_name")?.trim() || "";
+
+  if (alid) return { view: "album", artistId: aid, artistProvider: aProvider, artistName: aName, albumId: alid, albumProvider: alProvider, albumName: alName };
+  if (aid) return { view: "artist", artistId: aid, artistProvider: aProvider, artistName: aName, albumId: null, albumProvider: "", albumName: "" };
+  return { view: "search", artistId: null, artistProvider: "", artistName: "", albumId: null, albumProvider: "", albumName: "" };
+}
+
 export default function DiscoverPage() {
   const navigate = useNavigate();
-  const [query, setQuery] = useState("");
-  const [view, setView] = useState<View>("search");
-  const [selectedArtistId, setSelectedArtistId] = useState<string | null>(null);
-  const [selectedArtistProvider, setSelectedArtistProvider] = useState("");
-  const [selectedArtistName, setSelectedArtistName] = useState("");
-  const [selectedAlbumId, setSelectedAlbumId] = useState<string | null>(null);
-  const [selectedAlbumProvider, setSelectedAlbumProvider] = useState("");
-  const [selectedAlbumName, setSelectedAlbumName] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  const { view, artistId, artistProvider, artistName, albumId, albumProvider, albumName } = paramsToView(searchParams);
+
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [coverUrl, setCoverUrl] = useState("");
 
   const { data: providers } = useDiscoveryProviders();
   const searchMutation = useDiscoverySearch();
-  const { data: albums } = useArtistAlbums(selectedArtistId, selectedArtistProvider);
-  const { data: tracks } = useAlbumTracks(selectedAlbumId, selectedAlbumProvider);
+  const { data: albums } = useArtistAlbums(artistId, artistProvider);
+  const { data: tracks } = useAlbumTracks(albumId, albumProvider);
   const downloadAlbumMutation = useDownloadAlbum();
 
   const noProviders = providers && providers.length === 0;
 
+  // Keep query input in sync with URL params (e.g. on back-navigation).
+  useEffect(() => {
+    setQuery(searchParams.get("q") ?? "");
+  }, [searchParams]);
+
+  // ── Navigation helpers (update URL params) ──
+
+  const goSearch = useCallback((q?: string) => {
+    const params: Record<string, string> = {};
+    if (q) params.q = q;
+    setSearchParams(params, { replace: true });
+  }, [setSearchParams]);
+
+  const goArtist = useCallback((id: string, provider: string, name: string) => {
+    setSearchParams({ artist_id: id, provider, artist_name: name }, { replace: true });
+  }, [setSearchParams]);
+
+  const goAlbum = useCallback((id: string, provider: string, name: string) => {
+    const params: Record<string, string> = {
+      artist_id: artistId ?? "",
+      provider: artistProvider,
+      artist_name: artistName,
+      album_id: id,
+      album_provider: provider,
+      album_name: name,
+    };
+    setSearchParams(params, { replace: true });
+  }, [artistId, artistProvider, artistName, setSearchParams]);
+
+  // ── Handlers ──
+
   const handleSearch = useCallback(
     (e: FormEvent) => {
       e.preventDefault();
-      if (!query.trim()) return;
-      setView("search");
-      searchMutation.mutate({ query: query.trim() });
+      const q = query.trim();
+      if (!q) return;
+      searchMutation.mutate({ query: q });
+      goSearch(q);
     },
-    [query, searchMutation],
+    [query, searchMutation, goSearch],
   );
 
   const handleArtistClick = useCallback((artist: ArtistSummary) => {
-    setSelectedArtistId(artist.provider_id);
-    setSelectedArtistProvider(artist.provider_name ?? "");
-    setSelectedArtistName(artist.name);
-    setView("artist");
-  }, []);
+    goArtist(artist.provider_id, artist.provider_name ?? "", artist.name);
+  }, [goArtist]);
 
   const handleAlbumClick = useCallback((album: DiscoveryAlbum) => {
-    setSelectedAlbumId(album.provider_id);
-    setSelectedAlbumProvider(album.provider_name);
-    setSelectedAlbumName(album.title);
     setCoverUrl(album.cover_url ?? "");
-    setView("album");
-  }, []);
+    goAlbum(album.provider_id, album.provider_name, album.title);
+  }, [goAlbum]);
 
   const handleBack = useCallback(() => {
     if (view === "album") {
-      setView("artist");
-      setSelectedAlbumId(null);
-      setSelectedAlbumProvider("");
+      if (artistId) {
+        goArtist(artistId, artistProvider, artistName);
+      } else {
+        goSearch(query || undefined);
+      }
     } else if (view === "artist") {
-      setView("search");
-      setSelectedArtistId(null);
-      setSelectedArtistProvider("");
+      goSearch(query || undefined);
     }
-  }, [view]);
+  }, [view, artistId, artistProvider, artistName, query, goArtist, goSearch]);
 
   const handleDownloadAlbum = useCallback(() => {
-    if (!selectedAlbumId) return;
-    downloadAlbumMutation.mutate(selectedAlbumId, {
+    if (!albumId) return;
+    downloadAlbumMutation.mutate(albumId, {
       onSuccess: (data) => {
         toast.success(`${data.queued}/${data.total} tracks queued`);
         if (data.errors.length > 0) {
@@ -88,7 +134,7 @@ export default function DiscoverPage() {
         toast.error(err.message);
       },
     });
-  }, [selectedAlbumId, downloadAlbumMutation, navigate]);
+  }, [albumId, downloadAlbumMutation, navigate]);
 
   const results = searchMutation.data;
 
@@ -96,19 +142,21 @@ export default function DiscoverPage() {
     <div className="max-w-4xl mx-auto">
       <h1 className="text-2xl font-bold mb-6 text-gray-100">Discover</h1>
 
-      {/* Search bar */}
-      <form onSubmit={handleSearch} className="flex gap-3 mb-6">
-        <input
-          type="text"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          placeholder="Search artists or albums..."
-          className="flex-1 px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-purple-500"
-        />
-        <Button type="submit" disabled={searchMutation.isPending}>
-          {searchMutation.isPending ? "Searching..." : "Search"}
-        </Button>
-      </form>
+      {/* Search bar — only in search view */}
+      {view === "search" && (
+        <form onSubmit={handleSearch} className="flex gap-3 mb-6">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Search artists or albums..."
+            className="flex-1 px-4 py-2 rounded-lg bg-gray-800 border border-gray-700 text-gray-100 placeholder-gray-500 focus:outline-none focus:border-purple-500"
+          />
+          <Button type="submit" disabled={searchMutation.isPending}>
+            {searchMutation.isPending ? "Searching..." : "Search"}
+          </Button>
+        </form>
+      )}
 
       {/* Back button */}
       {view !== "search" && (
@@ -116,7 +164,7 @@ export default function DiscoverPage() {
           onClick={handleBack}
           className="mb-4 text-purple-400 hover:text-purple-300 text-sm flex items-center gap-1"
         >
-          ← Back to {view === "album" ? selectedArtistName : "search results"}
+          ← Back to {view === "album" ? artistName : "search results"}
         </button>
       )}
 
@@ -129,16 +177,16 @@ export default function DiscoverPage() {
       )}
 
       {/* Loading / Error / Empty states */}
-      {searchMutation.isPending && (
+      {view === "search" && searchMutation.isPending && (
         <div className="text-center text-gray-400 py-12">Searching...</div>
       )}
-      {searchMutation.isError && (
+      {view === "search" && searchMutation.isError && (
         <div className="rounded-lg border border-red-800 bg-red-950/50 text-red-300 p-4 text-sm">
           {searchMutation.error?.message ?? "Search failed"}
         </div>
       )}
 
-      {/* Artist view */}
+      {/* Search results */}
       {view === "search" && results && (
         <div className="space-y-8">
           {results.artists && results.artists.length > 0 && (
@@ -202,7 +250,7 @@ export default function DiscoverPage() {
       {view === "artist" && (
         <section>
           <h2 className="text-xl font-bold text-gray-100 mb-2">
-            {selectedArtistName}
+            {artistName}
           </h2>
           <p className="text-gray-400 mb-6">Albums</p>
           {albums ? (
@@ -220,15 +268,15 @@ export default function DiscoverPage() {
             {coverUrl && (
               <img
                 src={coverUrl}
-                alt={selectedAlbumName}
+                alt={albumName}
                 className="w-48 h-48 rounded-lg object-cover shadow-lg"
               />
             )}
             <div className="flex flex-col justify-end">
               <h2 className="text-2xl font-bold text-gray-100">
-                {selectedAlbumName}
+                {albumName}
               </h2>
-              <p className="text-gray-400">{selectedArtistName}</p>
+              <p className="text-gray-400">{artistName}</p>
               <p className="text-gray-500 text-sm mt-1">
                 {tracks?.length ?? "?"} tracks
               </p>

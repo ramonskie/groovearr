@@ -215,6 +215,21 @@ func (a *API) GetArtistAlbums(ctx context.Context, id string, limit, offset int,
 	return &result, nil
 }
 
+// GetArtistTopTracks returns an artist's top tracks for the token's market.
+func (a *API) GetArtistTopTracks(ctx context.Context, id string) ([]Track, error) {
+	if err := a.requireDevMode(); err != nil {
+		return nil, err
+	}
+
+	var result struct {
+		Tracks []Track `json:"tracks"`
+	}
+	if err := a.get(ctx, "/artists/"+id+"/top-tracks", nil, &result); err != nil {
+		return nil, err
+	}
+	return result.Tracks, nil
+}
+
 // ─── Playlists ────────────────────────────────────────────────────────
 
 // GetPlaylist returns a playlist by Spotify playlist ID.

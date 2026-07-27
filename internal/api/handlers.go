@@ -150,6 +150,8 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	// Discovery routes — metadata-first album/track browsing.
 	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)
 	mux.Handle("GET /api/discover/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverSearch)))
+	mux.Handle("GET /api/discover/artists/resolve", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverResolveArtist)))
+	mux.Handle("GET /api/discover/artists/overview", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverArtistOverview)))
 	mux.HandleFunc("GET /api/discover/artists/{id}/albums", s.handleDiscoverArtistAlbums)
 	mux.HandleFunc("GET /api/discover/albums/{id}/tracks", s.handleDiscoverAlbumTracks)
 	mux.Handle("POST /api/discover/albums/{id}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDiscoverAlbumDownload)))
@@ -1984,6 +1986,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 		albums  []discovery.AlbumResult
 		err     error
 	}
+
 	results := make([]providerResult, len(providers))
 
 	var wg sync.WaitGroup
@@ -2084,6 +2087,344 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"artists": mergedArtists,
 		"albums":  mergedAlbums,
+	})
+}
+
+// handleDiscoverResolveArtist searches all providers for an artist by name
+// and returns the best exact match. Used by the library UI to link to discovery.
+func (s *Server) handleDiscoverResolveArtist(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	s.log.Info("discover resolve artist", "query", q, "component", "discover")
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
+		return
+	}
+	if s.discoveryReg == nil || len(s.discoveryReg.Any()) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "no discovery providers configured",
+		})
+		return
+	}
+
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		providers = s.discoveryReg.Any()
+	}
+	if len(providers) == 0 {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artist not found"})
+		return
+	}
+
+	const searchTimeout = 5 * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
+	defer cancel()
+
+	type providerResult struct {
+		artists []discovery.ArtistSummary
+		err     error
+	}
+	results := make([]providerResult, len(providers))
+
+	var wg sync.WaitGroup
+	for i, p := range providers {
+		wg.Add(1)
+		go func(idx int, provider discovery.Provider) {
+			defer wg.Done()
+			a, err := provider.SearchArtists(ctx, q, 10)
+			if err != nil {
+				s.log.Warn("discover resolve artist error",
+					"provider", provider.Name(), "error", err, "component", "discover")
+				results[idx].err = err
+			}
+			results[idx].artists = a
+		}(i, p)
+	}
+	wg.Wait()
+
+	// Skip further work if the client disconnected during search.
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// Collect all artists, prefer entries with images.
+	queryKey := normalizeKey(q)
+	var best *discovery.ArtistSummary
+	for idx := range providers {
+		for i := range results[idx].artists {
+			a := &results[idx].artists[i]
+			if normalizeKey(a.Name) != queryKey {
+				continue
+			}
+			if best == nil || (best.ImageURL == "" && a.ImageURL != "") {
+				best = a
+			}
+		}
+	}
+
+	if best == nil {
+		s.log.Info("discover resolve artist: not found", "query", q, "component", "discover")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artist not found"})
+		return
+	}
+
+	s.log.Info("discover resolve artist: found", "query", q,
+		"provider", best.ProviderName, "provider_id", best.ProviderID, "component", "discover")
+	writeJSON(w, http.StatusOK, best)
+}
+
+// artistOverviewResponse is returned by GET /api/discover/artists/overview.
+type artistOverviewResponse struct {
+	Artist     discovery.ArtistSummary `json:"artist"`
+	TopTracks  []discovery.TrackInfo   `json:"top_tracks"`
+	Discography map[string]int         `json:"discography"` // e.g. {"album":12,"single":5}
+}
+
+// handleDiscoverArtistOverview resolves an artist by name, fetches top tracks
+// and discography stats, and caches the result for 24h (same pattern as
+// album_discovery_cache).
+func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query().Get("q")
+	s.log.Info("discover artist overview", "query", q, "component", "discover")
+	if q == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "query parameter 'q' is required"})
+		return
+	}
+
+	queryKey := normalizeKey(q)
+
+	// ── Check cache ──
+	var cachedName, cachedProvider, cachedArtistID, cachedImageURL, cachedGenresJSON, cachedTopTracksJSON, cachedDiscographyJSON, cachedAt string
+	if dbp, ok := s.store.(sqlDBProvider); ok {
+		err := dbp.DB().QueryRowContext(r.Context(),
+			`SELECT artist_name, provider_name, provider_artist_id, image_url, genres_json, top_tracks_json, discography_json, cached_at
+			 FROM artist_overview_cache WHERE normalized_name = ?`, queryKey,
+		).Scan(&cachedName, &cachedProvider, &cachedArtistID, &cachedImageURL, &cachedGenresJSON, &cachedTopTracksJSON, &cachedDiscographyJSON, &cachedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("artist overview cache read failed", "query", q, "error", err, "component", "discover")
+		}
+	}
+
+	if cachedDiscographyJSON != "" && cachedDiscographyJSON != "null" && cachedAt != "" {
+		if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
+			if time.Since(t) <= 24*time.Hour {
+				// Cache hit — return cached data.
+				var topTracks []discovery.TrackInfo
+				if cachedTopTracksJSON != "" && cachedTopTracksJSON != "null" {
+					if uerr := json.Unmarshal([]byte(cachedTopTracksJSON), &topTracks); uerr != nil {
+						s.log.Warn("artist overview cache top_tracks corrupt", "query", q, "error", uerr, "component", "discover")
+						topTracks = nil
+					}
+				}
+				var discography map[string]int
+				if uerr := json.Unmarshal([]byte(cachedDiscographyJSON), &discography); uerr != nil {
+					s.log.Warn("artist overview cache discography corrupt", "query", q, "error", uerr, "component", "discover")
+					discography = nil
+				}
+				if discography != nil {
+					var cachedGenres []string
+					if cachedGenresJSON != "" && cachedGenresJSON != "null" {
+						_ = json.Unmarshal([]byte(cachedGenresJSON), &cachedGenres)
+					}
+					out := artistOverviewResponse{
+						Artist: discovery.ArtistSummary{
+							ProviderID:   cachedArtistID,
+							ProviderName: cachedProvider,
+							Name:         cachedName,
+							ImageURL:     cachedImageURL,
+							Genres:       cachedGenres,
+						},
+						TopTracks:   topTracks,
+						Discography: discography,
+					}
+					if len(out.TopTracks) == 0 {
+						out.TopTracks = []discovery.TrackInfo{}
+					}
+					writeJSON(w, http.StatusOK, out)
+					return
+				}
+			}
+		}
+	}
+
+	// ── Cache miss — resolve artist and fetch fresh data ──
+	if s.discoveryReg == nil || len(s.discoveryReg.Any()) == 0 {
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no discovery providers configured"})
+		return
+	}
+
+	// 1. Resolve artist (same logic as handleDiscoverResolveArtist).
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		providers = s.discoveryReg.Any()
+	}
+
+	const searchTimeout = 5 * time.Second
+	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
+	defer cancel()
+
+	type providerResult struct {
+		artists []discovery.ArtistSummary
+		err     error
+	}
+	results := make([]providerResult, len(providers))
+
+	var wg sync.WaitGroup
+	for i, p := range providers {
+		wg.Add(1)
+		go func(idx int, provider discovery.Provider) {
+			defer wg.Done()
+			a, err := provider.SearchArtists(ctx, q, 10)
+			if err != nil {
+				s.log.Warn("discover artist overview: search failed",
+					"provider", provider.Name(), "error", err, "component", "discover")
+			}
+			results[idx].artists = a
+		}(i, p)
+	}
+	wg.Wait()
+
+	var resolved *discovery.ArtistSummary
+	for idx := range providers {
+		for i := range results[idx].artists {
+			a := &results[idx].artists[i]
+			if normalizeKey(a.Name) == queryKey {
+				if resolved == nil || (resolved.ImageURL == "" && a.ImageURL != "") {
+					resolved = a
+				}
+			}
+		}
+	}
+
+	if resolved == nil {
+		s.log.Info("discover artist overview: artist not found", "query", q, "component", "discover")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artist not found"})
+		return
+	}
+
+	if r.Context().Err() != nil {
+		return
+	}
+
+	// 2. Fetch discography (albums by type) with a fresh context.
+	// Use the registry to get the provider matching the resolved artist.
+	fetchProvider := s.discoveryReg.Get(resolved.ProviderName)
+	if fetchProvider == nil {
+		// Provider was removed since resolution — skip discography fetch
+		// rather than risking a cross-provider call with wrong ID format.
+		s.log.Warn("discover artist overview: resolved provider not found in registry",
+			"provider", resolved.ProviderName, "component", "discover")
+	}
+	var albums []discovery.AlbumResult
+	if fetchProvider != nil {
+		fetchCtx, fetchCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer fetchCancel()
+		var err error
+		albums, err = fetchProvider.GetArtistAlbums(fetchCtx, resolved.ProviderID, 50)
+		if err != nil {
+			s.log.Warn("discover artist overview: get albums failed", "query", q, "provider", resolved.ProviderName, "error", err, "component", "discover")
+		}
+	}
+	discography := map[string]int{}
+	for _, a := range albums {
+		t := a.Type
+		if t == "" {
+			t = "album"
+		}
+		discography[t]++
+	}
+
+	// 3. Fetch top tracks (optional) — prefer the resolved provider, then scan others.
+	var topTracks []discovery.TrackInfo
+	tryTopTracks := func(p discovery.Provider, artistID string) bool {
+		ttp, ok := p.(discovery.TopTrackProvider)
+		if !ok {
+			return false
+		}
+		fetchCtx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer cancel()
+		tt, ttErr := ttp.GetArtistTopTracks(fetchCtx, artistID, 10)
+		if ttErr != nil {
+			s.log.Debug("discover artist overview: get top tracks failed", "query", q, "provider", p.Name(), "error", ttErr, "component", "discover")
+			return false
+		}
+		topTracks = tt
+		return true
+	}
+
+	// Try the already-resolved provider first (no extra search needed).
+	if fetchProvider != nil && tryTopTracks(fetchProvider, resolved.ProviderID) {
+		// got top tracks from the same provider
+	} else {
+		// Scan other providers (requires re-searching for their artist ID).
+		for _, p := range providers {
+			if p.Name() == resolved.ProviderName {
+				continue // already tried
+			}
+			searchCtx, searchCancel := context.WithTimeout(r.Context(), 5*time.Second)
+			artists, serr := p.SearchArtists(searchCtx, q, 5)
+			searchCancel()
+			if serr != nil || len(artists) == 0 {
+				continue
+			}
+			var ttArtistID string
+			for i := range artists {
+				if normalizeKey(artists[i].Name) == queryKey {
+					ttArtistID = artists[i].ProviderID
+					break
+				}
+			}
+			if ttArtistID == "" {
+				continue
+			}
+			if tryTopTracks(p, ttArtistID) {
+				break
+			}
+		}
+	}
+
+	// 4. Persist to cache (cache empty results too — avoids repeated lookups).
+	if dbp, ok := s.store.(sqlDBProvider); ok {
+		topJSON, _ := json.Marshal(topTracks)
+		discJSON, _ := json.Marshal(discography)
+		topStr := string(topJSON)
+		if topStr == "null" || topStr == "" {
+			topStr = "[]"
+		}
+		genresJSON, _ := json.Marshal(resolved.Genres)
+		if string(genresJSON) == "null" {
+			genresJSON = []byte("[]")
+		}
+		_, cerr := dbp.DB().ExecContext(r.Context(),
+			`INSERT OR REPLACE INTO artist_overview_cache
+			 (normalized_name, artist_name, provider_name, provider_artist_id, image_url, genres_json, top_tracks_json, discography_json, cached_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			queryKey, resolved.Name, resolved.ProviderName, resolved.ProviderID,
+			resolved.ImageURL, string(genresJSON),
+			topStr, string(discJSON),
+			time.Now().UTC().Format(time.RFC3339),
+		)
+		if cerr != nil {
+			s.log.Warn("artist overview cache write failed", "query", q, "error", cerr, "component", "discover")
+		}
+	}
+
+	if topTracks == nil {
+		topTracks = []discovery.TrackInfo{}
+	}
+
+	s.log.Info("discover artist overview: complete", "query", q,
+		"provider", resolved.ProviderName, "albums", len(albums),
+		"top_tracks", len(topTracks), "component", "discover")
+	writeJSON(w, http.StatusOK, artistOverviewResponse{
+		Artist: discovery.ArtistSummary{
+			ProviderID:   resolved.ProviderID,
+			ProviderName: resolved.ProviderName,
+			Name:         resolved.Name,
+			ImageURL:     resolved.ImageURL,
+			Genres:       resolved.Genres,
+		},
+		TopTracks:   topTracks,
+		Discography: discography,
 	})
 }
 
