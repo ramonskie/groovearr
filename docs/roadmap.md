@@ -59,8 +59,8 @@ Small but impactful fixes to what's already built.
 | 21 | ~~DB migration versioning~~ — removed; pre-release simplification, schema is flat idempotent DDL | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
 | 23 | **Use central `download.Engine`** — Engine wired into orchestrator, available for future queue/bandwidth features | ✅ Done | S | — |
-| — | **Quality Profiles** — named profiles with ranked format fallback chains (e.g. FLAC → MP3-320 → MP3-128). Replaces per-source quality settings. Profile CRUD, ranked target editor, upgrade-until cutoff. SoulSync PR #974 for reference. | 🟡 Medium | L | QualityConfig (done), Settings UI |
-| — | **Replace lower quality on import** — toggle to auto-replace existing tracks when a higher-quality version is downloaded. Per-profile setting. Stops useless re-downloads of same-or-worse quality. | 🟡 Medium | M | Quality Profiles |
+| — | **Quality Profiles** — named profiles with ranked format fallback chains (e.g. FLAC → MP3-320 → MP3-128). Replaces per-source quality settings. Profile CRUD, ranked target editor, upgrade-until cutoff. `internal/quality/` with SQLite store + ranker + integration tests. | ✅ Done | L | QualityConfig (done), Settings UI |
+| — | **Replace lower quality on import** — toggle to auto-replace existing tracks when a higher-quality version is downloaded. Per-profile setting. `UpgradeOrchestrator` in `internal/download/upgrade.go`. | ✅ Done | M | Quality Profiles |
 | 24 | **Artist unique constraint** — add UNIQUE on `artists.name` to prevent duplicates | ✅ Done | S | — |
 | 25 | **Library pagination + search** — API query params + UI search/filter beyond 200 limit | ✅ Done | M | — |
 | 26 | **Album-art display in UI** — `<img>` tags in library views, `GET /api/covers/{id}` proxy endpoint | ✅ Done | M | Cover art hook |
@@ -82,12 +82,12 @@ This tier enables the fully free path (slskd + free metadata = complete library)
 | 31 | **Metadata enrichment pipeline** — `MetadataEnrichmentHandler` in download post-processing chain. Runs all configured metadata providers against imported tracks: cover art fetch (CAA + Deezer CDN), ISRC/genre/label enrichment (MusicBrainz), album title resolution when missing, re-tagging with new metadata. Syncs `thumb_url` from on-disk `cover.jpg`. | ✅ Done | M | Metadata provider interface + registry |
 | 32 | **Configurable metadata provider order** — `metadata_order` config field (`["deezer", "musicbrainz", "coverartarchive"]`). Resolver and enrichment handler query providers in specified priority. Unlisted providers fall to end. | ✅ Done | S | Metadata resolver + enrichment handler |
 | 33 | **Comma-separated artist handling** — Spotify free mode returns co-artist strings like `"The Moon, DJ Ghost"`. Resolver tries full artist first, then primary artist (before first comma) as fallback for both album and cover lookup. | ✅ Done | S | Metadata resolver |
-| 34 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | 🟡 Medium | M | Metadata provider interface, Last.fm API key |
+| 34 | **Last.fm metadata provider** — artist images, similar artists, tags, biographies. Free API key. | ✅ Done | M | Metadata provider interface, Last.fm API key |
 | — | **iTunes Search API provider** — free cover art + metadata fallback. No auth, good for mainstream releases not in CAA. | 🟡 Medium | S | Metadata provider interface |
 
 **Goal**: After Tier 1.5, a user with only slskd configured gets:
 - ✅ Cover art (`cover.jpg` in album dirs)
-- ❌ Artist images and bios (needs Last.fm or iTunes provider)
+- ✅ Artist images and bios (via Last.fm provider)
 - ✅ ISRC codes for dedup
 - ✅ Genre tags
 - ✅ Album grouping by MusicBrainz release ID
@@ -139,7 +139,7 @@ Spotify integration for playlist import/sync, artist following, and discovery.
 | 51 | **Playlist explorer UI** — browse, import, sync, track view | ✅ Done | M | Handlers + UI |
 | 52 | **Artist watchlist** — follow artists, get notifications of new releases | 🟡 Medium | L | Spotify/Deezer APIs |
 | 53 | **Automatic watchlist downloads** — new releases auto-downloaded | 🟡 Medium | M | Watchlist + download pipeline |
-| 54 | **Wishlist / retry queue** — two-phase batch-queue pipeline (✅), Pending tab with Active/Queue sections (✅), orphan recovery on restart (✅). Missing: `POST /api/downloads/{id}/retry` endpoint, Retry button in UI, stuck pending auto-fail (#B5). | 🟡 In Progress | M | Retry endpoint + UI button |
+| 54 | **Wishlist / retry queue** — two-phase batch-queue pipeline (✅), Pending tab with Active/Queue sections (✅), orphan recovery on restart (✅). `POST /api/downloads/{id}/retry` endpoint (✅), Retry button in UI (✅), auto-retry loop with exponential backoff (✅). Missing: **stuck pending timeout** — records with missing artist/title metadata loop forever in `queued` state instead of auto-failing. See #B5. | 🟡 In Progress | M | Timeout guard for unresolved pending records |
 | 55 | **Discovery pool** — AI-curated recommendations from Spotify/Deezer/Last.fm | 🟢 Low | L | Multiple APIs |
 | 56 | **Personalized playlists** — Daily Mix, Discover Weekly, Release Radar sync | 🟢 Low | L | Spotify OAuth |
 | 57 | **Beatport charts** — top charts imported for discovery | 🟢 Low | M | Web scraping |
@@ -156,7 +156,7 @@ moved to Tier 1.5 as foundational infrastructure. Remaining items are premium/ni
 | 58 | **Last.fm scrobbling** — scrobble plays, fetch similar artists/tags | 🟡 Medium | M | Last.fm API |
 | 59 | **ListenBrainz scrobbling** — open alternative to Last.fm | 🟢 Low | M | ListenBrainz API |
 | 60 | **Genius lyrics** — fetch + embed lyrics into audio files | 🟢 Low | L | Genius API |
-| 61 | **Discogs metadata** — release info, catalog numbers | 🟢 Low | M | Discogs API |
+| 61 | **Discogs metadata** — release info, catalog numbers | ✅ Done | M | Discogs API |
 | 62 | **AudioDB metadata** — artist images, bios, genre tags | 🟢 Low | S | AudioDB API |
 
 ---
@@ -203,15 +203,15 @@ Deployment, security, and operational concerns.
 | Tier | Name | Count | Status |
 |------|------|-------|--------|
 | 0 | MVP | 15 features | ✅ 15/15 |
-| 1 | Core Quality | 13 features | 🟡 11/13 |
-| 1.5 | Metadata Providers | 8 features | ✅ 7/8 (27-33 done; 34 remains) |
+| 1 | Core Quality | 13 features | ✅ 13/13 |
+| 1.5 | Metadata Providers | 8 features | ✅ 8/8 |
 | 2 | Download Sources | 8 features | ❌ 0/8 |
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | 🟡 4 done, 6 remaining |
-| 5 | Metadata Enrichment | 5 features | ❌ 0/5 |
+| 5 | Metadata Enrichment | 5 features | 🟡 1/5 (Discogs done) |
 | 6 | Automation | 7 features | ❌ 0/7 |
 | 7 | Platform & Ops | 12 features | 🟡 2/12 (70,71 done; 72-81 remain) |
-| **Total** | | **85 features** | **39 done, 46 remaining** |
+| **Total** | | **85 features** | **43 done, 42 remaining** |
 
 ## Known Bugs
 
@@ -221,7 +221,7 @@ Deployment, security, and operational concerns.
 | B2 | Config | ✅ Done | **Masked secret round-trip corruption.** `Merge()` now detects masked strings and preserves original values. Fixed in `internal/config/config.go:90-160`. |
 | B3 | Config (design) | 🟡 Medium | **`Merge()` replaces entire source objects.** Any field not sent by the frontend (e.g., `tokens`, `allow_fallback`) is lost on save. Server-managed fields like OAuth tokens can't coexist safely with user-editable config without deep-merge. |
 | B4 | Playlist / Download | ✅ Done | **Queued tracks now visible.** `DownloadMissing` uses two-phase batch-queue → background-resolve. `QueuePending` inserts all tracks immediately with `source=pending`. Pending tab shows queue via SSE. `RecoverOrphans` recovers stuck records on restart. |
-| B5 | Playlist / Download | 🟡 Medium | **Stuck pending detection.** Records with `source=pending` older than N minutes should be auto-failed or retried. Currently silently stick forever if resolver fails. |
+| B5 | Playlist / Download | 🟡 Medium | **Stuck pending timeout for missing metadata.** Records with `source=pending` AND empty `artist`/`title` loop forever in `resolvePendingSources` (skipped, never transitioned). Records with valid metadata that fail search ARE handled (auto-transition to `failedPending` + retry loop). Fix: auto-fail records stuck in `queued`+`pending` state for >15 minutes. |
 | B6 | Discover / Download | 🟡 Medium | **Discover album download should use two-phase pattern.** Currently does synchronous search+queue per track. Should batch-queue all first (like playlists) for instant visibility. |
 | B25 | Metadata | ✅ Done | **Resolver guard prevents album lookup.** `resolvePendingDownloads` required `rec.Album != ""` to call `EnrichMetadata`, but `EnrichMetadata` was designed to FIND the album when missing. Guard changed to `rec.Artist != "" && rec.Title != ""` (`internal/playlist/service.go`). |
 | B26 | Metadata | ✅ Done | **"Unknown Album" hardcoded fallback.** `extractMetadata` in `LibraryImporterHandler` defaulted to `library.DefaultAlbumTitle` ("Unknown Album") before enrichment handler could resolve it. Removed fallback, album stays empty until enrichment (`internal/download/handler_library.go`). |
@@ -257,15 +257,15 @@ Deployment, security, and operational concerns.
 3. **Authentication** — forms login + API key + security settings (#70, ✅ Done)
 4. **API rate limiting** — protect downstream providers from excessive calls (#B14, ✅ Done)
 5. **Worker pool init fix** — constructor now accepts pool directly (#B10, ✅ Done)
-6. **iTunes Search API provider** — free cover art + metadata fallback (#30, Tier 1.5, 🟡 Medium)
-7. **Last.fm metadata provider** — artist images, similar artists, tags (#32, Tier 1.5, 🟡 Medium)
-8. **Wishlist retry endpoint + UI** — `POST /api/downloads/{id}/retry` + Retry button (#54 gap, Tier 4, 🟡)
-9. **Stuck pending auto-fail** — auto-fail/retry pending records older than N minutes (#B5, 🟡 Medium)
+6. **iTunes Search API provider** — free cover art + metadata fallback (#—, Tier 1.5, 🟡 Medium)
+7. **Last.fm metadata provider** — artist images, similar artists, tags (#34, Tier 1.5, ✅ Done)
+8. **Wishlist retry + UI** — endpoint (✅), Retry button (✅), auto-retry loop (✅). Missing: stuck pending timeout (#B5).
+9. **Stuck pending timeout** — auto-fail records stuck in `queued`+`pending` for >15 minutes (#B5, 🟡 Medium)
 
 ### First Major Feature Block (Platform hardening + Tier 1.5 completion + Tier 7 security)
 
 1. **Observability foundation** — structured logging (#B8 ✅), HTTP timeouts (#B9 ✅), health endpoint (#B20), rate limiting (#B14 ✅)
-2. **Free-tier metadata completion** — iTunes + Last.fm providers to round out free path coverage
+2. **Free-tier metadata completion** — iTunes provider to round out free path coverage
 3. **Authentication** — forms login + API keys + security settings (#70 ✅, Tier 7)
 4. **Wishlist polish** — retry endpoint, retry UI, stuck pending detection (#54 gap + #B5)
 5. **Systemd service** — production deployment target (#74, Tier 7)
