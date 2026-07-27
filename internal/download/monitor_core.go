@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/events"
@@ -69,6 +70,9 @@ type MonitoringService struct {
 
 	// ticksSincePendingResolve counts ticks for periodic pending-source resolution.
 	ticksSincePendingResolve int
+
+	// pendingResolveRunning prevents concurrent resolvePendingSources calls.
+	pendingResolveRunning atomic.Bool
 }
 
 // NewMonitoringService creates a MonitoringService that accepts its dependencies
@@ -111,7 +115,12 @@ func (m *MonitoringService) SetQualityProfileStore(store quality.ProfileStore) {
 // the service's internal context, which is cancelled by Shutdown.
 func (m *MonitoringService) Start(ctx context.Context) {
 	m.recoverOrphans(ctx)
-	m.resolvePendingSources(ctx)
+	if m.pendingResolveRunning.CompareAndSwap(false, true) {
+		go func() {
+			defer m.pendingResolveRunning.Store(false)
+			m.resolvePendingSources(m.ctx)
+		}()
+	}
 	m.wg.Add(1)
 	go m.run()
 	m.log.Info("monitoring service started", "component", "monitor")
@@ -172,7 +181,12 @@ func (m *MonitoringService) tick() {
 	m.ticksSincePendingResolve++
 	if m.ticksSincePendingResolve >= monitorPendingResolveTicks {
 		m.ticksSincePendingResolve = 0
-		m.resolvePendingSources(m.ctx)
+		if m.pendingResolveRunning.CompareAndSwap(false, true) {
+			go func() {
+				defer m.pendingResolveRunning.Store(false)
+				m.resolvePendingSources(m.ctx)
+			}()
+		}
 	}
 }
 
