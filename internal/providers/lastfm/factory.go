@@ -53,6 +53,6 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 	}
 }
 
-func (f *factory) Icon() string                  { return "radio" }
+func (f *factory) Icon() string                   { return "radio" }
 func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
 func (f *factory) UISlots() *plugin.UISlots       { return nil }

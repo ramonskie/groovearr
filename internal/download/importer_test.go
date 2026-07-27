@@ -6,26 +6,25 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 )
 
-// mockDownloadStore implements DownloadStore for testing.
+// mockDownloadStore implements Store for testing.
 type mockDownloadStore struct {
-	records map[string]*domain.DownloadRecord
+	records map[string]*Record
 }
 
 func newMockDownloadStore() *mockDownloadStore {
-	return &mockDownloadStore{records: make(map[string]*domain.DownloadRecord)}
+	return &mockDownloadStore{records: make(map[string]*Record)}
 }
 
-func (m *mockDownloadStore) Insert(ctx context.Context, r *domain.DownloadRecord) error {
+func (m *mockDownloadStore) Insert(ctx context.Context, r *Record) error {
 	cp := *r
 	m.records[r.ID] = &cp
 	return nil
 }
 
-func (m *mockDownloadStore) Update(ctx context.Context, r *domain.DownloadRecord) error {
+func (m *mockDownloadStore) Update(ctx context.Context, r *Record) error {
 	existing, ok := m.records[r.ID]
 	if !ok {
 		return fmt.Errorf("not found")
@@ -49,7 +48,7 @@ func (m *mockDownloadStore) Update(ctx context.Context, r *domain.DownloadRecord
 	return nil
 }
 
-func (m *mockDownloadStore) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
+func (m *mockDownloadStore) UpdateProgress(ctx context.Context, id string, state State, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
 	existing, ok := m.records[id]
 	if !ok {
 		return fmt.Errorf("not found")
@@ -68,7 +67,7 @@ func (m *mockDownloadStore) UpdateProgress(ctx context.Context, id string, state
 	return nil
 }
 
-func (m *mockDownloadStore) TransitionState(ctx context.Context, id string, oldState, newState domain.DownloadState) (bool, error) {
+func (m *mockDownloadStore) TransitionState(ctx context.Context, id string, oldState, newState State) (bool, error) {
 	r, ok := m.records[id]
 	if !ok || r.State != oldState {
 		return false, nil
@@ -77,7 +76,7 @@ func (m *mockDownloadStore) TransitionState(ctx context.Context, id string, oldS
 	return true, nil
 }
 
-func (m *mockDownloadStore) Get(ctx context.Context, id string) (*domain.DownloadRecord, error) {
+func (m *mockDownloadStore) Get(ctx context.Context, id string) (*Record, error) {
 	r, ok := m.records[id]
 	if !ok {
 		return nil, nil
@@ -86,16 +85,16 @@ func (m *mockDownloadStore) Get(ctx context.Context, id string) (*domain.Downloa
 	return &cp, nil
 }
 
-func (m *mockDownloadStore) List(ctx context.Context) ([]domain.DownloadRecord, error) {
-	var out []domain.DownloadRecord
+func (m *mockDownloadStore) List(ctx context.Context) ([]Record, error) {
+	var out []Record
 	for _, r := range m.records {
 		out = append(out, *r)
 	}
 	return out, nil
 }
 
-func (m *mockDownloadStore) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
-	var out []domain.DownloadRecord
+func (m *mockDownloadStore) ListByState(ctx context.Context, state State) ([]Record, error) {
+	var out []Record
 	for _, r := range m.records {
 		if r.State == state {
 			out = append(out, *r)
@@ -104,8 +103,8 @@ func (m *mockDownloadStore) ListByState(ctx context.Context, state domain.Downlo
 	return out, nil
 }
 
-func (m *mockDownloadStore) ListActive(ctx context.Context) ([]domain.DownloadRecord, error) {
-	var out []domain.DownloadRecord
+func (m *mockDownloadStore) ListActive(ctx context.Context) ([]Record, error) {
+	var out []Record
 	for _, r := range m.records {
 		if !r.State.Terminal() {
 			out = append(out, *r)
@@ -114,8 +113,8 @@ func (m *mockDownloadStore) ListActive(ctx context.Context) ([]domain.DownloadRe
 	return out, nil
 }
 
-func (m *mockDownloadStore) ListByPlaylist(ctx context.Context, playlistID string) ([]domain.DownloadRecord, error) {
-	var out []domain.DownloadRecord
+func (m *mockDownloadStore) ListByPlaylist(ctx context.Context, playlistID string) ([]Record, error) {
+	var out []Record
 	for _, r := range m.records {
 		if r.PlaylistID == playlistID {
 			out = append(out, *r)
@@ -124,11 +123,11 @@ func (m *mockDownloadStore) ListByPlaylist(ctx context.Context, playlistID strin
 	return out, nil
 }
 
-func (m *mockDownloadStore) RecordEvent(ctx context.Context, e *domain.DownloadEvent) error {
+func (m *mockDownloadStore) RecordEvent(ctx context.Context, e *Event) error {
 	return nil
 }
 
-func (m *mockDownloadStore) GetEvents(ctx context.Context, downloadID string) ([]domain.DownloadEvent, error) {
+func (m *mockDownloadStore) GetEvents(ctx context.Context, downloadID string) ([]Event, error) {
 	return nil, nil
 }
 
@@ -138,7 +137,7 @@ func (m *mockDownloadStore) DeleteTerminal(ctx context.Context) error {
 
 func (m *mockDownloadStore) Close() error { return nil }
 
-func (m *mockDownloadStore) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
+func (m *mockDownloadStore) FindActiveByTitle(ctx context.Context, artist, title string) (*Record, error) {
 	for _, r := range m.records {
 		if r.Artist == artist && r.Title == title && !r.State.Terminal() {
 			cp := *r
@@ -180,14 +179,14 @@ func (b *trackingBus) lastEvent() *trackedEvent {
 // successHandler always succeeds.
 type successHandler struct{ name string }
 
-func (h *successHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *successHandler) Handle(ctx context.Context, record *Record) error {
 	return nil
 }
 
 // failHandler always fails.
 type failHandler struct{ msg string }
 
-func (h *failHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *failHandler) Handle(ctx context.Context, record *Record) error {
 	return errors.New(h.msg)
 }
 
@@ -195,9 +194,9 @@ func TestCompletedDownloadService_SuccessChain(t *testing.T) {
 	store := newMockDownloadStore()
 	bus := newTrackingBus()
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:    "test-dl-1",
-		State: domain.DownloadImportPending,
+		State: StateImportPending,
 	}
 	store.Insert(context.Background(), record)
 
@@ -209,11 +208,11 @@ func TestCompletedDownloadService_SuccessChain(t *testing.T) {
 	svc.bus = bus
 	svc.log = testLogger()
 	svc.handlers = []ImportHandler{h1, h2}
-	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-1"})
+	svc.onDownloadCompleted(context.Background(), &Record{ID: "test-dl-1"})
 
 	// Verify state transition.
 	got, _ := store.Get(context.Background(), "test-dl-1")
-	if got.State != domain.DownloadImported {
+	if got.State != StateImported {
 		t.Errorf("expected imported, got %s", got.State)
 	}
 
@@ -228,9 +227,9 @@ func TestCompletedDownloadService_FailureStopsChain(t *testing.T) {
 	store := newMockDownloadStore()
 	bus := newTrackingBus()
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:    "test-dl-2",
-		State: domain.DownloadImportPending,
+		State: StateImportPending,
 	}
 	store.Insert(context.Background(), record)
 
@@ -243,10 +242,10 @@ func TestCompletedDownloadService_FailureStopsChain(t *testing.T) {
 	svc.bus = bus
 	svc.log = testLogger()
 	svc.handlers = []ImportHandler{h1, h2, h3}
-	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-2"})
+	svc.onDownloadCompleted(context.Background(), &Record{ID: "test-dl-2"})
 
 	got, _ := store.Get(context.Background(), "test-dl-2")
-	if got.State != domain.DownloadFailed {
+	if got.State != StateFailed {
 		t.Errorf("expected failed, got %s", got.State)
 	}
 	if got.Error == "" {
@@ -263,9 +262,9 @@ func TestCompletedDownloadService_SkipsNonImportPending(t *testing.T) {
 	store := newMockDownloadStore()
 	bus := newTrackingBus()
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:    "test-dl-3",
-		State: domain.DownloadQueued,
+		State: StateQueued,
 	}
 	store.Insert(context.Background(), record)
 
@@ -274,11 +273,11 @@ func TestCompletedDownloadService_SkipsNonImportPending(t *testing.T) {
 	svc.bus = bus
 	svc.log = testLogger()
 	svc.handlers = []ImportHandler{&successHandler{name: "h1"}}
-	svc.onDownloadCompleted(context.Background(), &domain.DownloadRecord{ID: "test-dl-3"})
+	svc.onDownloadCompleted(context.Background(), &Record{ID: "test-dl-3"})
 
 	// State should remain unchanged.
 	got, _ := store.Get(context.Background(), "test-dl-3")
-	if got.State != domain.DownloadQueued {
+	if got.State != StateQueued {
 		t.Errorf("expected queued, got %s", got.State)
 	}
 }

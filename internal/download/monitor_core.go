@@ -8,7 +8,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
@@ -39,7 +38,7 @@ type monitoredDownload struct {
 //   - Shutdown() → cancel context, wait for goroutine exit
 type MonitoringService struct {
 	log      *slog.Logger
-	store    DownloadStore
+	store    Store
 	registry *Registry
 	bus      events.IEventAggregator
 
@@ -76,7 +75,7 @@ type MonitoringService struct {
 // through the constructor: store for persistence, registry for plugin lookup,
 // bus for event publishing, and logger for structured output.
 func NewMonitoringService(
-	store DownloadStore,
+	store Store,
 	registry *Registry,
 	bus events.IEventAggregator,
 	logger *slog.Logger,
@@ -232,7 +231,7 @@ func (m *MonitoringService) syncFromProviders() {
 			m.log.Warn("provider lost download, marking as failed",
 				"download_id", md.recordID, "provider_id", md.providerID,
 				"plugin", p.Name(), "component", "monitor")
-			m.failRecord(md.recordID, domain.DownloadDownloading,
+			m.failRecord(md.recordID, StateDownloading,
 				fmt.Sprintf("provider %s lost download (restart or cleanup)", p.Name()))
 			m.releaseSemaphore(md.pluginName)
 		}
@@ -307,8 +306,8 @@ func (m *MonitoringService) releaseSemaphore(pluginName string) {
 }
 
 // publishRecord fires a lifecycle event with a minimal download record.
-func (m *MonitoringService) publishRecord(downloadID string, state domain.DownloadState, topic string) {
-	m.bus.Publish(m.ctx, topic, &domain.DownloadRecord{
+func (m *MonitoringService) publishRecord(downloadID string, state State, topic string) {
+	m.bus.Publish(m.ctx, topic, &Record{
 		ID:    downloadID,
 		State: state,
 	})
@@ -316,9 +315,9 @@ func (m *MonitoringService) publishRecord(downloadID string, state domain.Downlo
 
 // fireProgress publishes a TopicDownloadProgress event with live transfer data.
 func (m *MonitoringService) fireProgress(downloadID string, progress float64, transferred, total, speed int64) {
-	m.bus.Publish(m.ctx, events.TopicDownloadProgress, &domain.DownloadRecord{
+	m.bus.Publish(m.ctx, events.TopicDownloadProgress, &Record{
 		ID:          downloadID,
-		State:       domain.DownloadDownloading,
+		State:       StateDownloading,
 		Progress:    progress,
 		Transferred: transferred,
 		Size:        total,

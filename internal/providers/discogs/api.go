@@ -63,10 +63,10 @@ type ArtistDetail struct {
 
 // ArtistImage represents a Discogs artist image.
 type ArtistImage struct {
-	URI         string `json:"uri"`
-	URI150      string `json:"uri150"`
-	Width       int    `json:"width"`
-	Height      int    `json:"height"`
+	URI    string `json:"uri"`
+	URI150 string `json:"uri150"`
+	Width  int    `json:"width"`
+	Height int    `json:"height"`
 }
 
 // ReleaseResult represents a minimal Discogs release from search or artist pages.
@@ -108,8 +108,8 @@ type Client struct {
 // NewClient creates a Discogs API client with rate-limited transport.
 func NewClient(cfg DiscogsConfig, logger *slog.Logger) *Client {
 	return &Client{
-		cfg:        cfg,
-		baseURL:    discogsBaseURL,
+		cfg:     cfg,
+		baseURL: discogsBaseURL,
 		httpClient: &http.Client{
 			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, discogsAPIRate),
 			Timeout:   15 * time.Second,

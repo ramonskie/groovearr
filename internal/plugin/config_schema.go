@@ -4,16 +4,16 @@ package plugin
 // It is used by the frontend to render provider-specific settings cards without
 // hardcoded per-provider React components.
 type ConfigField struct {
-	Name        string          `json:"name"`
-	Type        string          `json:"type"` // "text", "password", "select", "number"
-	Label       string          `json:"label"`
-	Hint        string          `json:"hint,omitempty"`
-	Required    bool            `json:"required"`
-	Placeholder string          `json:"placeholder,omitempty"`
-	Default     string          `json:"default,omitempty"`
-	Options     []FieldOption   `json:"options,omitempty"`
-	DependsOn   *FieldDependsOn `json:"depends_on,omitempty"`
-	Secret      bool            `json:"secret,omitempty"`    // mask value in UI (password fields)
+	Name        string           `json:"name"`
+	Type        string           `json:"type"` // "text", "password", "select", "number"
+	Label       string           `json:"label"`
+	Hint        string           `json:"hint,omitempty"`
+	Required    bool             `json:"required"`
+	Placeholder string           `json:"placeholder,omitempty"`
+	Default     string           `json:"default,omitempty"`
+	Options     []FieldOption    `json:"options,omitempty"`
+	DependsOn   *FieldDependsOn  `json:"depends_on,omitempty"`
+	Secret      bool             `json:"secret,omitempty"` // mask value in UI (password fields)
 	Validation  *FieldValidation `json:"validation,omitempty"`
 }
 
@@ -32,10 +32,10 @@ type FieldDependsOn struct {
 
 // FieldValidation declares validation rules for a field.
 type FieldValidation struct {
-	Format  string  `json:"format,omitempty"`  // "url", "email"
-	Min     *int    `json:"min,omitempty"`
-	Max     *int    `json:"max,omitempty"`
-	Pattern string  `json:"pattern,omitempty"` // regex
+	Format  string `json:"format,omitempty"` // "url", "email"
+	Min     *int   `json:"min,omitempty"`
+	Max     *int   `json:"max,omitempty"`
+	Pattern string `json:"pattern,omitempty"` // regex
 }
 
 // OAuthInfo describes an OAuth flow for plugins that require user authentication.
@@ -51,16 +51,16 @@ type OAuthInfo struct {
 
 // UISlots declares optional UI features a plugin provides beyond config forms.
 type UISlots struct {
-	PlaylistBrowser  bool            `json:"playlist_browser"`
+	PlaylistBrowser   bool            `json:"playlist_browser"`
 	ImportURLPatterns []ImportPattern `json:"import_url_patterns,omitempty"`
 }
 
 // ImportPattern describes a URL pattern that the import dialog can parse
 // to extract playlist IDs from user-pasted URLs.
 type ImportPattern struct {
-	Pattern     string `json:"pattern"`               // regex with capture group
-	Label       string `json:"label"`                 // human-readable description
-	IsFallback  bool   `json:"is_fallback,omitempty"` // try this if no other pattern matches
+	Pattern    string `json:"pattern"`               // regex with capture group
+	Label      string `json:"label"`                 // human-readable description
+	IsFallback bool   `json:"is_fallback,omitempty"` // try this if no other pattern matches
 }
 
 // ConfigSchemaProvider is implemented by plugin factories that want to expose

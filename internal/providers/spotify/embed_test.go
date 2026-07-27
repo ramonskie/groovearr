@@ -103,7 +103,7 @@ func TestParseSpotifyURL_Valid(t *testing.T) {
 
 func TestParseSpotifyURL_Invalid(t *testing.T) {
 	tests := []struct {
-		name  string
+		name   string
 		rawURL string
 	}{
 		{name: "empty", rawURL: ""},
@@ -486,4 +486,3 @@ func fetchOEmbedWithClient(ctx context.Context, client *http.Client, reqURL stri
 
 	return &o, nil
 }
-

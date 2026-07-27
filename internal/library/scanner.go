@@ -39,13 +39,13 @@ func NewScanner(store Store, logger *slog.Logger) *Scanner {
 
 // tagMeta holds metadata extracted from audio file tags.
 type tagMeta struct {
-	Artist    string
-	Album     string
-	Title     string
-	Year      int
-	TrackNum  int
-	DiscNum   int
-	Genre     string
+	Artist   string
+	Album    string
+	Title    string
+	Year     int
+	TrackNum int
+	DiscNum  int
+	Genre    string
 }
 
 // readFileTags attempts to read audio metadata from a file using ID3/FLAC/Vorbis tags.

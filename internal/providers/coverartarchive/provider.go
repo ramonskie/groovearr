@@ -29,16 +29,16 @@ func NewClient(log *slog.Logger) *Client {
 
 // Compile-time interface checks.
 var (
-	_ metadata.Provider                 = (*Client)(nil)
-	_ metadata.CoverArtArchiveProvider  = (*Client)(nil)
+	_ metadata.Provider                = (*Client)(nil)
+	_ metadata.CoverArtArchiveProvider = (*Client)(nil)
 )
 
 // ─── plugin.BasePlugin ─────────────────────────────────────────────────
 
-func (c *Client) Name() string        { return pluginName }
-func (c *Client) DisplayName() string { return displayName }
-func (c *Client) IsConfigured() bool         { return true } // no credentials required
-func (c *Client) IsMetadataAvailable() bool  { return true }
+func (c *Client) Name() string              { return pluginName }
+func (c *Client) DisplayName() string       { return displayName }
+func (c *Client) IsConfigured() bool        { return true } // no credentials required
+func (c *Client) IsMetadataAvailable() bool { return true }
 
 // CapabilityStatus returns metadata status based on health check.
 func (c *Client) CapabilityStatus() map[string]string {

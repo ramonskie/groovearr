@@ -14,21 +14,21 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
-	"github.com/ramonskie/groovearr/internal/logger"
-	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
-	"github.com/ramonskie/groovearr/internal/providers/soulseek"
-	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
-	"github.com/ramonskie/groovearr/internal/providers/discogs"
-	"github.com/ramonskie/groovearr/internal/providers/lastfm"
-	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
-	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
+	"github.com/ramonskie/groovearr/internal/logger"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
+	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
+	deezer "github.com/ramonskie/groovearr/internal/providers/deezer"
+	"github.com/ramonskie/groovearr/internal/providers/discogs"
+	"github.com/ramonskie/groovearr/internal/providers/lastfm"
+	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
+	"github.com/ramonskie/groovearr/internal/providers/soulseek"
+	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
@@ -179,15 +179,15 @@ func main() {
 
 	// Playlist service — auto-register plugins that provide playlist sources.
 	playlistReg := playlist.NewRegistry()
-		for _, p := range registry.All() {
-			if psp, ok := p.(playlist.PlaylistSourceProvider); ok {
-				if p.IsConfigured() {
-					if ps := psp.PlaylistSource(); ps != nil {
-						playlistReg.Register(ps)
-					}
+	for _, p := range registry.All() {
+		if psp, ok := p.(playlist.PlaylistSourceProvider); ok {
+			if p.IsConfigured() {
+				if ps := psp.PlaylistSource(); ps != nil {
+					playlistReg.Register(ps)
 				}
 			}
 		}
+	}
 	playlistSvc := playlist.NewService(playlistReg, libStore, registry, downloadSvc, func() config.Config {
 		return cfg.Get()
 	}, qualityProfileStore, metadataResolver, mainLog)

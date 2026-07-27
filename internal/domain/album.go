@@ -8,7 +8,7 @@ type AlbumType string
 const (
 	AlbumTypeAlbum       AlbumType = "album"
 	AlbumTypeSingle      AlbumType = "single"
-	AlbumTypeEP           AlbumType = "ep"
+	AlbumTypeEP          AlbumType = "ep"
 	AlbumTypeCompilation AlbumType = "compilation"
 	AlbumTypeLive        AlbumType = "live"
 )

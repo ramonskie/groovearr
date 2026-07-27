@@ -36,9 +36,9 @@ var _ metadata.Provider = (*Client)(nil)
 
 // ─── plugin.BasePlugin ─────────────────────────────────────────────────
 
-func (c *Client) Name() string        { return pluginName }
-func (c *Client) DisplayName() string { return displayName }
-func (c *Client) IsConfigured() bool  { return true } // no credentials required
+func (c *Client) Name() string              { return pluginName }
+func (c *Client) DisplayName() string       { return displayName }
+func (c *Client) IsConfigured() bool        { return true } // no credentials required
 func (c *Client) IsMetadataAvailable() bool { return true }
 
 // CapabilityStatus returns metadata status based on health check.

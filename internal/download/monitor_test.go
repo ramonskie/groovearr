@@ -30,11 +30,11 @@ func waitFor(t *testing.T, timeout time.Duration, fn func() bool) {
 // monitorTestProvider implements MonitoredProvider and Plugin for white-box
 // testing of the MonitoringService download state machine.
 type monitorTestProvider struct {
-	mu    sync.Mutex
-	name  string
+	mu   sync.Mutex
+	name string
 
-	records  map[string]*domain.DownloadRecord // providerID → record
-	progress map[string]*Progress              // providerID → progress
+	records  map[string]*Record   // providerID → record
+	progress map[string]*Progress // providerID → progress
 
 	// Behavior control
 	maxConcurrent int
@@ -47,7 +47,7 @@ type monitorTestProvider struct {
 	searchError   error
 
 	// Capture the last StartDownload meta (used in TestStartSingleDownload_BuildsMetaFields)
-	lastMeta DownloadMeta
+	lastMeta Meta
 }
 
 // Compile-time interface checks.
@@ -57,7 +57,7 @@ var _ Plugin = (*monitorTestProvider)(nil)
 func newMonitorTestProvider(name string) *monitorTestProvider {
 	return &monitorTestProvider{
 		name:          name,
-		records:       make(map[string]*domain.DownloadRecord),
+		records:       make(map[string]*Record),
 		progress:      make(map[string]*Progress),
 		maxConcurrent: 2,
 		timeout:       30 * time.Minute,
@@ -66,7 +66,7 @@ func newMonitorTestProvider(name string) *monitorTestProvider {
 
 // ─── MonitoredProvider methods ───────────────────────────────────────
 
-func (p *monitorTestProvider) StartDownload(ctx context.Context, meta DownloadMeta) (string, error) {
+func (p *monitorTestProvider) StartDownload(ctx context.Context, meta Meta) (string, error) {
 	if p.failStart {
 		return "", fmt.Errorf("start download failed")
 	}
@@ -74,9 +74,9 @@ func (p *monitorTestProvider) StartDownload(ctx context.Context, meta DownloadMe
 	p.mu.Lock()
 	p.lastMeta = meta
 	providerID := fmt.Sprintf("prov-%s-%d", meta.Filename, time.Now().UnixNano())
-	rec := &domain.DownloadRecord{
+	rec := &Record{
 		ID:       providerID,
-		State:    domain.DownloadDownloading,
+		State:    StateDownloading,
 		Filename: meta.Filename,
 	}
 	p.records[providerID] = rec
@@ -88,7 +88,7 @@ func (p *monitorTestProvider) StartDownload(ctx context.Context, meta DownloadMe
 		go func() {
 			time.Sleep(delay)
 			p.mu.Lock()
-			rec.State = domain.DownloadImported
+			rec.State = StateImported
 			rec.FilePath = "/tmp/" + meta.Filename
 			rec.CoverURL = "http://cover.example.com/" + meta.Filename
 			p.mu.Unlock()
@@ -98,7 +98,7 @@ func (p *monitorTestProvider) StartDownload(ctx context.Context, meta DownloadMe
 	return providerID, nil
 }
 
-func (p *monitorTestProvider) GetStatus(_ context.Context, providerID string) (*domain.DownloadRecord, error) {
+func (p *monitorTestProvider) GetStatus(_ context.Context, providerID string) (*Record, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	rec, ok := p.records[providerID]
@@ -124,7 +124,7 @@ func (p *monitorTestProvider) Cancel(_ context.Context, providerID string, remov
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if rec, ok := p.records[providerID]; ok {
-		rec.State = domain.DownloadIgnored
+		rec.State = StateIgnored
 	}
 	return nil
 }
@@ -139,16 +139,16 @@ func (p *monitorTestProvider) ActiveDownloads() []string {
 	return ids
 }
 
-func (p *monitorTestProvider) MaxConcurrent() int              { return p.maxConcurrent }
-func (p *monitorTestProvider) DownloadTimeout() time.Duration  { return p.timeout }
+func (p *monitorTestProvider) MaxConcurrent() int             { return p.maxConcurrent }
+func (p *monitorTestProvider) DownloadTimeout() time.Duration { return p.timeout }
 
 // ─── Plugin methods ──────────────────────────────────────────────────
 
-func (p *monitorTestProvider) Name() string            { return p.name }
-func (p *monitorTestProvider) DisplayName() string     { return "Test Provider" }
-func (p *monitorTestProvider) IsConfigured() bool      { return true }
+func (p *monitorTestProvider) Name() string                            { return p.name }
+func (p *monitorTestProvider) DisplayName() string                     { return "Test Provider" }
+func (p *monitorTestProvider) IsConfigured() bool                      { return true }
 func (p *monitorTestProvider) CheckConnection(_ context.Context) error { return nil }
-func (p *monitorTestProvider) Connected() bool         { return true }
+func (p *monitorTestProvider) Connected() bool                         { return true }
 func (p *monitorTestProvider) CapabilityStatus() map[string]string {
 	return map[string]string{"download": "connected"}
 }
@@ -170,7 +170,7 @@ func hasEvent(t *testing.T, bus *mockBus, topic, downloadID string) bool {
 		if ev.Topic != topic {
 			continue
 		}
-		if rec, ok := ev.Event.(*domain.DownloadRecord); ok && rec.ID == downloadID {
+		if rec, ok := ev.Event.(*Record); ok && rec.ID == downloadID {
 			return true
 		}
 	}
@@ -186,11 +186,11 @@ func TestStartQueuedDownloads_PicksUpQueued(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	rec := &domain.DownloadRecord{
+	rec := &Record{
 		ID:         "dl-1",
 		SourceName: "testsource",
 		Filename:   "track.flac",
-		State:      domain.DownloadQueued,
+		State:      StateQueued,
 		Artist:     "a-ha",
 		Title:      "Take on Me",
 	}
@@ -214,7 +214,7 @@ func TestStartQueuedDownloads_PicksUpQueued(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found in store")
 	}
-	if fresh.State != domain.DownloadDownloading {
+	if fresh.State != StateDownloading {
 		t.Errorf("expected state downloading, got %s", fresh.State)
 	}
 
@@ -225,14 +225,14 @@ func TestStartQueuedDownloads_PicksUpQueued(t *testing.T) {
 }
 
 // TestStartSingleDownload_BuildsMetaFields verifies that startSingleDownload
-// passes a correctly-populated DownloadMeta to StartDownload. The Filename
+// passes a correctly-populated Meta to StartDownload. The Filename
 // field must not be empty (regression test for the bug where meta.Filename
 // was left blank).
 func TestStartSingleDownload_BuildsMetaFields(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	rec := &domain.DownloadRecord{
+	rec := &Record{
 		ID:         "dl-2",
 		SourceName: "testsource",
 		Filename:   "song.flac",
@@ -243,7 +243,7 @@ func TestStartSingleDownload_BuildsMetaFields(t *testing.T) {
 		Title:      "TestSong",
 		Bitrate:    320,
 		Format:     "flac",
-		State:      domain.DownloadQueued,
+		State:      StateQueued,
 	}
 	if err := store.Insert(context.Background(), rec); err != nil {
 		t.Fatal(err)
@@ -296,13 +296,13 @@ func TestStartSingleDownload_ConcurrencyLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rec1 := &domain.DownloadRecord{
+	rec1 := &Record{
 		ID: "dl-a", SourceName: "limited", Filename: "a.flac",
-		State: domain.DownloadQueued,
+		State: StateQueued,
 	}
-	rec2 := &domain.DownloadRecord{
+	rec2 := &Record{
 		ID: "dl-b", SourceName: "limited", Filename: "b.flac",
-		State: domain.DownloadQueued,
+		State: StateQueued,
 	}
 	store.Insert(context.Background(), rec1)
 	store.Insert(context.Background(), rec2)
@@ -315,11 +315,11 @@ func TestStartSingleDownload_ConcurrencyLimit(t *testing.T) {
 
 	downloading := 0
 	queued := 0
-	for _, r := range []*domain.DownloadRecord{freshA, freshB} {
+	for _, r := range []*Record{freshA, freshB} {
 		switch r.State {
-		case domain.DownloadDownloading:
+		case StateDownloading:
 			downloading++
-		case domain.DownloadQueued:
+		case StateQueued:
 			queued++
 		}
 	}
@@ -335,10 +335,10 @@ func TestPollSingle_DownloadImported_TransitionAndCoverSync(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	storeRec := &domain.DownloadRecord{
+	storeRec := &Record{
 		ID:         "dl-imported",
 		SourceName: "testsource",
-		State:      domain.DownloadDownloading,
+		State:      StateDownloading,
 	}
 	if err := store.Insert(context.Background(), storeRec); err != nil {
 		t.Fatal(err)
@@ -347,9 +347,9 @@ func TestPollSingle_DownloadImported_TransitionAndCoverSync(t *testing.T) {
 	prov := newMonitorTestProvider("testsource")
 	// Set up provider-side record as imported with file path and cover URL.
 	prov.mu.Lock()
-	prov.records["prov-imported"] = &domain.DownloadRecord{
+	prov.records["prov-imported"] = &Record{
 		ID:       "prov-imported",
-		State:    domain.DownloadImported,
+		State:    StateImported,
 		FilePath: "/tmp/song.flac",
 		CoverURL: "http://cover.example.com/song.jpg",
 	}
@@ -381,7 +381,7 @@ func TestPollSingle_DownloadImported_TransitionAndCoverSync(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found after poll")
 	}
-	if fresh.State != domain.DownloadImportPending {
+	if fresh.State != StateImportPending {
 		t.Errorf("expected importPending, got %s", fresh.State)
 	}
 	if fresh.CoverURL != "http://cover.example.com/song.jpg" {
@@ -402,18 +402,18 @@ func TestPollSingle_DownloadFailed(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	storeRec := &domain.DownloadRecord{
+	storeRec := &Record{
 		ID:         "dl-fail",
 		SourceName: "testsource",
-		State:      domain.DownloadDownloading,
+		State:      StateDownloading,
 	}
 	store.Insert(context.Background(), storeRec)
 
 	prov := newMonitorTestProvider("testsource")
 	prov.mu.Lock()
-	prov.records["prov-fail"] = &domain.DownloadRecord{
+	prov.records["prov-fail"] = &Record{
 		ID:    "prov-fail",
-		State: domain.DownloadFailed,
+		State: StateFailed,
 		Error: "peer offline",
 	}
 	prov.mu.Unlock()
@@ -438,7 +438,7 @@ func TestPollSingle_DownloadFailed(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadFailed {
+	if fresh.State != StateFailed {
 		t.Errorf("expected failed, got %s", fresh.State)
 	}
 	if fresh.Error != "peer offline" {
@@ -456,10 +456,10 @@ func TestPollSingle_Timeout(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	storeRec := &domain.DownloadRecord{
+	storeRec := &Record{
 		ID:         "dl-timeout",
 		SourceName: "testsource",
-		State:      domain.DownloadDownloading,
+		State:      StateDownloading,
 	}
 	store.Insert(context.Background(), storeRec)
 
@@ -487,7 +487,7 @@ func TestPollSingle_Timeout(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadFailed {
+	if fresh.State != StateFailed {
 		t.Errorf("expected failed, got %s", fresh.State)
 	}
 	if fresh.Error == "" {
@@ -505,10 +505,10 @@ func TestCheckCancellations_StopsTracking(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	storeRec := &domain.DownloadRecord{
+	storeRec := &Record{
 		ID:         "dl-cancel",
 		SourceName: "testsource",
-		State:      domain.DownloadDownloading,
+		State:      StateDownloading,
 	}
 	store.Insert(context.Background(), storeRec)
 
@@ -528,7 +528,7 @@ func TestCheckCancellations_StopsTracking(t *testing.T) {
 
 	// Externally cancel the record.
 	if ok, err := store.TransitionState(context.Background(), "dl-cancel",
-		domain.DownloadDownloading, domain.DownloadIgnored); err != nil || !ok {
+		StateDownloading, StateIgnored); err != nil || !ok {
 		t.Fatal("failed to transition to ignored")
 	}
 
@@ -560,11 +560,11 @@ func TestScanRetry_CrossProviderSearch(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	failedRec := &domain.DownloadRecord{
+	failedRec := &Record{
 		ID:         "dl-retry",
 		SourceName: "soulseek",
 		Filename:   "oldfile.flac",
-		State:      domain.DownloadFailed,
+		State:      StateFailed,
 		Artist:     "a-ha",
 		Title:      "Take on Me",
 	}
@@ -601,7 +601,7 @@ func TestScanRetry_CrossProviderSearch(t *testing.T) {
 	if fresh.SourceName != "deezer" {
 		t.Errorf("expected SourceName=deezer after cross-provider search, got %q", fresh.SourceName)
 	}
-	if fresh.State != domain.DownloadQueued {
+	if fresh.State != StateQueued {
 		t.Errorf("expected state queued, got %s", fresh.State)
 	}
 	if fresh.RetryCount != 1 {
@@ -622,11 +622,11 @@ func TestScanRetry_NoSourceFound_Skips(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	failedRec := &domain.DownloadRecord{
+	failedRec := &Record{
 		ID:         "dl-nosource",
 		SourceName: "soulseek",
 		Filename:   "unknown.flac",
-		State:      domain.DownloadFailed,
+		State:      StateFailed,
 		Artist:     "obscure",
 		Title:      "nobody has this",
 	}
@@ -646,7 +646,7 @@ func TestScanRetry_NoSourceFound_Skips(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadFailed {
+	if fresh.State != StateFailed {
 		t.Errorf("expected state to remain failed, got %s", fresh.State)
 	}
 	if fresh.RetryCount != 0 {
@@ -660,14 +660,14 @@ func TestScanRetry_MaxRetries_Exhausted(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	exhaustedRec := &domain.DownloadRecord{
+	exhaustedRec := &Record{
 		ID:         "dl-exhausted",
 		SourceName: "soulseek",
 		Filename:   "stale.flac",
-		State:      domain.DownloadFailed,
+		State:      StateFailed,
 		Artist:     "a-ha",
 		Title:      "Take on Me",
-		RetryCount: domain.MaxRetries, // 5
+		RetryCount: MaxRetries, // 5
 	}
 	store.Insert(context.Background(), exhaustedRec)
 
@@ -681,7 +681,7 @@ func TestScanRetry_MaxRetries_Exhausted(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadFailed {
+	if fresh.State != StateFailed {
 		t.Errorf("expected state to remain failed, got %s", fresh.State)
 	}
 }
@@ -693,10 +693,10 @@ func TestRecoverOrphans_DownloadingToFailed(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	orphanRec := &domain.DownloadRecord{
+	orphanRec := &Record{
 		ID:         "dl-orphan",
 		SourceName: "soulseek",
-		State:      domain.DownloadDownloading,
+		State:      StateDownloading,
 	}
 	store.Insert(context.Background(), orphanRec)
 
@@ -708,7 +708,7 @@ func TestRecoverOrphans_DownloadingToFailed(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadFailed {
+	if fresh.State != StateFailed {
 		t.Errorf("expected state failed, got %s", fresh.State)
 	}
 	if fresh.Error != "download interrupted by server restart" {
@@ -726,10 +726,10 @@ func TestRecoverOrphans_ImportPending_ReTrigger(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	importPendingRec := &domain.DownloadRecord{
+	importPendingRec := &Record{
 		ID:         "dl-reimport",
 		SourceName: "soulseek",
-		State:      domain.DownloadImportPending,
+		State:      StateImportPending,
 		FilePath:   "/tmp/song.flac",
 	}
 	store.Insert(context.Background(), importPendingRec)
@@ -743,7 +743,7 @@ func TestRecoverOrphans_ImportPending_ReTrigger(t *testing.T) {
 	if fresh == nil {
 		t.Fatal("record not found")
 	}
-	if fresh.State != domain.DownloadImportPending {
+	if fresh.State != StateImportPending {
 		t.Errorf("expected state to remain importPending, got %s", fresh.State)
 	}
 	if !hasEvent(t, bus, events.TopicDownloadCompleted, "dl-reimport") {
@@ -758,11 +758,11 @@ func TestResolveRetrySource_PopulatesFields(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 
-	rec := domain.DownloadRecord{
+	rec := Record{
 		ID:         "dl-resolve",
 		SourceName: "oldsource",
 		Filename:   "old.flac",
-		State:      domain.DownloadFailed,
+		State:      StateFailed,
 		Artist:     "TestArtist",
 		Title:      "TestTrack",
 	}

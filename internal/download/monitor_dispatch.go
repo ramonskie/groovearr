@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 )
 
@@ -16,7 +15,7 @@ import (
 // sources, respects per-plugin concurrency limits, and starts downloads via
 // the provider's StartDownload method.
 func (m *MonitoringService) startQueuedDownloads() {
-	queued, err := m.store.ListByState(m.ctx, domain.DownloadQueued)
+	queued, err := m.store.ListByState(m.ctx, StateQueued)
 	if err != nil {
 		m.log.Error("startQueuedDownloads: list queued failed", "error", err, "component", "monitor")
 		return
@@ -63,7 +62,7 @@ func (m *MonitoringService) startQueuedDownloads() {
 		if err != nil || fresh == nil {
 			continue
 		}
-		if fresh.State != domain.DownloadQueued {
+		if fresh.State != StateQueued {
 			continue
 		}
 
@@ -74,21 +73,21 @@ func (m *MonitoringService) startQueuedDownloads() {
 // startSingleDownload initiates a download for a single queued record. It
 // looks up the plugin, checks concurrency limits, transitions the store
 // state to downloading, calls StartDownload, and registers the mapping.
-func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
+func (m *MonitoringService) startSingleDownload(rec *Record) {
 	downloadID := rec.ID
 	sourceName := rec.SourceName
 
 	// Look up the plugin.
 	plugin := m.registry.Get(sourceName)
 	if plugin == nil {
-		m.failRecord(downloadID, domain.DownloadQueued,
+		m.failRecord(downloadID, StateQueued,
 			fmt.Sprintf("plugin %q not found", sourceName))
 		return
 	}
 
 	mp, ok := plugin.(MonitoredProvider)
 	if !ok {
-		m.failRecord(downloadID, domain.DownloadQueued,
+		m.failRecord(downloadID, StateQueued,
 			fmt.Sprintf("plugin %q does not support monitored downloads", sourceName))
 		return
 	}
@@ -113,7 +112,7 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 	}()
 
 	// Transition state atomically: queued → downloading.
-	if ok, err := m.store.TransitionState(m.ctx, downloadID, domain.DownloadQueued, domain.DownloadDownloading); err != nil {
+	if ok, err := m.store.TransitionState(m.ctx, downloadID, StateQueued, StateDownloading); err != nil {
 		m.log.Error("startSingleDownload: transition failed",
 			"download_id", downloadID, "error", err, "component", "monitor")
 		return
@@ -124,7 +123,7 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 	}
 
 	// Publish state-changed event.
-	m.publishRecord(downloadID, domain.DownloadDownloading, events.TopicDownloadStateChanged)
+	m.publishRecord(downloadID, StateDownloading, events.TopicDownloadStateChanged)
 
 	// Build metadata for the provider.
 	displayName := rec.DisplayName
@@ -137,7 +136,7 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 			displayName = rec.Filename
 		}
 	}
-	meta := DownloadMeta{
+	meta := Meta{
 		Artist:      rec.Artist,
 		Album:       rec.Album,
 		Title:       rec.Title,
@@ -167,7 +166,7 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 	// are not prematurely cancelled.
 	providerID, err := mp.StartDownload(m.ctx, meta)
 	if err != nil {
-		m.failRecord(downloadID, domain.DownloadDownloading,
+		m.failRecord(downloadID, StateDownloading,
 			fmt.Sprintf("start download for %s: %v", displayName, err))
 		return
 	}
@@ -226,7 +225,7 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 	if !md.deadline.IsZero() && time.Now().After(md.deadline) {
 		elapsed := time.Since(md.startedAt).Round(time.Second)
 		reason := fmt.Sprintf("download timed out after %v", elapsed)
-		m.failRecord(md.recordID, domain.DownloadDownloading, reason)
+		m.failRecord(md.recordID, StateDownloading, reason)
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
 		return
@@ -237,7 +236,7 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 	if plugin == nil {
 		m.log.Warn("pollSingle: plugin not found in registry, failing download",
 			"plugin", md.pluginName, "download_id", md.recordID, "component", "monitor")
-		m.failRecord(md.recordID, domain.DownloadDownloading,
+		m.failRecord(md.recordID, StateDownloading,
 			fmt.Sprintf("plugin %q unavailable", md.pluginName))
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
@@ -247,7 +246,7 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 	if !ok {
 		m.log.Warn("pollSingle: plugin no longer supports monitored downloads, failing download",
 			"plugin", md.pluginName, "download_id", md.recordID, "component", "monitor")
-		m.failRecord(md.recordID, domain.DownloadDownloading,
+		m.failRecord(md.recordID, StateDownloading,
 			fmt.Sprintf("plugin %q type changed", md.pluginName))
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
@@ -283,7 +282,7 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 	}
 
 	// Sync progress to store.
-	_ = m.store.UpdateProgress(m.ctx, md.recordID, domain.DownloadDownloading,
+	_ = m.store.UpdateProgress(m.ctx, md.recordID, StateDownloading,
 		bestProgress, bestTotal, bestTransferred, bestSpeed,
 		status.FilePath, status.CoverURL)
 
@@ -296,11 +295,11 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 
 // handleProviderState inspects the provider's reported download state and
 // transitions the groovearr record accordingly.
-func (m *MonitoringService) handleProviderState(md *monitoredDownload, status *domain.DownloadRecord) {
+func (m *MonitoringService) handleProviderState(md *monitoredDownload, status *Record) {
 	switch status.State {
-	case domain.DownloadImported:
+	case StateImported:
 		// Provider says file is on disk → transition to importPending.
-		if ok, err := m.store.TransitionState(m.ctx, md.recordID, domain.DownloadDownloading, domain.DownloadImportPending); err != nil {
+		if ok, err := m.store.TransitionState(m.ctx, md.recordID, StateDownloading, StateImportPending); err != nil {
 			m.log.Error("handleProviderState: transition to importPending failed",
 				"download_id", md.recordID, "error", err, "component", "monitor")
 			return
@@ -313,7 +312,7 @@ func (m *MonitoringService) handleProviderState(md *monitoredDownload, status *d
 		}
 
 		if status.FilePath != "" {
-			_ = m.store.UpdateProgress(m.ctx, md.recordID, domain.DownloadImportPending,
+			_ = m.store.UpdateProgress(m.ctx, md.recordID, StateImportPending,
 				100, status.Size, status.Size, 0, status.FilePath, status.CoverURL)
 		}
 
@@ -322,22 +321,22 @@ func (m *MonitoringService) handleProviderState(md *monitoredDownload, status *d
 		if err == nil && fresh != nil {
 			m.bus.Publish(m.ctx, events.TopicDownloadCompleted, fresh)
 		} else {
-			m.publishRecord(md.recordID, domain.DownloadImportPending, events.TopicDownloadCompleted)
+			m.publishRecord(md.recordID, StateImportPending, events.TopicDownloadCompleted)
 		}
 
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
 
-	case domain.DownloadFailed:
+	case StateFailed:
 		reason := status.Error
 		if reason == "" {
 			reason = "provider reported download failure"
 		}
-		m.failRecord(md.recordID, domain.DownloadDownloading, reason)
+		m.failRecord(md.recordID, StateDownloading, reason)
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
 
-	case domain.DownloadIgnored:
+	case StateIgnored:
 		// Provider-side cancellation.
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
@@ -381,7 +380,7 @@ func (m *MonitoringService) checkCancellations() {
 			continue
 		}
 
-		if fresh.State != domain.DownloadDownloading {
+		if fresh.State != StateDownloading {
 			m.log.Info("checkCancellations: state changed externally, cancelling provider download",
 				"download_id", md.recordID, "state", fresh.State, "component", "monitor")
 
@@ -409,7 +408,7 @@ func (m *MonitoringService) checkCancellations() {
 // failRecord atomically transitions a download to the failed state and
 // publishes a TopicDownloadFailed event. If the download is already in a
 // terminal state, this is a no-op.
-func (m *MonitoringService) failRecord(downloadID string, oldState domain.DownloadState, errMsg string) {
+func (m *MonitoringService) failRecord(downloadID string, oldState State, errMsg string) {
 	record, err := m.store.Get(m.ctx, downloadID)
 	if err == nil && record != nil && record.State.Terminal() {
 		return // already terminal — don't overwrite
@@ -423,7 +422,7 @@ func (m *MonitoringService) failRecord(downloadID string, oldState domain.Downlo
 	if record != nil {
 		attemptOld = record.State
 	}
-	if ok, _ := m.store.TransitionState(m.ctx, downloadID, attemptOld, domain.DownloadFailed); !ok {
+	if ok, _ := m.store.TransitionState(m.ctx, downloadID, attemptOld, StateFailed); !ok {
 		return // another caller won the race
 	}
 
@@ -432,9 +431,9 @@ func (m *MonitoringService) failRecord(downloadID string, oldState domain.Downlo
 		record = fresh
 	}
 	if record == nil {
-		record = &domain.DownloadRecord{ID: downloadID}
+		record = &Record{ID: downloadID}
 	}
-	record.State = domain.DownloadFailed
+	record.State = StateFailed
 	record.Error = errMsg
 	_ = m.store.Update(m.ctx, record)
 

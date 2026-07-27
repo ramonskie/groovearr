@@ -30,24 +30,26 @@ type mockProvider struct {
 	configured bool
 	cover      *CoverResult
 	coverErr   error
-	coverCalls int // incremented on each SearchCover invocation
+	coverCalls int    // incremented on each SearchCover invocation
 	album      string // returned by SearchAlbum
 }
 
 // compile-time interface check
 var _ Provider = (*mockProvider)(nil)
 
-func (m *mockProvider) Name() string                                  { return m.name }
-func (m *mockProvider) DisplayName() string                           { return m.name }
-func (m *mockProvider) IsConfigured() bool                            { return m.configured }
-func (m *mockProvider) IsMetadataAvailable() bool                     { return m.configured }
+func (m *mockProvider) Name() string              { return m.name }
+func (m *mockProvider) DisplayName() string       { return m.name }
+func (m *mockProvider) IsConfigured() bool        { return m.configured }
+func (m *mockProvider) IsMetadataAvailable() bool { return m.configured }
 func (m *mockProvider) CapabilityStatus() map[string]string {
 	s := "not_configured"
-	if m.configured { s = "connected" }
+	if m.configured {
+		s = "connected"
+	}
 	return map[string]string{"metadata": s}
 }
-func (m *mockProvider) CheckConnection(_ context.Context) error       { return nil }
-func (m *mockProvider) Connected() bool                               { return true }
+func (m *mockProvider) CheckConnection(_ context.Context) error { return nil }
+func (m *mockProvider) Connected() bool                         { return true }
 
 func (m *mockProvider) SearchCover(_ context.Context, _, _ string) (*CoverResult, error) {
 	m.coverCalls++
@@ -270,26 +272,26 @@ func TestEnrichMetadata_MultipleProviders(t *testing.T) {
 			wantCalls2:   1,
 		},
 		{
-			name:       "first nil cover, second succeeds",
-			p2Cover:    &CoverResult{ImageURL: "http://second.example/cover.jpg"},
+			name:         "first nil cover, second succeeds",
+			p2Cover:      &CoverResult{ImageURL: "http://second.example/cover.jpg"},
 			wantCoverURL: "http://second.example/cover.jpg",
-			wantCalls1: 1,
-			wantCalls2: 1,
+			wantCalls1:   1,
+			wantCalls2:   1,
 		},
 		{
-			name:       "first empty URL, second succeeds",
-			p1Cover:    &CoverResult{ImageURL: ""},
-			p2Cover:    &CoverResult{ImageURL: "http://second.example/cover.jpg"},
+			name:         "first empty URL, second succeeds",
+			p1Cover:      &CoverResult{ImageURL: ""},
+			p2Cover:      &CoverResult{ImageURL: "http://second.example/cover.jpg"},
 			wantCoverURL: "http://second.example/cover.jpg",
-			wantCalls1: 1,
-			wantCalls2: 1,
+			wantCalls1:   1,
+			wantCalls2:   1,
 		},
 		{
-			name:       "first succeeds, second not called",
-			p1Cover:    &CoverResult{ImageURL: "http://first.example/cover.jpg"},
+			name:         "first succeeds, second not called",
+			p1Cover:      &CoverResult{ImageURL: "http://first.example/cover.jpg"},
 			wantCoverURL: "http://first.example/cover.jpg",
-			wantCalls1: 1,
-			wantCalls2: 0,
+			wantCalls1:   1,
+			wantCalls2:   0,
 		},
 	}
 
@@ -406,7 +408,7 @@ func TestEnrichMetadata_AlbumAlreadySet(t *testing.T) {
 
 // TestEnrichMetadata_AlbumLookupMultipleProviders uses the first provider that returns an album.
 func TestEnrichMetadata_AlbumLookupMultipleProviders(t *testing.T) {
-	p1 := &mockProvider{name: "p1", configured: true, album: ""}        // no album
+	p1 := &mockProvider{name: "p1", configured: true, album: ""}          // no album
 	p2 := &mockProvider{name: "p2", configured: true, album: "Discovery"} // found!
 	p3 := &mockProvider{name: "p3", configured: true, album: "Wrong"}     // should not be reached
 	_ = p3

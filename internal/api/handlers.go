@@ -642,7 +642,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.downloadSvc.Queue(ctx, req.Source, req.Username, req.Filename, req.Size, download.DownloadMeta{
+	id, err := s.downloadSvc.Queue(ctx, req.Source, req.Username, req.Filename, req.Size, download.Meta{
 		Artist:      artist,
 		Album:       album,
 		Title:       req.Title,
@@ -733,7 +733,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+	id, err := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.Meta{
 		Artist:      artist,
 		Album:       album,
 		Title:       title,
@@ -759,7 +759,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	stateParam := r.URL.Query().Get("state")
 
-	var downloads []domain.DownloadRecord
+	var downloads []download.Record
 	var err error
 
 	switch stateParam {
@@ -768,7 +768,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 	case "active":
 		downloads, err = s.downloadSvc.ListActive(ctx)
 	default:
-		downloads, err = s.downloadSvc.ListByState(ctx, domain.DownloadState(stateParam))
+		downloads, err = s.downloadSvc.ListByState(ctx, download.State(stateParam))
 	}
 
 	if err != nil {
@@ -776,7 +776,7 @@ func (s *Server) handleGetDownloads(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if downloads == nil {
-		downloads = []domain.DownloadRecord{}
+		downloads = []download.Record{}
 	}
 	writeJSON(w, http.StatusOK, downloads)
 }
@@ -806,13 +806,13 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	switch rec.State {
-	case domain.DownloadFailed:
+	case download.StateFailed:
 		if err := s.downloadSvc.Retry(r.Context(), id); err != nil {
 			writeError(w, http.StatusInternalServerError, err)
 			return
 		}
 		writeJSON(w, http.StatusOK, map[string]string{"status": "retrying"})
-	case domain.DownloadFailedPending:
+	case download.StateFailedPending:
 		// Re-trigger search resolution immediately. Reset retry count so
 		// manual retry is not blocked by the auto-retry limit.
 		rec.RetryCount = 0
@@ -920,22 +920,22 @@ type sqlDBProvider interface {
 
 // DiscoveryTrackEntry is a track from discovery merged with library download status.
 type discoveryTrackEntry struct {
-	Title           string `json:"title"`
-	TrackNumber     int    `json:"track_number"`
-	DurationMs      int64  `json:"duration_ms"`
-	Downloaded      bool   `json:"downloaded"`
-	LibraryTrackID  int64  `json:"library_track_id,omitempty"`
-	FilePath        string `json:"file_path,omitempty"`
-	FileSize        int64  `json:"file_size,omitempty"`
-	Bitrate         int    `json:"bitrate,omitempty"`
-	Format          string `json:"format,omitempty"`
+	Title          string `json:"title"`
+	TrackNumber    int    `json:"track_number"`
+	DurationMs     int64  `json:"duration_ms"`
+	Downloaded     bool   `json:"downloaded"`
+	LibraryTrackID int64  `json:"library_track_id,omitempty"`
+	FilePath       string `json:"file_path,omitempty"`
+	FileSize       int64  `json:"file_size,omitempty"`
+	Bitrate        int    `json:"bitrate,omitempty"`
+	Format         string `json:"format,omitempty"`
 }
 
 // albumDiscoveryResponse is the JSON payload for the discovery endpoint.
 type albumDiscoveryResponse struct {
-	Provider        string                 `json:"provider"`
-	ProviderAlbumID string                 `json:"provider_album_id"`
-	Tracks          []discoveryTrackEntry  `json:"tracks"`
+	Provider        string                `json:"provider"`
+	ProviderAlbumID string                `json:"provider_album_id"`
+	Tracks          []discoveryTrackEntry `json:"tracks"`
 }
 
 // handleLibraryAlbumDiscovery searches discovery providers for an album's full
@@ -1193,8 +1193,6 @@ func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
 		"paths":    paths,
 	})
 }
-
-
 
 func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("artistID")
@@ -2217,7 +2215,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 			}
 		}
 
-		_, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, best.Track.Username, best.Track.Filename, best.Track.Size, download.DownloadMeta{
+		_, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, best.Track.Username, best.Track.Filename, best.Track.Size, download.Meta{
 			Artist:      artist,
 			Album:       album,
 			Title:       title,

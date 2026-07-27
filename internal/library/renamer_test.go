@@ -128,10 +128,10 @@ func TestRenamerRename(t *testing.T) {
 
 func TestParseMetadataFromFilename(t *testing.T) {
 	tests := []struct {
-		filename     string
-		wantArtist   string
-		wantAlbum    string
-		wantTitle    string
+		filename   string
+		wantArtist string
+		wantAlbum  string
+		wantTitle  string
 	}{
 		{"Daft Punk - Get Lucky.flac", "Daft Punk", "Unknown Album", "Get Lucky"},
 		{"Artist - Album - Title.mp3", "Artist", "Album", "Title"},

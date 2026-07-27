@@ -30,7 +30,7 @@ func NewPlaylistLinkerHandler(libStore library.Store, logger *slog.Logger) *Play
 
 // Handle links the imported track to unmatched playlist_tracks entries
 // using title and artist matching.
-func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *PlaylistLinkerHandler) Handle(ctx context.Context, record *Record) error {
 	if record.PlaylistID == "" {
 		h.log.Info("skipped - no playlist_id", "download_id", record.ID, "component", "playlist_linker")
 		return nil

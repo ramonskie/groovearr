@@ -30,7 +30,7 @@ func NewLibraryImporterHandler(libStore library.Store, logger *slog.Logger) *Lib
 
 // Handle creates artist/album/track records for the downloaded file.
 // Metadata is extracted from the file path (post-renamer) and audio tags.
-func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *LibraryImporterHandler) Handle(ctx context.Context, record *Record) error {
 	if record.FilePath == "" {
 		return fmt.Errorf("library importer: no file path for %s", record.ID)
 	}
@@ -89,7 +89,7 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *domain.Down
 }
 
 // extractMetadata pulls artist/album/title from the record and file path.
-func (h *LibraryImporterHandler) extractMetadata(record *domain.DownloadRecord) (title, artist, album string) {
+func (h *LibraryImporterHandler) extractMetadata(record *Record) (title, artist, album string) {
 	artist = record.Artist
 	album = record.Album
 	title = record.Title

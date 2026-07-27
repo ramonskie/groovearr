@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
 )
 
@@ -23,7 +22,7 @@ func TestFileRenamerHandler(t *testing.T) {
 	}
 
 	store := newMockDownloadStore()
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:          "test-rename-1",
 		FilePath:    srcFile,
 		Filename:    "test.mp3",
@@ -57,7 +56,7 @@ func TestFileRenamerHandler_NoFilePath(t *testing.T) {
 	store := newMockDownloadStore()
 	handler := NewFileRenamerHandler(&library.Renamer{}, store, nil)
 
-	record := &domain.DownloadRecord{ID: "no-file"}
+	record := &Record{ID: "no-file"}
 	err := handler.Handle(context.Background(), record)
 	if err == nil {
 		t.Error("expected error for empty file path")
@@ -70,7 +69,7 @@ func TestFileRenamerHandler_ExistingPath(t *testing.T) {
 	os.WriteFile(srcFile, []byte("audio"), 0o644)
 
 	store := newMockDownloadStore()
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-rename-3",
 		FilePath: srcFile,
 		Filename: "already_placed.mp3",

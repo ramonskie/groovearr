@@ -64,6 +64,6 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 	}
 }
 
-func (f *factory) Icon() string                  { return "disc" }
+func (f *factory) Icon() string                   { return "disc" }
 func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
 func (f *factory) UISlots() *plugin.UISlots       { return nil }

@@ -68,16 +68,16 @@ type SimplifiedArtist struct {
 
 // Artist is the full artist object returned by /v1/artists/{id}.
 type Artist struct {
-	ExternalURLs ExternalURLs       `json:"external_urls"`
-	Followers    Followers          `json:"followers"`
-	Genres       []string           `json:"genres"`
-	Href         string             `json:"href"`
-	ID           string             `json:"id"`
-	Images       []Image            `json:"images"`
-	Name         string             `json:"name"`
-	Popularity   int                `json:"popularity"`
-	Type         string             `json:"type"`
-	URI          string             `json:"uri"`
+	ExternalURLs ExternalURLs `json:"external_urls"`
+	Followers    Followers    `json:"followers"`
+	Genres       []string     `json:"genres"`
+	Href         string       `json:"href"`
+	ID           string       `json:"id"`
+	Images       []Image      `json:"images"`
+	Name         string       `json:"name"`
+	Popularity   int          `json:"popularity"`
+	Type         string       `json:"type"`
+	URI          string       `json:"uri"`
 }
 
 // ─── Album ───────────────────────────────────────────────────────────
@@ -102,25 +102,25 @@ type SimplifiedAlbum struct {
 
 // Album is the full album object returned by /v1/albums/{id}.
 type Album struct {
-	AlbumType            string                 `json:"album_type"`
-	TotalTracks          int                    `json:"total_tracks"`
-	ExternalURLs         ExternalURLs           `json:"external_urls"`
-	Href                 string                 `json:"href"`
-	ID                   string                 `json:"id"`
-	Images               []Image                `json:"images"`
-	Name                 string                 `json:"name"`
-	ReleaseDate          string                 `json:"release_date"`
-	ReleaseDatePrecision string                 `json:"release_date_precision"`
-	Restrictions         *Restrictions          `json:"restrictions,omitempty"`
-	Type                 string                 `json:"type"`
-	URI                  string                 `json:"uri"`
-	Artists              []SimplifiedArtist     `json:"artists"`
+	AlbumType            string                  `json:"album_type"`
+	TotalTracks          int                     `json:"total_tracks"`
+	ExternalURLs         ExternalURLs            `json:"external_urls"`
+	Href                 string                  `json:"href"`
+	ID                   string                  `json:"id"`
+	Images               []Image                 `json:"images"`
+	Name                 string                  `json:"name"`
+	ReleaseDate          string                  `json:"release_date"`
+	ReleaseDatePrecision string                  `json:"release_date_precision"`
+	Restrictions         *Restrictions           `json:"restrictions,omitempty"`
+	Type                 string                  `json:"type"`
+	URI                  string                  `json:"uri"`
+	Artists              []SimplifiedArtist      `json:"artists"`
 	Tracks               Paging[SimplifiedTrack] `json:"tracks"`
-	Copyrights           []Copyright            `json:"copyrights"`
-	ExternalIDs          ExternalIDs            `json:"external_ids"`
-	Genres               []string               `json:"genres"`
-	Label                string                 `json:"label"`
-	Popularity           int                    `json:"popularity"`
+	Copyrights           []Copyright             `json:"copyrights"`
+	ExternalIDs          ExternalIDs             `json:"external_ids"`
+	Genres               []string                `json:"genres"`
+	Label                string                  `json:"label"`
+	Popularity           int                     `json:"popularity"`
 }
 
 // ─── Track ───────────────────────────────────────────────────────────
@@ -179,8 +179,8 @@ type PlaylistTracksRef struct {
 
 // PlaylistTrack is a single item in a playlist's tracks array.
 type PlaylistTrack struct {
-	AddedAt *string `json:"added_at"`  // nullable for old playlists
-	AddedBy *User   `json:"added_by"`  // nullable for old playlists
+	AddedAt *string `json:"added_at"` // nullable for old playlists
+	AddedBy *User   `json:"added_by"` // nullable for old playlists
 	IsLocal bool    `json:"is_local"`
 	Track   *Track  `json:"track"`
 }

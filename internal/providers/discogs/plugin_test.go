@@ -315,8 +315,8 @@ func TestPlugin_GetAlbumTracks_ParseDuration(t *testing.T) {
 func TestPlugin_GetAlbumTracks_NonNumericPosition(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{
-			"title":    "Vinyl Release",
-			"artists":  []map[string]any{{"name": "Artist"}},
+			"title":   "Vinyl Release",
+			"artists": []map[string]any{{"name": "Artist"}},
 			"tracklist": []map[string]any{
 				{"position": "A1", "title": "Side A Track 1", "duration": "3:00"},
 				{"position": "B2", "title": "Side B Track 2", "duration": "4:00"},
@@ -625,9 +625,9 @@ func TestPlugin_EnrichTrack(t *testing.T) {
 		}
 		// GetRelease request
 		writeJSON(w, map[string]any{
-			"title":    "Get Lucky",
-			"year":     2013,
-			"artists":  []map[string]any{{"name": "Daft Punk"}},
+			"title":     "Get Lucky",
+			"year":      2013,
+			"artists":   []map[string]any{{"name": "Daft Punk"}},
 			"tracklist": []any{},
 		})
 	})

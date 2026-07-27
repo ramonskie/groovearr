@@ -3,8 +3,6 @@ package download
 import (
 	"context"
 	"time"
-
-	"github.com/ramonskie/groovearr/internal/domain"
 )
 
 // MonitoredProvider defines a download provider that exposes fine-grained
@@ -14,10 +12,10 @@ import (
 type MonitoredProvider interface {
 	// StartDownload initiates a non-blocking download and returns a
 	// provider-managed download ID for subsequent status queries.
-	StartDownload(ctx context.Context, meta DownloadMeta) (string, error)
+	StartDownload(ctx context.Context, meta Meta) (string, error)
 
 	// GetStatus returns the current state of a tracked download.
-	GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error)
+	GetStatus(ctx context.Context, providerID string) (*Record, error)
 
 	// GetProgress returns live byte-level progress for a download.
 	// Providers that do not support progress reporting must return nil, nil.

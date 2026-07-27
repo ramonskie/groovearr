@@ -35,7 +35,7 @@ type ResolveArgs struct {
 	Artist    string
 	Album     string
 	Year      int
-	TrackNum  int    // 1-based
+	TrackNum  int // 1-based
 	Title     string
 	Ext       string // without leading dot, e.g. "flac", "mp3"
 	DiscNum   int    // 1-based; 0 or 1 treated as "no multi-disc"

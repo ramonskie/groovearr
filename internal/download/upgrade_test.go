@@ -8,10 +8,10 @@ import (
 
 func makeProfile(targets quality.RankedTargets, policy quality.UpgradePolicy, cutoffIdx int, fallback bool) *quality.QualityProfile {
 	return &quality.QualityProfile{
-		Name:              "test",
-		RankedTargets:     targets,
-		FallbackEnabled:   fallback,
-		UpgradePolicy:     policy,
+		Name:               "test",
+		RankedTargets:      targets,
+		FallbackEnabled:    fallback,
+		UpgradePolicy:      policy,
 		UpgradeCutoffIndex: cutoffIdx,
 	}
 }

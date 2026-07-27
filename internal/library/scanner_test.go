@@ -283,36 +283,50 @@ func TestScannerScanPath(t *testing.T) {
 
 // mockStore is a minimal in-memory implementation of Store for testing.
 type mockStore struct {
-	artists  map[string]int64
-	albums   map[string]int64
-	tracks   []domain.Track
-	nextID   int64
+	artists map[string]int64
+	albums  map[string]int64
+	tracks  []domain.Track
+	nextID  int64
 }
 
 func (m *mockStore) next() int64 { m.nextID++; return m.nextID }
 func (m *mockStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, error) {
-	if id, ok := m.artists[a.Name]; ok { return id, nil }
+	if id, ok := m.artists[a.Name]; ok {
+		return id, nil
+	}
 	id := m.next()
 	m.artists[a.Name] = id
 	return id, nil
 }
-func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error)                { return nil, nil }
+func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) { return nil, nil }
 func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
-	if id, ok := m.artists[name]; ok { return &domain.Artist{ID: id, Name: name}, nil }
+	if id, ok := m.artists[name]; ok {
+		return &domain.Artist{ID: id, Name: name}, nil
+	}
 	return nil, nil
 }
-func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error)     { return nil, nil }
-func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) { return nil, nil }
-func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error      { return nil }
+func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error {
+	return nil
+}
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) {
 	key := fmt.Sprintf("%d:%s", a.ArtistID, a.Title)
-	if id, ok := m.albums[key]; ok { return id, nil }
+	if id, ok := m.albums[key]; ok {
+		return id, nil
+	}
 	id := m.next()
 	m.albums[key] = id
 	return id, nil
 }
-func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error)                      { return nil, nil }
-func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error)      { return nil, nil }
+func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) { return nil, nil }
+func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
+	return nil, nil
+}
 func (m *mockStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
 	var out []domain.Album
 	for key, id := range m.albums {
@@ -331,31 +345,59 @@ func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, er
 	m.tracks = append(m.tracks, *t)
 	return id, nil
 }
-func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error)                       { return nil, nil }
-func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error)         { return nil, nil }
-func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error)       { return nil, nil }
-func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error)  { return nil, nil }
+func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error) { return nil, nil }
+func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
+	return nil, nil
+}
 func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.Track, error) {
 	for _, t := range m.tracks {
-		if t.FilePath == fp { return &t, nil }
+		if t.FilePath == fp {
+			return &t, nil
+		}
 	}
 	return nil, nil
 }
-func (m *mockStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) { return nil, nil }
-func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error                                   { return nil }
-func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) { return nil, nil }
-func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error)   { return nil, nil }
-func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error)   { return nil, nil }
-func (m *mockStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error)                 { return 0, nil }
-func (m *mockStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error)                    { return nil, nil }
-func (m *mockStore) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) { return nil, nil }
-func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error)                          { return nil, nil }
-func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error                                    { return nil }
-func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error                { return nil }
-func (m *mockStore) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error) { return nil, nil }
-func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error                      { return nil }
-func (m *mockStore) Close() error                                                                          { return nil }
-func (m *mockStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error)                    { return nil, nil }
+func (m *mockStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
+func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error) {
+	return nil, nil
+}
+func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error) {
+	return 0, nil
+}
+func (m *mockStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
+	return nil, nil
+}
+func (m *mockStore) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) {
+	return nil, nil
+}
+func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) { return nil, nil }
+func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
+func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
+	return nil
+}
+func (m *mockStore) GetPlaylistTracks(ctx context.Context, playlistID int64) ([]domain.PlaylistTrack, error) {
+	return nil, nil
+}
+func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error { return nil }
+func (m *mockStore) Close() error                                                     { return nil }
+func (m *mockStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
+	return nil, nil
+}
 func (m *mockStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
 	return m.UpsertTrack(ctx, track)
 }
@@ -383,9 +425,9 @@ func minimalFLAC(artist, album, title string, year, trackNum, discNum int) []byt
 	binary.BigEndian.PutUint32(streamInfoData[10:14], 0x0AC44000) // sample_rate=44100, channels=2, bps=16
 	binary.BigEndian.PutUint32(streamInfoData[14:18], 0x00000000) // total samples upper
 	binary.BigEndian.PutUint32(streamInfoData[18:22], 0x00000000) // total samples lower
-	buf.WriteByte(0x00)           // not last block
-	writeUint24BE(&buf, 34)       // length
-	buf.Write(streamInfoData)     // STREAMINFO data
+	buf.WriteByte(0x00)                                           // not last block
+	writeUint24BE(&buf, 34)                                       // length
+	buf.Write(streamInfoData)                                     // STREAMINFO data
 
 	// Vorbis comment block.
 	var commentsBuf bytes.Buffer
@@ -401,7 +443,7 @@ func minimalFLAC(artist, album, title string, year, trackNum, discNum int) []byt
 	writeVorbisComment(&commentsBuf, "DISCNUMBER", fmt.Sprintf("%d", discNum))
 
 	commentsData := commentsBuf.Bytes()
-	buf.WriteByte(0x84)           // last block = true (0x80) | block type = 4 (Vorbis comment)
+	buf.WriteByte(0x84) // last block = true (0x80) | block type = 4 (Vorbis comment)
 	writeUint24BE(&buf, len(commentsData))
 	buf.Write(commentsData)
 

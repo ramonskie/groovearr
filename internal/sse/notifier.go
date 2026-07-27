@@ -6,7 +6,7 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
 )
 
@@ -43,7 +43,7 @@ func NewSSENotifier(hub *SSEHub, bus events.IEventAggregator, logger *slog.Logge
 
 // broadcastRecord marshals a download record as JSON and broadcasts it as an
 // SSE event of the given type.
-func (n *SSENotifier) broadcastRecord(record *domain.DownloadRecord, eventType string) {
+func (n *SSENotifier) broadcastRecord(record *download.Record, eventType string) {
 	data, err := json.Marshal(record)
 	if err != nil {
 		n.log.Error("marshal download failed", "download_id", record.ID, "error", err, "component", "sse")
@@ -59,7 +59,7 @@ func (n *SSENotifier) broadcastRecord(record *domain.DownloadRecord, eventType s
 }
 
 func (n *SSENotifier) onDownloadQueued(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -67,7 +67,7 @@ func (n *SSENotifier) onDownloadQueued(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onStateChanged(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -75,7 +75,7 @@ func (n *SSENotifier) onStateChanged(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onProgress(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -83,7 +83,7 @@ func (n *SSENotifier) onProgress(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onDownloadCompleted(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -91,7 +91,7 @@ func (n *SSENotifier) onDownloadCompleted(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onDownloadFailed(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -99,7 +99,7 @@ func (n *SSENotifier) onDownloadFailed(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onImportCompleted(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -107,7 +107,7 @@ func (n *SSENotifier) onImportCompleted(ctx context.Context, event any) {
 }
 
 func (n *SSENotifier) onImportFailed(ctx context.Context, event any) {
-	record, ok := event.(*domain.DownloadRecord)
+	record, ok := event.(*download.Record)
 	if !ok {
 		return
 	}
@@ -116,7 +116,7 @@ func (n *SSENotifier) onImportFailed(ctx context.Context, event any) {
 
 // Handle implements download.ImportHandler. When the notifier is placed in the
 // import handler chain, it broadcasts the record as a final SSE notification.
-func (n *SSENotifier) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (n *SSENotifier) Handle(ctx context.Context, record *download.Record) error {
 	n.broadcastRecord(record, "import_completed")
 	return nil
 }

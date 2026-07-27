@@ -17,17 +17,21 @@ type mockPlugin struct {
 	searchResults []domain.TrackResult
 }
 
-func (m *mockPlugin) Name() string                                  { return m.name }
-func (m *mockPlugin) DisplayName() string                           { return m.display }
-func (m *mockPlugin) IsConfigured() bool                            { return m.configured }
-func (m *mockPlugin) Connected() bool                                { return m.connected }
+func (m *mockPlugin) Name() string        { return m.name }
+func (m *mockPlugin) DisplayName() string { return m.display }
+func (m *mockPlugin) IsConfigured() bool  { return m.configured }
+func (m *mockPlugin) Connected() bool     { return m.connected }
 func (m *mockPlugin) CapabilityStatus() map[string]string {
 	s := "not_configured"
-	if m.configured { s = "configured" }
-	if m.connected { s = "connected" }
+	if m.configured {
+		s = "configured"
+	}
+	if m.connected {
+		s = "connected"
+	}
 	return map[string]string{"download": s}
 }
-func (m *mockPlugin) CheckConnection(ctx context.Context) error       { return nil }
+func (m *mockPlugin) CheckConnection(ctx context.Context) error { return nil }
 func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	if m.searchResults != nil {
 		return m.searchResults, nil, nil
@@ -36,13 +40,13 @@ func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult
 }
 
 // MonitoredProvider stubs for retry/search tests.
-func (m *mockPlugin) StartDownload(_ context.Context, _ DownloadMeta) (string, error) { return "", nil }
-func (m *mockPlugin) GetStatus(_ context.Context, _ string) (*domain.DownloadRecord, error) { return nil, nil }
-func (m *mockPlugin) GetProgress(_ context.Context, _ string) (*Progress, error)       { return nil, nil }
-func (m *mockPlugin) Cancel(_ context.Context, _ string, _ bool) error                 { return nil }
-func (m *mockPlugin) ActiveDownloads() []string                                        { return nil }
-func (m *mockPlugin) MaxConcurrent() int                                               { return 0 }
-func (m *mockPlugin) DownloadTimeout() time.Duration                                   { return 0 }
+func (m *mockPlugin) StartDownload(_ context.Context, _ Meta) (string, error)    { return "", nil }
+func (m *mockPlugin) GetStatus(_ context.Context, _ string) (*Record, error)     { return nil, nil }
+func (m *mockPlugin) GetProgress(_ context.Context, _ string) (*Progress, error) { return nil, nil }
+func (m *mockPlugin) Cancel(_ context.Context, _ string, _ bool) error           { return nil }
+func (m *mockPlugin) ActiveDownloads() []string                                  { return nil }
+func (m *mockPlugin) MaxConcurrent() int                                         { return 0 }
+func (m *mockPlugin) DownloadTimeout() time.Duration                             { return 0 }
 
 func TestRegistryRegister(t *testing.T) {
 	r := NewRegistry()
@@ -200,9 +204,9 @@ func TestFilterByProfile(t *testing.T) {
 
 	t.Run("ranked targets pick best tier", func(t *testing.T) {
 		candidates := []Candidate{
-			makeCand("flac", 1411),   // matches tier 0
-			makeCand("mp3", 320),     // matches tier 1
-			makeCand("mp3", 128),     // matches tier 2
+			makeCand("flac", 1411), // matches tier 0
+			makeCand("mp3", 320),   // matches tier 1
+			makeCand("mp3", 128),   // matches tier 2
 		}
 		profile := &quality.QualityProfile{
 			Name: "Ranked",
@@ -323,4 +327,3 @@ func TestRankAllByQuality(t *testing.T) {
 		t.Errorf("expected FLAC first with best_quality, got %s", result[0].Track.AudioQuality.Format)
 	}
 }
-

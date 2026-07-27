@@ -7,8 +7,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/ramonskie/groovearr/internal/domain"
-
+	"github.com/ramonskie/groovearr/internal/download"
 	_ "modernc.org/sqlite"
 )
 
@@ -83,8 +82,8 @@ func openTestDB(t *testing.T) *sql.DB {
 	return db
 }
 
-func newTestRecord(id, source, filename, display string) *domain.DownloadRecord {
-	return &domain.DownloadRecord{
+func newTestRecord(id, source, filename, display string) *download.Record {
+	return &download.Record{
 		ID:          id,
 		SourceName:  source,
 		Filename:    filename,
@@ -116,7 +115,7 @@ func TestStore_InsertAndGet(t *testing.T) {
 	if got == nil {
 		t.Fatal("expected record, got nil")
 	}
-	if got.State != domain.DownloadQueued {
+	if got.State != download.StateQueued {
 		t.Errorf("state = %q, want queued", got.State)
 	}
 	if got.SourceName != "soulseek" {
@@ -152,9 +151,9 @@ func TestStore_Update(t *testing.T) {
 	}
 
 	// Update mutable fields.
-	update := &domain.DownloadRecord{
+	update := &download.Record{
 		ID:          "dl-1",
-		State:       domain.DownloadDownloading,
+		State:       download.StateDownloading,
 		Progress:    42.5,
 		Size:        1024000,
 		Transferred: 512000,
@@ -170,7 +169,7 @@ func TestStore_Update(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.State != domain.DownloadDownloading {
+	if got.State != download.StateDownloading {
 		t.Errorf("state = %q, want downloading", got.State)
 	}
 	if got.Progress != 42.5 {
@@ -195,7 +194,7 @@ func TestStore_UpdateNotFound(t *testing.T) {
 	store := New(db, slog.Default())
 	ctx := context.Background()
 
-	err := store.Update(ctx, &domain.DownloadRecord{ID: "no-such-id"})
+	err := store.Update(ctx, &download.Record{ID: "no-such-id"})
 	if err == nil {
 		t.Error("expected error for nonexistent record")
 	}
@@ -254,9 +253,9 @@ func TestStore_ListByState(t *testing.T) {
 	store.Insert(ctx, newTestRecord("dl-2", "b", "b", "b"))
 
 	// Update one to downloading.
-	store.Update(ctx, &domain.DownloadRecord{ID: "dl-2", State: domain.DownloadDownloading})
+	store.Update(ctx, &download.Record{ID: "dl-2", State: download.StateDownloading})
 
-	queued, err := store.ListByState(ctx, domain.DownloadQueued)
+	queued, err := store.ListByState(ctx, download.StateQueued)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,7 +263,7 @@ func TestStore_ListByState(t *testing.T) {
 		t.Errorf("queued list: got %d records", len(queued))
 	}
 
-	downloading, err := store.ListByState(ctx, domain.DownloadDownloading)
+	downloading, err := store.ListByState(ctx, download.StateDownloading)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,7 +272,7 @@ func TestStore_ListByState(t *testing.T) {
 	}
 
 	// Empty state.
-	imported, err := store.ListByState(ctx, domain.DownloadImported)
+	imported, err := store.ListByState(ctx, download.StateImported)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,8 +291,8 @@ func TestStore_ListActive(t *testing.T) {
 	store.Insert(ctx, newTestRecord("dl-3", "c", "c", "c")) // queued
 
 	// Make dl-2 imported (terminal), dl-3 failed (terminal).
-	store.Update(ctx, &domain.DownloadRecord{ID: "dl-2", State: domain.DownloadImported})
-	store.Update(ctx, &domain.DownloadRecord{ID: "dl-3", State: domain.DownloadFailed})
+	store.Update(ctx, &download.Record{ID: "dl-2", State: download.StateImported})
+	store.Update(ctx, &download.Record{ID: "dl-3", State: download.StateFailed})
 
 	active, err := store.ListActive(ctx)
 	if err != nil {
@@ -358,9 +357,9 @@ func TestStore_RecordAndGetEvents(t *testing.T) {
 
 	store.Insert(ctx, newTestRecord("dl-1", "soulseek", "t.flac", "T"))
 
-	evt := &domain.DownloadEvent{
+	evt := &download.Event{
 		DownloadID: "dl-1",
-		Type:       domain.EventProgress,
+		Type:       download.EventProgress,
 		Payload:    []byte(`{"progress":50}`),
 	}
 	if err := store.RecordEvent(ctx, evt); err != nil {
@@ -370,9 +369,9 @@ func TestStore_RecordAndGetEvents(t *testing.T) {
 		t.Error("expected event ID to be set")
 	}
 
-	evt2 := &domain.DownloadEvent{
+	evt2 := &download.Event{
 		DownloadID: "dl-1",
-		Type:       domain.EventCompleted,
+		Type:       download.EventCompleted,
 	}
 	if err := store.RecordEvent(ctx, evt2); err != nil {
 		t.Fatalf("RecordEvent: %v", err)
@@ -385,10 +384,10 @@ func TestStore_RecordAndGetEvents(t *testing.T) {
 	if len(events) != 2 {
 		t.Fatalf("expected 2 events, got %d", len(events))
 	}
-	if events[0].Type != domain.EventProgress {
+	if events[0].Type != download.EventProgress {
 		t.Errorf("first event = %q, want progress", events[0].Type)
 	}
-	if events[1].Type != domain.EventCompleted {
+	if events[1].Type != download.EventCompleted {
 		t.Errorf("second event = %q, want completed", events[1].Type)
 	}
 }
@@ -419,11 +418,11 @@ func TestStore_DeleteTerminal(t *testing.T) {
 	store.Insert(ctx, newTestRecord("dl-3", "c", "c", "c")) // queued
 
 	// Set dl-1 to imported, dl-2 to failed, dl-3 stays queued.
-	store.Update(ctx, &domain.DownloadRecord{ID: "dl-1", State: domain.DownloadImported})
-	store.Update(ctx, &domain.DownloadRecord{ID: "dl-2", State: domain.DownloadFailed})
+	store.Update(ctx, &download.Record{ID: "dl-1", State: download.StateImported})
+	store.Update(ctx, &download.Record{ID: "dl-2", State: download.StateFailed})
 
 	// Add events for dl-1 (should cascade delete).
-	store.RecordEvent(ctx, &domain.DownloadEvent{DownloadID: "dl-1", Type: domain.EventCompleted})
+	store.RecordEvent(ctx, &download.Event{DownloadID: "dl-1", Type: download.EventCompleted})
 
 	if err := store.DeleteTerminal(ctx); err != nil {
 		t.Fatalf("DeleteTerminal: %v", err)
@@ -467,10 +466,10 @@ func TestStore_ConcurrentUpdates(t *testing.T) {
 		wg.Add(1)
 		go func(progress float64) {
 			defer wg.Done()
-			err := store.Update(ctx, &domain.DownloadRecord{
+			err := store.Update(ctx, &download.Record{
 				ID:       "dl-1",
 				Progress: progress,
-				State:    domain.DownloadDownloading,
+				State:    download.StateDownloading,
 			})
 			if err != nil {
 				errs <- err
@@ -493,7 +492,7 @@ func TestStore_ConcurrentUpdates(t *testing.T) {
 	if got == nil {
 		t.Fatal("record vanished after concurrent updates")
 	}
-	if got.State != domain.DownloadDownloading {
+	if got.State != download.StateDownloading {
 		t.Errorf("state = %q after concurrent updates", got.State)
 	}
 }

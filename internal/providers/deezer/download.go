@@ -52,9 +52,9 @@ var blowfishSecret = []byte("g4el58wc0zvf9na1")
 
 // Quality format codes for media API.
 var qualityFormats = map[string]map[string]string{
-	"flac":     {"cipher": "BF_CBC_STRIPE", "format": "FLAC"},
-	"mp3_320":  {"cipher": "BF_CBC_STRIPE", "format": "MP3_320"},
-	"mp3_128":  {"cipher": "BF_CBC_STRIPE", "format": "MP3_128"},
+	"flac":    {"cipher": "BF_CBC_STRIPE", "format": "FLAC"},
+	"mp3_320": {"cipher": "BF_CBC_STRIPE", "format": "MP3_320"},
+	"mp3_128": {"cipher": "BF_CBC_STRIPE", "format": "MP3_128"},
 }
 
 var qualityOrder = []string{"flac", "mp3_320", "mp3_128"}
@@ -84,7 +84,7 @@ type DownloadClient struct {
 
 	// Per-download state.
 	downloadsMu sync.RWMutex
-	downloads   map[string]*domain.DownloadRecord // downloadID → record
+	downloads   map[string]*download.Record // downloadID → record
 
 	// Cancellation for active downloads.
 	cancelMu    sync.Mutex
@@ -136,7 +136,7 @@ func NewDownloadClient(cfg DeezerConfig, downloadPath string, logger *slog.Logge
 				}, deezerDownloadRate),
 			},
 		},
-		downloads:   make(map[string]*domain.DownloadRecord),
+		downloads:   make(map[string]*download.Record),
 		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 }
@@ -301,7 +301,7 @@ func (c *DownloadClient) Search(ctx context.Context, query string) ([]domain.Tra
 // StartDownload initiates a non-blocking Deezer download. Returns a
 // provider-managed download ID for subsequent status queries.
 // Implements download.MonitoredProvider.
-func (c *DownloadClient) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
+func (c *DownloadClient) StartDownload(ctx context.Context, meta download.Meta) (string, error) {
 	if !c.IsConfigured() {
 		c.log.Error("download failed: ARL not set", "component", "deezer")
 		return "", fmt.Errorf("deezer: ARL token not set")
@@ -332,13 +332,13 @@ func (c *DownloadClient) StartDownload(ctx context.Context, meta download.Downlo
 	downloadID := fmt.Sprintf("deezer-%s-%d", trackID, time.Now().UnixNano())
 
 	// Create record and start goroutine only after all checks pass.
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:          downloadID,
 		SourceName:  downloadPluginName,
 		Filename:    filename,
 		DisplayName: displayName,
 		TrackID:     trackID,
-		State:       domain.DownloadQueued,
+		State:       download.StateQueued,
 	}
 
 	c.downloadsMu.Lock()
@@ -358,11 +358,11 @@ func (c *DownloadClient) StartDownload(ctx context.Context, meta download.Downlo
 }
 
 // GetDownloads returns all tracked downloads.
-func (c *DownloadClient) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (c *DownloadClient) GetDownloads(ctx context.Context) ([]download.Record, error) {
 	c.downloadsMu.RLock()
 	defer c.downloadsMu.RUnlock()
 
-	out := make([]domain.DownloadRecord, 0, len(c.downloads))
+	out := make([]download.Record, 0, len(c.downloads))
 	for _, r := range c.downloads {
 		out = append(out, *r)
 	}
@@ -370,7 +370,7 @@ func (c *DownloadClient) GetDownloads(ctx context.Context) ([]domain.DownloadRec
 }
 
 // GetDownloadStatus returns a single download's status.
-func (c *DownloadClient) GetDownloadStatus(ctx context.Context, downloadID string) (*domain.DownloadRecord, error) {
+func (c *DownloadClient) GetDownloadStatus(ctx context.Context, downloadID string) (*download.Record, error) {
 	c.downloadsMu.RLock()
 	defer c.downloadsMu.RUnlock()
 
@@ -387,7 +387,7 @@ func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, 
 	c.downloadsMu.Lock()
 	r, ok := c.downloads[downloadID]
 	if ok {
-		r.State = domain.DownloadIgnored
+		r.State = download.StateIgnored
 		r.Error = ""
 	}
 	if remove {
@@ -411,7 +411,7 @@ func (c *DownloadClient) CancelDownload(ctx context.Context, downloadID string, 
 }
 
 // GetStatus implements download.MonitoredProvider by wrapping GetDownloadStatus.
-func (c *DownloadClient) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
+func (c *DownloadClient) GetStatus(ctx context.Context, providerID string) (*download.Record, error) {
 	return c.GetDownloadStatus(ctx, providerID)
 }
 
@@ -584,7 +584,7 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 					year = y
 				}
 			}
-			c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+			c.updateRecord(downloadID, func(r *download.Record) {
 				r.CoverURL = trk.Album.CoverXL
 				r.Artist = trk.Artist.Name
 				r.Album = trk.Album.Title
@@ -637,11 +637,11 @@ func (c *DownloadClient) downloadSync(ctx context.Context, downloadID, trackID, 
 	}
 
 	// Only mark succeeded if not already cancelled.
-	c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+	c.updateRecord(downloadID, func(r *download.Record) {
 		if r.State.Terminal() {
 			return // cancelled or errored during download
 		}
-		r.State = domain.DownloadImported
+		r.State = download.StateImported
 		r.Progress = 100.0
 		r.FilePath = outPath
 	})
@@ -683,8 +683,8 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 	chunkIndex := 0
 	buf := make([]byte, chunkSize)
 
-	c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
-		r.State = domain.DownloadDownloading
+	c.updateRecord(downloadID, func(r *download.Record) {
+		r.State = download.StateDownloading
 		r.Size = totalSize
 	})
 
@@ -751,7 +751,7 @@ func (c *DownloadClient) downloadAndDecrypt(ctx context.Context, downloadID, tra
 				progress = float64(downloaded) / float64(totalSize) * 100
 			}
 
-			c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+			c.updateRecord(downloadID, func(r *download.Record) {
 				r.Transferred = downloaded
 				r.Progress = min(progress, 99.9)
 				r.Speed = speed
@@ -971,7 +971,7 @@ type playlistSourceAdapter struct {
 	client *DownloadClient
 }
 
-func (a *playlistSourceAdapter) Name() string       { return downloadPluginName }
+func (a *playlistSourceAdapter) Name() string        { return downloadPluginName }
 func (a *playlistSourceAdapter) DisplayName() string { return downloadDisplayName }
 func (a *playlistSourceAdapter) IsConfigured() bool  { return a.client.IsConfigured() }
 
@@ -1021,16 +1021,16 @@ func (c *DownloadClient) PlaylistSource() playlist.Source {
 // ─── Helpers ────────────────────────────────────────────────────────
 
 func (c *DownloadClient) setError(downloadID, msg string) {
-	c.updateRecord(downloadID, func(r *domain.DownloadRecord) {
+	c.updateRecord(downloadID, func(r *download.Record) {
 		if r.State.Terminal() {
 			return // already cancelled — don't overwrite
 		}
-		r.State = domain.DownloadFailed
+		r.State = download.StateFailed
 		r.Error = msg
 	})
 }
 
-func (c *DownloadClient) updateRecord(downloadID string, fn func(*domain.DownloadRecord)) {
+func (c *DownloadClient) updateRecord(downloadID string, fn func(*download.Record)) {
 	c.downloadsMu.Lock()
 	defer c.downloadsMu.Unlock()
 	if r, ok := c.downloads[downloadID]; ok {

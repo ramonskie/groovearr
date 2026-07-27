@@ -5,7 +5,6 @@ import (
 	"log/slog"
 	"path/filepath"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/tagging"
 )
 
@@ -26,7 +25,7 @@ func NewTagWriterHandler(logger *slog.Logger) *TagWriterHandler {
 
 // Handle writes metadata tags from the record's metadata fields and embeds
 // cover art if cover.jpg exists in the same directory.
-func (h *TagWriterHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *TagWriterHandler) Handle(ctx context.Context, record *Record) error {
 	if record.FilePath == "" {
 		return nil
 	}

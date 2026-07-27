@@ -4,16 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"io"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
 )
 
@@ -457,11 +457,11 @@ func TestSSENotifierReceivesProgress(t *testing.T) {
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         "n1",
 		SourceName: "test",
 		Filename:   "song.flac",
-		State:      domain.DownloadDownloading,
+		State:      download.StateDownloading,
 		Progress:   42.0,
 	}
 
@@ -485,11 +485,11 @@ func TestSSENotifierReceivesCompleted(t *testing.T) {
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         "n2",
 		SourceName: "test",
 		Filename:   "song.flac",
-		State:      domain.DownloadImportPending,
+		State:      download.StateImportPending,
 		Progress:   100,
 	}
 
@@ -513,11 +513,11 @@ func TestSSENotifierReceivesFailed(t *testing.T) {
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         "n3",
 		SourceName: "test",
 		Filename:   "song.flac",
-		State:      domain.DownloadFailed,
+		State:      download.StateFailed,
 		Error:      "timeout",
 	}
 
@@ -545,11 +545,11 @@ func TestSSENotifierReceivesImportCompleted(t *testing.T) {
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         "n4",
 		SourceName: "test",
 		Filename:   "song.flac",
-		State:      domain.DownloadImported,
+		State:      download.StateImported,
 	}
 
 	bus.Publish(context.Background(), events.TopicImportCompleted, record)
@@ -572,11 +572,11 @@ func TestSSENotifierHandle(t *testing.T) {
 	ch := make(chan SSEEvent, 4)
 	hub.Register(ch)
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         "n5",
 		SourceName: "test",
 		Filename:   "song.flac",
-		State:      domain.DownloadImported,
+		State:      download.StateImported,
 	}
 
 	err := notifier.Handle(context.Background(), record)
@@ -630,7 +630,7 @@ func TestSSENotifierImplementsImportHandler(t *testing.T) {
 
 	// This test uses a helper interface matching download.ImportHandler.
 	type importHandler interface {
-		Handle(ctx context.Context, record *domain.DownloadRecord) error
+		Handle(ctx context.Context, record *download.Record) error
 	}
 
 	var _ importHandler = notifier

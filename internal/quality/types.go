@@ -72,11 +72,11 @@ func (aq AudioQuality) TierScore() float64 {
 // Stored as JSON in quality_profiles.ranked_targets.
 // All constraint fields are optional — only non-zero values are enforced.
 type QualityTarget struct {
-	Label         string `json:"label"`                    // "FLAC 24-bit/192kHz"
-	Format        string `json:"format,omitempty"`         // restrict to this format (case-insensitive)
-	MinBitrate    int    `json:"min_bitrate,omitempty"`    // minimum kbps (lossy only)
+	Label         string `json:"label"`                     // "FLAC 24-bit/192kHz"
+	Format        string `json:"format,omitempty"`          // restrict to this format (case-insensitive)
+	MinBitrate    int    `json:"min_bitrate,omitempty"`     // minimum kbps (lossy only)
 	MinSampleRate int    `json:"min_sample_rate,omitempty"` // minimum Hz
-	MinBitDepth   int    `json:"min_bit_depth,omitempty"`  // minimum bit depth
+	MinBitDepth   int    `json:"min_bit_depth,omitempty"`   // minimum bit depth
 }
 
 // MatchesTarget checks all non-zero constraint fields.
@@ -102,7 +102,7 @@ func (aq AudioQuality) MatchesTarget(t QualityTarget) bool {
 type UpgradePolicy string
 
 const (
-	UpgradeAcceptable  UpgradePolicy = "acceptable"  // download anything meeting any target
+	UpgradeAcceptable  UpgradePolicy = "acceptable"   // download anything meeting any target
 	UpgradeUntilCutoff UpgradePolicy = "until_cutoff" // keep upgrading until reaching cutoff index
 	UpgradeUntilTop    UpgradePolicy = "until_top"    // keep upgrading until reaching top target
 )
@@ -111,7 +111,7 @@ const (
 type SearchMode string
 
 const (
-	SearchPriority    SearchMode = "priority"    // first source wins, try targets in order
+	SearchPriority    SearchMode = "priority"     // first source wins, try targets in order
 	SearchBestQuality SearchMode = "best_quality" // pool all sources, pick best quality
 )
 

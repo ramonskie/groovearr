@@ -1,4 +1,4 @@
-// Package sqlite implements the download.DownloadStore interface using SQLite.
+// Package sqlite implements the download.Store interface using SQLite.
 package sqlite
 
 import (
@@ -9,11 +9,10 @@ import (
 	"log/slog"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 )
 
-// Store implements download.DownloadStore backed by a *sql.DB connection.
+// Store implements download.Store backed by a *sql.DB connection.
 type Store struct {
 	db  *sql.DB
 	log *slog.Logger
@@ -35,7 +34,7 @@ func (s *Store) Close() error { return nil }
 // Insert creates a new download record. The record must have ID, SourceName,
 // Filename, and DisplayName set. State is forced to "queued" regardless of
 // the incoming value.
-func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
+func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	_, err := s.db.ExecContext(ctx, `
@@ -50,7 +49,7 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 			created_at, updated_at
 		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Username, r.Filename, r.DisplayName,
-		string(domain.DownloadQueued), 0.0,
+		string(download.StateQueued), 0.0,
 		r.Size, 0, 0, "", "",
 		r.TrackID, r.CoverURL, r.Artist, r.Album, r.Title,
 		r.TrackNumber, r.DiscNumber, r.Year,
@@ -68,7 +67,7 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 
 // Update atomically modifies the mutable fields of a download record.
 // The record is identified by its ID field.
-func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
+func (s *Store) Update(ctx context.Context, r *download.Record) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	result, err := s.db.ExecContext(ctx, `
@@ -112,7 +111,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 // out metadata set at queue time.
 // cover_url is only updated when a non-empty value is passed (e.g., from a
 // plugin that provides cover art). Empty strings preserve the existing value.
-func (s *Store) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
+func (s *Store) UpdateProgress(ctx context.Context, id string, state download.State, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET
@@ -139,7 +138,7 @@ func (s *Store) UpdateProgress(ctx context.Context, id string, state domain.Down
 
 // TransitionState atomically changes the download's state only if it
 // currently matches oldState. Returns true if the transition occurred.
-func (s *Store) TransitionState(ctx context.Context, id string, oldState, newState domain.DownloadState) (bool, error) {
+func (s *Store) TransitionState(ctx context.Context, id string, oldState, newState download.State) (bool, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET state=?, updated_at=? WHERE id=? AND state=?`,
@@ -154,7 +153,7 @@ func (s *Store) TransitionState(ctx context.Context, id string, oldState, newSta
 }
 
 // Get returns a single download record by ID, or nil if not found.
-func (s *Store) Get(ctx context.Context, id string) (*domain.DownloadRecord, error) {
+func (s *Store) Get(ctx context.Context, id string) (*download.Record, error) {
 	row := s.db.QueryRowContext(ctx, downloadSelect+" WHERE id=?", id)
 	r, err := s.scanDownload(row)
 	if err != nil {
@@ -164,7 +163,7 @@ func (s *Store) Get(ctx context.Context, id string) (*domain.DownloadRecord, err
 }
 
 // List returns all download records ordered by created_at DESC.
-func (s *Store) List(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (s *Store) List(ctx context.Context) ([]download.Record, error) {
 	rows, err := s.db.QueryContext(ctx, downloadSelect+" ORDER BY created_at DESC, id DESC")
 	if err != nil {
 		s.log.Error("download list failed", "error", err, "component", "dl_store")
@@ -175,8 +174,8 @@ func (s *Store) List(ctx context.Context) ([]domain.DownloadRecord, error) {
 }
 
 // ListByState returns downloads filtered by a single state.
-func (s *Store) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
-	rows, err := s.db.QueryContext(ctx, 		downloadSelect+" WHERE state=? ORDER BY created_at DESC, id DESC", state)
+func (s *Store) ListByState(ctx context.Context, state download.State) ([]download.Record, error) {
+	rows, err := s.db.QueryContext(ctx, downloadSelect+" WHERE state=? ORDER BY created_at DESC, id DESC", state)
 	if err != nil {
 		s.log.Error("download listByState failed", "error", err, "component", "dl_store")
 		return nil, fmt.Errorf("download listByState: %w", err)
@@ -186,10 +185,10 @@ func (s *Store) ListByState(ctx context.Context, state domain.DownloadState) ([]
 }
 
 // ListActive returns all non-terminal downloads.
-func (s *Store) ListActive(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (s *Store) ListActive(ctx context.Context) ([]download.Record, error) {
 	rows, err := s.db.QueryContext(ctx,
 		downloadSelect+" WHERE state NOT IN (?, ?, ?) ORDER BY created_at DESC, id DESC",
-		domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
+		download.StateImported, download.StateFailed, download.StateIgnored,
 	)
 	if err != nil {
 		s.log.Error("download listActive failed", "error", err, "component", "dl_store")
@@ -200,7 +199,7 @@ func (s *Store) ListActive(ctx context.Context) ([]domain.DownloadRecord, error)
 }
 
 // ListByPlaylist returns downloads filtered by playlist_id.
-func (s *Store) ListByPlaylist(ctx context.Context, playlistID string) ([]domain.DownloadRecord, error) {
+func (s *Store) ListByPlaylist(ctx context.Context, playlistID string) ([]download.Record, error) {
 	rows, err := s.db.QueryContext(ctx,
 		downloadSelect+" WHERE playlist_id=? ORDER BY created_at DESC, id DESC", playlistID,
 	)
@@ -213,10 +212,10 @@ func (s *Store) ListByPlaylist(ctx context.Context, playlistID string) ([]domain
 }
 
 // FindActiveByTitle returns the first active download matching artist+title, or nil.
-func (s *Store) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
-	row := s.db.QueryRowContext(ctx, 
+func (s *Store) FindActiveByTitle(ctx context.Context, artist, title string) (*download.Record, error) {
+	row := s.db.QueryRowContext(ctx,
 		downloadSelect+" WHERE artist=? AND title=? AND state NOT IN (?, ?, ?) LIMIT 1",
-		artist, title, domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
+		artist, title, download.StateImported, download.StateFailed, download.StateIgnored,
 	)
 	return s.scanDownload(row)
 }
@@ -224,7 +223,7 @@ func (s *Store) FindActiveByTitle(ctx context.Context, artist, title string) (*d
 // ─── Events ────────────────────────────────────────────────────────────
 
 // RecordEvent inserts a new event into the download_events table.
-func (s *Store) RecordEvent(ctx context.Context, e *domain.DownloadEvent) error {
+func (s *Store) RecordEvent(ctx context.Context, e *download.Event) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	payload := string(e.Payload)
 	if payload == "" {
@@ -248,7 +247,7 @@ func (s *Store) RecordEvent(ctx context.Context, e *domain.DownloadEvent) error 
 }
 
 // GetEvents returns all events for a download ordered by created_at.
-func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]domain.DownloadEvent, error) {
+func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]download.Event, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, download_id, event_type, payload, created_at
 		FROM download_events
@@ -262,9 +261,9 @@ func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]domain.Down
 	}
 	defer rows.Close()
 
-	var events []domain.DownloadEvent
+	var events []download.Event
 	for rows.Next() {
-		var e domain.DownloadEvent
+		var e download.Event
 		var id int64
 		var payload, createdAt string
 		if err := rows.Scan(&id, &e.DownloadID, &e.Type, &payload, &createdAt); err != nil {
@@ -286,7 +285,7 @@ func (s *Store) GetEvents(ctx context.Context, downloadID string) ([]domain.Down
 func (s *Store) DeleteTerminal(ctx context.Context) error {
 	_, err := s.db.ExecContext(ctx,
 		`DELETE FROM downloads WHERE state IN (?, ?, ?)`,
-		domain.DownloadImported, domain.DownloadFailed, domain.DownloadIgnored,
+		download.StateImported, download.StateFailed, download.StateIgnored,
 	)
 	if err != nil {
 		s.log.Error("deleteTerminal failed", "error", err, "component", "dl_store")
@@ -308,8 +307,8 @@ const downloadSelect = `SELECT
 	created_at, updated_at
 	FROM downloads`
 
-func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
-	var r domain.DownloadRecord
+func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
+	var r download.Record
 	var stateStr string
 	var playlistID, retryAfter, createdAt, updatedAt string
 	err := row.Scan(
@@ -332,14 +331,14 @@ func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 
 	r.PlaylistID = playlistID
 	r.RetryAfter = retryAfter
-	r.State = domain.DownloadState(stateStr)
+	r.State = download.State(stateStr)
 	return &r, nil
 }
 
-func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
-	var out []domain.DownloadRecord
+func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
+	var out []download.Record
 	for rows.Next() {
-		var r domain.DownloadRecord
+		var r download.Record
 		var stateStr string
 		var playlistID, retryAfter, createdAt, updatedAt string
 		if err := rows.Scan(
@@ -357,7 +356,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 		}
 		r.PlaylistID = playlistID
 		r.RetryAfter = retryAfter
-		r.State = domain.DownloadState(stateStr)
+		r.State = download.State(stateStr)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -368,4 +367,4 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 }
 
 // Ensure interface compliance at compile time.
-var _ download.DownloadStore = (*Store)(nil)
+var _ download.Store = (*Store)(nil)

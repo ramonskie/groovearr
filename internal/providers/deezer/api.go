@@ -23,27 +23,27 @@ const baseURL = "https://api.deezer.com"
 
 // Track represents a Deezer track from the public API.
 type Track struct {
-	ID         int    `json:"id"`
-	Title      string `json:"title"`
-	Duration   int    `json:"duration"` // seconds
-	Rank       int    `json:"rank"`
-	Preview    string `json:"preview"`
-	Link       string `json:"link"`
-	TrackPos   int    `json:"track_position"`
-	DiskNumber int    `json:"disk_number"`
-	Explicit   bool   `json:"explicit_lyrics"`
+	ID          int    `json:"id"`
+	Title       string `json:"title"`
+	Duration    int    `json:"duration"` // seconds
+	Rank        int    `json:"rank"`
+	Preview     string `json:"preview"`
+	Link        string `json:"link"`
+	TrackPos    int    `json:"track_position"`
+	DiskNumber  int    `json:"disk_number"`
+	Explicit    bool   `json:"explicit_lyrics"`
 	ReleaseDate string `json:"release_date"`
-	Artist     struct {
+	Artist      struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
 	} `json:"artist"`
 	Album struct {
-		ID        int    `json:"id"`
-		Title     string `json:"title"`
-		CoverXL   string `json:"cover_xl"`
-		CoverBig  string `json:"cover_big"`
-		CoverMed  string `json:"cover_medium"`
-		NbTracks  int    `json:"nb_tracks"`
+		ID       int    `json:"id"`
+		Title    string `json:"title"`
+		CoverXL  string `json:"cover_xl"`
+		CoverBig string `json:"cover_big"`
+		CoverMed string `json:"cover_medium"`
+		NbTracks int    `json:"nb_tracks"`
 	} `json:"album"`
 	Contributors []struct {
 		ID   int    `json:"id"`
@@ -77,13 +77,13 @@ type Album struct {
 
 // Artist represents a Deezer artist from the public API.
 type Artist struct {
-	ID        int    `json:"id"`
-	Name      string `json:"name"`
-	NbFan     int    `json:"nb_fan"`
-	PictureXL string `json:"picture_xl"`
+	ID         int    `json:"id"`
+	Name       string `json:"name"`
+	NbFan      int    `json:"nb_fan"`
+	PictureXL  string `json:"picture_xl"`
 	PictureBig string `json:"picture_big"`
 	PictureMed string `json:"picture_medium"`
-	Link      string `json:"link"`
+	Link       string `json:"link"`
 }
 
 // Client provides access to Deezer's public metadata API.
@@ -94,7 +94,7 @@ type Client struct {
 	log         *slog.Logger
 
 	// Rate limiting.
-	lastCall   time.Time
+	lastCall    time.Time
 	minInterval time.Duration
 }
 

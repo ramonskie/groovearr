@@ -10,16 +10,16 @@ import (
 )
 
 type mockSource struct {
-	name        string
-	display     string
-	configured  bool
-	playlists   []PlaylistInfo
-	tracks      map[string][]TrackInfo
+	name       string
+	display    string
+	configured bool
+	playlists  []PlaylistInfo
+	tracks     map[string][]TrackInfo
 }
 
-func (m *mockSource) Name() string              { return m.name }
-func (m *mockSource) DisplayName() string        { return m.display }
-func (m *mockSource) IsConfigured() bool         { return m.configured }
+func (m *mockSource) Name() string        { return m.name }
+func (m *mockSource) DisplayName() string { return m.display }
+func (m *mockSource) IsConfigured() bool  { return m.configured }
 func (m *mockSource) GetUserPlaylists(ctx context.Context) ([]PlaylistInfo, error) {
 	return m.playlists, nil
 }
@@ -54,11 +54,11 @@ func TestRegistry(t *testing.T) {
 }
 
 type mockStore struct {
-	playlists       map[int64]*domain.Playlist
-	playlistTracks  map[int64][]domain.PlaylistTrack
-	artists         map[string]*domain.Artist // name → artist
-	searchTracks    []domain.Track            // tracks returned by SearchTracks
-	nextID          int64
+	playlists      map[int64]*domain.Playlist
+	playlistTracks map[int64][]domain.PlaylistTrack
+	artists        map[string]*domain.Artist // name → artist
+	searchTracks   []domain.Track            // tracks returned by SearchTracks
+	nextID         int64
 }
 
 func (m *mockStore) next() int64 { m.nextID++; return m.nextID }
@@ -107,9 +107,13 @@ func (m *mockStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) 
 
 // Remaining Store methods — stubs.
 func (m *mockStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, error) {
-	if m.artists == nil { m.artists = map[string]*domain.Artist{} }
+	if m.artists == nil {
+		m.artists = map[string]*domain.Artist{}
+	}
 	existing := m.artists[a.Name]
-	if existing != nil { return existing.ID, nil }
+	if existing != nil {
+		return existing.ID, nil
+	}
 	id := m.next()
 	a.ID = id
 	m.artists[a.Name] = a
@@ -117,35 +121,63 @@ func (m *mockStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, 
 }
 func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
 	for _, a := range m.artists {
-		if a.ID == id { return a, nil }
+		if a.ID == id {
+			return a, nil
+		}
 	}
 	return nil, nil
 }
 func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
 	return m.artists[name], nil
 }
-func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) { return nil, nil }
-func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) { return nil, nil }
-func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error      { return nil }
+func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error {
+	return nil
+}
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) { return 0, nil }
-func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) { return nil, nil }
-func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) { return nil, nil }
-func (m *mockStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) { return nil, nil }
+func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error)   { return nil, nil }
+func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
+	return nil, nil
+}
+func (m *mockStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
+	return nil, nil
+}
 func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) { return 0, nil }
-func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error)       { return nil, nil }
-func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) { return nil, nil }
-func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) { return nil, nil }
+func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error)   { return nil, nil }
+func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
+	return nil, nil
+}
 func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
 	return m.searchTracks, nil
 }
-func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.Track, error) { return nil, nil }
-func (m *mockStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error)   { return nil, nil }
-func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error                          { return nil }
-func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) { return nil, nil }
-func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error) { return nil, nil }
-func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) { return nil, nil }
-func (m *mockStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error)                { return nil, nil }
-func (m *mockStore) Close() error                                                                { return nil }
+func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
+func (m *mockStore) GetArtistByExternalID(ctx context.Context, svc, eid string) (*domain.Artist, error) {
+	return nil, nil
+}
+func (m *mockStore) GetAlbumByExternalID(ctx context.Context, svc, eid string) (*domain.Album, error) {
+	return nil, nil
+}
+func (m *mockStore) GetTrackByExternalID(ctx context.Context, svc, eid string) (*domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
+	return nil, nil
+}
+func (m *mockStore) Close() error { return nil }
 func (m *mockStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
 	return m.UpsertTrack(ctx, track)
 }

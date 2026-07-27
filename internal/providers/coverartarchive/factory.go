@@ -17,8 +17,8 @@ var Factory plugin.PluginFactory = &factory{}
 
 type factory struct{}
 
-func (f *factory) Name() string          { return pluginName }
-func (f *factory) DisplayName() string   { return displayName }
+func (f *factory) Name() string           { return pluginName }
+func (f *factory) DisplayName() string    { return displayName }
 func (f *factory) Capabilities() []string { return []string{"metadata"} }
 
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
@@ -35,6 +35,6 @@ func (f *factory) DefaultConfig() json.RawMessage {
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField { return nil }
-func (f *factory) Icon() string                        { return "image" }
-func (f *factory) OAuthConfig() *plugin.OAuthInfo       { return nil }
-func (f *factory) UISlots() *plugin.UISlots             { return nil }
+func (f *factory) Icon() string                       { return "image" }
+func (f *factory) OAuthConfig() *plugin.OAuthInfo     { return nil }
+func (f *factory) UISlots() *plugin.UISlots           { return nil }

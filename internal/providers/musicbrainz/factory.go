@@ -21,8 +21,8 @@ var Factory plugin.PluginFactory = &factory{}
 
 type factory struct{}
 
-func (f *factory) Name() string        { return pluginName }
-func (f *factory) DisplayName() string { return displayName }
+func (f *factory) Name() string           { return pluginName }
+func (f *factory) DisplayName() string    { return displayName }
 func (f *factory) Capabilities() []string { return []string{"metadata"} }
 
 // Create builds a MusicBrainz metadata provider from raw JSON config.
@@ -61,6 +61,6 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 	}
 }
 
-func (f *factory) Icon() string                  { return "database" }
+func (f *factory) Icon() string                   { return "database" }
 func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
 func (f *factory) UISlots() *plugin.UISlots       { return nil }

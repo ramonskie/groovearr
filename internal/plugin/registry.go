@@ -10,8 +10,8 @@ import (
 // Registry holds all registered plugins and factories with name/capability-based lookup.
 type Registry struct {
 	mu        sync.RWMutex
-	plugins   map[string]BasePlugin   // canonical name → plugin
-	names     []string                // insertion order
+	plugins   map[string]BasePlugin    // canonical name → plugin
+	names     []string                 // insertion order
 	factories map[string]PluginFactory // canonical name → factory
 }
 
@@ -267,5 +267,3 @@ func (r *Registry) Rebuild(name string, rawCfg json.RawMessage, resources Plugin
 	}
 	return nil
 }
-
-

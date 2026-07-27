@@ -4,7 +4,6 @@ import (
 	"context"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
@@ -22,12 +21,12 @@ import (
 // the record is updated to use it. If no alternative is found, the original
 // source is kept and re-queued anyway (the same provider may have recovered).
 func (m *MonitoringService) scanRetry() {
-	failed, err := m.store.ListByState(m.ctx, domain.DownloadFailed)
+	failed, err := m.store.ListByState(m.ctx, StateFailed)
 	if err != nil {
 		m.log.Error("scanRetry: list failed", "error", err, "component", "monitor")
 		return
 	}
-	failedPending, err := m.store.ListByState(m.ctx, domain.DownloadFailedPending)
+	failedPending, err := m.store.ListByState(m.ctx, StateFailedPending)
 	if err != nil {
 		m.log.Error("scanRetry: list failedPending", "error", err, "component", "monitor")
 		return
@@ -39,7 +38,7 @@ func (m *MonitoringService) scanRetry() {
 
 	retried := 0
 	for _, rec := range failed {
-		if rec.RetryCount >= domain.MaxRetries {
+		if rec.RetryCount >= MaxRetries {
 			continue
 		}
 		if rec.RetryAfter != "" {
@@ -83,7 +82,7 @@ func (m *MonitoringService) scanRetry() {
 
 		// Reset to queued — the main loop will pick it up with the (potentially
 		// updated) source info on the next tick.
-		rec.State = domain.DownloadQueued
+		rec.State = StateQueued
 		rec.Error = ""
 		rec.Progress = 0
 
@@ -93,7 +92,7 @@ func (m *MonitoringService) scanRetry() {
 			continue
 		}
 
-		m.publishRecord(rec.ID, domain.DownloadQueued, events.TopicDownloadStateChanged)
+		m.publishRecord(rec.ID, StateQueued, events.TopicDownloadStateChanged)
 		retried++
 	}
 
@@ -106,7 +105,7 @@ func (m *MonitoringService) scanRetry() {
 // matching the record's artist and title. Source fields (SourceName, Filename,
 // Size, Bitrate, Format, Username) are updated from the best match.
 // Returns true if a source was found, false if no results were returned.
-func (m *MonitoringService) resolveRetrySource(ctx context.Context, rec *domain.DownloadRecord) bool {
+func (m *MonitoringService) resolveRetrySource(ctx context.Context, rec *Record) bool {
 	if rec.Artist == "" || rec.Title == "" {
 		return false
 	}
@@ -173,8 +172,8 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 
 	for _, rec := range active {
 		switch rec.State {
-		case domain.DownloadDownloading:
-			if ok, err := m.store.TransitionState(ctx, rec.ID, domain.DownloadDownloading, domain.DownloadFailed); err != nil {
+		case StateDownloading:
+			if ok, err := m.store.TransitionState(ctx, rec.ID, StateDownloading, StateFailed); err != nil {
 				m.log.Error("recoverOrphans: downloading→failed transition failed",
 					"download_id", rec.ID, "error", err, "component", "monitor")
 				continue
@@ -183,7 +182,7 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 					"download_id", rec.ID, "component", "monitor")
 				continue
 			}
-			rec.State = domain.DownloadFailed
+			rec.State = StateFailed
 			rec.Error = "download interrupted by server restart"
 			if err := m.store.Update(ctx, &rec); err != nil {
 				m.log.Warn("recoverOrphans: update error field failed",
@@ -192,15 +191,15 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 			m.bus.Publish(ctx, events.TopicDownloadFailed, &rec)
 			downloading++
 
-		case domain.DownloadImportPending:
+		case StateImportPending:
 			// File is on disk — re-trigger the import chain via event.
 			m.log.Info("recoverOrphans: re-triggering import",
 				"download_id", rec.ID, "component", "monitor")
 			m.bus.Publish(ctx, events.TopicDownloadCompleted, &rec)
 			importPending++
 
-		case domain.DownloadImporting:
-			if ok, err := m.store.TransitionState(ctx, rec.ID, domain.DownloadImporting, domain.DownloadFailed); err != nil {
+		case StateImporting:
+			if ok, err := m.store.TransitionState(ctx, rec.ID, StateImporting, StateFailed); err != nil {
 				m.log.Error("recoverOrphans: importing→failed transition failed",
 					"download_id", rec.ID, "error", err, "component", "monitor")
 				continue
@@ -209,7 +208,7 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 					"download_id", rec.ID, "component", "monitor")
 				continue
 			}
-			rec.State = domain.DownloadFailed
+			rec.State = StateFailed
 			rec.Error = "import interrupted by server restart"
 			if err := m.store.Update(ctx, &rec); err != nil {
 				m.log.Warn("recoverOrphans: update error field failed",
@@ -218,7 +217,7 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 			m.bus.Publish(ctx, events.TopicDownloadFailed, &rec)
 			importing++
 
-		case domain.DownloadFailedPending:
+		case StateFailedPending:
 			m.log.Debug("recoverOrphans: skipping failedPending, handled by retry",
 				"download_id", rec.ID, "component", "monitor")
 		}
@@ -244,13 +243,13 @@ func (m *MonitoringService) recoverOrphans(ctx context.Context) {
 // orchestrator, updates the record with resolved source fields, and leaves
 // it queued for the main loop to pick up.
 func (m *MonitoringService) resolvePendingSources(ctx context.Context) {
-	queued, err := m.store.ListByState(ctx, domain.DownloadQueued)
+	queued, err := m.store.ListByState(ctx, StateQueued)
 	if err != nil {
 		m.log.Error("resolvePendingSources: list queued failed", "error", err, "component", "monitor")
 		return
 	}
 
-	var pending []domain.DownloadRecord
+	var pending []Record
 	for _, rec := range queued {
 		if rec.IsPendingSource() {
 			pending = append(pending, rec)
@@ -289,7 +288,7 @@ func (m *MonitoringService) resolvePendingSources(ctx context.Context) {
 		if err != nil {
 			m.log.Warn("resolvePendingSources: search failed",
 				"download_id", rec.ID, "artist", rec.Artist, "title", rec.Title, "error", err, "component", "monitor")
-			rec.State = domain.DownloadFailedPending
+			rec.State = StateFailedPending
 			rec.Error = err.Error()
 			rec.RetryCount = 1
 			rec.RetryAfter = time.Now().UTC().Add(time.Minute).Format(time.RFC3339)

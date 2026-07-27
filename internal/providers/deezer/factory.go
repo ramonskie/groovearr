@@ -24,7 +24,9 @@ func (f *factory) Name() string        { return downloadPluginName }
 func (f *factory) DisplayName() string { return downloadDisplayName }
 
 // Capabilities returns the capability domains this plugin provides.
-func (f *factory) Capabilities() []string { return []string{"download", "playlist", "discovery", "metadata"} }
+func (f *factory) Capabilities() []string {
+	return []string{"download", "playlist", "discovery", "metadata"}
+}
 
 // Create builds a Deezer download client from raw JSON config and runtime resources.
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
@@ -78,7 +80,7 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 	}
 }
 
-func (f *factory) Icon() string                  { return "music2" }
+func (f *factory) Icon() string                   { return "music2" }
 func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
 func (f *factory) UISlots() *plugin.UISlots {
 	return &plugin.UISlots{

@@ -122,11 +122,15 @@ func (m *mockLibStore) GetTrackByFilePath(ctx context.Context, filePath string) 
 	}
 	return nil, nil
 }
-func (m *mockLibStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) { return nil, nil }
+func (m *mockLibStore) GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error) {
+	return nil, nil
+}
 
 func (m *mockLibStore) DeleteTrack(ctx context.Context, id int64) error { return nil }
 
-func (m *mockLibStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) { return nil, nil }
+func (m *mockLibStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
+	return nil, nil
+}
 
 func (m *mockLibStore) GetArtistByExternalID(ctx context.Context, service, externalID string) (*domain.Artist, error) {
 	return nil, nil
@@ -140,14 +144,18 @@ func (m *mockLibStore) GetTrackByExternalID(ctx context.Context, service, extern
 	return nil, nil
 }
 
-func (m *mockLibStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error) { return 0, nil }
-func (m *mockLibStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error)   { return nil, nil }
+func (m *mockLibStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error) {
+	return 0, nil
+}
+func (m *mockLibStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
+	return nil, nil
+}
 func (m *mockLibStore) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) {
 	return nil, nil
 }
 
 func (m *mockLibStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) { return nil, nil }
-func (m *mockLibStore) DeletePlaylist(ctx context.Context, id int64) error            { return nil }
+func (m *mockLibStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
 func (m *mockLibStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
 	return nil
 }
@@ -157,7 +165,7 @@ func (m *mockLibStore) GetPlaylistTracks(ctx context.Context, playlistID int64) 
 }
 
 func (m *mockLibStore) DeletePlaylistTracks(ctx context.Context, playlistID int64) error { return nil }
-func (m *mockLibStore) Close() error                                                      { return nil }
+func (m *mockLibStore) Close() error                                                     { return nil }
 func (m *mockLibStore) ImportTrack(ctx context.Context, track *domain.Track, artistName, albumTitle string, albumYear int, genres []string) (int64, error) {
 	// Get or create artist (like real store does).
 	existingArtist, _ := m.GetArtistByName(ctx, artistName)
@@ -210,7 +218,7 @@ func TestCoverArtHandler_DownloadsCover(t *testing.T) {
 	})
 
 	handler := NewCoverArtHandler(libStore, testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-cover-1",
 		FilePath: filepath.Join(albumDir, "01 track.mp3"),
 		CoverURL: srv.URL + "/cover.jpg",
@@ -240,7 +248,7 @@ func TestCoverArtHandler_DownloadsCover(t *testing.T) {
 
 func TestCoverArtHandler_EmptyCoverURL(t *testing.T) {
 	handler := NewCoverArtHandler(newMockLibStore(), testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-cover-2",
 		FilePath: "/tmp/somefile.mp3",
 	}
@@ -269,7 +277,7 @@ func TestCoverArtHandler_SkipsExistingCover(t *testing.T) {
 	})
 
 	handler := NewCoverArtHandler(libStore, testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-cover-3",
 		FilePath: filepath.Join(albumDir, "01 track.mp3"),
 		CoverURL: "http://invalid-url-that-would-fail/cover.jpg",

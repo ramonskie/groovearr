@@ -30,8 +30,8 @@ func newTestAPI(handler http.HandlerFunc) (*API, *httptest.Server) {
 		log: log,
 		http: &http.Client{
 			Transport: &authTransport{
-				cfg: cfg,
-				log: log,
+				cfg:       cfg,
+				log:       log,
 				transport: &urlRewriteTransport{serverURL: server.URL},
 				refreshFunc: func(ctx context.Context, refreshToken, clientID string, _ *slog.Logger) (string, int, error) {
 					return "", 0, errors.New("no refresh in test")

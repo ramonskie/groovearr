@@ -26,8 +26,8 @@ type recordingResp struct {
 }
 
 type releaseRef struct {
-	ID           string     `json:"id"`
-	ReleaseGroup *rgRef     `json:"release-group,omitempty"`
+	ID           string `json:"id"`
+	ReleaseGroup *rgRef `json:"release-group,omitempty"`
 }
 
 type rgRef struct {
@@ -125,7 +125,7 @@ func TestSearchRecording_SeanPaul_Temperature(t *testing.T) {
 			ID:    "r-pad",
 			Title: "Temperature",
 			Releases: releasesWithRG(
-				[]string{"Various Compilation "+itoa(i), "Album"},
+				[]string{"Various Compilation " + itoa(i), "Album"},
 			),
 		})
 	}
@@ -511,5 +511,5 @@ func releasesWithRG(pairs ...[]string) []releaseRef {
 }
 
 func itoa(n int) string {
-	return string(rune('0' + n%10)) + string(rune('0'+n/10%10))
+	return string(rune('0'+n%10)) + string(rune('0'+n/10%10))
 }

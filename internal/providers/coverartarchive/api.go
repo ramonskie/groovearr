@@ -20,12 +20,12 @@ const caaRate = 5
 
 // Image represents a single cover art image from the CAA JSON response.
 type Image struct {
-	ID         string          `json:"id"`
-	ImageURL   string          `json:"image"`
-	Types      []string        `json:"types"`
-	Front      bool            `json:"front"`
-	Back       bool            `json:"back"`
-	Approved   bool            `json:"approved"`
+	ID         string            `json:"id"`
+	ImageURL   string            `json:"image"`
+	Types      []string          `json:"types"`
+	Front      bool              `json:"front"`
+	Back       bool              `json:"back"`
+	Approved   bool              `json:"approved"`
 	Thumbnails map[string]string `json:"thumbnails"` // "250", "500", "1200", "small", "large"
 }
 
@@ -48,7 +48,7 @@ func newAPIClient(log *slog.Logger) *apiClient {
 			Timeout:   15 * time.Second,
 			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, caaRate),
 		},
-		log:        log,
+		log: log,
 	}
 }
 

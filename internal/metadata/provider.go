@@ -51,7 +51,7 @@ type CoverResult struct {
 	ImageURL string `json:"image_url"`
 	Width    int    `json:"width,omitempty"`
 	Height   int    `json:"height,omitempty"`
-	Source   string `json:"source"`            // provider name (e.g. "coverartarchive", "deezer")
+	Source   string `json:"source"`              // provider name (e.g. "coverartarchive", "deezer")
 	ThumbURL string `json:"thumb_url,omitempty"` // smaller version when available
 }
 
@@ -60,7 +60,7 @@ type ArtistImageResult struct {
 	ImageURL string `json:"image_url"`
 	Width    int    `json:"width,omitempty"`
 	Height   int    `json:"height,omitempty"`
-	Source   string `json:"source"`            // provider name
+	Source   string `json:"source"`              // provider name
 	ThumbURL string `json:"thumb_url,omitempty"` // smaller version when available
 }
 

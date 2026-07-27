@@ -179,7 +179,7 @@ func TestScoreTrackMatch_DurationMismatch(t *testing.T) {
 
 func TestStringSimilarity(t *testing.T) {
 	tests := []struct {
-		a, b string
+		a, b             string
 		wantMin, wantMax float64
 	}{
 		{"hello", "hello", 1.0, 1.0},
@@ -223,10 +223,10 @@ func TestDurationSimilarity(t *testing.T) {
 
 func TestLcsRatio_Exact(t *testing.T) {
 	tests := []struct {
-		name     string
-		a, b     string
-		wantMin  float64
-		wantMax  float64
+		name    string
+		a, b    string
+		wantMin float64
+		wantMax float64
 	}{
 		{"exact match", "hello", "hello", 1.0, 1.0},
 		{"no overlap", "abc", "xyz", 0.0, 0.0},
@@ -245,10 +245,10 @@ func TestLcsRatio_Exact(t *testing.T) {
 
 func TestLcsRatio_RuneAware(t *testing.T) {
 	tests := []struct {
-		name     string
-		a, b     string
-		wantMin  float64
-		wantMax  float64
+		name    string
+		a, b    string
+		wantMin float64
+		wantMax float64
 	}{
 		{"identical CJK", "命の灯火", "命の灯火", 1.0, 1.0},
 		{"partial CJK", "命の灯火", "灯火", 0.66, 0.67}, // LCS 2 chars, ratio = 2*2/6 = 0.667
@@ -266,10 +266,10 @@ func TestLcsRatio_RuneAware(t *testing.T) {
 
 func TestLcsRatio_EdgeCases(t *testing.T) {
 	tests := []struct {
-		name     string
-		a, b     string
-		wantMin  float64
-		wantMax  float64
+		name    string
+		a, b    string
+		wantMin float64
+		wantMax float64
 	}{
 		{"both empty", "", "", 1.0, 1.0},
 		{"one empty", "", "a", 0.0, 0.0},
@@ -291,11 +291,11 @@ func TestLcsRatio_EdgeCases(t *testing.T) {
 func TestWordBoundaryArtistMatch_PathSegments(t *testing.T) {
 	e := New()
 	tests := []struct {
-		name       string
-		artists    []string
-		path       string
-		wantMin    float64
-		wantMax    float64
+		name    string
+		artists []string
+		path    string
+		wantMin float64
+		wantMax float64
 	}{
 		{
 			"exact segment match",
@@ -336,11 +336,11 @@ func TestWordBoundaryArtistMatch_PathSegments(t *testing.T) {
 func TestWordBoundaryArtistMatch_MultipleTokens(t *testing.T) {
 	e := New()
 	tests := []struct {
-		name       string
-		artists    []string
-		path       string
-		wantMin    float64
-		wantMax    float64
+		name    string
+		artists []string
+		path    string
+		wantMin float64
+		wantMax float64
 	}{
 		{
 			"all tokens match",
@@ -375,9 +375,9 @@ func TestWordBoundaryArtistMatch_MultipleTokens(t *testing.T) {
 func TestHardGates_JunkArtist(t *testing.T) {
 	e := New()
 	tests := []struct {
-		name     string
-		path     string
-		artists  []string
+		name    string
+		path    string
+		artists []string
 	}{
 		{"various artists in path", "Various Artists/Album/track.flac", []string{"Various Artists"}},
 		{"va abbreviation", "VA - Greatest Hits/track.mp3", []string{"VA"}},
@@ -586,15 +586,15 @@ func TestBigramFallback(t *testing.T) {
 func TestMatchingEngine_TableDriven(t *testing.T) {
 	e := New()
 	tests := []struct {
-		name            string
-		srcTitle        string
-		srcArtists      []string
-		srcDur          int64
-		candTitle       string
-		candArtists     []string
-		candDur         int64
-		minConf         float64
-		maxConf         float64
+		name        string
+		srcTitle    string
+		srcArtists  []string
+		srcDur      int64
+		candTitle   string
+		candArtists []string
+		candDur     int64
+		minConf     float64
+		maxConf     float64
 	}{
 		{"exact match", "Bohemian Rhapsody", []string{"Queen"}, 355000,
 			"Bohemian Rhapsody", []string{"Queen"}, 355000, 0.95, 1.0},

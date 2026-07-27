@@ -81,9 +81,9 @@ func TestFilterAndRank_BestGroup(t *testing.T) {
 	}
 
 	candidates := []AudioQuality{
-		{Format: "mp3", Bitrate: 320},  // matches target index 1
+		{Format: "mp3", Bitrate: 320},   // matches target index 1
 		{Format: "flac", Bitrate: 1411}, // matches target index 0 (BEST)
-		{Format: "mp3", Bitrate: 128},  // matches nothing
+		{Format: "mp3", Bitrate: 128},   // matches nothing
 	}
 
 	result := FilterAndRank(candidates, targets, false)

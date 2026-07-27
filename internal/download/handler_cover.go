@@ -11,7 +11,6 @@ import (
 	"regexp"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
 )
 
@@ -39,7 +38,7 @@ func NewCoverArtHandler(libStore library.Store, logger *slog.Logger) *CoverArtHa
 // Handle downloads cover art from record.CoverURL, saves it alongside the
 // audio file, and updates the matching album's thumb_url in the library store.
 // Cover art failures are non-fatal — the import continues.
-func (h *CoverArtHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *CoverArtHandler) Handle(ctx context.Context, record *Record) error {
 	if record.CoverURL == "" || record.FilePath == "" {
 		return nil
 	}

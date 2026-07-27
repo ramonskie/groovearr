@@ -47,9 +47,9 @@ type Plugin struct {
 // In dev mode an authenticated SpotifyClient and API wrapper are created.
 func NewPlugin(cfg *SpotifyConfig, downloadPath string, logger *slog.Logger) *Plugin {
 	p := &Plugin{
-		cfg:        cfg,
-		dlPath:     downloadPath,
-		log:        logger,
+		cfg:    cfg,
+		dlPath: downloadPath,
+		log:    logger,
 		oembedClient: &http.Client{
 			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
 			Timeout:   15 * time.Second,

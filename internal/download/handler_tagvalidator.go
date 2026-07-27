@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"strings"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
 )
@@ -35,7 +34,7 @@ func NewTagValidatorHandler(logger *slog.Logger) *TagValidatorHandler {
 // Handle reads the file's audio tags and compares them against the expected
 // metadata in the download record. Tag mismatches block import — file tags are
 // more authoritative than parsed filenames.
-func (h *TagValidatorHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *TagValidatorHandler) Handle(ctx context.Context, record *Record) error {
 	if record.FilePath == "" || record.Artist == "" {
 		return nil
 	}

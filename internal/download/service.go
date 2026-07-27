@@ -8,31 +8,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
-
-// DownloadMeta carries track metadata supplied at queue time.
-type DownloadMeta struct {
-	Artist      string
-	Album       string
-	Title       string
-	TrackNumber int
-	DiscNumber  int
-	Year        int
-	TrackID     string
-	ISRC        string
-	CoverURL    string
-	PlaylistID  string
-	Bitrate     int    // kbps
-	Format      string // "flac", "mp3", etc.
-
-	// Source-specific download parameters.
-	Username string // e.g., slskd peer name, streaming source name
-	Filename string // source-specific file identifier (e.g., Soulseek path)
-	Size     int64  // file size in bytes
-}
 
 // retryOriginalSnap captures original source fields before they are cleared
 // for the UI reset. Used to restore the original source on search failure.
@@ -50,7 +28,7 @@ type retryOriginalSnap struct {
 // drives the download state machine automatically.
 type DownloadService struct {
 	log                 *slog.Logger
-	store               DownloadStore
+	store               Store
 	bus                 events.IEventAggregator
 	registry            *Registry // needed for retry source resolution
 	qualityProfileStore quality.ProfileStore
@@ -59,7 +37,7 @@ type DownloadService struct {
 
 // NewDownloadService creates a DownloadService backed by the given store,
 // event bus, and logger.
-func NewDownloadService(store DownloadStore, bus events.IEventAggregator, logger *slog.Logger) *DownloadService {
+func NewDownloadService(store Store, bus events.IEventAggregator, logger *slog.Logger) *DownloadService {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -89,7 +67,7 @@ func (s *DownloadService) SetQualityProfileStore(store quality.ProfileStore) {
 // up queued records from the DB and drives the download lifecycle.
 // Skips if an active download already exists for the same artist+title.
 // Returns the generated download ID.
-func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta DownloadMeta) (string, error) {
+func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -112,13 +90,13 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 		displayName = meta.Title
 	}
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:          id,
 		SourceName:  sourceName,
 		Username:    username,
 		Filename:    filename,
 		DisplayName: displayName,
-		State:       domain.DownloadQueued,
+		State:       StateQueued,
 		Size:        fileSize,
 		TrackID:     meta.TrackID,
 		ISRC:        meta.ISRC,
@@ -149,7 +127,7 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 //
 // This enables batch-queuing all items first (visible in UI), then resolving
 // them in the background.
-func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (string, error) {
+func (s *DownloadService) QueuePending(ctx context.Context, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -167,11 +145,11 @@ func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (
 
 	displayName := meta.Artist + " - " + meta.Title
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:          id,
-		SourceName:  domain.PendingSourceName,
+		SourceName:  PendingSource,
 		DisplayName: displayName,
-		State:       domain.DownloadQueued,
+		State:       StateQueued,
 		TrackID:     meta.TrackID,
 		ISRC:        meta.ISRC,
 		CoverURL:    meta.CoverURL,
@@ -196,7 +174,7 @@ func (s *DownloadService) QueuePending(ctx context.Context, meta DownloadMeta) (
 
 // UpdateDownload persists changes to an existing download record and fires
 // a state-changed event.
-func (s *DownloadService) UpdateDownload(ctx context.Context, record *domain.DownloadRecord) error {
+func (s *DownloadService) UpdateDownload(ctx context.Context, record *Record) error {
 	if err := s.store.Update(ctx, record); err != nil {
 		return fmt.Errorf("update download: %w", err)
 	}
@@ -205,22 +183,22 @@ func (s *DownloadService) UpdateDownload(ctx context.Context, record *domain.Dow
 }
 
 // GetStatus returns the current state of a download by ID.
-func (s *DownloadService) GetStatus(ctx context.Context, id string) (*domain.DownloadRecord, error) {
+func (s *DownloadService) GetStatus(ctx context.Context, id string) (*Record, error) {
 	return s.store.Get(ctx, id)
 }
 
 // List returns all download records ordered by creation time.
-func (s *DownloadService) List(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (s *DownloadService) List(ctx context.Context) ([]Record, error) {
 	return s.store.List(ctx)
 }
 
 // ListByState returns downloads filtered by a single state.
-func (s *DownloadService) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
+func (s *DownloadService) ListByState(ctx context.Context, state State) ([]Record, error) {
 	return s.store.ListByState(ctx, state)
 }
 
 // ListActive returns all non-terminal downloads.
-func (s *DownloadService) ListActive(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (s *DownloadService) ListActive(ctx context.Context) ([]Record, error) {
 	return s.store.ListActive(ctx)
 }
 
@@ -244,7 +222,7 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 		return nil // already terminal — idempotent
 	}
 
-	record.State = domain.DownloadIgnored
+	record.State = StateIgnored
 	if err := s.store.Update(ctx, record); err != nil {
 		return fmt.Errorf("cancel: %w", err)
 	}
@@ -279,7 +257,7 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 	// Manual retry — reset count and backoff, transition to queued immediately.
 	record.RetryCount = 0
 	record.RetryAfter = ""
-	record.State = domain.DownloadQueued
+	record.State = StateQueued
 	record.Error = ""
 	record.Progress = 0
 
@@ -334,7 +312,7 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 // DB. Intended for use in a background goroutine.
 // orig holds the original source fields (cleared by Retry) so they can be
 // restored if the search or persist fails.
-func (s *DownloadService) resolveAndSubmit(record *domain.DownloadRecord, orig retryOriginalSnap) {
+func (s *DownloadService) resolveAndSubmit(record *Record, orig retryOriginalSnap) {
 	// Timeout only for the search — network calls can hang. DB operations
 	// use a separate background context so they don't fail due to the
 	// search consuming the timeout budget.
@@ -381,8 +359,8 @@ func (s *DownloadService) resolveAndSubmit(record *domain.DownloadRecord, orig r
 
 // failRetry transitions a record to failed with the given error message,
 // persists it, and publishes the state change event.
-func (s *DownloadService) failRetry(ctx context.Context, record *domain.DownloadRecord, errMsg string) {
-	record.State = domain.DownloadFailed
+func (s *DownloadService) failRetry(ctx context.Context, record *Record, errMsg string) {
+	record.State = StateFailed
 	record.Error = errMsg
 	if err := s.store.Update(ctx, record); err != nil {
 		s.log.Error("failRetry: update failed",
@@ -393,7 +371,7 @@ func (s *DownloadService) failRetry(ctx context.Context, record *domain.Download
 
 // restoreOriginal restores the original source fields from a snapshot taken
 // before Retry() cleared them for the UI reset.
-func (s *DownloadService) restoreOriginal(record *domain.DownloadRecord, orig retryOriginalSnap) {
+func (s *DownloadService) restoreOriginal(record *Record, orig retryOriginalSnap) {
 	record.SourceName = orig.sourcename
 	record.Filename = orig.filename
 	record.Size = orig.size
@@ -406,7 +384,7 @@ func (s *DownloadService) restoreOriginal(record *domain.DownloadRecord, orig re
 // Source fields (SourceName, Filename, Size, Bitrate, Format, Username)
 // are always populated from the best match. Errors are logged but not
 // returned — the caller should fall back to the existing source.
-func (s *DownloadService) resolveRetrySource(ctx context.Context, rec *domain.DownloadRecord) {
+func (s *DownloadService) resolveRetrySource(ctx context.Context, rec *Record) {
 	if rec.Artist == "" || rec.Title == "" {
 		return // can't search without artist+title
 	}

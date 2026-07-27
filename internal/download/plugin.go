@@ -40,5 +40,3 @@ type Progress struct {
 	Total       int64 // total file size in bytes
 	Speed       int64 // bytes per second
 }
-
-

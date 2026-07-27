@@ -16,18 +16,18 @@ type Config struct {
 	Sources       map[string]json.RawMessage `json:"sources"`
 	Library       LibraryConfig              `json:"library"`
 	Auth          AuthConfig                 `json:"auth"`
-	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
-	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
+	MetadataOrder []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
+	DownloadOrder []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
 }
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	DownloadPath      string `json:"download_path"`       // download staging directory
-	LibraryPath       string `json:"library_path"`        // where organized downloads end up
-	FolderTemplate    string `json:"folder_template"`     // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
-	PlaylistPath      string `json:"playlist_path"`       // separate folder for playlist downloads
-	PlaylistTemplate  string `json:"playlist_template"`   // e.g. "{position:02d} {artist} - {title}"
-	MaxDownloadWorkers int  `json:"max_download_workers"` // concurrent download workers (default 3)
+	DownloadPath       string `json:"download_path"`        // download staging directory
+	LibraryPath        string `json:"library_path"`         // where organized downloads end up
+	FolderTemplate     string `json:"folder_template"`      // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	PlaylistPath       string `json:"playlist_path"`        // separate folder for playlist downloads
+	PlaylistTemplate   string `json:"playlist_template"`    // e.g. "{position:02d} {artist} - {title}"
+	MaxDownloadWorkers int    `json:"max_download_workers"` // concurrent download workers (default 3)
 }
 
 // AuthConfig holds authentication settings.
@@ -39,11 +39,11 @@ type LibraryConfig struct {
 // APIKey is always accepted regardless of method (for API/programmatic access).
 // LocalBypassSubnets lists CIDR ranges that skip authentication entirely.
 type AuthConfig struct {
-	Method             string   `json:"method"`                // none, forms, basic
-	Username           string   `json:"username"`              // for forms/basic auth
-	Password           string   `json:"password"`              // bcrypt hash, masked in API responses
-	APIKey             string   `json:"api_key"`               // accepted via X-Api-Key header or ?apikey query
-	LocalBypassSubnets []string `json:"local_bypass_subnets"`  // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
+	Method             string   `json:"method"`               // none, forms, basic
+	Username           string   `json:"username"`             // for forms/basic auth
+	Password           string   `json:"password"`             // bcrypt hash, masked in API responses
+	APIKey             string   `json:"api_key"`              // accepted via X-Api-Key header or ?apikey query
+	LocalBypassSubnets []string `json:"local_bypass_subnets"` // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
 }
 
 var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
@@ -52,15 +52,15 @@ var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 func DefaultConfig() Config {
 	return Config{
 		Sources:       make(map[string]json.RawMessage),
-		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
-		DownloadOrder:  []string{"soulseek", "deezer"},
+		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
+		DownloadOrder: []string{"soulseek", "deezer"},
 		Library: LibraryConfig{
-			DownloadPath:      "./downloads",
-			LibraryPath:       "./music",
-			FolderTemplate:    "{artist}/{album} ({year})/{track:02d} - {title}",
-			PlaylistPath:      "./playlists",
+			DownloadPath:       "./downloads",
+			LibraryPath:        "./music",
+			FolderTemplate:     "{artist}/{album} ({year})/{track:02d} - {title}",
+			PlaylistPath:       "./playlists",
 			MaxDownloadWorkers: 3,
-			PlaylistTemplate: "{position:02d} {artist} - {title}",
+			PlaylistTemplate:   "{position:02d} {artist} - {title}",
 		},
 	}
 }

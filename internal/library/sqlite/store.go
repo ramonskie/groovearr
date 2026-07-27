@@ -580,24 +580,24 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 		if al.Year == 0 && year != 0 {
 			al.Year = year
 			if _, err := s.UpsertAlbum(ctx, al); err != nil {
-			s.log.Error("update album year failed", "title", title, "error", err, "component", "lib_store")
-		}
-	}
-	return al.ID, nil
-}
-
-// Fallback: fuzzy search via LIKE for near matches.
-albums, err := s.SearchAlbums(ctx, title, 10)
-if err != nil {
-	s.log.Error("getOrCreateAlbum: search fallback failed", "error", err, "component", "lib_store")
-	return 0, err
-}
-for _, al := range albums {
-	if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
-		if al.Year == 0 && year != 0 {
-			al.Year = year
-			if _, err := s.UpsertAlbum(ctx, &al); err != nil {
 				s.log.Error("update album year failed", "title", title, "error", err, "component", "lib_store")
+			}
+		}
+		return al.ID, nil
+	}
+
+	// Fallback: fuzzy search via LIKE for near matches.
+	albums, err := s.SearchAlbums(ctx, title, 10)
+	if err != nil {
+		s.log.Error("getOrCreateAlbum: search fallback failed", "error", err, "component", "lib_store")
+		return 0, err
+	}
+	for _, al := range albums {
+		if strings.EqualFold(al.Title, title) && al.ArtistID == artistID {
+			if al.Year == 0 && year != 0 {
+				al.Year = year
+				if _, err := s.UpsertAlbum(ctx, &al); err != nil {
+					s.log.Error("update album year failed", "title", title, "error", err, "component", "lib_store")
 				}
 			}
 			return al.ID, nil

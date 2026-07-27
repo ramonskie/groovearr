@@ -30,18 +30,18 @@ func testLogger() *slog.Logger {
 
 type mockDLPlugin struct {
 	mu      sync.Mutex
-	records map[string]*domain.DownloadRecord
+	records map[string]*download.Record
 	dlPath  string
 }
 
 func newMockDLPlugin(dlPath string) *mockDLPlugin {
-	return &mockDLPlugin{records: make(map[string]*domain.DownloadRecord), dlPath: dlPath}
+	return &mockDLPlugin{records: make(map[string]*download.Record), dlPath: dlPath}
 }
 
-func (m *mockDLPlugin) Name() string             { return "mock" }
-func (m *mockDLPlugin) DisplayName() string      { return "Mock" }
-func (m *mockDLPlugin) IsConfigured() bool       { return true }
-func (m *mockDLPlugin) Connected() bool          { return true }
+func (m *mockDLPlugin) Name() string        { return "mock" }
+func (m *mockDLPlugin) DisplayName() string { return "Mock" }
+func (m *mockDLPlugin) IsConfigured() bool  { return true }
+func (m *mockDLPlugin) Connected() bool     { return true }
 func (m *mockDLPlugin) CapabilityStatus() map[string]string {
 	return map[string]string{"download": "connected"}
 }
@@ -68,15 +68,15 @@ func (m *mockDLPlugin) Search(ctx context.Context, query string) ([]domain.Track
 
 // ─── MonitoredProvider implementation ──────────────────────────────
 
-func (m *mockDLPlugin) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
+func (m *mockDLPlugin) StartDownload(ctx context.Context, meta download.Meta) (string, error) {
 	filename := meta.Filename
 	if filename == "" {
 		filename = meta.Title
 	}
 	pluginID := "mock-dl-" + filename[:min(8, len(filename))]
 	m.mu.Lock()
-	m.records[pluginID] = &domain.DownloadRecord{
-		ID: pluginID, State: domain.DownloadDownloading, Filename: filename,
+	m.records[pluginID] = &download.Record{
+		ID: pluginID, State: download.StateDownloading, Filename: filename,
 		Size: 100_000, Transferred: 0, Progress: 0,
 	}
 	m.mu.Unlock()
@@ -91,7 +91,7 @@ func (m *mockDLPlugin) StartDownload(ctx context.Context, meta download.Download
 		meta := trackMeta(filename)
 		m.mu.Lock()
 		r := m.records[pluginID]
-		r.State = domain.DownloadImported
+		r.State = download.StateImported
 		r.Progress, r.FilePath = 100, outPath
 		r.Transferred, r.Size = int64(len(validFLAC())), int64(len(validFLAC()))
 		r.CoverURL, r.Artist, r.Album, r.Title = meta.coverURL, meta.artist, meta.album, meta.title
@@ -100,7 +100,7 @@ func (m *mockDLPlugin) StartDownload(ctx context.Context, meta download.Download
 	return pluginID, nil
 }
 
-func (m *mockDLPlugin) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
+func (m *mockDLPlugin) GetStatus(ctx context.Context, providerID string) (*download.Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	r, ok := m.records[providerID]
@@ -119,7 +119,7 @@ func (m *mockDLPlugin) Cancel(ctx context.Context, providerID string, remove boo
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if r, ok := m.records[providerID]; ok {
-		r.State = domain.DownloadIgnored
+		r.State = download.StateIgnored
 	}
 	return nil
 }
@@ -134,8 +134,8 @@ func (m *mockDLPlugin) ActiveDownloads() []string {
 	return ids
 }
 
-func (m *mockDLPlugin) MaxConcurrent() int              { return 0 }
-func (m *mockDLPlugin) DownloadTimeout() time.Duration   { return 30 * time.Second }
+func (m *mockDLPlugin) MaxConcurrent() int             { return 0 }
+func (m *mockDLPlugin) DownloadTimeout() time.Duration { return 30 * time.Second }
 
 // ─── Mock playlist source ─────────────────────────────────────────────
 
@@ -197,21 +197,28 @@ func validFLAC() []byte {
 
 	// STREAMINFO block: last-block + type(0) + length(34).
 	streaminfo := make([]byte, 38)
-	streaminfo[0] = 0x80       // is_last = 1, type = 0
-	streaminfo[1] = 0x00       // length[23:16]
-	streaminfo[2] = 0x00       // length[15:8]
-	streaminfo[3] = 0x22       // length[7:0] = 34
+	streaminfo[0] = 0x80 // is_last = 1, type = 0
+	streaminfo[1] = 0x00 // length[23:16]
+	streaminfo[2] = 0x00 // length[15:8]
+	streaminfo[3] = 0x22 // length[7:0] = 34
 	// min block size = 4096
-	streaminfo[4] = 0x10; streaminfo[5] = 0x00
+	streaminfo[4] = 0x10
+	streaminfo[5] = 0x00
 	// max block size = 4096
-	streaminfo[6] = 0x10; streaminfo[7] = 0x00
+	streaminfo[6] = 0x10
+	streaminfo[7] = 0x00
 	// min frame size = 0
 	// max frame size = 0
 	// sample rate = 44100
-	streaminfo[10] = 0x0A; streaminfo[11] = 0xC4; streaminfo[12] = 0x42
+	streaminfo[10] = 0x0A
+	streaminfo[11] = 0xC4
+	streaminfo[12] = 0x42
 	// channels = 2, bps = 16, total samples = 4096
-	streaminfo[13] = 0x2F               // 2 ch (3 bits) << 4 | 16 bps (5 bits) → 0010 1111
-	streaminfo[14] = 0x00; streaminfo[15] = 0x00; streaminfo[16] = 0x10; streaminfo[17] = 0x00
+	streaminfo[13] = 0x2F // 2 ch (3 bits) << 4 | 16 bps (5 bits) → 0010 1111
+	streaminfo[14] = 0x00
+	streaminfo[15] = 0x00
+	streaminfo[16] = 0x10
+	streaminfo[17] = 0x00
 	// MD5: 00... (not checked by go-flac for metadata-only parse)
 	flac = append(flac, streaminfo...)
 
@@ -389,7 +396,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 		if d.CoverURL == "" {
 			t.Errorf("download %s: CoverURL not synced from plugin to store", d.ID)
 		}
-	} 
+	}
 
 	// ─── Step 4: Verify playlist folder ─────────────────────────────
 	plDir := filepath.Join(plPath, "Test Mix")

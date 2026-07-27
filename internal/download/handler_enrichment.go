@@ -101,7 +101,7 @@ func (h *MetadataEnrichmentHandler) orderedProviders() []metadata.Provider {
 // resolved at queue time by the webhook/indexer pipeline.
 // Failures are non-fatal — the import continues with whatever metadata
 // was successfully enriched.
-func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) error {
 	if record.LibraryTrackID == 0 || record.FilePath == "" {
 		return nil
 	}

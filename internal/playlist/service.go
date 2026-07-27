@@ -25,23 +25,23 @@ import (
 
 // Service orchestrates playlist import and sync.
 type Service struct {
-	srcReg             *Registry
-	store              library.Store
-	downloadReg        *download.Registry
-	downloadSvc        *download.DownloadService
-	matcher            *matching.Engine
-	metadataResolver   *metadata.MetadataResolver
-	cfgFn              func() config.Config
-	log                *slog.Logger
+	srcReg              *Registry
+	store               library.Store
+	downloadReg         *download.Registry
+	downloadSvc         *download.DownloadService
+	matcher             *matching.Engine
+	metadataResolver    *metadata.MetadataResolver
+	cfgFn               func() config.Config
+	log                 *slog.Logger
 	qualityProfileStore quality.ProfileStore
-	syncMu             sync.Mutex
-	syncing            map[int64]bool // playlistIDs currently being synced
+	syncMu              sync.Mutex
+	syncing             map[int64]bool // playlistIDs currently being synced
 }
 
 // pendingItem pairs a queued download record with its source playlist track
 // for background resolution.
 type pendingItem struct {
-	record *domain.DownloadRecord
+	record *download.Record
 	track  domain.PlaylistTrack
 }
 
@@ -51,16 +51,16 @@ func NewService(srcReg *Registry, store library.Store, downloadReg *download.Reg
 		logger = slog.Default()
 	}
 	return &Service{
-		srcReg:             srcReg,
-		store:              store,
-		downloadReg:        downloadReg,
-		downloadSvc:        downloadSvc,
-		matcher:            matching.New(),
-		metadataResolver:   metadataResolver,
-		cfgFn:              cfgFn,
-		log:                logger,
+		srcReg:              srcReg,
+		store:               store,
+		downloadReg:         downloadReg,
+		downloadSvc:         downloadSvc,
+		matcher:             matching.New(),
+		metadataResolver:    metadataResolver,
+		cfgFn:               cfgFn,
+		log:                 logger,
 		qualityProfileStore: qualityProfileStore,
-		syncing:            make(map[int64]bool),
+		syncing:             make(map[int64]bool),
 	}
 }
 
@@ -171,7 +171,7 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 			Artist:        info.Artist,
 			Album:         info.Album,
 			DurationMs:    info.DurationMs,
-			ISRC:         info.ISRC,
+			ISRC:          info.ISRC,
 		}
 
 		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
@@ -227,7 +227,7 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 			continue
 		}
 
-		id, dlErr := s.downloadSvc.QueuePending(ctx, download.DownloadMeta{
+		id, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
 			Artist:      pt.Artist,
 			Album:       pt.Album,
 			Title:       pt.Title,
@@ -296,7 +296,7 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 			if existing, _ := s.store.GetTrackByISRC(ctx, pt.ISRC); existing != nil {
 				s.log.Info("playlist track already imported via ISRC, skipping",
 					"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
-				rec.State = domain.DownloadIgnored
+				rec.State = download.StateIgnored
 				_ = s.downloadSvc.UpdateDownload(ctx, rec)
 				continue
 			}
@@ -307,10 +307,10 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
 
 			rec.RetryCount++
-			if rec.RetryCount > domain.MaxRetries {
+			if rec.RetryCount > download.MaxRetries {
 				s.log.Warn("max retries reached for pending download",
 					"artist", pt.Artist, "title", pt.Title, "retry_count", rec.RetryCount, "component", "playlist")
-				rec.State = domain.DownloadFailed
+				rec.State = download.StateFailed
 				rec.Error = fmt.Sprintf("search resolution failed after %d retries: %s", rec.RetryCount, err.Error())
 				_ = s.downloadSvc.UpdateDownload(ctx, rec)
 				continue
@@ -322,7 +322,7 @@ func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64)
 				backoffMin = 30
 			}
 			rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
-			rec.State = domain.DownloadFailedPending
+			rec.State = download.StateFailedPending
 			rec.Error = err.Error()
 			_ = s.downloadSvc.UpdateDownload(ctx, rec)
 			continue
@@ -424,7 +424,7 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 	username := best.Track.Username
 
 	// Build DownloadMeta with authoritative playlist metadata.
-	meta := download.DownloadMeta{
+	meta := download.Meta{
 		Artist:      artist,
 		Album:       album,
 		Title:       title,
@@ -489,7 +489,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 			for i, info := range trackInfos {
 				newPos := i + 1
 				if old, ok := oldPos[info.SourceTrackID]; ok && old != newPos {
-				s.log.Info("track moved", "title", info.Title, "old_pos", old, "new_pos", newPos, "component", "playlist")
+					s.log.Info("track moved", "title", info.Title, "old_pos", old, "new_pos", newPos, "component", "playlist")
 				}
 			}
 
@@ -498,7 +498,7 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 				pt := domain.PlaylistTrack{
 					PlaylistID: playlistID, Position: i + 1,
 					SourceTrackID: info.SourceTrackID,
-					Title: info.Title, Artist: info.Artist,
+					Title:         info.Title, Artist: info.Artist,
 					Album: info.Album, DurationMs: info.DurationMs,
 					ISRC: info.ISRC,
 				}
@@ -529,9 +529,9 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 		}
 		info := TrackInfo{
 			SourceTrackID: tracks[i].SourceTrackID,
-			Title: tracks[i].Title, Artist: tracks[i].Artist,
+			Title:         tracks[i].Title, Artist: tracks[i].Artist,
 			DurationMs: tracks[i].DurationMs,
-			ISRC: tracks[i].ISRC,
+			ISRC:       tracks[i].ISRC,
 		}
 		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
 			tracks[i].TrackID = &trackID
@@ -646,7 +646,7 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 		if !e.IsDir() && !keepFiles[e.Name()] {
 			path := filepath.Join(playlistDir, e.Name())
 			if err := os.Remove(path); err == nil {
-			s.log.Info("removed orphaned file", "file", e.Name(), "component", "playlist")
+				s.log.Info("removed orphaned file", "file", e.Name(), "component", "playlist")
 			}
 		}
 	}
@@ -802,7 +802,7 @@ func (s *Service) StartRetryWorker(ctx context.Context, interval time.Duration) 
 	if interval <= 0 {
 		interval = 1 * time.Minute
 	}
-	s.log.Info("pending retry worker started", "interval", interval, "max_retries", domain.MaxRetries, "component", "playlist")
+	s.log.Info("pending retry worker started", "interval", interval, "max_retries", download.MaxRetries, "component", "playlist")
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -826,7 +826,7 @@ func (s *Service) StartRetryWorker(ctx context.Context, interval time.Duration) 
 // retryPendingDownloads lists failedPending records and re-attempts search
 // resolution for those whose RetryAfter has passed and haven't hit MaxRetries.
 func (s *Service) retryPendingDownloads(ctx context.Context) {
-	failedPending, err := s.downloadSvc.ListByState(ctx, domain.DownloadFailedPending)
+	failedPending, err := s.downloadSvc.ListByState(ctx, download.StateFailedPending)
 	if err != nil {
 		s.log.Error("pending retry worker: list failed", "error", err, "component", "playlist")
 		return
@@ -849,10 +849,10 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 	for i := range failedPending {
 		rec := &failedPending[i]
 
-		if rec.RetryCount >= domain.MaxRetries {
+		if rec.RetryCount >= download.MaxRetries {
 			// Belt and suspenders — transition to terminal failed so the
 			// record doesn't stay stuck in failedPending forever.
-			rec.State = domain.DownloadFailed
+			rec.State = download.StateFailed
 			rec.Error = fmt.Sprintf("search resolution failed after %d retries", rec.RetryCount)
 			_ = s.downloadSvc.UpdateDownload(ctx, rec)
 			continue
@@ -866,7 +866,7 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 		if rec.Artist == "" || rec.Title == "" {
 			s.log.Warn("pending retry worker: missing artist/title, marking failed",
 				"download_id", rec.ID, "component", "playlist")
-			rec.State = domain.DownloadFailed
+			rec.State = download.StateFailed
 			rec.Error = "missing artist or title metadata — cannot resolve download source"
 			_ = s.downloadSvc.UpdateDownload(ctx, rec)
 			continue
@@ -877,7 +877,7 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 			if existing, _ := s.store.GetTrackByISRC(ctx, rec.ISRC); existing != nil {
 				s.log.Info("pending retry worker: track already imported via ISRC, skipping",
 					"artist", rec.Artist, "title", rec.Title, "isrc", rec.ISRC, "component", "playlist")
-				rec.State = domain.DownloadIgnored
+				rec.State = download.StateIgnored
 				_ = s.downloadSvc.UpdateDownload(ctx, rec)
 				continue
 			}
@@ -889,8 +889,8 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 				"artist", rec.Artist, "title", rec.Title, "error", searchErr, "component", "playlist")
 
 			rec.RetryCount++
-			if rec.RetryCount > domain.MaxRetries {
-				rec.State = domain.DownloadFailed
+			if rec.RetryCount > download.MaxRetries {
+				rec.State = download.StateFailed
 				rec.Error = fmt.Sprintf("search resolution failed after %d retries: %s", rec.RetryCount, searchErr.Error())
 			} else {
 				backoffMin := 1 << (rec.RetryCount - 1)
@@ -915,7 +915,7 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 		rec.Size = best.Track.Size
 		rec.Bitrate = best.Track.Bitrate
 		rec.Format = best.Track.Quality
-		rec.State = domain.DownloadQueued
+		rec.State = download.StateQueued
 		rec.Error = ""
 		rec.RetryAfter = ""
 		rec.DisplayName = rec.Artist + " - " + rec.Title

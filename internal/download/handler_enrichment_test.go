@@ -19,24 +19,26 @@ func testLogger() *slog.Logger {
 
 // mockMetadataProvider implements metadata.Provider for testing.
 type mockMetadataProvider struct {
-	name        string
-	cover       *metadata.CoverResult
-	trackMeta   *metadata.TrackMetadata
-	configured  bool
-	connected   bool
+	name       string
+	cover      *metadata.CoverResult
+	trackMeta  *metadata.TrackMetadata
+	configured bool
+	connected  bool
 }
 
-func (m *mockMetadataProvider) Name() string                    { return m.name }
-func (m *mockMetadataProvider) DisplayName() string             { return m.name }
-func (m *mockMetadataProvider) IsConfigured() bool              { return m.configured }
-func (m *mockMetadataProvider) IsMetadataAvailable() bool       { return m.configured }
+func (m *mockMetadataProvider) Name() string              { return m.name }
+func (m *mockMetadataProvider) DisplayName() string       { return m.name }
+func (m *mockMetadataProvider) IsConfigured() bool        { return m.configured }
+func (m *mockMetadataProvider) IsMetadataAvailable() bool { return m.configured }
 func (m *mockMetadataProvider) CapabilityStatus() map[string]string {
 	s := "not_configured"
-	if m.configured { s = "connected" }
+	if m.configured {
+		s = "connected"
+	}
 	return map[string]string{"metadata": s}
 }
 func (m *mockMetadataProvider) CheckConnection(ctx context.Context) error { return nil }
-func (m *mockMetadataProvider) Connected() bool                 { return m.connected }
+func (m *mockMetadataProvider) Connected() bool                           { return m.connected }
 
 func (m *mockMetadataProvider) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
 	return m.cover, nil
@@ -56,10 +58,10 @@ func (m *mockMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Tr
 
 // mockLibraryStore provides the methods needed by MetadataEnrichmentHandler.
 type mockLibraryStore struct {
-	track     *domain.Track
-	artist    *domain.Artist
-	album     *domain.Album
-	tracks    []domain.Track
+	track       *domain.Track
+	artist      *domain.Artist
+	album       *domain.Album
+	tracks      []domain.Track
 	getTrackErr error
 }
 
@@ -104,7 +106,7 @@ func TestMetadataEnrichmentHandler_SkipNoLibraryTrack(t *testing.T) {
 	store := &mockLibraryStore{}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 0,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -123,7 +125,7 @@ func TestMetadataEnrichmentHandler_NoProviders(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 1,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -156,7 +158,7 @@ func TestMetadataEnrichmentHandler_EnrichISRC(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 1,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -192,7 +194,7 @@ func TestMetadataEnrichmentHandler_DoesNotOverwriteExisting(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 1,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -224,7 +226,7 @@ func TestMetadataEnrichmentHandler_NoOpProvider(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 1,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -240,7 +242,7 @@ func TestMetadataEnrichmentHandler_TrackNotFound(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 999,
 		FilePath:       "/tmp/test.mp3",
 	})
@@ -278,7 +280,7 @@ func TestMetadataEnrichmentHandler_CoverDoesNotOverwrite(t *testing.T) {
 	}
 	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
 
-	err := handler.Handle(context.Background(), &domain.DownloadRecord{
+	err := handler.Handle(context.Background(), &Record{
 		LibraryTrackID: 1,
 		FilePath:       filepath.Join(tmpDir, "test.mp3"),
 	})

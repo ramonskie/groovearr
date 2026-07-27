@@ -20,7 +20,7 @@ func TestLibraryImporterHandler_CreatesArtistAlbumTrack(t *testing.T) {
 	libStore := newMockLibStore()
 	handler := NewLibraryImporterHandler(libStore, nil)
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:          "test-lib-1",
 		SourceName:  "deezer",
 		FilePath:    trackFile,
@@ -69,7 +69,7 @@ func TestLibraryImporterHandler_SkipsExistingByPath(t *testing.T) {
 		FilePath: existingPath,
 	})
 
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-lib-2",
 		FilePath: existingPath,
 		Artist:   "Test Artist",
@@ -88,7 +88,7 @@ func TestLibraryImporterHandler_SkipsExistingByPath(t *testing.T) {
 
 func TestLibraryImporterHandler_NoFilePath(t *testing.T) {
 	handler := NewLibraryImporterHandler(newMockLibStore(), nil)
-	record := &domain.DownloadRecord{ID: "test-lib-3"}
+	record := &Record{ID: "test-lib-3"}
 
 	err := handler.Handle(context.Background(), record)
 	if err == nil {

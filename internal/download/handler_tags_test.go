@@ -5,8 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/ramonskie/groovearr/internal/domain"
 )
 
 func TestTagWriterHandler_MP3(t *testing.T) {
@@ -24,7 +22,7 @@ func TestTagWriterHandler_MP3(t *testing.T) {
 	os.WriteFile(mp3Path, header, 0o644)
 
 	handler := NewTagWriterHandler(testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-tags-1",
 		FilePath: mp3Path,
 		Artist:   "Test Artist",
@@ -48,7 +46,7 @@ func TestTagWriterHandler_FLAC(t *testing.T) {
 	os.WriteFile(flacPath, []byte("fLaC\x00"), 0o644)
 
 	handler := NewTagWriterHandler(testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-tags-2",
 		FilePath: flacPath,
 		Artist:   "Artist",
@@ -65,7 +63,7 @@ func TestTagWriterHandler_FLAC(t *testing.T) {
 
 func TestTagWriterHandler_NoFilePath(t *testing.T) {
 	handler := NewTagWriterHandler(testLogger())
-	record := &domain.DownloadRecord{ID: "test-tags-3"}
+	record := &Record{ID: "test-tags-3"}
 	err := handler.Handle(context.Background(), record)
 	if err != nil {
 		t.Fatalf("Handle should return nil for empty file path: %v", err)
@@ -78,7 +76,7 @@ func TestTagWriterHandler_NonAudio(t *testing.T) {
 	os.WriteFile(txtPath, []byte("hello"), 0o644)
 
 	handler := NewTagWriterHandler(testLogger())
-	record := &domain.DownloadRecord{
+	record := &Record{
 		ID:       "test-tags-4",
 		FilePath: txtPath,
 	}

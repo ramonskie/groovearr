@@ -8,7 +8,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
 )
 
@@ -16,13 +15,13 @@ import (
 // using the library.Renamer path resolver.
 type FileRenamerHandler struct {
 	renamer *library.Renamer
-	store   DownloadStore
+	store   Store
 	log     *slog.Logger
 }
 
 // NewFileRenamerHandler creates a handler that moves downloaded files into
 // the library directory structure after each download completes.
-func NewFileRenamerHandler(renamer *library.Renamer, store DownloadStore, logger *slog.Logger) *FileRenamerHandler {
+func NewFileRenamerHandler(renamer *library.Renamer, store Store, logger *slog.Logger) *FileRenamerHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -31,7 +30,7 @@ func NewFileRenamerHandler(renamer *library.Renamer, store DownloadStore, logger
 
 // Handle calls library.Renamer.Rename using the record's embedded metadata
 // and persists the new file path to the store.
-func (h *FileRenamerHandler) Handle(ctx context.Context, record *domain.DownloadRecord) error {
+func (h *FileRenamerHandler) Handle(ctx context.Context, record *Record) error {
 	if record.FilePath == "" {
 		return fmt.Errorf("renamer: no file path in download record %s", record.ID)
 	}

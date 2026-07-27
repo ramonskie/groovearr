@@ -98,13 +98,13 @@ func TestBuildAuthURL(t *testing.T) {
 
 	q := u.Query()
 	checks := map[string]string{
-		"client_id":              "client123",
-		"response_type":          "code",
-		"redirect_uri":           "http://localhost:8008/callback",
-		"state":                  "state_xyz",
-		"code_challenge_method":  "S256",
-		"code_challenge":         "challenge_abc",
-		"scope":                  spotifyScopes,
+		"client_id":             "client123",
+		"response_type":         "code",
+		"redirect_uri":          "http://localhost:8008/callback",
+		"state":                 "state_xyz",
+		"code_challenge_method": "S256",
+		"code_challenge":        "challenge_abc",
+		"scope":                 spotifyScopes,
 	}
 	for param, want := range checks {
 		if got := q.Get(param); got != want {

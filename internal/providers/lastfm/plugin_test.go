@@ -61,9 +61,9 @@ func newTestPluginNoKey(t *testing.T, handler http.Handler) (*Plugin, func()) {
 
 // lfmHandler returns a handler that dispatches based on the "method" query param.
 type lfmHandler struct {
-	artistSearch   func(w http.ResponseWriter, artist string, limit int)
-	topAlbums      func(w http.ResponseWriter, artist string, limit int)
-	albumInfo      func(w http.ResponseWriter, artist, album string)
+	artistSearch func(w http.ResponseWriter, artist string, limit int)
+	topAlbums    func(w http.ResponseWriter, artist string, limit int)
+	albumInfo    func(w http.ResponseWriter, artist, album string)
 }
 
 func (h *lfmHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -235,8 +235,8 @@ func TestPlugin_SearchArtists(t *testing.T) {
 								},
 							},
 							{
-								"name": "NoMBID Artist",
-								"mbid": "",
+								"name":  "NoMBID Artist",
+								"mbid":  "",
 								"image": []map[string]any{},
 							},
 						},

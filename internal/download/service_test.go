@@ -16,14 +16,14 @@ import (
 
 type mockStore struct {
 	mu      sync.Mutex
-	records map[string]*domain.DownloadRecord
+	records map[string]*Record
 }
 
 func newMockStore() *mockStore {
-	return &mockStore{records: make(map[string]*domain.DownloadRecord)}
+	return &mockStore{records: make(map[string]*Record)}
 }
 
-func (m *mockStore) Insert(ctx context.Context, r *domain.DownloadRecord) error {
+func (m *mockStore) Insert(ctx context.Context, r *Record) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, exists := m.records[r.ID]; exists {
@@ -34,7 +34,7 @@ func (m *mockStore) Insert(ctx context.Context, r *domain.DownloadRecord) error 
 	return nil
 }
 
-func (m *mockStore) Update(ctx context.Context, r *domain.DownloadRecord) error {
+func (m *mockStore) Update(ctx context.Context, r *Record) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	existing, ok := m.records[r.ID]
@@ -80,7 +80,7 @@ func (m *mockStore) Update(ctx context.Context, r *domain.DownloadRecord) error 
 	return nil
 }
 
-func (m *mockStore) UpdateProgress(ctx context.Context, id string, state domain.DownloadState, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
+func (m *mockStore) UpdateProgress(ctx context.Context, id string, state State, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[id]
@@ -101,7 +101,7 @@ func (m *mockStore) UpdateProgress(ctx context.Context, id string, state domain.
 	return nil
 }
 
-func (m *mockStore) TransitionState(ctx context.Context, id string, oldState, newState domain.DownloadState) (bool, error) {
+func (m *mockStore) TransitionState(ctx context.Context, id string, oldState, newState State) (bool, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[id]
@@ -115,7 +115,7 @@ func (m *mockStore) TransitionState(ctx context.Context, id string, oldState, ne
 	return true, nil
 }
 
-func (m *mockStore) Get(ctx context.Context, id string) (*domain.DownloadRecord, error) {
+func (m *mockStore) Get(ctx context.Context, id string) (*Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	rec, ok := m.records[id]
@@ -126,20 +126,20 @@ func (m *mockStore) Get(ctx context.Context, id string) (*domain.DownloadRecord,
 	return &r2, nil
 }
 
-func (m *mockStore) List(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (m *mockStore) List(ctx context.Context) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	out := make([]domain.DownloadRecord, 0, len(m.records))
+	out := make([]Record, 0, len(m.records))
 	for _, r := range m.records {
 		out = append(out, *r)
 	}
 	return out, nil
 }
 
-func (m *mockStore) ListByState(ctx context.Context, state domain.DownloadState) ([]domain.DownloadRecord, error) {
+func (m *mockStore) ListByState(ctx context.Context, state State) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []domain.DownloadRecord
+	var out []Record
 	for _, r := range m.records {
 		if r.State == state {
 			out = append(out, *r)
@@ -148,10 +148,10 @@ func (m *mockStore) ListByState(ctx context.Context, state domain.DownloadState)
 	return out, nil
 }
 
-func (m *mockStore) ListActive(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (m *mockStore) ListActive(ctx context.Context) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []domain.DownloadRecord
+	var out []Record
 	for _, r := range m.records {
 		if !r.State.Terminal() {
 			out = append(out, *r)
@@ -160,10 +160,10 @@ func (m *mockStore) ListActive(ctx context.Context) ([]domain.DownloadRecord, er
 	return out, nil
 }
 
-func (m *mockStore) ListByPlaylist(ctx context.Context, playlistID string) ([]domain.DownloadRecord, error) {
+func (m *mockStore) ListByPlaylist(ctx context.Context, playlistID string) ([]Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var out []domain.DownloadRecord
+	var out []Record
 	for _, r := range m.records {
 		if r.PlaylistID == playlistID {
 			out = append(out, *r)
@@ -172,7 +172,7 @@ func (m *mockStore) ListByPlaylist(ctx context.Context, playlistID string) ([]do
 	return out, nil
 }
 
-func (m *mockStore) FindActiveByTitle(ctx context.Context, artist, title string) (*domain.DownloadRecord, error) {
+func (m *mockStore) FindActiveByTitle(ctx context.Context, artist, title string) (*Record, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	for _, r := range m.records {
@@ -184,12 +184,12 @@ func (m *mockStore) FindActiveByTitle(ctx context.Context, artist, title string)
 	return nil, nil
 }
 
-func (m *mockStore) RecordEvent(ctx context.Context, event *domain.DownloadEvent) error { return nil }
-func (m *mockStore) GetEvents(ctx context.Context, downloadID string) ([]domain.DownloadEvent, error) {
+func (m *mockStore) RecordEvent(ctx context.Context, event *Event) error { return nil }
+func (m *mockStore) GetEvents(ctx context.Context, downloadID string) ([]Event, error) {
 	return nil, nil
 }
 func (m *mockStore) DeleteTerminal(ctx context.Context) error { return nil }
-func (m *mockStore) Close() error                            { return nil }
+func (m *mockStore) Close() error                             { return nil }
 
 // ─── Mock event bus ───────────────────────────────────────────────────
 
@@ -253,7 +253,7 @@ func TestQueueCreatesRecord(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 12345678, DownloadMeta{})
+	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 12345678, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -274,8 +274,8 @@ func TestQueueCreatesRecord(t *testing.T) {
 	if record.Filename != "song.flac" {
 		t.Errorf("filename = %q", record.Filename)
 	}
-	if record.State != domain.DownloadQueued {
-		t.Errorf("state = %q, want %q", record.State, domain.DownloadQueued)
+	if record.State != StateQueued {
+		t.Errorf("state = %q, want %q", record.State, StateQueued)
 	}
 	if record.Size != 12345678 {
 		t.Errorf("size = %d", record.Size)
@@ -286,7 +286,7 @@ func TestQueueSetsDisplayName(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, DownloadMeta{
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{
 		Artist: "Artist", Title: "Title",
 	})
 	record, _ := store.Get(context.Background(), id)
@@ -300,7 +300,7 @@ func TestQueueFiresQueuedEvent(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, DownloadMeta{})
+	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -312,14 +312,14 @@ func TestQueueFiresQueuedEvent(t *testing.T) {
 	if evts[0].Topic != events.TopicDownloadQueued {
 		t.Errorf("topic = %q, want %q", evts[0].Topic, events.TopicDownloadQueued)
 	}
-	record, ok := evts[0].Event.(*domain.DownloadRecord)
+	record, ok := evts[0].Event.(*Record)
 	if !ok {
-		t.Fatalf("event payload is not *domain.DownloadRecord")
+		t.Fatalf("event payload is not *Record")
 	}
 	if record.ID != id {
 		t.Errorf("event record id = %q, want %q", record.ID, id)
 	}
-	if record.State != domain.DownloadQueued {
+	if record.State != StateQueued {
 		t.Errorf("event record state = %q", record.State)
 	}
 }
@@ -328,7 +328,7 @@ func TestQueuePersistsMetaFields(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "deezer", "dluser", "42.mp3", 999, DownloadMeta{
+	id, _ := svc.Queue(context.Background(), "deezer", "dluser", "42.mp3", 999, Meta{
 		Artist: "TestArtist", Album: "TestAlbum", Title: "TestTitle",
 		TrackNumber: 3, DiscNumber: 1, Year: 2024,
 		TrackID: "trk-42", ISRC: "US-ABC-24-00001", CoverURL: "http://cover.jpg",
@@ -359,7 +359,7 @@ func TestQueueDedupSkipsActive(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	meta := DownloadMeta{Artist: "DupeArtist", Title: "DupeTitle"}
+	meta := Meta{Artist: "DupeArtist", Title: "DupeTitle"}
 	id1, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
@@ -379,7 +379,7 @@ func TestQueueDedupErrorLogsWarning(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	meta := DownloadMeta{Artist: "ErrArtist", Title: "ErrTitle"}
+	meta := Meta{Artist: "ErrArtist", Title: "ErrTitle"}
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
@@ -405,11 +405,11 @@ func TestQueueDedupPreservesState(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	meta := DownloadMeta{Artist: "PreserveArt", Title: "PreserveTitle"}
+	meta := Meta{Artist: "PreserveArt", Title: "PreserveTitle"}
 	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
 
 	// Manually change state — dedup should still return id1 since it's active.
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id1, State: domain.DownloadDownloading})
+	_ = store.Update(context.Background(), &Record{ID: id1, State: StateDownloading})
 
 	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
@@ -424,9 +424,9 @@ func TestQueueNoDedupForTerminal(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	meta := DownloadMeta{Artist: "TermArt", Title: "TermTitle"}
+	meta := Meta{Artist: "TermArt", Title: "TermTitle"}
 	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id1, State: domain.DownloadImported})
+	_ = store.Update(context.Background(), &Record{ID: id1, State: StateImported})
 
 	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
@@ -444,7 +444,7 @@ func TestQueuePendingCreatesRecord(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, err := svc.QueuePending(context.Background(), DownloadMeta{
+	id, err := svc.QueuePending(context.Background(), Meta{
 		Artist: "Artist", Album: "Album", Title: "Title",
 		Bitrate: 320, Format: "flac",
 	})
@@ -456,8 +456,8 @@ func TestQueuePendingCreatesRecord(t *testing.T) {
 	if record == nil {
 		t.Fatal("record not found")
 	}
-	if record.State != domain.DownloadQueued {
-		t.Errorf("state = %q, want %q", record.State, domain.DownloadQueued)
+	if record.State != StateQueued {
+		t.Errorf("state = %q, want %q", record.State, StateQueued)
 	}
 	if !record.IsPendingSource() {
 		t.Error("record should be pending source")
@@ -473,7 +473,7 @@ func TestQueuePendingDedup(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	meta := DownloadMeta{Artist: "A", Title: "T"}
+	meta := Meta{Artist: "A", Title: "T"}
 	id1, _ := svc.QueuePending(context.Background(), meta)
 	id2, _ := svc.QueuePending(context.Background(), meta)
 	if id1 != id2 {
@@ -486,8 +486,8 @@ func TestQueuePendingNoDedupMissingArtistTitle(t *testing.T) {
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
 	// No artist/title → dedup is skipped, two records are created.
-	id1, _ := svc.QueuePending(context.Background(), DownloadMeta{})
-	id2, _ := svc.QueuePending(context.Background(), DownloadMeta{})
+	id1, _ := svc.QueuePending(context.Background(), Meta{})
+	id2, _ := svc.QueuePending(context.Background(), Meta{})
 	if id1 == id2 {
 		t.Error("expected two distinct records when artist/title are empty")
 	}
@@ -499,7 +499,7 @@ func TestGetStatus(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 42, DownloadMeta{})
+	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 42, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -514,7 +514,7 @@ func TestGetStatus(t *testing.T) {
 	if record.ID != id {
 		t.Errorf("id mismatch: %q != %q", record.ID, id)
 	}
-	if record.State != domain.DownloadQueued {
+	if record.State != StateQueued {
 		t.Errorf("state = %q", record.State)
 	}
 }
@@ -534,8 +534,8 @@ func TestList(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	_, _ = svc.Queue(context.Background(), "soulseek", "p1", "a.flac", 1, DownloadMeta{})
-	_, _ = svc.Queue(context.Background(), "deezer", "u1", "b.mp3", 2, DownloadMeta{})
+	_, _ = svc.Queue(context.Background(), "soulseek", "p1", "a.flac", 1, Meta{})
+	_, _ = svc.Queue(context.Background(), "deezer", "u1", "b.mp3", 2, Meta{})
 
 	records, err := svc.List(context.Background())
 	if err != nil {
@@ -553,7 +553,7 @@ func TestCancelSetsIgnored(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
 	err := svc.Cancel(context.Background(), id)
 	if err != nil {
@@ -561,8 +561,8 @@ func TestCancelSetsIgnored(t *testing.T) {
 	}
 
 	record, _ := store.Get(context.Background(), id)
-	if record.State != domain.DownloadIgnored {
-		t.Errorf("state = %q, want %q", record.State, domain.DownloadIgnored)
+	if record.State != StateIgnored {
+		t.Errorf("state = %q, want %q", record.State, StateIgnored)
 	}
 }
 
@@ -571,7 +571,7 @@ func TestCancelFiresStateChangedEvent(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = svc.Cancel(context.Background(), id)
 
 	evts := bus.published()
@@ -583,8 +583,8 @@ func TestCancelFiresStateChangedEvent(t *testing.T) {
 	if stateEvent.Topic != events.TopicDownloadStateChanged {
 		t.Errorf("topic = %q, want %q", stateEvent.Topic, events.TopicDownloadStateChanged)
 	}
-	record := stateEvent.Event.(*domain.DownloadRecord)
-	if record.State != domain.DownloadIgnored {
+	record := stateEvent.Event.(*Record)
+	if record.State != StateIgnored {
 		t.Errorf("event record state = %q", record.State)
 	}
 }
@@ -602,9 +602,9 @@ func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	// Manually set to terminal in store.
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadImported})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateImported})
 
 	eventsBefore := len(bus.published())
 
@@ -619,7 +619,7 @@ func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 	}
 
 	record, _ := store.Get(context.Background(), id)
-	if record.State != domain.DownloadImported {
+	if record.State != StateImported {
 		t.Errorf("state should not change on terminal record, got %q", record.State)
 	}
 }
@@ -631,10 +631,10 @@ func TestRetryResetsToQueued(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
 	// Manually set to failed in store.
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, Error: "download error"})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, Error: "download error"})
 
 	err := svc.Retry(context.Background(), id)
 	if err != nil {
@@ -642,8 +642,8 @@ func TestRetryResetsToQueued(t *testing.T) {
 	}
 
 	record, _ := store.Get(context.Background(), id)
-	if record.State != domain.DownloadQueued {
-		t.Errorf("state = %q, want %q", record.State, domain.DownloadQueued)
+	if record.State != StateQueued {
+		t.Errorf("state = %q, want %q", record.State, StateQueued)
 	}
 	if record.Error != "" {
 		t.Errorf("error not cleared: %q", record.Error)
@@ -658,8 +658,8 @@ func TestRetryFiresStateChangedEvent(t *testing.T) {
 	bus := newMockBus()
 	svc := NewDownloadService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed})
 
 	_ = svc.Retry(context.Background(), id)
 
@@ -672,8 +672,8 @@ func TestRetryFiresStateChangedEvent(t *testing.T) {
 	if stateEvent.Topic != events.TopicDownloadStateChanged {
 		t.Errorf("topic = %q, want %q", stateEvent.Topic, events.TopicDownloadStateChanged)
 	}
-	record := stateEvent.Event.(*domain.DownloadRecord)
-	if record.State != domain.DownloadQueued {
+	record := stateEvent.Event.(*Record)
+	if record.State != StateQueued {
 		t.Errorf("event record state = %q", record.State)
 	}
 }
@@ -682,7 +682,7 @@ func TestRetryNonRetryableState(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
 	// Record is in "queued" state — not retryable.
 	err := svc.Retry(context.Background(), id)
@@ -711,7 +711,7 @@ func TestConcurrentQueueAndCancel(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, err := svc.Queue(context.Background(), "soulseek", "peer", fmt.Sprintf("f%d.flac", n), int64(n), DownloadMeta{})
+			_, err := svc.Queue(context.Background(), "soulseek", "peer", fmt.Sprintf("f%d.flac", n), int64(n), Meta{})
 			if err != nil {
 				t.Errorf("concurrent Queue failed: %v", err)
 			}
@@ -731,8 +731,8 @@ func TestManualRetryResetsRetryCount(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: 5})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: 5})
 
 	_ = svc.Retry(context.Background(), id)
 
@@ -740,7 +740,7 @@ func TestManualRetryResetsRetryCount(t *testing.T) {
 	if rec.RetryCount != 0 {
 		t.Errorf("RetryCount = %d, want 0 (manual retry resets count)", rec.RetryCount)
 	}
-	if rec.State != domain.DownloadQueued {
+	if rec.State != StateQueued {
 		t.Errorf("state = %q, want queued", rec.State)
 	}
 }
@@ -749,8 +749,8 @@ func TestManualRetryNotBlockedByMaxRetries(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed, RetryCount: domain.MaxRetries})
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: MaxRetries})
 
 	err := svc.Retry(context.Background(), id)
 	if err != nil {
@@ -767,9 +767,9 @@ func TestManualRetryClearsBackoff(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, DownloadMeta{})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{
-		ID: id, State: domain.DownloadFailed,
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	_ = store.Update(context.Background(), &Record{
+		ID: id, State: StateFailed,
 		RetryAfter: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
 	})
 
@@ -798,15 +798,15 @@ func TestResolveRetrySourcePopulatesFields(t *testing.T) {
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer1", "old.flac", 100, DownloadMeta{
+	id, _ := svc.Queue(context.Background(), "soulseek", "peer1", "old.flac", 100, Meta{
 		Artist: "Artist", Title: "Title",
 	})
-	_ = store.Update(context.Background(), &domain.DownloadRecord{ID: id, State: domain.DownloadFailed})
+	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed})
 
 	rec, _ := store.Get(context.Background(), id)
 
 	// The test record must be in failed state with metadata for the search.
-	rec.State = domain.DownloadFailed
+	rec.State = StateFailed
 	rec.Artist = "Artist"
 	rec.Title = "Title"
 
@@ -839,9 +839,9 @@ func TestResolveRetrySourceNoResultsKeepsOriginalSource(t *testing.T) {
 	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
-	rec := &domain.DownloadRecord{
+	rec := &Record{
 		ID: "test-1", SourceName: "soulseek", Filename: "old.flac",
-		Artist: "Artist", Title: "Title", State: domain.DownloadFailed,
+		Artist: "Artist", Title: "Title", State: StateFailed,
 	}
 
 	svc.resolveRetrySource(context.Background(), rec)
@@ -866,9 +866,9 @@ func TestResolveAndSubmitSuccess(t *testing.T) {
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
-	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+	_ = store.Insert(context.Background(), &Record{
 		ID: "test-1", SourceName: "soulseek", Filename: "old.flac",
-		Artist: "Artist", Title: "Title", State: domain.DownloadQueued,
+		Artist: "Artist", Title: "Title", State: StateQueued,
 	})
 
 	rec, _ := store.Get(context.Background(), "test-1")
@@ -893,9 +893,9 @@ func TestResolveAndSubmitNoSourceTransitionsToFailed(t *testing.T) {
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
-	_ = store.Insert(context.Background(), &domain.DownloadRecord{
+	_ = store.Insert(context.Background(), &Record{
 		ID: "test-2", SourceName: "soulseek", Filename: "",
-		Artist: "Artist", Title: "Title", State: domain.DownloadQueued,
+		Artist: "Artist", Title: "Title", State: StateQueued,
 	})
 
 	rec, _ := store.Get(context.Background(), "test-2")
@@ -903,8 +903,8 @@ func TestResolveAndSubmitNoSourceTransitionsToFailed(t *testing.T) {
 	svc.resolveAndSubmit(rec, retryOriginalSnap{})
 
 	stored, _ := store.Get(context.Background(), "test-2")
-	if stored.State != domain.DownloadFailed {
-		t.Errorf("state = %q, want %q", stored.State, domain.DownloadFailed)
+	if stored.State != StateFailed {
+		t.Errorf("state = %q, want %q", stored.State, StateFailed)
 	}
 	if stored.Error == "" {
 		t.Error("expected error message on resolution failure")
@@ -915,16 +915,16 @@ func TestFailRetrySetsFailed(t *testing.T) {
 	store := newMockStore()
 	svc := NewDownloadService(store, newMockBus(), testLogger())
 
-	_ = store.Insert(context.Background(), &domain.DownloadRecord{
-		ID: "test-3", State: domain.DownloadQueued,
+	_ = store.Insert(context.Background(), &Record{
+		ID: "test-3", State: StateQueued,
 	})
 
 	rec, _ := store.Get(context.Background(), "test-3")
 	svc.failRetry(context.Background(), rec, "something went wrong")
 
 	stored, _ := store.Get(context.Background(), "test-3")
-	if stored.State != domain.DownloadFailed {
-		t.Errorf("state = %q, want %q", stored.State, domain.DownloadFailed)
+	if stored.State != StateFailed {
+		t.Errorf("state = %q, want %q", stored.State, StateFailed)
 	}
 	if stored.Error != "something went wrong" {
 		t.Errorf("error = %q, want %q", stored.Error, "something went wrong")

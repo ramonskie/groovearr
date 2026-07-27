@@ -41,19 +41,19 @@ type SoulseekConfig struct {
 
 // Client implements download.Plugin for Soulseek via slskd REST API.
 type Client struct {
-	cfg      SoulseekConfig
-	dlPath   string // download staging directory (not from Soulseek config)
-	baseURL  string
-	apiKey   string
-	client   *http.Client
-	log      *slog.Logger
+	cfg       SoulseekConfig
+	dlPath    string // download staging directory (not from Soulseek config)
+	baseURL   string
+	apiKey    string
+	client    *http.Client
+	log       *slog.Logger
 	connected bool // set by health checker
 
-	mu             sync.Mutex
-	activeSearches map[string]context.CancelFunc // searchID → cancel
+	mu                sync.Mutex
+	activeSearches    map[string]context.CancelFunc // searchID → cancel
 	downloadsMu       sync.RWMutex
-	downloads         map[string]*domain.DownloadRecord // downloadID → record
-	downloadUsernames map[string]string                 // downloadID → username
+	downloads         map[string]*download.Record // downloadID → record
+	downloadUsernames map[string]string           // downloadID → username
 }
 
 var _ download.MonitoredProvider = (*Client)(nil)
@@ -66,14 +66,14 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 		return nil, fmt.Errorf("soulseek: invalid config: %w", err)
 	}
 	return &Client{
-		cfg:            sc,
-		dlPath:         downloadPath,
-		baseURL:        strings.TrimRight(sc.SlskdURL, "/"),
-		apiKey:         sc.APIKey,
-		client: &http.Client{Timeout: 120 * time.Second, Transport: provider.NewRateLimitedTransport(http.DefaultTransport, soulseekRate)},
-		log:            logger,
-		activeSearches: make(map[string]context.CancelFunc),
-		downloads:         make(map[string]*domain.DownloadRecord),
+		cfg:               sc,
+		dlPath:            downloadPath,
+		baseURL:           strings.TrimRight(sc.SlskdURL, "/"),
+		apiKey:            sc.APIKey,
+		client:            &http.Client{Timeout: 120 * time.Second, Transport: provider.NewRateLimitedTransport(http.DefaultTransport, soulseekRate)},
+		log:               logger,
+		activeSearches:    make(map[string]context.CancelFunc),
+		downloads:         make(map[string]*download.Record),
 		downloadUsernames: make(map[string]string),
 	}, nil
 }
@@ -132,11 +132,11 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 	}
 
 	searchReq := map[string]any{
-		"searchText":              query,
-		"timeout":                 timeoutSec * 1000, // slskd expects milliseconds
-		"filterResponses":         false,
+		"searchText":               query,
+		"timeout":                  timeoutSec * 1000, // slskd expects milliseconds
+		"filterResponses":          false,
 		"minimumResponseFileCount": 1,
-		"minimumPeerUploadSpeed":  c.cfg.MinUploadSpeed * 125000, // Mbps → bytes/sec
+		"minimumPeerUploadSpeed":   c.cfg.MinUploadSpeed * 125000, // Mbps → bytes/sec
 	}
 
 	body, _ := json.Marshal(searchReq)
@@ -208,7 +208,7 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 
 // StartDownload enqueues a file for download via slskd.
 // Implements download.MonitoredProvider.
-func (c *Client) StartDownload(ctx context.Context, meta download.DownloadMeta) (string, error) {
+func (c *Client) StartDownload(ctx context.Context, meta download.Meta) (string, error) {
 	if !c.IsConfigured() {
 		return "", fmt.Errorf("soulseek: not configured")
 	}
@@ -244,11 +244,11 @@ func (c *Client) StartDownload(ctx context.Context, meta download.DownloadMeta) 
 		}
 	}
 
-	record := &domain.DownloadRecord{
+	record := &download.Record{
 		ID:         downloadID,
 		SourceName: pluginName,
 		Filename:   filename,
-		State:      domain.DownloadQueued,
+		State:      download.StateQueued,
 	}
 	c.downloadsMu.Lock()
 	c.downloads[downloadID] = record
@@ -290,7 +290,7 @@ func (c *Client) findDownloadIDByFilename(ctx context.Context, filename string) 
 }
 
 // GetDownloads returns all tracked downloads for this source.
-func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, error) {
+func (c *Client) GetDownloads(ctx context.Context) ([]download.Record, error) {
 	// Refresh from slskd API.
 	resp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil)
 	if err != nil {
@@ -298,7 +298,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 		// Return cached records if API fails.
 		c.downloadsMu.RLock()
 		defer c.downloadsMu.RUnlock()
-		out := make([]domain.DownloadRecord, 0, len(c.downloads))
+		out := make([]download.Record, 0, len(c.downloads))
 		for _, r := range c.downloads {
 			out = append(out, *r)
 		}
@@ -318,7 +318,7 @@ func (c *Client) GetDownloads(ctx context.Context) ([]domain.DownloadRecord, err
 // GetDownloadStatus returns a single download's status.
 // Tries username-based endpoint first (works for all states), falls back
 // to ID-only endpoint, then list endpoint as last resort.
-func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*domain.DownloadRecord, error) {
+func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*download.Record, error) {
 	// Try username-based endpoint first — it returns the full record for all
 	// download states unlike the ID-only endpoint which 404s for completed
 	// transfers.
@@ -368,7 +368,7 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dom
 
 // trySingleEndpoint fetches a single download record from the given slskd API
 // endpoint and parses the flat JSON object response.
-func (c *Client) trySingleEndpoint(ctx context.Context, endpoint, downloadID string) (*domain.DownloadRecord, error) {
+func (c *Client) trySingleEndpoint(ctx context.Context, endpoint, downloadID string) (*download.Record, error) {
 	resp, err := c.doRequest(ctx, http.MethodGet, endpoint, nil)
 	if err != nil {
 		return nil, err
@@ -382,7 +382,7 @@ func (c *Client) trySingleEndpoint(ctx context.Context, endpoint, downloadID str
 }
 
 // cacheRecord stores a download record in the in-memory cache.
-func (c *Client) cacheRecord(r *domain.DownloadRecord) {
+func (c *Client) cacheRecord(r *download.Record) {
 	c.downloadsMu.Lock()
 	c.downloads[r.ID] = r
 	c.downloadsMu.Unlock()
@@ -467,7 +467,7 @@ func (c *Client) GetProgress(ctx context.Context, downloadID string) (*download.
 
 // GetStatus returns the current state of a tracked download.
 // Implements download.MonitoredProvider.
-func (c *Client) GetStatus(ctx context.Context, providerID string) (*domain.DownloadRecord, error) {
+func (c *Client) GetStatus(ctx context.Context, providerID string) (*download.Record, error) {
 	return c.GetDownloadStatus(ctx, providerID)
 }
 
@@ -803,7 +803,7 @@ func extractAlbumPath(filename string) string {
 
 // parseSingleDownload parses a single download record from the slskd
 // single-download endpoint (flat JSON object, not wrapped in user/directory).
-func parseSingleDownload(raw json.RawMessage, downloadPath string, log *slog.Logger) *domain.DownloadRecord {
+func parseSingleDownload(raw json.RawMessage, downloadPath string, log *slog.Logger) *download.Record {
 	var f struct {
 		ID               string  `json:"id"`
 		Filename         string  `json:"filename"`
@@ -827,7 +827,7 @@ func parseSingleDownload(raw json.RawMessage, downloadPath string, log *slog.Log
 		filePath = filepath.Join(downloadPath, slskdOutputPath(normalizedFilename))
 	}
 
-	return &domain.DownloadRecord{
+	return &download.Record{
 		ID:          f.ID,
 		SourceName:  pluginName,
 		Filename:    normalizedFilename,
@@ -853,7 +853,7 @@ func slskdOutputPath(filename string) string {
 	return filename
 }
 
-func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Logger) []domain.DownloadRecord {
+func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Logger) []download.Record {
 	var users []struct {
 		Username    string `json:"username"`
 		Directories []struct {
@@ -874,7 +874,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Log
 		return nil
 	}
 
-	var records []domain.DownloadRecord
+	var records []download.Record
 	for _, user := range users {
 		for _, dir := range user.Directories {
 			for _, f := range dir.Files {
@@ -884,7 +884,7 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Log
 				if normalizedFilename != "" && downloadPath != "" {
 					filePath = filepath.Join(downloadPath, slskdOutputPath(normalizedFilename))
 				}
-				records = append(records, domain.DownloadRecord{
+				records = append(records, download.Record{
 					ID:          f.ID,
 					SourceName:  pluginName,
 					Filename:    normalizedFilename,
@@ -902,19 +902,19 @@ func parseDownloadStatus(raw json.RawMessage, downloadPath string, log *slog.Log
 }
 
 // parseState maps slskd's download state strings to canonical domain states.
-func parseState(s string) domain.DownloadState {
+func parseState(s string) download.State {
 	lower := strings.ToLower(s)
 	switch {
 	case strings.Contains(lower, "errored") || strings.Contains(lower, "failed") || strings.Contains(lower, "rejected"):
-		return domain.DownloadFailed
+		return download.StateFailed
 	case strings.Contains(lower, "cancelled") || strings.Contains(lower, "canceled") || strings.Contains(lower, "aborted"):
-		return domain.DownloadIgnored
+		return download.StateIgnored
 	case strings.Contains(lower, "completed") || strings.Contains(lower, "succeeded"):
-		return domain.DownloadImported
+		return download.StateImported
 	case strings.Contains(lower, "initializing") || strings.Contains(lower, "queued"):
-		return domain.DownloadQueued
+		return download.StateQueued
 	default:
-		return domain.DownloadDownloading
+		return download.StateDownloading
 	}
 }
 

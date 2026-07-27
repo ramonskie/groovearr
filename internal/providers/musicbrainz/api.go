@@ -44,24 +44,24 @@ type ReleaseInfo struct {
 
 // ReleaseTrack represents a single track within a release lookup.
 type ReleaseTrack struct {
-	Number  string
-	Title   string
-	Length  int64  // milliseconds
-	ISRCs   []string
+	Number string
+	Title  string
+	Length int64 // milliseconds
+	ISRCs  []string
 }
 
 // ─── API client ────────────────────────────────────────────────────────
 
 // apiClient provides access to the MusicBrainz public API.
 type apiClient struct {
-	cfg         MusicBrainzConfig
-	httpClient  *http.Client
-	userAgent   string
-	baseURL     string // configurable for testing
-	log         *slog.Logger
+	cfg        MusicBrainzConfig
+	httpClient *http.Client
+	userAgent  string
+	baseURL    string // configurable for testing
+	log        *slog.Logger
 
-	mu         sync.Mutex
-	lastCall   time.Time
+	mu          sync.Mutex
+	lastCall    time.Time
 	minInterval time.Duration
 }
 
@@ -229,8 +229,8 @@ func pickMostFrequent(counts map[string]int) string {
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
 func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
 	data, err := c.apiGet(ctx, "/release/"+mbid, map[string]string{
-		"inc":  "recordings+isrcs+labels+genres+artist-credits",
-		"fmt":  "json",
+		"inc": "recordings+isrcs+labels+genres+artist-credits",
+		"fmt": "json",
 	})
 	if err != nil {
 		c.log.Error("musicbrainz lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
@@ -241,10 +241,10 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 	}
 
 	var resp struct {
-		ID      string `json:"id"`
-		Title   string `json:"title"`
-		Date    string `json:"date"`
-		Country string `json:"country"`
+		ID           string `json:"id"`
+		Title        string `json:"title"`
+		Date         string `json:"date"`
+		Country      string `json:"country"`
 		ReleaseGroup struct {
 			ID string `json:"id"`
 		} `json:"release-group"`
