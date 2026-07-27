@@ -196,6 +196,15 @@ func main() {
 	// downloads (e.g., expired tokens) and re-attempts resolution.
 	playlistSvc.StartRetryWorker(bgCtx, 1*time.Minute)
 
+	// Start playlist auto-sync worker — periodically syncs playlists with
+	// AutoSync=true against their upstream source, downloading newly added tracks.
+	// Configurable via library.playlist_auto_sync_mins (0 or nil = disabled, set to 5+).
+	if syncMins := currentCfg.Library.PlaylistAutoSyncMins; syncMins != nil && *syncMins >= 5 {
+		playlistSvc.StartAutoSyncWorker(bgCtx, time.Duration(*syncMins)*time.Minute)
+	} else {
+		mainLog.Info("playlist auto-sync disabled (set library.playlist_auto_sync_mins to 5+ to enable)", "component", "main")
+	}
+
 	// Start monitoring service — recovers orphans, resolves pending sources,
 	// and starts the main polling loop for downloads at 1-second intervals.
 	monitor.Start(bgCtx)

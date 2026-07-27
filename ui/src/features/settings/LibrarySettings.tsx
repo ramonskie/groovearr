@@ -125,6 +125,24 @@ export default function LibrarySettings() {
           </FormGroup>
         </div>
       </Card>
+
+      <Card title="Playlist Auto-Sync">
+        <FormGroup
+          label="Sync Interval (minutes)"
+          htmlFor="playlist_auto_sync_mins"
+          hint="How often to check playlists with auto-sync enabled for new tracks from upstream. Set to 0 to disable background syncing."
+          error={errors.playlist_auto_sync_mins?.message}
+        >
+          <input
+            id="playlist_auto_sync_mins"
+            type="number"
+            min={0}
+            placeholder="30"
+            {...register("playlist_auto_sync_mins")}
+            className="w-full rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-white placeholder:text-slate-500 focus:border-purple-500 focus:outline-none focus:ring-1 focus:ring-purple-500"
+          />
+        </FormGroup>
+      </Card>
     </div>
   );
 }

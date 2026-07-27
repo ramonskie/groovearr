@@ -9,6 +9,7 @@ import {
   downloadMissing,
   syncPlaylist,
   deletePlaylist,
+  updatePlaylist,
 } from "../api/client";
 import { useDownloadStore } from "../stores/download-poll";
 import type {
@@ -129,6 +130,22 @@ export function useDeletePlaylist() {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (playlistId: number) => deletePlaylist(playlistId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["playlists"] });
+    },
+  });
+}
+
+export function useUpdatePlaylist() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({
+      playlistId,
+      patch,
+    }: {
+      playlistId: number;
+      patch: { auto_sync?: boolean; sync_mode?: string };
+    }) => updatePlaylist(playlistId, patch),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["playlists"] });
     },

@@ -1,9 +1,9 @@
 import { useState, type FC } from "react";
-import { RefreshCw, Download, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown } from "lucide-react";
+import { RefreshCw, Download, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown, Repeat } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { Playlist, PlaylistTrackDownloadStatus } from "../../api/types";
-import { useSyncPlaylist, useDownloadMissing, usePlaylist, useDeletePlaylist } from "../../hooks/use-playlists";
+import { useSyncPlaylist, useDownloadMissing, usePlaylist, useDeletePlaylist, useUpdatePlaylist } from "../../hooks/use-playlists";
 import { useSources } from "../../hooks/use-config";
 import { getProviderIcon } from "../settings/providerIcons";
 import Button from "../../components/Button";
@@ -31,6 +31,7 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
   const syncMutation = useSyncPlaylist();
   const downloadMissingMutation = useDownloadMissing();
   const deleteMutation = useDeletePlaylist();
+  const updateMutation = useUpdatePlaylist();
   const { data: sources } = useSources();
 
   const { data: trackData, isLoading: tracksLoading } = usePlaylist(
@@ -80,6 +81,18 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
     });
   };
 
+  const handleToggleAutoSync = (e: React.MouseEvent) => {
+    e.stopPropagation();
+    const enable = !playlist.auto_sync;
+    updateMutation.mutate(
+      { playlistId: playlist.id, patch: { auto_sync: enable } },
+      {
+        onSuccess: () => toast.success(enable ? `Auto-sync enabled for "${playlist.name}"` : `Auto-sync disabled for "${playlist.name}"`),
+        onError: (err) => toast.error(err instanceof Error ? err.message : "Failed to update playlist"),
+      },
+    );
+  };
+
   const tracks = trackData?.tracks ?? [];
 
   return (
@@ -120,6 +133,9 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-xs text-slate-400">{playlist.track_count} tracks</span>
+            {playlist.sync_mode === "append" && (
+              <Badge variant="muted">append</Badge>
+            )}
             {isSynced ? (
               <Badge variant="success"><Check size={10} className="mr-0.5" />Synced</Badge>
             ) : (
@@ -138,6 +154,15 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
           </Button>
           <Button variant="ghost" size="sm" onClick={handleDelete} title="Remove playlist" loading={confirmDelete && deleteMutation.isPending}>
             <Trash2 size={14} className={confirmDelete ? "text-red-500" : "text-red-400"} />
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={handleToggleAutoSync}
+            title={playlist.auto_sync ? "Auto-sync enabled — click to disable" : "Auto-sync disabled — click to enable"}
+            loading={updateMutation.isPending}
+          >
+            <Repeat size={14} className={playlist.auto_sync ? "text-green-400" : "text-slate-500"} />
           </Button>
           <ChevronDown size={16} className={`text-slate-500 transition-transform ${expanded ? "rotate-180" : ""}`} />
         </div>

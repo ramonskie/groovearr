@@ -119,6 +119,7 @@ func (s *Store) migrate() error {
 			owner_name         TEXT,
 			is_public          INTEGER DEFAULT 1,
 			auto_sync          INTEGER DEFAULT 0,
+			sync_mode          TEXT DEFAULT 'mirror',
 			synced_at          TEXT,
 			created_at         TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
@@ -242,6 +243,25 @@ func (s *Store) migrate() error {
 
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("schema: commit: %w", err)
+	}
+
+	// Run idempotent migrations outside the main transaction. ALTER TABLE
+	// ADD COLUMN in SQLite fails if the column already exists — we tolerate
+	// that error to support upgrades from databases created before the column
+	// was added.
+	migrations := []string{
+		`ALTER TABLE playlists ADD COLUMN sync_mode TEXT DEFAULT 'mirror'`,
+		`UPDATE playlists SET sync_mode='mirror' WHERE sync_mode IS NULL OR sync_mode=''`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				s.log.Debug("migration already applied", "stmt", stmt, "component", "lib_store")
+			} else {
+				s.log.Error("migration failed", "stmt", stmt, "error", err, "component", "lib_store")
+				return fmt.Errorf("migration %q: %w", stmt, err)
+			}
+		}
 	}
 
 	return nil
@@ -790,14 +810,18 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 	if p.AutoSync {
 		autoSync = 1
 	}
+	syncMode := string(p.SyncMode)
+	if syncMode == "" {
+		syncMode = "mirror"
+	}
 
 	if p.ID != 0 {
 		_, err := s.db.ExecContext(ctx, `
 			UPDATE playlists SET name=?, description=?, track_count=?, cover_url=?,
-			owner_name=?, is_public=?, auto_sync=?, synced_at=?, updated_at=?
+			owner_name=?, is_public=?, auto_sync=?, sync_mode=?, synced_at=?, updated_at=?
 			WHERE id=?`,
 			p.Name, p.Description, p.TrackCount, p.CoverURL,
-			p.OwnerName, boolToInt(p.IsPublic), autoSync, p.SyncedAt, now, p.ID,
+			p.OwnerName, boolToInt(p.IsPublic), autoSync, syncMode, p.SyncedAt, now, p.ID,
 		)
 		if err != nil {
 			s.log.Error("upsert playlist update failed", "error", err, "component", "lib_store")
@@ -807,11 +831,11 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO playlists (source, source_playlist_id, name, description,
-			track_count, cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			track_count, cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Source, p.SourcePlaylistID, p.Name, p.Description,
 		p.TrackCount, p.CoverURL, p.OwnerName, boolToInt(p.IsPublic), autoSync,
-		p.SyncedAt, now, now,
+		syncMode, p.SyncedAt, now, now,
 	)
 	if err != nil {
 		s.log.Error("upsert playlist insert failed", "error", err, "component", "lib_store")
@@ -837,12 +861,13 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 func (s *Store) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
 	p := &domain.Playlist{}
 	var autoSync int
+	var syncMode string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
 		FROM playlists WHERE id=?`, id,
 	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
-		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
 		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -851,19 +876,21 @@ func (s *Store) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, er
 		s.log.Error("get playlist failed", "error", err, "component", "lib_store")
 	}
 	p.AutoSync = autoSync != 0
+	p.SyncMode = domain.SyncMode(syncMode)
 	return p, err
 }
 
 func (s *Store) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) {
 	p := &domain.Playlist{}
 	var autoSync int
+	var syncMode string
 	err := s.db.QueryRowContext(ctx, `
 		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
 		FROM playlists WHERE source=? AND source_playlist_id=?`,
 		source, sourceID,
 	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
-		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
 		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -872,13 +899,14 @@ func (s *Store) GetPlaylistBySourceID(ctx context.Context, source, sourceID stri
 		s.log.Error("get playlist by source ID failed", "error", err, "component", "lib_store")
 	}
 	p.AutoSync = autoSync != 0
+	p.SyncMode = domain.SyncMode(syncMode)
 	return p, err
 }
 
 func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, synced_at, created_at, updated_at
+			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
 		FROM playlists ORDER BY created_at DESC`)
 	if err != nil {
 		s.log.Error("list playlists failed", "error", err, "component", "lib_store")
@@ -890,13 +918,15 @@ func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
 	for rows.Next() {
 		var p domain.Playlist
 		var autoSync int
+		var syncMode string
 		if err := rows.Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
-			&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync,
+			&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
 			&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
 			s.log.Error("list playlists scan failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		p.AutoSync = autoSync != 0
+		p.SyncMode = domain.SyncMode(syncMode)
 		out = append(out, p)
 	}
 	return out, rows.Err()

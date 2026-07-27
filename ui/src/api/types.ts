@@ -33,6 +33,7 @@ export interface LibraryConfig {
   folder_template: string;
   playlist_path: string;
   playlist_template: string;
+  playlist_auto_sync_mins: number | null;
 }
 
 export interface AuthConfig {
@@ -494,6 +495,7 @@ export interface Playlist {
   is_public: boolean;
   synced_at?: string;
   auto_sync: boolean;
+  sync_mode: string;
   created_at: string;
   updated_at: string;
 }
@@ -539,6 +541,7 @@ export interface SourcePlaylistItem {
 export interface ImportPlaylistRequest {
   source: string;
   playlist_id: string;
+  sync_mode?: string;
 }
 
 export interface ImportPlaylistResponse {

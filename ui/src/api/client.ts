@@ -295,6 +295,16 @@ export function deletePlaylist(
   );
 }
 
+export function updatePlaylist(
+  playlistId: number,
+  patch: { auto_sync?: boolean; sync_mode?: string },
+): Promise<Playlist> {
+  return request<Playlist>(`/api/playlists/${playlistId}`, {
+    method: "PATCH",
+    body: JSON.stringify(patch),
+  });
+}
+
 // ─── Discovery ────────────────────────────────────────────────────
 
 export function getDiscoveryProviders() {

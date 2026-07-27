@@ -22,12 +22,13 @@ type Config struct {
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	DownloadPath       string `json:"download_path"`        // download staging directory
-	LibraryPath        string `json:"library_path"`         // where organized downloads end up
-	FolderTemplate     string `json:"folder_template"`      // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
-	PlaylistPath       string `json:"playlist_path"`        // separate folder for playlist downloads
-	PlaylistTemplate   string `json:"playlist_template"`    // e.g. "{position:02d} {artist} - {title}"
-	MaxDownloadWorkers int    `json:"max_download_workers"` // concurrent download workers (default 3)
+	DownloadPath          string `json:"download_path"`           // download staging directory
+	LibraryPath           string `json:"library_path"`            // where organized downloads end up
+	FolderTemplate        string `json:"folder_template"`         // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	PlaylistPath          string `json:"playlist_path"`           // separate folder for playlist downloads
+	PlaylistTemplate      string `json:"playlist_template"`       // e.g. "{position:02d} {artist} - {title}"
+	MaxDownloadWorkers    int    `json:"max_download_workers"`    // concurrent download workers (default 3)
+	PlaylistAutoSyncMins  *int   `json:"playlist_auto_sync_mins"` // interval for auto-sync (nil/0 = disabled, default 30)
 }
 
 // AuthConfig holds authentication settings.
@@ -48,6 +49,8 @@ type AuthConfig struct {
 
 var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 
+func intPtr(v int) *int { return &v }
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
@@ -55,12 +58,13 @@ func DefaultConfig() Config {
 		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder: []string{"soulseek", "deezer"},
 		Library: LibraryConfig{
-			DownloadPath:       "./downloads",
-			LibraryPath:        "./music",
-			FolderTemplate:     "{artist}/{album} ({year})/{track:02d} - {title}",
-			PlaylistPath:       "./playlists",
-			MaxDownloadWorkers: 3,
-			PlaylistTemplate:   "{position:02d} {artist} - {title}",
+			DownloadPath:         "./downloads",
+			LibraryPath:          "./music",
+			FolderTemplate:       "{artist}/{album} ({year})/{track:02d} - {title}",
+			PlaylistPath:         "./playlists",
+			MaxDownloadWorkers:   3,
+			PlaylistTemplate:     "{position:02d} {artist} - {title}",
+			PlaylistAutoSyncMins: intPtr(30),
 		},
 	}
 }
@@ -86,6 +90,9 @@ func (c Config) Validate() []string {
 	}
 	if c.Library.LibraryPath != "" && strings.Contains(c.Library.LibraryPath, "\x00") {
 		errs = append(errs, "library.library_path: contains null bytes")
+	}
+	if c.Library.PlaylistAutoSyncMins != nil && *c.Library.PlaylistAutoSyncMins > 0 && *c.Library.PlaylistAutoSyncMins < 5 {
+		errs = append(errs, "library.playlist_auto_sync_mins: minimum 5 minutes (or 0 to disable)")
 	}
 
 	// Auth.
@@ -139,6 +146,12 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Library.MaxDownloadWorkers > 0 {
 		c.Library.MaxDownloadWorkers = partial.Library.MaxDownloadWorkers
+	}
+	if partial.Library.PlaylistAutoSyncMins != nil {
+		v := *partial.Library.PlaylistAutoSyncMins
+		if c.Library.PlaylistAutoSyncMins == nil || v != *c.Library.PlaylistAutoSyncMins {
+			c.Library.PlaylistAutoSyncMins = &v
+		}
 	}
 
 	// Auth — preserve password if partial has a masked (asterisk) value.

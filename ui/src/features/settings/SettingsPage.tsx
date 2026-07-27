@@ -75,6 +75,7 @@ export default function SettingsPage() {
         folder_template: config.library.folder_template ?? "",
         playlist_path: config.library.playlist_path ?? "",
         playlist_template: config.library.playlist_template ?? "",
+        playlist_auto_sync_mins: config.library.playlist_auto_sync_mins ?? undefined,
         auth_method: (config.auth?.method || "none") as "none" | "forms",
         auth_username: config.auth?.username ?? "",
         auth_password: "",
@@ -121,6 +122,7 @@ export default function SettingsPage() {
           folder_template: values.folder_template ?? "",
           playlist_path: values.playlist_path ?? "",
           playlist_template: values.playlist_template ?? "",
+          playlist_auto_sync_mins: values.playlist_auto_sync_mins,
         },
         auth: {
           method: values.auth_method ?? "none",

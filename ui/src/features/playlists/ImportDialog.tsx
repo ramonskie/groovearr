@@ -7,6 +7,8 @@ import { useSources } from "../../hooks/use-config";
 import type { ImportPattern } from "../../api/types";
 import Button from "../../components/Button";
 
+type SyncMode = "mirror" | "append";
+
 interface ImportDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
@@ -52,6 +54,7 @@ function parsePlaylistURL(input: string, patterns: ReturnType<typeof collectPatt
 
 const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
   const [input, setInput] = useState("");
+  const [syncMode, setSyncMode] = useState<SyncMode>("mirror");
   const importMutation = useImportPlaylist();
   const { data: sources } = useSources();
 
@@ -71,7 +74,7 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
       return;
     }
     importMutation.mutate(
-      { source: parsed.source, playlist_id: parsed.id },
+      { source: parsed.source, playlist_id: parsed.id, sync_mode: syncMode },
       {
         onSuccess: (data) => {
           toast.success(`Imported "${data.playlist.name}" with ${data.linked} linked tracks`);
@@ -122,6 +125,39 @@ const ImportDialog: FC<ImportDialogProps> = ({ open, onOpenChange }) => {
             />
             <p className="mt-1.5 text-xs text-slate-600">
               Paste a playlist URL from {sourceLabels}.
+            </p>
+          </div>
+
+          <div className="mb-4">
+            <label className="mb-1.5 block text-sm text-slate-400">
+              Sync Mode
+            </label>
+            <div className="flex gap-2">
+              {(["mirror", "append"] as SyncMode[]).map((mode) => (
+                <label
+                  key={mode}
+                  className={`flex-1 cursor-pointer rounded-lg border px-3 py-2 text-center text-sm transition ${
+                    syncMode === mode
+                      ? "border-purple-500 bg-purple-500/10 text-purple-300"
+                      : "border-slate-700 bg-slate-800 text-slate-400 hover:border-slate-600"
+                  }`}
+                >
+                  <input
+                    type="radio"
+                    name="syncMode"
+                    value={mode}
+                    checked={syncMode === mode}
+                    onChange={() => setSyncMode(mode)}
+                    className="sr-only"
+                  />
+                  {mode === "mirror" ? "Mirror" : "Append"}
+                </label>
+              ))}
+            </div>
+            <p className="mt-1 text-xs text-slate-600">
+              {syncMode === "mirror"
+                ? "Remove local files when tracks are removed from the source playlist."
+                : "Only add new tracks — never delete existing files."}
             </p>
           </div>
 

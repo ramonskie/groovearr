@@ -141,6 +141,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/playlists/sources/{source}", s.handlePlaylistSourceBrowse)
 	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
 	mux.HandleFunc("GET /api/playlists/{id}", s.handleGetPlaylist)
+	mux.HandleFunc("PATCH /api/playlists/{id}", s.handleUpdatePlaylist)
 	mux.Handle("POST /api/playlists/import", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleImportPlaylist)))
 	mux.Handle("POST /api/playlists/{id}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadMissing)))
 	mux.Handle("POST /api/playlists/{id}/sync", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleSyncPlaylist)))
@@ -260,7 +261,7 @@ func RequestIDFromCtx(ctx context.Context) string {
 func withCORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Api-Key")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)
@@ -1474,6 +1475,7 @@ func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Source     string `json:"source"`
 		PlaylistID string `json:"playlist_id"`
+		SyncMode   string `json:"sync_mode"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, err)
@@ -1483,8 +1485,12 @@ func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, fmt.Errorf("source and playlist_id required"))
 		return
 	}
+	if req.SyncMode != "" && req.SyncMode != "mirror" && req.SyncMode != "append" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("sync_mode must be 'mirror' or 'append'"))
+		return
+	}
 
-	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID)
+	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID, req.SyncMode)
 	if err != nil {
 		s.log.Error("playlist import failed", "source", req.Source, "playlist_id", req.PlaylistID, "error", err, "component", "api")
 		writeError(w, http.StatusInternalServerError, err)
@@ -1537,6 +1543,58 @@ func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "syncing"})
+}
+
+func (s *Server) handleUpdatePlaylist(w http.ResponseWriter, r *http.Request) {
+	idStr := r.PathValue("id")
+	id, err := strconv.ParseInt(idStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid playlist ID"))
+		return
+	}
+	var req struct {
+		AutoSync *bool   `json:"auto_sync"`
+		SyncMode *string `json:"sync_mode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.SyncMode != nil && *req.SyncMode != "mirror" && *req.SyncMode != "append" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("sync_mode must be 'mirror' or 'append'"))
+		return
+	}
+
+	ctx := r.Context()
+	p, err := s.store.GetPlaylist(ctx, id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if p == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("playlist not found"))
+		return
+	}
+	if req.AutoSync != nil {
+		p.AutoSync = *req.AutoSync
+	}
+	if req.SyncMode != nil {
+		p.SyncMode = domain.SyncMode(*req.SyncMode)
+	}
+	// Skip upsert if nothing changed — avoids needless UpdatedAt bump.
+	if req.AutoSync == nil && req.SyncMode == nil {
+		writeJSON(w, http.StatusOK, p)
+		return
+	}
+	if _, err := s.store.UpsertPlaylist(ctx, p); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	// Re-read to get fresh UpdatedAt set by the store.
+	if updated, err := s.store.GetPlaylist(ctx, id); err == nil && updated != nil {
+		p = updated
+	}
+	writeJSON(w, http.StatusOK, p)
 }
 
 func (s *Server) handleDeletePlaylist(w http.ResponseWriter, r *http.Request) {

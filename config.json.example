@@ -27,7 +27,8 @@
     "library_path": "./music",
     "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}",
     "playlist_path": "./playlists",
-    "playlist_template": "{position:02d} {artist} - {title}"
+    "playlist_template": "{position:02d} {artist} - {title}",
+    "playlist_auto_sync_mins": 30
   },
   "quality": {
     "preferred_format": "flac",

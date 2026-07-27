@@ -168,7 +168,7 @@ Scheduled background tasks for hands-off operation.
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
 | 63 | **Automation engine** — cron-like scheduler for background tasks | 🟡 Medium | L | Task queue |
-| 64 | **Playlist auto-sync** — scheduled playlist refresh + download | 🟡 Medium | M | Automation + playlists |
+| 64 | **Playlist auto-sync** — scheduled refresh of playlists with `AutoSync=true`. Background goroutine runs on configurable interval (default 30 min), re-links tracks against upstream source, rebuilds playlist folder. New tracks stay unmatched until manually downloaded. | ✅ Done | M | Playlist service |
 | 65 | **Watchlist auto-scan** — scheduled watchlist check for new releases | 🟡 Medium | M | Automation + watchlist |
 | 66 | **Wishlist auto-process** — scheduled retry of failed downloads | 🟡 Medium | M | Automation + wishlist |
 | 67 | **Library auto-scan** — scheduled filesystem scan for new/missing files | 🟡 Medium | S | Automation + scanner |
@@ -209,9 +209,9 @@ Deployment, security, and operational concerns.
 | 3 | Library & Media Servers | 7 features | ❌ 0/7 |
 | 4 | Playlists & Discovery | 10 features | 🟡 4 done, 6 remaining |
 | 5 | Metadata Enrichment | 5 features | 🟡 1/5 (Discogs done) |
-| 6 | Automation | 7 features | ❌ 0/7 |
+| 6 | Automation | 7 features | 🟡 1/7 (auto-sync done) |
 | 7 | Platform & Ops | 12 features | 🟡 2/12 (70,71 done; 72-81 remain) |
-| **Total** | | **85 features** | **43 done, 42 remaining** |
+| **Total** | | **85 features** | **44 done, 41 remaining** |
 
 ## Known Bugs
 

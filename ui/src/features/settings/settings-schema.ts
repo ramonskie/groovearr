@@ -43,6 +43,15 @@ export function buildFormSchema(sources: SourceInfo[]) {
     folder_template: z.string().optional(),
     playlist_path: z.string().optional(),
     playlist_template: z.string().optional(),
+    playlist_auto_sync_mins: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : Number(v)),
+      z
+        .number()
+        .int()
+        .min(0, "Must be 0 or greater")
+        .refine((v) => v === 0 || v >= 5, "Must be 0 (disabled) or at least 5 minutes")
+        .optional(),
+    ),
 
     // Auth (Security)
     auth_method: z.enum(["none", "forms"]).optional(),
@@ -80,6 +89,7 @@ export function buildDefaults(sources: SourceInfo[]) {
     folder_template: "",
     playlist_path: "",
     playlist_template: "",
+    playlist_auto_sync_mins: undefined as number | undefined,
     auth_method: "none" as const,
     auth_username: "",
     auth_password: "",

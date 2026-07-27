@@ -17,6 +17,7 @@ export interface ConfigCache {
     folder_template: string;
     playlist_path: string;
     playlist_template: string;
+    playlist_auto_sync_mins: number | null;
   };
 }
 

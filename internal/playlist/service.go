@@ -36,6 +36,7 @@ type Service struct {
 	qualityProfileStore quality.ProfileStore
 	syncMu              sync.Mutex
 	syncing             map[int64]bool // playlistIDs currently being synced
+	autoSyncSem         chan struct{}  // limits concurrent auto-sync goroutines (capacity 3)
 }
 
 // pendingItem pairs a queued download record with its source playlist track
@@ -61,6 +62,7 @@ func NewService(srcReg *Registry, store library.Store, downloadReg *download.Reg
 		log:                 logger,
 		qualityProfileStore: qualityProfileStore,
 		syncing:             make(map[int64]bool),
+		autoSyncSem:         make(chan struct{}, 3),
 	}
 }
 
@@ -133,7 +135,10 @@ type ImportResult struct {
 // ImportPlaylist imports a playlist from a source: saves tracks and links existing library matches.
 // Imports playlist metadata and tracks from a source.
 // On first import, unmatched tracks are automatically queued for download.
-func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string) (*ImportResult, error) {
+func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string, syncMode string) (*ImportResult, error) {
+	if syncMode == "" {
+		syncMode = "mirror"
+	}
 	src := s.srcReg.Get(sourceName)
 	if src == nil {
 		return nil, fmt.Errorf("playlist source %q not found", sourceName)
@@ -151,7 +156,7 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 		playlists = nil
 	}
 
-	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos))
+	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos), syncMode)
 	if err != nil {
 		return nil, err
 	}
@@ -625,30 +630,35 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 
 	s.log.Info("folder built", "name", playlist.Name, "tracks", written, "component", "playlist")
 
-	// Clean up orphaned files from old positions.
-	keepFiles := make(map[string]bool)
-	for _, pt := range tracks {
-		if pt.TrackID == nil {
-			continue
-		}
-		track, _ := s.store.GetTrack(ctx, *pt.TrackID)
-		if track == nil {
-			continue
-		}
-		ext := strings.TrimPrefix(filepath.Ext(track.FilePath), ".")
-		destPath := renamer.ResolvePath(pt.Position, pt.Artist, pt.Title, ext)
-		if destPath != "" {
-			keepFiles[filepath.Base(destPath)] = true
-		}
-	}
-	entries, _ := os.ReadDir(playlistDir)
-	for _, e := range entries {
-		if !e.IsDir() && !keepFiles[e.Name()] {
-			path := filepath.Join(playlistDir, e.Name())
-			if err := os.Remove(path); err == nil {
-				s.log.Info("removed orphaned file", "file", e.Name(), "component", "playlist")
+	// Clean up orphaned files from old positions (mirror mode only).
+	// Empty/unset SyncMode defaults to mirror for backward compatibility.
+	if playlist.SyncMode == "" || playlist.SyncMode == domain.SyncModeMirror {
+		keepFiles := make(map[string]bool)
+		for _, pt := range tracks {
+			if pt.TrackID == nil {
+				continue
+			}
+			track, _ := s.store.GetTrack(ctx, *pt.TrackID)
+			if track == nil {
+				continue
+			}
+			ext := strings.TrimPrefix(filepath.Ext(track.FilePath), ".")
+			destPath := renamer.ResolvePath(pt.Position, pt.Artist, pt.Title, ext)
+			if destPath != "" {
+				keepFiles[filepath.Base(destPath)] = true
 			}
 		}
+		entries, _ := os.ReadDir(playlistDir)
+		for _, e := range entries {
+			if !e.IsDir() && !keepFiles[e.Name()] {
+				path := filepath.Join(playlistDir, e.Name())
+				if err := os.Remove(path); err == nil {
+					s.log.Info("removed orphaned file", "file", e.Name(), "component", "playlist")
+				}
+			}
+		}
+	} else {
+		s.log.Info("skipping orphan cleanup (sync_mode=append)", "name", playlist.Name, "component", "playlist")
 	}
 }
 
@@ -690,10 +700,15 @@ func (s *Service) waitForDownloads(ctx context.Context) error {
 }
 
 // upsertPlaylist finds or creates a playlist record.
-func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int) (*domain.Playlist, error) {
+func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int, syncMode string) (*domain.Playlist, error) {
 	existing, _ := s.store.GetPlaylistBySourceID(ctx, source, sourceID)
 	if existing != nil {
 		existing.TrackCount = trackCount
+		// Only update SyncMode if caller explicitly set it — re-imports
+		// that don't specify a mode preserve the existing choice.
+		if syncMode != "" {
+			existing.SyncMode = domain.SyncMode(syncMode)
+		}
 		if _, err := s.store.UpsertPlaylist(ctx, existing); err != nil {
 			return nil, err
 		}
@@ -726,13 +741,19 @@ func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceNa
 		CoverURL:         cover,
 		OwnerName:        owner,
 		IsPublic:         true,
+		SyncMode:         domain.SyncMode(syncMode),
 	}
 	id, err := s.store.UpsertPlaylist(ctx, p)
 	if err != nil {
 		return nil, err
 	}
-	p.ID = id
-	return p, nil
+	// Re-read to get store defaults (SyncMode resolved to "mirror", UpdatedAt, etc.)
+	created, err := s.store.GetPlaylist(ctx, id)
+	if err != nil || created == nil {
+		p.ID = id
+		return p, nil
+	}
+	return created, nil
 }
 
 // findInLibrary searches the library for a matching track.
@@ -941,6 +962,86 @@ func (s *Service) retryPendingDownloads(ctx context.Context) {
 	}
 	if retried > 0 {
 		s.log.Info("pending retry worker: retried", "count", retried, "component", "playlist")
+	}
+}
+
+// ─── Auto-sync worker ──────────────────────────────────────────────────
+
+// StartAutoSyncWorker runs a periodic goroutine that syncs all playlists
+// with AutoSync=true against their upstream source. Runs until ctx is
+// cancelled. Uses per-playlist mutex via syncPlaylistGuarded to prevent
+// overlapping syncs.
+func (s *Service) StartAutoSyncWorker(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = 30 * time.Minute
+	}
+	s.log.Info("auto-sync worker started", "interval", interval, "component", "playlist")
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				s.log.Error("auto-sync worker panicked", "panic", r, "component", "playlist")
+			}
+		}()
+		timer := time.NewTimer(interval)
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				s.log.Info("auto-sync worker stopped", "component", "playlist")
+				return
+			case <-timer.C:
+				s.syncAutoPlaylists(ctx)
+				timer.Reset(interval)
+			}
+		}
+	}()
+}
+
+// syncAutoPlaylists lists all playlists with AutoSync=true and triggers a
+// sync for each. Errors are logged individually — one failing playlist
+// does not block others.
+func (s *Service) syncAutoPlaylists(ctx context.Context) {
+	playlists, err := s.store.ListPlaylists(ctx)
+	if err != nil {
+		s.log.Error("auto-sync: list playlists failed", "error", err, "component", "playlist")
+		return
+	}
+
+	var candidates []domain.Playlist
+	for _, p := range playlists {
+		if p.AutoSync {
+			candidates = append(candidates, p)
+		}
+	}
+	if len(candidates) == 0 {
+		return
+	}
+
+	s.log.Info("auto-sync: checking playlists", "total", len(candidates), "component", "playlist")
+	for _, p := range candidates {
+		if p.Source == "" || p.SourcePlaylistID == "" {
+			s.log.Warn("auto-sync: skipping playlist with no source",
+				"playlist_id", p.ID, "name", p.Name, "component", "playlist")
+			continue
+		}
+		// Fire each sync in its own goroutine so the ticker loop returns
+		// immediately. A semaphore caps concurrent auto-syncs at 3 to avoid
+		// overwhelming upstream APIs. syncPlaylistGuarded has its own
+		// per-playlist mutex to prevent overlapping syncs of the same playlist.
+		go func(pid int64) {
+			defer func() {
+				if r := recover(); r != nil {
+					s.log.Error("auto-sync goroutine panicked", "playlist_id", pid, "panic", r, "component", "playlist")
+				}
+			}()
+			select {
+			case s.autoSyncSem <- struct{}{}:
+				defer func() { <-s.autoSyncSem }()
+			case <-ctx.Done():
+				return
+			}
+			s.syncPlaylistGuarded(pid)
+		}(p.ID)
 	}
 }
 
