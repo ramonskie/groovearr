@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	monitorPollInterval   = 1 * time.Second
-	monitorRetryInterval  = 5 * time.Second
-	monitorRetryTickCount = 5 // run retry scan every N ticks
+	monitorPollInterval        = 1 * time.Second
+	monitorRetryInterval       = 5 * time.Second
+	monitorRetryTickCount      = 5  // run retry scan every N ticks
+	monitorPendingResolveTicks = 10 // run pending-source resolution every N ticks
 )
 
 // monitoredDownload tracks a single download being driven by the monitoring service.
@@ -66,6 +67,9 @@ type MonitoringService struct {
 
 	// ticksSinceRetry counts main-loop ticks for periodic retry scanning.
 	ticksSinceRetry int
+
+	// ticksSincePendingResolve counts ticks for periodic pending-source resolution.
+	ticksSincePendingResolve int
 }
 
 // NewMonitoringService creates a MonitoringService that accepts its dependencies
@@ -164,6 +168,12 @@ func (m *MonitoringService) tick() {
 	if m.ticksSinceRetry >= monitorRetryTickCount {
 		m.ticksSinceRetry = 0
 		m.scanRetry()
+	}
+
+	m.ticksSincePendingResolve++
+	if m.ticksSincePendingResolve >= monitorPendingResolveTicks {
+		m.ticksSincePendingResolve = 0
+		m.resolvePendingSources(m.ctx)
 	}
 }
 

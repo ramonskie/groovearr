@@ -95,27 +95,31 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 
 	// Acquire per-plugin concurrency slot.
 	maxConc := mp.MaxConcurrent()
+	semAcquired := false
 	if maxConc > 0 {
 		sem := m.getSemaphore(plugin.Name(), maxConc)
 		select {
 		case sem <- struct{}{}:
-			// slot acquired — release on completion/failure
+			semAcquired = true
 		default:
 			// Pool full, try again next tick.
 			return
 		}
 	}
+	defer func() {
+		if semAcquired {
+			m.releaseSemaphore(plugin.Name())
+		}
+	}()
 
 	// Transition state atomically: queued → downloading.
 	if ok, err := m.store.TransitionState(m.ctx, downloadID, domain.DownloadQueued, domain.DownloadDownloading); err != nil {
 		m.log.Error("startSingleDownload: transition failed",
 			"download_id", downloadID, "error", err, "component", "monitor")
-		m.releaseSemaphore(plugin.Name())
 		return
 	} else if !ok {
 		m.log.Warn("startSingleDownload: state changed before start, skipping",
 			"download_id", downloadID, "component", "monitor")
-		m.releaseSemaphore(plugin.Name())
 		return
 	}
 
@@ -165,12 +169,14 @@ func (m *MonitoringService) startSingleDownload(rec *domain.DownloadRecord) {
 	if err != nil {
 		m.failRecord(downloadID, domain.DownloadDownloading,
 			fmt.Sprintf("start download for %s: %v", displayName, err))
-		m.releaseSemaphore(plugin.Name())
 		return
 	}
 
 	// Track the mapping.
 	m.addMapping(downloadID, providerID, plugin.Name(), time.Now(), deadline)
+
+	// Slot held until download completes/fails in pollActiveDownloads.
+	semAcquired = false
 
 	m.log.Info("download started",
 		"download_id", downloadID,

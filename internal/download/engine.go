@@ -292,6 +292,18 @@ type Candidate struct {
 	Score      float64
 }
 
+// PopulateDownloadSource resets the source-related fields of a DownloadRecord
+// from a Candidate. Used by both the monitoring retry loop and the download
+// service to unify field population logic.
+func PopulateDownloadSource(rec *domain.DownloadRecord, src string, t domain.TrackResult) {
+	rec.SourceName = src
+	rec.Filename = t.Filename
+	rec.Size = t.Size
+	rec.Bitrate = t.Bitrate
+	rec.Format = t.Quality
+	rec.Username = t.Username
+}
+
 // FilterByProfile applies ranked quality targets to candidates and returns
 // only the best-matching group, sorted by tier score.
 func FilterByProfile(candidates []Candidate, profile *quality.QualityProfile) []Candidate {

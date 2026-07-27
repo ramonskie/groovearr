@@ -451,14 +451,5 @@ func (s *DownloadService) resolveRetrySource(ctx context.Context, rec *domain.Do
 		)
 	}
 
-	rec.SourceName = best.SourceName
-	rec.Filename = best.Track.Filename
-	rec.Size = best.Track.Size
-	rec.Bitrate = best.Track.Bitrate
-	rec.Format = best.Track.Quality
-	if best.Track.Username != "" {
-		rec.Username = best.Track.Username
-	} else {
-		rec.Username = best.SourceName
-	}
+	PopulateDownloadSource(rec, best.SourceName, best.Track)
 }
