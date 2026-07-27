@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/quality"
@@ -33,6 +34,15 @@ func (m *mockPlugin) Search(ctx context.Context, q string) ([]domain.TrackResult
 	}
 	return nil, nil, nil
 }
+
+// MonitoredProvider stubs for retry/search tests.
+func (m *mockPlugin) StartDownload(_ context.Context, _ DownloadMeta) (string, error) { return "", nil }
+func (m *mockPlugin) GetStatus(_ context.Context, _ string) (*domain.DownloadRecord, error) { return nil, nil }
+func (m *mockPlugin) GetProgress(_ context.Context, _ string) (*Progress, error)       { return nil, nil }
+func (m *mockPlugin) Cancel(_ context.Context, _ string, _ bool) error                 { return nil }
+func (m *mockPlugin) ActiveDownloads() []string                                        { return nil }
+func (m *mockPlugin) MaxConcurrent() int                                               { return 0 }
+func (m *mockPlugin) DownloadTimeout() time.Duration                                   { return 0 }
 
 func TestRegistryRegister(t *testing.T) {
 	r := NewRegistry()

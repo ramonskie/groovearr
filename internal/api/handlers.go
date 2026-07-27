@@ -2326,9 +2326,13 @@ func stringSlicesEqual(a, b []string) bool {
 // them after existing order entries for connected providers. Stale entries
 // (disconnected providers) are dropped.
 func connectedNames(plugins []download.Plugin, order []string) []string {
+	// Only include plugins that can actually download (MonitoredProvider),
+	// not metadata/search-only plugins.
 	valid := make(map[string]bool, len(plugins))
 	for _, p := range plugins {
-		valid[p.Name()] = true
+		if _, ok := p.(download.MonitoredProvider); ok {
+			valid[p.Name()] = true
+		}
 	}
 	var merged []string
 	seen := make(map[string]bool)
@@ -2339,7 +2343,7 @@ func connectedNames(plugins []download.Plugin, order []string) []string {
 		}
 	}
 	for _, p := range plugins {
-		if !seen[p.Name()] {
+		if _, ok := p.(download.MonitoredProvider); ok && !seen[p.Name()] {
 			merged = append(merged, p.Name())
 			seen[p.Name()] = true
 		}

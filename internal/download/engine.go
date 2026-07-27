@@ -77,6 +77,20 @@ func (o *Orchestrator) orderedConfigured() []Plugin {
 	return ordered
 }
 
+// orderedDownloadable returns configured plugins that can actually download
+// (implement MonitoredProvider), sorted by downloadOrder. Metadata/search-only
+// plugins that don't support downloads are excluded.
+func (o *Orchestrator) orderedDownloadable() []Plugin {
+	plugins := o.orderedConfigured()
+	filtered := plugins[:0]
+	for _, p := range plugins {
+		if _, ok := p.(MonitoredProvider); ok {
+			filtered = append(filtered, p)
+		}
+	}
+	return filtered
+}
+
 // Registry returns the plugin registry.
 func (o *Orchestrator) Registry() *Registry { return o.registry }
 
@@ -242,7 +256,7 @@ func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, arti
 		sourceArtists = []string{artist}
 	}
 
-	for _, p := range o.orderedConfigured() {
+	for _, p := range o.orderedDownloadable() {
 		if p.Name() == excludeSource {
 			continue
 		}
