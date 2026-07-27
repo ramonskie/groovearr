@@ -12,7 +12,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 const lastfmBaseURL = "https://ws.audioscrobbler.com/2.0/"
@@ -72,7 +72,7 @@ func NewClient(cfg LastFMConfig, logger *slog.Logger) *Client {
 		apiKey:  cfg.APIKey,
 		baseURL: lastfmBaseURL,
 		httpClient: &http.Client{
-			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, lastfmAPIRate),
+			Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, lastfmAPIRate),
 			Timeout:   15 * time.Second,
 		},
 		log: logger,

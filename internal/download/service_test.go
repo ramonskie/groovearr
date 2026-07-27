@@ -235,9 +235,9 @@ var _ events.IEventAggregator = (*mockBus)(nil)
 func TestNewDownloadService(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 	if svc == nil {
-		t.Fatal("NewDownloadService returned nil")
+		t.Fatal("NewService returned nil")
 	}
 	if svc.store != store {
 		t.Error("store not set")
@@ -251,7 +251,7 @@ func TestNewDownloadService(t *testing.T) {
 
 func TestQueueCreatesRecord(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 12345678, Meta{})
 	if err != nil {
@@ -284,7 +284,7 @@ func TestQueueCreatesRecord(t *testing.T) {
 
 func TestQueueSetsDisplayName(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{
 		Artist: "Artist", Title: "Title",
@@ -298,7 +298,7 @@ func TestQueueSetsDisplayName(t *testing.T) {
 func TestQueueFiresQueuedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{})
 	if err != nil {
@@ -326,7 +326,7 @@ func TestQueueFiresQueuedEvent(t *testing.T) {
 
 func TestQueuePersistsMetaFields(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "deezer", "dluser", "42.mp3", 999, Meta{
 		Artist: "TestArtist", Album: "TestAlbum", Title: "TestTitle",
@@ -357,7 +357,7 @@ func TestQueuePersistsMetaFields(t *testing.T) {
 
 func TestQueueDedupSkipsActive(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "DupeArtist", Title: "DupeTitle"}
 	id1, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
@@ -377,7 +377,7 @@ func TestQueueDedupSkipsActive(t *testing.T) {
 
 func TestQueueDedupErrorLogsWarning(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "ErrArtist", Title: "ErrTitle"}
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
@@ -403,7 +403,7 @@ func TestQueueDedupErrorLogsWarning(t *testing.T) {
 
 func TestQueueDedupPreservesState(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "PreserveArt", Title: "PreserveTitle"}
 	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
@@ -422,7 +422,7 @@ func TestQueueDedupPreservesState(t *testing.T) {
 
 func TestQueueNoDedupForTerminal(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "TermArt", Title: "TermTitle"}
 	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
@@ -442,7 +442,7 @@ func TestQueueNoDedupForTerminal(t *testing.T) {
 func TestQueuePendingCreatesRecord(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, err := svc.QueuePending(context.Background(), Meta{
 		Artist: "Artist", Album: "Album", Title: "Title",
@@ -471,7 +471,7 @@ func TestQueuePendingCreatesRecord(t *testing.T) {
 
 func TestQueuePendingDedup(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "A", Title: "T"}
 	id1, _ := svc.QueuePending(context.Background(), meta)
@@ -483,7 +483,7 @@ func TestQueuePendingDedup(t *testing.T) {
 
 func TestQueuePendingNoDedupMissingArtistTitle(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	// No artist/title → dedup is skipped, two records are created.
 	id1, _ := svc.QueuePending(context.Background(), Meta{})
@@ -497,7 +497,7 @@ func TestQueuePendingNoDedupMissingArtistTitle(t *testing.T) {
 
 func TestGetStatus(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 42, Meta{})
 	if err != nil {
@@ -520,7 +520,7 @@ func TestGetStatus(t *testing.T) {
 }
 
 func TestGetStatusNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewService(newMockStore(), newMockBus(), testLogger())
 	record, err := svc.GetStatus(context.Background(), "no-such-id")
 	if err != nil {
 		t.Fatal(err)
@@ -532,7 +532,7 @@ func TestGetStatusNonExistent(t *testing.T) {
 
 func TestList(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	_, _ = svc.Queue(context.Background(), "soulseek", "p1", "a.flac", 1, Meta{})
 	_, _ = svc.Queue(context.Background(), "deezer", "u1", "b.mp3", 2, Meta{})
@@ -551,7 +551,7 @@ func TestList(t *testing.T) {
 func TestCancelSetsIgnored(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
@@ -569,7 +569,7 @@ func TestCancelSetsIgnored(t *testing.T) {
 func TestCancelFiresStateChangedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = svc.Cancel(context.Background(), id)
@@ -590,7 +590,7 @@ func TestCancelFiresStateChangedEvent(t *testing.T) {
 }
 
 func TestCancelNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewService(newMockStore(), newMockBus(), testLogger())
 	err := svc.Cancel(context.Background(), "no-such-id")
 	if err == nil {
 		t.Fatal("expected error for non-existent id")
@@ -600,7 +600,7 @@ func TestCancelNonExistent(t *testing.T) {
 func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	// Manually set to terminal in store.
@@ -629,7 +629,7 @@ func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 func TestRetryResetsToQueued(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
@@ -656,7 +656,7 @@ func TestRetryResetsToQueued(t *testing.T) {
 func TestRetryFiresStateChangedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
-	svc := NewDownloadService(store, bus, testLogger())
+	svc := NewService(store, bus, testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed})
@@ -680,7 +680,7 @@ func TestRetryFiresStateChangedEvent(t *testing.T) {
 
 func TestRetryNonRetryableState(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 
@@ -695,7 +695,7 @@ func TestRetryNonRetryableState(t *testing.T) {
 }
 
 func TestRetryNonExistent(t *testing.T) {
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewService(newMockStore(), newMockBus(), testLogger())
 	err := svc.Retry(context.Background(), "no-such-id")
 	if err == nil {
 		t.Fatal("expected error for non-existent id")
@@ -704,7 +704,7 @@ func TestRetryNonExistent(t *testing.T) {
 
 func TestConcurrentQueueAndCancel(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	var wg sync.WaitGroup
 	for i := 0; i < 20; i++ {
@@ -729,7 +729,7 @@ func TestConcurrentQueueAndCancel(t *testing.T) {
 
 func TestManualRetryResetsRetryCount(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: 5})
@@ -747,7 +747,7 @@ func TestManualRetryResetsRetryCount(t *testing.T) {
 
 func TestManualRetryNotBlockedByMaxRetries(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: MaxRetries})
@@ -765,7 +765,7 @@ func TestManualRetryNotBlockedByMaxRetries(t *testing.T) {
 
 func TestManualRetryClearsBackoff(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{
@@ -795,7 +795,7 @@ func TestResolveRetrySourcePopulatesFields(t *testing.T) {
 	})
 
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
 	id, _ := svc.Queue(context.Background(), "soulseek", "peer1", "old.flac", 100, Meta{
@@ -836,7 +836,7 @@ func TestResolveRetrySourceNoResultsKeepsOriginalSource(t *testing.T) {
 		searchResults: nil, // no results
 	})
 
-	svc := NewDownloadService(newMockStore(), newMockBus(), testLogger())
+	svc := NewService(newMockStore(), newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
 	rec := &Record{
@@ -863,7 +863,7 @@ func TestResolveAndSubmitSuccess(t *testing.T) {
 	})
 
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
 	_ = store.Insert(context.Background(), &Record{
@@ -890,7 +890,7 @@ func TestResolveAndSubmitNoSourceTransitionsToFailed(t *testing.T) {
 	})
 
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
 	_ = store.Insert(context.Background(), &Record{
@@ -913,7 +913,7 @@ func TestResolveAndSubmitNoSourceTransitionsToFailed(t *testing.T) {
 
 func TestFailRetrySetsFailed(t *testing.T) {
 	store := newMockStore()
-	svc := NewDownloadService(store, newMockBus(), testLogger())
+	svc := NewService(store, newMockBus(), testLogger())
 
 	_ = store.Insert(context.Background(), &Record{
 		ID: "test-3", State: StateQueued,

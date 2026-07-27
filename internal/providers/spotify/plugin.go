@@ -14,7 +14,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/metadata"
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 // Compile-time interface checks.
@@ -51,7 +51,7 @@ func NewPlugin(cfg *SpotifyConfig, downloadPath string, logger *slog.Logger) *Pl
 		dlPath: downloadPath,
 		log:    logger,
 		oembedClient: &http.Client{
-			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
+			Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
 			Timeout:   15 * time.Second,
 		},
 	}

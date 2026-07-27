@@ -127,10 +127,10 @@ func main() {
 	monitor := download.NewMonitoringService(dlStore, registry, eventBus, mainLog)
 
 	// Download service — queues downloads. Dispatch handled by MonitoringService.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, mainLog)
+	downloadSvc := download.NewService(dlStore, eventBus, mainLog)
 	downloadSvc.SetRegistry(registry)
 
-	// Quality profile store (SQLite) — created early so DownloadService
+	// Quality profile store (SQLite) — created early so Service
 	// can use it for search resolution during retries.
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
 	downloadSvc.SetQualityProfileStore(qualityProfileStore)

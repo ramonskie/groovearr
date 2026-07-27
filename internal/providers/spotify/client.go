@@ -9,7 +9,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 // Base URL constants for the Spotify Web API and Accounts service.
@@ -43,7 +43,7 @@ func NewClient(cfg *SpotifyConfig, log *slog.Logger) *SpotifyClient {
 		http: &http.Client{
 			Transport: &authTransport{
 				cfg:         cfg,
-				transport:   provider.NewRateLimitedTransport(http.DefaultTransport, spotifyAPIRate),
+				transport:   ratelimit.NewRateLimitedTransport(http.DefaultTransport, spotifyAPIRate),
 				refreshFunc: RefreshAccessToken,
 				log:         log,
 			},

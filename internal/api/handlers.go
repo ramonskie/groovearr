@@ -44,7 +44,7 @@ type Server struct {
 	discoveryReg        *discovery.Registry
 	store               library.Store
 	scanner             *library.Scanner
-	downloadSvc         *download.DownloadService
+	downloadSvc         *download.Service
 	eventBus            events.IEventAggregator
 	sseHub              *sse.SSEHub
 	matcher             *matching.Engine
@@ -60,7 +60,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.DownloadService, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,

@@ -10,7 +10,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 const baseURL = "https://coverartarchive.org"
@@ -46,7 +46,7 @@ func newAPIClient(log *slog.Logger) *apiClient {
 	return &apiClient{
 		httpClient: &http.Client{
 			Timeout:   15 * time.Second,
-			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, caaRate),
+			Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, caaRate),
 		},
 		log: log,
 	}

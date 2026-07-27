@@ -1,5 +1,5 @@
-// Package provider contains shared utilities for download and metadata providers.
-package provider
+// Package ratelimit provides a rate-limited HTTP transport for downstream API clients.
+package ratelimit
 
 import (
 	"net/http"
@@ -27,7 +27,7 @@ type RateLimitedTransport struct {
 // Example:
 //
 //	client := &http.Client{
-//	    Transport: provider.NewRateLimitedTransport(http.DefaultTransport, 10),
+//	    Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, 10),
 //	    Timeout:   15 * time.Second,
 //	}
 func NewRateLimitedTransport(base http.RoundTripper, reqPerSec float64) *RateLimitedTransport {

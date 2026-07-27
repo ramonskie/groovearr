@@ -28,7 +28,7 @@ type Service struct {
 	srcReg              *Registry
 	store               library.Store
 	downloadReg         *download.Registry
-	downloadSvc         *download.DownloadService
+	downloadSvc         *download.Service
 	matcher             *matching.Engine
 	metadataResolver    *metadata.MetadataResolver
 	cfgFn               func() config.Config
@@ -46,7 +46,7 @@ type pendingItem struct {
 }
 
 // NewService creates a playlist service.
-func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.DownloadService, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, metadataResolver *metadata.MetadataResolver, logger *slog.Logger) *Service {
+func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.Service, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, metadataResolver *metadata.MetadataResolver, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}

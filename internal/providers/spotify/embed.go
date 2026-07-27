@@ -12,11 +12,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 var oembedHTTPClient = &http.Client{
-	Transport: provider.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
+	Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, spotifyOEmbedRate),
 	Timeout:   15 * time.Second,
 }
 

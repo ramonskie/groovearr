@@ -23,10 +23,10 @@ type retryOriginalSnap struct {
 	username   string
 }
 
-// DownloadService provides a thin API for download queueing, status tracking,
+// Service provides a thin API for download queueing, status tracking,
 // cancellation, and manual retry. The MonitoringService scans the DB and
 // drives the download state machine automatically.
-type DownloadService struct {
+type Service struct {
 	log                 *slog.Logger
 	store               Store
 	bus                 events.IEventAggregator
@@ -35,13 +35,13 @@ type DownloadService struct {
 	mu                  sync.Mutex
 }
 
-// NewDownloadService creates a DownloadService backed by the given store,
+// NewService creates a Service backed by the given store,
 // event bus, and logger.
-func NewDownloadService(store Store, bus events.IEventAggregator, logger *slog.Logger) *DownloadService {
+func NewService(store Store, bus events.IEventAggregator, logger *slog.Logger) *Service {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &DownloadService{
+	return &Service{
 		log:   logger,
 		store: store,
 		bus:   bus,
@@ -49,14 +49,14 @@ func NewDownloadService(store Store, bus events.IEventAggregator, logger *slog.L
 }
 
 // SetRegistry sets the plugin registry for retry source resolution.
-func (s *DownloadService) SetRegistry(registry *Registry) {
+func (s *Service) SetRegistry(registry *Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry = registry
 }
 
 // SetQualityProfileStore sets the quality profile store for retry search resolution.
-func (s *DownloadService) SetQualityProfileStore(store quality.ProfileStore) {
+func (s *Service) SetQualityProfileStore(store quality.ProfileStore) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.qualityProfileStore = store
@@ -67,7 +67,7 @@ func (s *DownloadService) SetQualityProfileStore(store quality.ProfileStore) {
 // up queued records from the DB and drives the download lifecycle.
 // Skips if an active download already exists for the same artist+title.
 // Returns the generated download ID.
-func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
+func (s *Service) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -127,7 +127,7 @@ func (s *DownloadService) Queue(ctx context.Context, sourceName, username, filen
 //
 // This enables batch-queuing all items first (visible in UI), then resolving
 // them in the background.
-func (s *DownloadService) QueuePending(ctx context.Context, meta Meta) (string, error) {
+func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -174,7 +174,7 @@ func (s *DownloadService) QueuePending(ctx context.Context, meta Meta) (string, 
 
 // UpdateDownload persists changes to an existing download record and fires
 // a state-changed event.
-func (s *DownloadService) UpdateDownload(ctx context.Context, record *Record) error {
+func (s *Service) UpdateDownload(ctx context.Context, record *Record) error {
 	if err := s.store.Update(ctx, record); err != nil {
 		return fmt.Errorf("update download: %w", err)
 	}
@@ -183,29 +183,29 @@ func (s *DownloadService) UpdateDownload(ctx context.Context, record *Record) er
 }
 
 // GetStatus returns the current state of a download by ID.
-func (s *DownloadService) GetStatus(ctx context.Context, id string) (*Record, error) {
+func (s *Service) GetStatus(ctx context.Context, id string) (*Record, error) {
 	return s.store.Get(ctx, id)
 }
 
 // List returns all download records ordered by creation time.
-func (s *DownloadService) List(ctx context.Context) ([]Record, error) {
+func (s *Service) List(ctx context.Context) ([]Record, error) {
 	return s.store.List(ctx)
 }
 
 // ListByState returns downloads filtered by a single state.
-func (s *DownloadService) ListByState(ctx context.Context, state State) ([]Record, error) {
+func (s *Service) ListByState(ctx context.Context, state State) ([]Record, error) {
 	return s.store.ListByState(ctx, state)
 }
 
 // ListActive returns all non-terminal downloads.
-func (s *DownloadService) ListActive(ctx context.Context) ([]Record, error) {
+func (s *Service) ListActive(ctx context.Context) ([]Record, error) {
 	return s.store.ListActive(ctx)
 }
 
 // Cancel transitions a download to the "ignored" state, persists the change,
 // and fires a state-changed event. The MonitoringService detects the state
 // change and stops tracking the download.
-func (s *DownloadService) Cancel(ctx context.Context, id string) error {
+func (s *Service) Cancel(ctx context.Context, id string) error {
 	s.log.Info("cancelling download", "download_id", id, "component", "download")
 
 	record, err := s.store.Get(ctx, id)
@@ -238,7 +238,7 @@ func (s *DownloadService) Cancel(ctx context.Context, id string) error {
 //
 // Returns an error if the download is not in a retryable state (only "failed"
 // is retryable).
-func (s *DownloadService) Retry(ctx context.Context, id string) error {
+func (s *Service) Retry(ctx context.Context, id string) error {
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
 		s.log.Error("retry: get failed", "download_id", id, "error", err, "component", "download")
@@ -312,7 +312,7 @@ func (s *DownloadService) Retry(ctx context.Context, id string) error {
 // DB. Intended for use in a background goroutine.
 // orig holds the original source fields (cleared by Retry) so they can be
 // restored if the search or persist fails.
-func (s *DownloadService) resolveAndSubmit(record *Record, orig retryOriginalSnap) {
+func (s *Service) resolveAndSubmit(record *Record, orig retryOriginalSnap) {
 	// Timeout only for the search — network calls can hang. DB operations
 	// use a separate background context so they don't fail due to the
 	// search consuming the timeout budget.
@@ -359,7 +359,7 @@ func (s *DownloadService) resolveAndSubmit(record *Record, orig retryOriginalSna
 
 // failRetry transitions a record to failed with the given error message,
 // persists it, and publishes the state change event.
-func (s *DownloadService) failRetry(ctx context.Context, record *Record, errMsg string) {
+func (s *Service) failRetry(ctx context.Context, record *Record, errMsg string) {
 	record.State = StateFailed
 	record.Error = errMsg
 	if err := s.store.Update(ctx, record); err != nil {
@@ -371,7 +371,7 @@ func (s *DownloadService) failRetry(ctx context.Context, record *Record, errMsg 
 
 // restoreOriginal restores the original source fields from a snapshot taken
 // before Retry() cleared them for the UI reset.
-func (s *DownloadService) restoreOriginal(record *Record, orig retryOriginalSnap) {
+func (s *Service) restoreOriginal(record *Record, orig retryOriginalSnap) {
 	record.SourceName = orig.sourcename
 	record.Filename = orig.filename
 	record.Size = orig.size
@@ -384,7 +384,7 @@ func (s *DownloadService) restoreOriginal(record *Record, orig retryOriginalSnap
 // Source fields (SourceName, Filename, Size, Bitrate, Format, Username)
 // are always populated from the best match. Errors are logged but not
 // returned — the caller should fall back to the existing source.
-func (s *DownloadService) resolveRetrySource(ctx context.Context, rec *Record) {
+func (s *Service) resolveRetrySource(ctx context.Context, rec *Record) {
 	if rec.Artist == "" || rec.Title == "" {
 		return // can't search without artist+title
 	}

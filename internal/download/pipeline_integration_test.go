@@ -307,7 +307,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	eventBus := events.NewInMemoryEventBus(testLogger())
 
 	// Download service — MonitoringService handles dispatch externally.
-	downloadSvc := download.NewDownloadService(dlStore, eventBus, testLogger())
+	downloadSvc := download.NewService(dlStore, eventBus, testLogger())
 
 	// Monitoring service — drives the state machine by polling providers.
 	monitor := download.NewMonitoringService(dlStore, reg, eventBus, testLogger())

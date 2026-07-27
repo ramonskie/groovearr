@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/provider"
+	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
 const discogsBaseURL = "https://api.discogs.com"
@@ -111,7 +111,7 @@ func NewClient(cfg DiscogsConfig, logger *slog.Logger) *Client {
 		cfg:     cfg,
 		baseURL: discogsBaseURL,
 		httpClient: &http.Client{
-			Transport: provider.NewRateLimitedTransport(http.DefaultTransport, discogsAPIRate),
+			Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, discogsAPIRate),
 			Timeout:   15 * time.Second,
 		},
 		log: logger,
