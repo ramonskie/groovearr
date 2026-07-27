@@ -20,7 +20,7 @@ const caaRate = 5
 
 // Image represents a single cover art image from the CAA JSON response.
 type Image struct {
-	ID         string            `json:"id"`
+	ID         any               `json:"id"` // int or string depending on CAA response
 	ImageURL   string            `json:"image"`
 	Types      []string          `json:"types"`
 	Front      bool              `json:"front"`
