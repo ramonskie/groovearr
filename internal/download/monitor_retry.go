@@ -27,6 +27,12 @@ func (m *MonitoringService) scanRetry() {
 		m.log.Error("scanRetry: list failed", "error", err, "component", "monitor")
 		return
 	}
+	failedPending, err := m.store.ListByState(m.ctx, domain.DownloadFailedPending)
+	if err != nil {
+		m.log.Error("scanRetry: list failedPending", "error", err, "component", "monitor")
+		return
+	}
+	failed = append(failed, failedPending...)
 	if len(failed) == 0 {
 		return
 	}

@@ -44,7 +44,7 @@ func (s DownloadState) Terminal() bool {
 
 // IsRetryable returns true if the download can be retried from this state.
 func (s DownloadState) IsRetryable() bool {
-	return s == DownloadFailed
+	return s == DownloadFailed || s == DownloadFailedPending
 }
 
 // ─── Event types ────────────────────────────────────────────────────

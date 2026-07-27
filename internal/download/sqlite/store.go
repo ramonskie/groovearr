@@ -46,8 +46,9 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 			track_number, disc_number, year,
 			bitrate, format,
 			retry_count, retry_after, playlist_id, quality_profile_id,
+			isrc, library_track_id,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Username, r.Filename, r.DisplayName,
 		string(domain.DownloadQueued), 0.0,
 		r.Size, 0, 0, "", "",
@@ -55,6 +56,7 @@ func (s *Store) Insert(ctx context.Context, r *domain.DownloadRecord) error {
 		r.TrackNumber, r.DiscNumber, r.Year,
 		r.Bitrate, r.Format,
 		0, r.RetryAfter, r.PlaylistID, r.QualityProfileID,
+		r.ISRC, r.LibraryTrackID,
 		now, now,
 	)
 	if err != nil {
@@ -79,6 +81,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 			bitrate=?, format=?,
 			retry_count=?, retry_after=?,
 			quality_profile_id=?,
+			isrc=?, library_track_id=?,
 			updated_at=?
 		WHERE id=?`,
 		r.SourceName, r.Username, r.Filename, r.DisplayName,
@@ -89,6 +92,7 @@ func (s *Store) Update(ctx context.Context, r *domain.DownloadRecord) error {
 		r.Bitrate, r.Format,
 		r.RetryCount, r.RetryAfter,
 		r.QualityProfileID,
+		r.ISRC, r.LibraryTrackID,
 		now, r.ID,
 	)
 	if err != nil {
@@ -300,6 +304,7 @@ const downloadSelect = `SELECT
 	artist, album, title, track_number, disc_number, year,
 	bitrate, format,
 	retry_count, retry_after, playlist_id, quality_profile_id,
+	isrc, library_track_id,
 	created_at, updated_at
 	FROM downloads`
 
@@ -314,6 +319,7 @@ func (s *Store) scanDownload(row *sql.Row) (*domain.DownloadRecord, error) {
 		&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
 		&r.Bitrate, &r.Format,
 		&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
+		&r.ISRC, &r.LibraryTrackID,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -343,6 +349,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]domain.DownloadRecord, error) {
 			&r.Artist, &r.Album, &r.Title, &r.TrackNumber, &r.DiscNumber, &r.Year,
 			&r.Bitrate, &r.Format,
 			&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
+			&r.ISRC, &r.LibraryTrackID,
 			&createdAt, &updatedAt,
 		); err != nil {
 			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")

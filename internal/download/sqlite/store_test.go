@@ -57,6 +57,8 @@ func openTestDB(t *testing.T) *sql.DB {
 			format TEXT NOT NULL DEFAULT '',
 			playlist_id TEXT NOT NULL DEFAULT '',
 			quality_profile_id INTEGER,
+			isrc TEXT NOT NULL DEFAULT '',
+			library_track_id INTEGER NOT NULL DEFAULT 0,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
