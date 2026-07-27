@@ -25,10 +25,10 @@ type LibraryConfig struct {
 	DownloadPath          string `json:"download_path"`           // download staging directory
 	LibraryPath           string `json:"library_path"`            // where organized downloads end up
 	FolderTemplate        string `json:"folder_template"`         // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
-	PlaylistPath          string `json:"playlist_path"`           // separate folder for playlist downloads
-	PlaylistTemplate      string `json:"playlist_template"`       // e.g. "{position:02d} {artist} - {title}"
-	MaxDownloadWorkers    int    `json:"max_download_workers"`    // concurrent download workers (default 3)
-	PlaylistAutoSyncMins  *int   `json:"playlist_auto_sync_mins"` // interval for auto-sync (nil/0 = disabled, default 30)
+	PlaylistPath          string `json:"playlist_path"`            // separate folder for playlist downloads
+	PlaylistTemplate      string `json:"playlist_template"`        // e.g. "{position:02d} {artist} - {title}"
+	MaxDownloadWorkers    int    `json:"max_download_workers"`     // concurrent download workers (default 3)
+	PlaylistAutoSyncMins  *int   `json:"playlist_auto_sync_mins"`  // interval for auto-sync (nil/0 = disabled, default 30)
 }
 
 // AuthConfig holds authentication settings.
@@ -64,7 +64,7 @@ func DefaultConfig() Config {
 			PlaylistPath:         "./playlists",
 			MaxDownloadWorkers:   3,
 			PlaylistTemplate:     "{position:02d} {artist} - {title}",
-			PlaylistAutoSyncMins: intPtr(30),
+			PlaylistAutoSyncMins:  intPtr(30),
 		},
 	}
 }

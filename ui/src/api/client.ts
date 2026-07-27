@@ -239,6 +239,15 @@ export function getLibraryAlbumDiscovery(
   );
 }
 
+export function downloadMissingForAlbum(
+  albumId: number,
+): Promise<DownloadMissingResponse> {
+  return request<DownloadMissingResponse>(
+    `/api/library/albums/${albumId}/download-missing`,
+    { method: "POST" },
+  );
+}
+
 // ─── Playlists ─────────────────────────────────────────────────────
 
 export function getPlaylistSources(): Promise<PlaylistSourceItem[]> {

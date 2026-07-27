@@ -241,6 +241,9 @@ func (c *Client) StartDownload(ctx context.Context, meta download.Meta) (string,
 	if downloadID == filename {
 		if realID := c.findDownloadIDByFilename(ctx, filename); realID != "" {
 			downloadID = realID
+		} else {
+			c.log.Warn("soulseek download: could not resolve UUID, will match by filename in polls",
+				"filename", filename, "component", "soulseek")
 		}
 	}
 
@@ -339,7 +342,7 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dow
 		return rec, nil
 	}
 
-	// Fallback 2: list all downloads and search by ID.
+	// Fallback 2: list all downloads and search by ID, then by filename.
 	c.log.Warn("single-download endpoint failed, trying list fallback", "downloadID", downloadID, "component", "soulseek")
 	if listResp, listErr := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil); listErr == nil {
 		records := parseDownloadStatus(listResp, c.dlPath, c.log)
@@ -348,6 +351,23 @@ func (c *Client) GetDownloadStatus(ctx context.Context, downloadID string) (*dow
 				c.log.Info("found match in list", "downloadID", downloadID, "state", rec.State, "component", "soulseek")
 				c.cacheRecord(&rec)
 				return &rec, nil
+			}
+		}
+		// When downloadID is a filename (not a UUID), match by Filename field.
+		c.downloadsMu.RLock()
+		cachedFilename := ""
+		if r, ok := c.downloads[downloadID]; ok {
+			cachedFilename = r.Filename
+		}
+		c.downloadsMu.RUnlock()
+		if cachedFilename != "" {
+			for _, rec := range records {
+				if rec.Filename == cachedFilename {
+					c.log.Info("found match in list by filename", "downloadID", downloadID, "realID", rec.ID, "state", rec.State, "component", "soulseek")
+					c.updateDownloadID(downloadID, rec.ID)
+					c.cacheRecord(&rec)
+					return &rec, nil
+				}
 			}
 		}
 		c.log.Warn("download not found in list", "downloadID", downloadID, "checked", len(records), "component", "soulseek")
@@ -386,6 +406,22 @@ func (c *Client) cacheRecord(r *download.Record) {
 	c.downloadsMu.Lock()
 	c.downloads[r.ID] = r
 	c.downloadsMu.Unlock()
+}
+
+// updateDownloadID updates the in-memory mapping when the real UUID is
+// discovered (e.g., when StartDownload returned a filename instead of UUID).
+func (c *Client) updateDownloadID(oldID, newID string) {
+	c.downloadsMu.Lock()
+	defer c.downloadsMu.Unlock()
+	if r, ok := c.downloads[oldID]; ok {
+		r.ID = newID
+		delete(c.downloads, oldID)
+		c.downloads[newID] = r
+	}
+	if u, ok := c.downloadUsernames[oldID]; ok {
+		delete(c.downloadUsernames, oldID)
+		c.downloadUsernames[newID] = u
+	}
 }
 
 // CancelDownload cancels an active download. Tries multiple endpoint formats for slskd compatibility.

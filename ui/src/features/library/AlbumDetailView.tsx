@@ -1,10 +1,10 @@
-import { useState, useEffect, useRef, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Music, Download, Check } from "lucide-react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import { useStartBestDownload } from "../../hooks/use-downloads";
-import { useLibraryAlbumDiscovery } from "../../hooks/use-library";
+import { useLibraryAlbumDiscovery, useDownloadMissingForAlbum } from "../../hooks/use-library";
 import type { Album, DiscoveryTrackEntry } from "../../api/types";
 
 interface AlbumDetailViewProps {
@@ -101,23 +101,10 @@ export default function AlbumDetailView({
   const [imgError, setImgError] = useState(false);
   const discovery = useLibraryAlbumDiscovery(album.id);
   const startBestDownload = useStartBestDownload();
+  const downloadMissing = useDownloadMissingForAlbum();
   const queryClient = useQueryClient();
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
-  const [batchDownloading, setBatchDownloading] = useState(false);
   const [batchError, setBatchError] = useState<string | null>(null);
-  const batchTimersRef = useRef<ReturnType<typeof setTimeout>[]>([]);
-  const batchRemainingRef = useRef(0);
-  const batchFailedRef = useRef(0);
-  const mountedRef = useRef(true);
-
-  // Clean up timers and mark unmounted on unmount.
-  useEffect(() => {
-    mountedRef.current = true;
-    return () => {
-      mountedRef.current = false;
-      for (const t of batchTimersRef.current) clearTimeout(t);
-    };
-  }, []);
 
   const tracks = discovery.data?.tracks ?? [];
   const undownloadedTracks = tracks.filter((t) => !t.downloaded);
@@ -155,36 +142,11 @@ export default function AlbumDetailView({
 
   const handleDownloadAll = () => {
     setBatchError(null);
-    setBatchDownloading(true);
-    batchTimersRef.current = [];
-    batchRemainingRef.current = undownloadedTracks.length;
-    batchFailedRef.current = 0;
-    let delay = 0;
-    for (const track of undownloadedTracks) {
-      const t = setTimeout(() => {
-        startBestDownload.mutate(
-          { title: track.title, artist: artistName, duration: track.duration_ms },
-          {
-            onError: () => {
-              batchFailedRef.current++;
-            },
-            onSettled: () => {
-              batchRemainingRef.current--;
-              if (batchRemainingRef.current <= 0) {
-                if (!mountedRef.current) return;
-                setBatchDownloading(false);
-                invalidateDiscovery();
-                if (batchFailedRef.current > 0) {
-                  setBatchError(`${batchFailedRef.current} of ${undownloadedTracks.length} downloads failed. Check Downloads page for details.`);
-                }
-              }
-            },
-          }
-        );
-      }, delay);
-      batchTimersRef.current.push(t);
-      delay += 350;
-    }
+    downloadMissing.mutate(album.id, {
+      onError: (err) => {
+        setBatchError(err.message);
+      },
+    });
   };
 
   if (discovery.isError) {
@@ -281,11 +243,11 @@ export default function AlbumDetailView({
             <button
               type="button"
               onClick={handleDownloadAll}
-              disabled={batchDownloading || startBestDownload.isPending}
+              disabled={downloadMissing.isPending || startBestDownload.isPending}
               className="mt-2 flex w-fit items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
             >
               <Download size={14} />
-              {batchDownloading
+              {downloadMissing.isPending
                 ? "Queueing…"
                 : `Download ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""}`}
             </button>
@@ -341,7 +303,7 @@ export default function AlbumDetailView({
                     artistName={artistName}
                     onDownload={handleDownloadTrack}
                     isDownloading={downloadingIds.has(trackKey(track))}
-                    batchDownloading={batchDownloading}
+                    batchDownloading={downloadMissing.isPending}
                   />
                 ))}
               </tbody>

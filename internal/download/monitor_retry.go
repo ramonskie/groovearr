@@ -49,9 +49,8 @@ func (m *MonitoringService) scanRetry() {
 		}
 
 		// Search for alternative sources across all providers.
-		// Use a short timeout to prevent a hanging plugin from blocking the loop.
-		// If no source is found, skip this retry — do NOT re-queue with a source
-		// that just failed. The retry cycle will try again when backoff elapses.
+		// Each plugin enforces its own HTTP client timeouts — the monitor
+		// is provider-agnostic and passes its background context directly.
 		found := true
 		func() {
 			defer func() {
@@ -60,9 +59,7 @@ func (m *MonitoringService) scanRetry() {
 						"download_id", rec.ID, "panic", r, "component", "monitor")
 				}
 			}()
-			searchCtx, cancel := context.WithTimeout(m.ctx, 30*time.Second)
-			defer cancel()
-			found = m.resolveRetrySource(searchCtx, &rec)
+			found = m.resolveRetrySource(m.ctx, &rec)
 		}()
 
 		if !found {

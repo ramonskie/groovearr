@@ -39,13 +39,6 @@ type Service struct {
 	autoSyncSem         chan struct{}  // limits concurrent auto-sync goroutines (capacity 3)
 }
 
-// pendingItem pairs a queued download record with its source playlist track
-// for background resolution.
-type pendingItem struct {
-	record *download.Record
-	track  domain.PlaylistTrack
-}
-
 // NewService creates a playlist service.
 func NewService(srcReg *Registry, store library.Store, downloadReg *download.Registry, downloadSvc *download.Service, cfgFn func() config.Config, qualityProfileStore quality.ProfileStore, metadataResolver *metadata.MetadataResolver, logger *slog.Logger) *Service {
 	if logger == nil {
@@ -219,20 +212,24 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 		return 0, err
 	}
 
-	// Phase 1: queue all unmatched tracks immediately (metadata only, no search).
-	// This makes them visible in the UI before the downloader starts processing.
-	var items []pendingItem
-	// seen prevents duplicate processing when QueuePending dedup returns the
-	// same existing download ID for multiple tracks with matching artist+title.
-	seen := make(map[string]bool)
 	playlistIDStr := strconv.FormatInt(playlistID, 10)
+	queued := 0
 
 	for _, pt := range tracks {
 		if pt.TrackID != nil {
 			continue
 		}
 
-		id, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
+		// ISRC dedup: skip if a library track with the same ISRC already exists.
+		if pt.ISRC != "" {
+			if existing, _ := s.store.GetTrackByISRC(ctx, pt.ISRC); existing != nil {
+				s.log.Info("playlist track already imported via ISRC, skipping",
+					"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
+				continue
+			}
+		}
+
+		_, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
 			Artist:      pt.Artist,
 			Album:       pt.Album,
 			Title:       pt.Title,
@@ -244,140 +241,11 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 			s.log.Error("queue pending failed", "artist", pt.Artist, "title", pt.Title, "error", dlErr, "component", "playlist")
 			continue
 		}
-		if seen[id] {
-			continue
-		}
-		seen[id] = true
-		// Fetch the record so we have the full DownloadRecord for resolution.
-		rec, err := s.downloadSvc.GetStatus(ctx, id)
-		if err != nil {
-			s.log.Warn("get status after queue failed", "download_id", id, "error", err, "component", "playlist")
-		}
-		if rec == nil {
-			continue
-		}
-		items = append(items, pendingItem{record: rec, track: pt})
+		queued++
 	}
 
-	s.log.Info("download missing: queued", "count", len(items), "component", "playlist")
-
-	// Phase 2: resolve and dispatch in background — search for matches one at a time
-	// and submit to the worker pool.
-	if len(items) > 0 {
-		s.log.Info("resolving pending downloads", "count", len(items), "playlist_id", playlistID, "component", "playlist")
-		go s.resolvePendingDownloads(items, playlistID)
-	}
-
-	return len(items), nil
-}
-
-// resolvePendingDownloads searches for source matches for pending records
-// and dispatches them to the download pool.
-func (s *Service) resolvePendingDownloads(items []pendingItem, playlistID int64) {
-	defer func() {
-		if r := recover(); r != nil {
-			s.log.Error("resolvePendingDownloads panicked", "panic", r, "playlist_id", playlistID, "component", "playlist")
-		}
-	}()
-
-	ctx := context.Background()
-	orch := download.NewOrchestrator(s.downloadReg, s.log)
-	var defaultProfile *quality.QualityProfile
-	if s.qualityProfileStore != nil {
-		p, err := s.qualityProfileStore.LoadProfileByID(ctx, nil)
-		if err != nil {
-			s.log.Warn("failed to load default quality profile, playlist resolution proceeds unfiltered", "error", err, "component", "playlist")
-		}
-		defaultProfile = p
-	}
-	resolved := 0
-
-	for _, item := range items {
-		rec := item.record
-		pt := item.track
-
-		// ISRC dedup: skip if a library track with the same ISRC already exists.
-		if pt.ISRC != "" {
-			if existing, _ := s.store.GetTrackByISRC(ctx, pt.ISRC); existing != nil {
-				s.log.Info("playlist track already imported via ISRC, skipping",
-					"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
-				rec.State = download.StateIgnored
-				_ = s.downloadSvc.UpdateDownload(ctx, rec)
-				continue
-			}
-		}
-
-		best, err := orch.FindBestMatch(ctx, pt.Title, pt.Artist, pt.Album, pt.DurationMs, "", defaultProfile)
-		if err != nil {
-			s.log.Error("resolve failed", "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
-
-			rec.RetryCount++
-			if rec.RetryCount > download.MaxRetries {
-				s.log.Warn("max retries reached for pending download",
-					"artist", pt.Artist, "title", pt.Title, "retry_count", rec.RetryCount, "component", "playlist")
-				rec.State = download.StateFailed
-				rec.Error = fmt.Sprintf("search resolution failed after %d retries: %s", rec.RetryCount, err.Error())
-				_ = s.downloadSvc.UpdateDownload(ctx, rec)
-				continue
-			}
-
-			// Exponential backoff: 1m, 2m, 4m, 8m, 16m, cap at 30m.
-			backoffMin := 1 << (rec.RetryCount - 1)
-			if backoffMin > 30 {
-				backoffMin = 30
-			}
-			rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
-			rec.State = download.StateFailedPending
-			rec.Error = err.Error()
-			_ = s.downloadSvc.UpdateDownload(ctx, rec)
-			continue
-		}
-
-		// Update the pending record with resolved source info.
-		username := best.Track.Username
-		if username == "" {
-			username = best.SourceName
-		}
-		rec.SourceName = best.SourceName
-		rec.Username = username
-		rec.Filename = best.Track.Filename
-		rec.Size = best.Track.Size
-		rec.Bitrate = best.Track.Bitrate
-		rec.Format = best.Track.Quality
-		rec.Artist = pt.Artist
-		rec.Album = pt.Album
-		rec.Title = pt.Title
-		rec.DisplayName = pt.Artist + " - " + pt.Title
-
-		// Enrich with album name + cover art from metadata providers (MusicBrainz/CoverArtArchive).
-		// Always call EnrichMetadata — it resolves album from artist+title when album is empty,
-		// then searches for cover art. Only requires artist+title to function.
-		if s.metadataResolver != nil && rec.Artist != "" && rec.Title != "" {
-			if enriched, enrichErr := s.metadataResolver.EnrichMetadata(ctx, rec.Artist, rec.Title, rec.Album, rec.Year); enrichErr == nil {
-				if rec.Album == "" && enriched.Album != "" {
-					rec.Album = enriched.Album
-				}
-				if enriched.CoverURL != "" {
-					rec.CoverURL = enriched.CoverURL
-				}
-			} else {
-				s.log.Warn("metadata enrichment failed for pending download",
-					"artist", rec.Artist, "title", rec.Title, "error", enrichErr, "component", "playlist")
-			}
-		}
-
-		if err := s.downloadSvc.UpdateDownload(ctx, rec); err != nil {
-			s.log.Error("update pending failed", "download_id", rec.ID, "error", err, "component", "playlist")
-			continue
-		}
-
-		resolved++
-	}
-
-	s.log.Info("resolved downloads", "resolved", resolved, "total", len(items), "component", "playlist")
-	if resolved > 0 {
-		s.syncPlaylistGuarded(playlistID)
-	}
+	s.log.Info("download missing: queued", "count", queued, "component", "playlist")
+	return queued, nil
 }
 
 // syncPlaylistGuarded runs SyncPlaylist with a per-playlist mutex to prevent

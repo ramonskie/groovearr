@@ -7,6 +7,7 @@ import {
   getLibraryArtistAlbums,
   getLibraryArtistTracks,
   getLibraryAlbumDiscovery,
+  downloadMissingForAlbum,
   scanLibrary,
 } from "../api/client";
 
@@ -88,6 +89,17 @@ export function useScanLibrary() {
   return useMutation({
     mutationFn: scanLibrary,
     onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+    },
+  });
+}
+
+export function useDownloadMissingForAlbum() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (albumId: number) => downloadMissingForAlbum(albumId),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["downloads"] });
       queryClient.invalidateQueries({ queryKey: ["library"] });
     },
   });

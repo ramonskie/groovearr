@@ -2,6 +2,7 @@ package download
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/events"
@@ -190,12 +191,11 @@ func (m *MonitoringService) startSingleDownload(rec *Record) {
 // Poll active downloads
 // ---------------------------------------------------------------------------
 
-// pollActiveDownloads iterates over all tracked downloads, queries the
-// provider for status and progress, updates the store, and handles terminal
-// states (completed, failed, cancelled).
+// pollActiveDownloads iterates over all tracked downloads and queries each
+// provider for status and progress in parallel. This ensures a smooth live
+// view — before PR #2 each download had its own goroutine polling independently.
 func (m *MonitoringService) pollActiveDownloads() {
 	m.activeMu.Lock()
-	// Snapshot active downloads to avoid holding the lock during I/O.
 	snapshot := make([]*monitoredDownload, 0, len(m.active))
 	for _, md := range m.active {
 		cp := *md
@@ -203,9 +203,15 @@ func (m *MonitoringService) pollActiveDownloads() {
 	}
 	m.activeMu.Unlock()
 
+	var wg sync.WaitGroup
 	for _, md := range snapshot {
-		m.pollSingle(md)
+		wg.Add(1)
+		go func(md *monitoredDownload) {
+			defer wg.Done()
+			m.pollSingle(md)
+		}(md)
 	}
+	wg.Wait()
 }
 
 // pollSingle polls one active download's status from its provider and handles

@@ -135,6 +135,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
 	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
 	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
+	mux.Handle("POST /api/library/albums/{albumID}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownloadMissing)))
 
 	// Playlist routes.
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -1162,6 +1163,193 @@ func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Requ
 		Tracks:          entries,
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleLibraryAlbumDownloadMissing queues all undownloaded tracks for an album
+// as pending downloads. Source resolution happens in the background via the
+// monitor's resolvePendingSources — same pattern as playlist download-missing.
+func (s *Server) handleLibraryAlbumDownloadMissing(w http.ResponseWriter, r *http.Request) {
+	albumIDStr := r.PathValue("albumID")
+	albumID, err := strconv.ParseInt(albumIDStr, 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid album ID"))
+		return
+	}
+
+	ctx := r.Context()
+
+	album, err := s.store.GetAlbum(ctx, albumID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("get album: %w", err))
+		return
+	}
+	if album == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("album not found"))
+		return
+	}
+
+	artist, err := s.store.GetArtist(ctx, album.ArtistID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("get artist: %w", err))
+		return
+	}
+	if artist == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
+		return
+	}
+
+	// Get discovery tracks to find which ones are missing.
+	discovery, err := getLibraryAlbumDiscoveryData(ctx, s, albumID, artist.Name, album.Title)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to load discovery data: %w", err))
+		return
+	}
+
+	queued := 0
+	var errors []string
+	for _, dt := range discovery {
+		if dt.Downloaded {
+			continue
+		}
+		_, err := s.downloadSvc.QueuePending(ctx, download.Meta{
+			Artist:      artist.Name,
+			Album:       album.Title,
+			Title:       dt.Title,
+			TrackNumber: dt.TrackNumber,
+		})
+		if err != nil {
+			s.log.Warn("queue pending failed", "artist", artist.Name, "title", dt.Title, "error", err, "component", "api")
+			errors = append(errors, fmt.Sprintf("%s: %v", dt.Title, err))
+			continue
+		}
+		queued++
+	}
+
+	resp := map[string]any{"queued": queued}
+	if len(errors) > 0 {
+		resp["errors"] = errors
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+// discoveryTrackData is the internal representation used by handleLibraryAlbumDownloadMissing.
+type discoveryTrackData struct {
+	Title        string
+	TrackNumber  int
+	Downloaded   bool
+}
+
+// getLibraryAlbumDiscoveryData returns discovery tracks for an album, reusing
+// the same logic as handleLibraryAlbumDiscovery but returning a simple struct.
+func getLibraryAlbumDiscoveryData(ctx context.Context, s *Server, albumID int64, artistName, albumTitle string) ([]discoveryTrackData, error) {
+	// Try cache first.
+	if dbp, ok := s.store.(sqlDBProvider); ok {
+		var tracksJSON, cachedAt string
+		err := dbp.DB().QueryRowContext(ctx,
+			`SELECT tracks_json, cached_at FROM album_discovery_cache WHERE album_id = ?`, albumID,
+		).Scan(&tracksJSON, &cachedAt)
+		if err != nil && !errors.Is(err, sql.ErrNoRows) {
+			s.log.Warn("album discovery cache read failed", "album_id", albumID, "error", err, "component", "api")
+		}
+		if err == nil && tracksJSON != "" {
+			// Check 24h TTL.
+			if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
+				if time.Since(t) > 24*time.Hour {
+					tracksJSON = "" // expired
+				}
+			}
+		}
+		if tracksJSON != "" {
+			var cached []struct {
+				Title       string `json:"title"`
+				TrackNumber int    `json:"track_number"`
+			}
+			if json.Unmarshal([]byte(tracksJSON), &cached) == nil {
+				// Get library tracks for merge.
+				libTracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
+				byTitle := make(map[string]bool, len(libTracks))
+				for _, t := range libTracks {
+					byTitle[normalizeKey(t.Title)] = true
+				}
+				var out []discoveryTrackData
+				for _, c := range cached {
+					out = append(out, discoveryTrackData{
+						Title:       c.Title,
+						TrackNumber: c.TrackNumber,
+						Downloaded:  byTitle[normalizeKey(c.Title)],
+					})
+				}
+				return out, nil
+			}
+		}
+	}
+
+	// Cache miss — do the full discovery.
+	if s.discoveryReg == nil {
+		return nil, fmt.Errorf("no discovery providers available")
+	}
+	providers := s.discoveryReg.Any()
+	query := artistName + " " + albumTitle
+	for _, p := range providers {
+		albums, serr := p.SearchAlbums(ctx, query, 5)
+		if serr != nil || len(albums) == 0 {
+			continue
+		}
+		var matched *discovery.AlbumResult
+		for i := range albums {
+			a := &albums[i]
+			if strings.EqualFold(a.ArtistName, artistName) && strings.EqualFold(a.Title, albumTitle) {
+				matched = a
+				break
+			}
+		}
+		if matched == nil {
+			// Fallback: title-only match when artist name differs slightly.
+			for i := range albums {
+				a := &albums[i]
+				if strings.EqualFold(a.Title, albumTitle) {
+					matched = a
+					break
+				}
+			}
+		}
+		if matched == nil {
+			continue
+		}
+		tracks, terr := p.GetAlbumTracks(ctx, matched.ProviderID)
+		if terr != nil || len(tracks) == 0 {
+			continue
+		}
+		libTracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
+		byTitle := make(map[string]bool, len(libTracks))
+		for _, t := range libTracks {
+			byTitle[normalizeKey(t.Title)] = true
+		}
+		var out []discoveryTrackData
+		for _, t := range tracks {
+			out = append(out, discoveryTrackData{
+				Title:       t.Title,
+				TrackNumber: t.TrackNumber,
+				Downloaded:  byTitle[normalizeKey(t.Title)],
+			})
+		}
+
+		// Persist to cache so future calls hit cache.
+		if dbp, ok := s.store.(sqlDBProvider); ok {
+			tracksJSON, jerr := json.Marshal(tracks)
+			if jerr == nil {
+				_, _ = dbp.DB().ExecContext(ctx,
+					`INSERT OR REPLACE INTO album_discovery_cache (album_id, provider_name, provider_album_id, tracks_json, cached_at)
+					 VALUES (?, ?, ?, ?, ?)`,
+					albumID, matched.ProviderName, matched.ProviderID, string(tracksJSON),
+					time.Now().UTC().Format(time.RFC3339),
+				)
+			}
+		}
+
+		return out, nil
+	}
+	return nil, fmt.Errorf("no discovery data found for album %d", albumID)
 }
 
 func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
@@ -2571,59 +2759,20 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	orch := s.orchestrator
-	if orch == nil {
-		writeError(w, http.StatusInternalServerError, fmt.Errorf("orchestrator not initialized"))
-		return
-	}
-
-	defaultProfile, profileErr := s.qualityProfileStore.LoadProfileByID(ctx, nil)
-	if profileErr != nil {
-		s.log.Warn("failed to load default quality profile, discover downloads proceed unfiltered", "error", profileErr, "component", "api")
-	}
-
+	// Queue all tracks as pending — source resolution happens in background
+	// via the monitor's resolvePendingSources.
 	var queued int
 	var errors []string
 	for _, t := range tracks {
-		best, err := orch.FindBestMatch(ctx, t.Title, t.ArtistName, t.AlbumTitle, t.DurationMs, "", defaultProfile)
-		if err != nil {
-			errors = append(errors, fmt.Sprintf("%s - %s: %v", t.ArtistName, t.Title, err))
+		if t.ArtistName == "" || t.Title == "" {
 			continue
 		}
-
-		// Enrich metadata before queuing.
-		artist := t.ArtistName
-		album := t.AlbumTitle
-		title := t.Title
-		year := 0
-		var coverURL string
-		if s.metadataResolver != nil {
-			enrichCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-			enriched, err := s.metadataResolver.EnrichMetadata(enrichCtx, artist, title, album, year)
-			cancel()
-			if err == nil && enriched != nil {
-				if enriched.CoverURL != "" {
-					coverURL = enriched.CoverURL
-				}
-				if album == "" && enriched.Album != "" {
-					album = enriched.Album
-				}
-				if year == 0 && enriched.Year > 0 {
-					year = enriched.Year
-				}
-			}
-		}
-
-		_, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, best.Track.Username, best.Track.Filename, best.Track.Size, download.Meta{
-			Artist:      artist,
-			Album:       album,
-			Title:       title,
+		_, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
+			Artist:      t.ArtistName,
+			Album:       t.AlbumTitle,
+			Title:       t.Title,
 			TrackNumber: t.TrackNumber,
 			DiscNumber:  t.DiscNumber,
-			Year:        year,
-			Bitrate:     best.Track.Bitrate,
-			Format:      best.Track.Quality,
-			CoverURL:    coverURL,
 		})
 		if dlErr != nil {
 			errors = append(errors, fmt.Sprintf("%s - %s: queue: %v", t.ArtistName, t.Title, dlErr))

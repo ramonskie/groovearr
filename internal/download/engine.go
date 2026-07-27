@@ -170,6 +170,13 @@ func (o *Orchestrator) FindBestMatch(ctx context.Context, title, artist, album s
 				allCandidates = append(allCandidates, c)
 			}
 		}
+
+		// Early termination: stop after primary query finds candidates.
+		// Fallback queries (album variant, cleaned title) are only needed
+		// when the primary query returns nothing.
+		if i == 0 && len(allCandidates) > 0 {
+			break
+		}
 	}
 
 	if len(allCandidates) == 0 {
@@ -245,41 +252,66 @@ func (o *Orchestrator) configuredQueries(title, artist, album string) []string {
 	return queries
 }
 
-// searchSingleQuery queries all configured plugins with a single search string,
-// scores results with ScoreTrackMatchWithPath (using the candidate's Filename
-// for word-boundary artist matching), and returns candidates meeting the
-// minConfidence threshold.
+// searchSingleQuery queries all configured plugins in parallel with a single
+// search string, scores results with ScoreTrackMatchWithPath (using the
+// candidate's Filename for word-boundary artist matching), and returns
+// candidates meeting the minConfidence threshold.
 func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, artist string, durationMs int64, excludeSource string) []Candidate {
-	var candidates []Candidate
 	sourceArtists := []string{}
 	if artist != "" {
 		sourceArtists = []string{artist}
 	}
 
-	for _, p := range o.orderedDownloadable() {
+	plugins := o.orderedDownloadable()
+
+	type result struct {
+		candidates []Candidate
+	}
+	ch := make(chan result, len(plugins))
+	var wg sync.WaitGroup
+
+	for _, p := range plugins {
 		if p.Name() == excludeSource {
 			continue
 		}
-		searchTracks, _, searchErr := p.Search(ctx, query)
-		if searchErr != nil {
-			o.log.Error("search failed", "plugin", p.Name(), "query", query, "error", searchErr, "component", "orchestrator")
-			continue
-		}
-		for _, t := range searchTracks {
-			candidateArtists := []string{}
-			if t.Artist != "" {
-				candidateArtists = []string{t.Artist}
+		wg.Add(1)
+		go func(plugin Plugin) {
+			defer wg.Done()
+			searchTracks, _, searchErr := plugin.Search(ctx, query)
+			if searchErr != nil {
+				o.log.Error("search failed", "plugin", plugin.Name(), "query", query, "error", searchErr, "component", "orchestrator")
+				return
 			}
-			// Use ScoreTrackMatchWithPath for word-boundary artist matching on the file path.
-			score, _ := o.matcher.ScoreTrackMatchWithPath(
-				title, sourceArtists, durationMs,
-				t.Title, candidateArtists, t.Duration,
-				t.Filename,
-			)
-			if score >= minMatchConfidence {
-				candidates = append(candidates, Candidate{Track: t, SourceName: p.Name(), Score: score})
+			var candidates []Candidate
+			for _, t := range searchTracks {
+				candidateArtists := []string{}
+				if t.Artist != "" {
+					candidateArtists = []string{t.Artist}
+				}
+				score, _ := o.matcher.ScoreTrackMatchWithPath(
+					title, sourceArtists, durationMs,
+					t.Title, candidateArtists, t.Duration,
+					t.Filename,
+				)
+				if score >= minMatchConfidence {
+					candidates = append(candidates, Candidate{Track: t, SourceName: plugin.Name(), Score: score})
+				}
 			}
-		}
+			if len(candidates) > 0 {
+				ch <- result{candidates: candidates}
+			}
+		}(p)
+	}
+
+	// Close channel when all goroutines finish.
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var candidates []Candidate
+	for r := range ch {
+		candidates = append(candidates, r.candidates...)
 	}
 	return candidates
 }
