@@ -33,6 +33,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		`CREATE TABLE IF NOT EXISTS downloads (
 			id TEXT PRIMARY KEY,
 			source_name TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
 			filename TEXT NOT NULL DEFAULT '',
 			display_name TEXT NOT NULL DEFAULT '',
 			state TEXT NOT NULL DEFAULT 'initializing',
@@ -55,6 +56,7 @@ func openTestDB(t *testing.T) *sql.DB {
 			bitrate INTEGER NOT NULL DEFAULT 0,
 			format TEXT NOT NULL DEFAULT '',
 			playlist_id TEXT NOT NULL DEFAULT '',
+			quality_profile_id INTEGER,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,

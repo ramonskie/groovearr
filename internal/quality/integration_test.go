@@ -15,7 +15,7 @@ func TestProfileCRUD_Integration(t *testing.T) {
 	}
 	defer db.Close()
 
-	// Create table (same as migration v5).
+	// Create table (schema matches library/sqlite store init).
 	_, err = db.Exec(`CREATE TABLE quality_profiles (
 		id INTEGER PRIMARY KEY AUTOINCREMENT,
 		name TEXT NOT NULL UNIQUE,

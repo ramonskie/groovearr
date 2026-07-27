@@ -56,7 +56,7 @@ Small but impactful fixes to what's already built.
 | 18 | **Audio metadata parsing** — read ID3/FLAC/Vorbis tags in scanner instead of path-only heuristics | ✅ Done | M | `dhowden/tag` |
 | 19 | **Tag writing** — embed metadata into downloaded files (artist, album, title, track#, cover art) | ✅ Done | L | `bogem/id3v2`, `go-flac` |
 | 20 | **Config validation** — validate URLs, quality values, path existence at save time | ✅ Done | S | — |
-| 21 | **DB migration versioning** — version-tracked schema with `schema_version` table | ✅ Done | S | — |
+| 21 | ~~DB migration versioning~~ — removed; pre-release simplification, schema is flat idempotent DDL | ✅ Done | S | — |
 | 22 | **Wire `QualityConfig`** — actually use `min_bitrate` and `preferred_format` in download filter logic | ✅ Done | S | — |
 | 23 | **Use central `download.Engine`** — Engine wired into orchestrator, available for future queue/bandwidth features | ✅ Done | S | — |
 | — | **Quality Profiles** — named profiles with ranked format fallback chains (e.g. FLAC → MP3-320 → MP3-128). Replaces per-source quality settings. Profile CRUD, ranked target editor, upgrade-until cutoff. SoulSync PR #974 for reference. | 🟡 Medium | L | QualityConfig (done), Settings UI |
@@ -249,8 +249,6 @@ Deployment, security, and operational concerns.
 | B22 | Code Quality | 🟢 Low | **main.go growing linearly with features.** Each new plugin adds ~5 lines. At 10+ plugins becomes unwieldy. Consider `App` struct with builder pattern. |
 | B23 | Download | 🟢 Low | **No download retention policy.** Terminal records accumulate forever. Add configurable retention (auto-clean records older than N days). |
 | B24 | Settings / Providers | 🟡 Medium | **Provider connection badges not persisted.** After testing a connection, the badge shows "Connected" but reverts to "Configured" when returning to the settings page or restarting the app. Connection state is transient (in-memory only). Should persist last-known status or re-test on page load. |
-
-> **Note**: Review flagged missing DB migration system as 🔴 — false positive. Migration system already exists (`internal/library/sqlite/store.go`, v1-v4 with `schema_version` table). Roadmap #21 is accurate.
 
 ### Immediate Next Steps
 

@@ -53,19 +53,8 @@ func (s *Store) DB() *sql.DB {
 // ─── Schema ──────────────────────────────────────────────────────────
 
 func (s *Store) migrate() error {
-	// Ensure version tracking table exists.
-	if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS schema_version (version INTEGER NOT NULL)`); err != nil {
-		s.log.Error("migration: schema_version create failed", "error", err, "component", "lib_store")
-		return fmt.Errorf("migration: schema_version: %w", err)
-	}
-
-	// Read current schema version (0 on fresh DB).
-	var version int
-	s.db.QueryRow(`SELECT COALESCE(MAX(version), 0) FROM schema_version`).Scan(&version)
-
-	// Version 1: initial schema (idempotent CREATE TABLE IF NOT EXISTS).
-	if version < 1 {
-		statements := []string{
+	statements := []string{
+		// ── Library: artists, albums, tracks ──
 		`CREATE TABLE IF NOT EXISTS artists (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			name TEXT NOT NULL,
@@ -76,7 +65,6 @@ func (s *Store) migrate() error {
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
-		`DROP INDEX IF EXISTS idx_artists_name`,
 		`CREATE UNIQUE INDEX IF NOT EXISTS idx_artists_name ON artists(name)`,
 		`CREATE TABLE IF NOT EXISTS albums (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -108,6 +96,7 @@ func (s *Store) migrate() error {
 			external_ids TEXT DEFAULT '{}',
 			acoustid TEXT,
 			isrc TEXT,
+			quality_profile_id INTEGER,
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE,
@@ -117,264 +106,142 @@ func (s *Store) migrate() error {
 		`CREATE INDEX IF NOT EXISTS idx_tracks_album ON tracks(album_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_artist ON tracks(artist_id)`,
 		`CREATE INDEX IF NOT EXISTS idx_tracks_file_path ON tracks(file_path)`,
-	}
 
-	for _, stmt := range statements {
-		if _, err := s.db.Exec(stmt); err != nil {
-			s.log.Error("migration v1 exec failed", "error", err, "component", "lib_store")
-			return fmt.Errorf("migration v1: %w", err)
-		}
-	}
-		version = 1
-	}
+		// ── Playlists ──
+		`CREATE TABLE IF NOT EXISTS playlists (
+			id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+			source             TEXT NOT NULL,
+			source_playlist_id TEXT NOT NULL,
+			name               TEXT NOT NULL,
+			description        TEXT,
+			track_count        INTEGER,
+			cover_url          TEXT,
+			owner_name         TEXT,
+			is_public          INTEGER DEFAULT 1,
+			auto_sync          INTEGER DEFAULT 0,
+			synced_at          TEXT,
+			created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(source, source_playlist_id)
+		)`,
+		`CREATE TABLE IF NOT EXISTS playlist_tracks (
+			playlist_id     INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
+			position        INTEGER NOT NULL,
+			track_id        INTEGER REFERENCES tracks(id),
+			source_track_id TEXT NOT NULL,
+			title           TEXT NOT NULL,
+			artist          TEXT NOT NULL,
+			album           TEXT,
+			duration_ms     INTEGER,
+			isrc            TEXT,
+			added_at        TEXT NOT NULL DEFAULT (datetime('now')),
+			PRIMARY KEY (playlist_id, position)
+		)`,
 
-	// Version 2: playlist support.
-	if version < 2 {
-		statements := []string{
-			`CREATE TABLE IF NOT EXISTS playlists (
-				id                 INTEGER PRIMARY KEY AUTOINCREMENT,
-				source             TEXT NOT NULL,
-				source_playlist_id TEXT NOT NULL,
-				name               TEXT NOT NULL,
-				description        TEXT,
-				track_count        INTEGER,
-				cover_url          TEXT,
-				owner_name         TEXT,
-				is_public          INTEGER DEFAULT 1,
-				auto_sync          INTEGER DEFAULT 0,
-				synced_at          TEXT,
-				created_at         TEXT NOT NULL DEFAULT (datetime('now')),
-				updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
-				UNIQUE(source, source_playlist_id)
-			)`,
-			`CREATE TABLE IF NOT EXISTS playlist_tracks (
-				playlist_id     INTEGER NOT NULL REFERENCES playlists(id) ON DELETE CASCADE,
-				position        INTEGER NOT NULL,
-				track_id        INTEGER REFERENCES tracks(id),
-				source_track_id TEXT NOT NULL,
-				title           TEXT NOT NULL,
-				artist          TEXT NOT NULL,
-				album           TEXT,
-				duration_ms     INTEGER,
-				isrc            TEXT,
-				added_at        TEXT NOT NULL DEFAULT (datetime('now')),
-				PRIMARY KEY (playlist_id, position)
-			)`,
-		}
-		for _, stmt := range statements {
-			if _, err := s.db.Exec(stmt); err != nil {
-				s.log.Error("migration v2 exec failed", "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v2: %w", err)
-			}
-		}
-		version = 2
-	}
+		// ── Downloads ──
+		`CREATE TABLE IF NOT EXISTS downloads (
+			id TEXT PRIMARY KEY,
+			source_name TEXT NOT NULL DEFAULT '',
+			username TEXT NOT NULL DEFAULT '',
+			filename TEXT NOT NULL DEFAULT '',
+			display_name TEXT NOT NULL DEFAULT '',
+			state TEXT NOT NULL DEFAULT 'initializing',
+			progress REAL NOT NULL DEFAULT 0,
+			size INTEGER NOT NULL DEFAULT 0,
+			transferred INTEGER NOT NULL DEFAULT 0,
+			speed INTEGER NOT NULL DEFAULT 0,
+			file_path TEXT NOT NULL DEFAULT '',
+			error TEXT NOT NULL DEFAULT '',
+			track_id TEXT NOT NULL DEFAULT '',
+			cover_url TEXT NOT NULL DEFAULT '',
+			artist TEXT NOT NULL DEFAULT '',
+			album TEXT NOT NULL DEFAULT '',
+			title TEXT NOT NULL DEFAULT '',
+			track_number INTEGER NOT NULL DEFAULT 0,
+			disc_number INTEGER NOT NULL DEFAULT 0,
+			year INTEGER NOT NULL DEFAULT 0,
+			retry_count INTEGER NOT NULL DEFAULT 0,
+			retry_after TEXT NOT NULL DEFAULT '',
+			bitrate INTEGER NOT NULL DEFAULT 0,
+			format TEXT NOT NULL DEFAULT '',
+			playlist_id TEXT NOT NULL DEFAULT '',
+			quality_profile_id INTEGER,
+			created_at TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE TABLE IF NOT EXISTS download_events (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
+			event_type TEXT NOT NULL,
+			payload TEXT NOT NULL DEFAULT '{}',
+			created_at TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_downloads_state ON downloads(state)`,
+		`CREATE INDEX IF NOT EXISTS idx_downloads_playlist_id ON downloads(playlist_id)`,
 
-	// Version 3: download pipeline persistence.
-	if version < 3 {
-		statements := []string{
-			`CREATE TABLE IF NOT EXISTS downloads (
-				id TEXT PRIMARY KEY,
-				source_name TEXT NOT NULL DEFAULT '',
-				filename TEXT NOT NULL DEFAULT '',
-				display_name TEXT NOT NULL DEFAULT '',
-				state TEXT NOT NULL DEFAULT 'initializing',
-				progress REAL NOT NULL DEFAULT 0,
-				size INTEGER NOT NULL DEFAULT 0,
-				transferred INTEGER NOT NULL DEFAULT 0,
-				speed INTEGER NOT NULL DEFAULT 0,
-				file_path TEXT NOT NULL DEFAULT '',
-				error TEXT NOT NULL DEFAULT '',
-				track_id TEXT NOT NULL DEFAULT '',
-				cover_url TEXT NOT NULL DEFAULT '',
-				artist TEXT NOT NULL DEFAULT '',
-				album TEXT NOT NULL DEFAULT '',
-				title TEXT NOT NULL DEFAULT '',
-				track_number INTEGER NOT NULL DEFAULT 0,
-				disc_number INTEGER NOT NULL DEFAULT 0,
-				year INTEGER NOT NULL DEFAULT 0,
-				retry_count INTEGER NOT NULL DEFAULT 0,
-				retry_after TEXT NOT NULL DEFAULT '',
-				bitrate INTEGER NOT NULL DEFAULT 0,
-				format TEXT NOT NULL DEFAULT '',
-				playlist_id TEXT NOT NULL DEFAULT '',
-				created_at TEXT NOT NULL DEFAULT (datetime('now')),
-				updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-			)`,
-			`CREATE TABLE IF NOT EXISTS download_events (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				download_id TEXT NOT NULL REFERENCES downloads(id) ON DELETE CASCADE,
-				event_type TEXT NOT NULL,
-				payload TEXT NOT NULL DEFAULT '{}',
-				created_at TEXT NOT NULL DEFAULT (datetime('now'))
-			)`,
-			`CREATE INDEX IF NOT EXISTS idx_downloads_state ON downloads(state)`,
-			`CREATE INDEX IF NOT EXISTS idx_downloads_playlist_id ON downloads(playlist_id)`,
-		}
-		for _, stmt := range statements {
-			if _, err := s.db.Exec(stmt); err != nil {
-				s.log.Error("migration v3 exec failed", "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v3: %w", err)
-			}
-		}
-		version = 3
-	}
+		// ── Quality profiles ──
+		`CREATE TABLE IF NOT EXISTS quality_profiles (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			name TEXT NOT NULL UNIQUE,
+			description TEXT DEFAULT '',
+			ranked_targets TEXT NOT NULL DEFAULT '[]',
+			fallback_enabled INTEGER NOT NULL DEFAULT 1,
+			search_mode TEXT NOT NULL DEFAULT 'priority',
+			rank_candidates_by_quality INTEGER NOT NULL DEFAULT 0,
+			upgrade_policy TEXT NOT NULL DEFAULT 'acceptable',
+			upgrade_cutoff_index INTEGER NOT NULL DEFAULT 0,
+			replace_lower_quality INTEGER NOT NULL DEFAULT 0,
+			is_default INTEGER NOT NULL DEFAULT 0,
+			created_at TEXT DEFAULT (datetime('now')),
+			updated_at TEXT DEFAULT (datetime('now'))
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_quality_profiles_default ON quality_profiles(is_default)`,
+		`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
+		SELECT 'Balanced', 'FLAC preferred, MP3 320 fallback',
+			'[{"label":"FLAC","format":"flac"},{"label":"MP3 320","format":"mp3","min_bitrate":320}]',
+			1, 'priority', 1, 'acceptable', 0, 1
+		WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Balanced')`,
+		`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
+		SELECT 'Lossless Only', 'FLAC only, no fallback',
+			'[{"label":"FLAC","format":"flac"}]',
+			0, 'priority', 1, 'acceptable', 0, 0
+		WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Lossless Only')`,
+		`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
+		SELECT 'Any Quality', 'Accept any format and bitrate',
+			'[]',
+			1, 'priority', 0, 'acceptable', 0, 0
+		WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Any Quality')`,
 
-	// Version 4: migrate individual external-id columns to JSON column.
-	// Requires SQLite >= 3.35.0 (2021-03-12) for ALTER TABLE DROP COLUMN support.
-	// On older SQLite versions this migration will fail — upgrade your SQLite driver.
-	if version < 4 {
-		// Drop old indices that reference columns being removed.
-		for _, stmt := range []string{
-			`DROP INDEX IF EXISTS idx_artists_spotify`,
-			`DROP INDEX IF EXISTS idx_artists_deezer`,
-			`DROP INDEX IF EXISTS idx_albums_spotify`,
-			`DROP INDEX IF EXISTS idx_tracks_spotify`,
-		} {
-			s.db.Exec(stmt) // ignore errors — indices may not exist
-		}
-
-		// Drop old per-source ID columns from pre-v4 databases.
-		// Fresh v1 databases already use external_ids; DROP COLUMN errors
-		// for missing columns on fresh DBs are non-fatal.
-		dropColumn := func(table, col string) error {
-			_, err := s.db.Exec("ALTER TABLE " + table + " DROP COLUMN " + col)
-			if err != nil && !strings.Contains(err.Error(), "no such column") {
-				s.log.Error("migration v4: drop column failed", "table", table, "column", col, "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v4: drop %s.%s: %w (requires SQLite >= 3.35.0)", table, col, err)
-			}
-			return nil
-		}
-
-		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id"} {
-			if err := dropColumn("artists", col); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec("ALTER TABLE artists ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
-				s.log.Error("migration v4: add artists.external_ids failed", "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v4: add artists.external_ids: %w", err)
-			}
-		}
-
-		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id", "tidal_id", "qobuz_id"} {
-			if err := dropColumn("albums", col); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec("ALTER TABLE albums ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
-				s.log.Error("migration v4: add albums.external_ids failed", "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v4: add albums.external_ids: %w", err)
-			}
-		}
-
-		for _, col := range []string{"spotify_id", "itunes_id", "deezer_id", "musicbrainz_id", "tidal_id", "qobuz_id"} {
-			if err := dropColumn("tracks", col); err != nil {
-				return err
-			}
-		}
-		if _, err := s.db.Exec("ALTER TABLE tracks ADD COLUMN external_ids TEXT DEFAULT '{}'"); err != nil {
-			if !strings.Contains(err.Error(), "duplicate column name") {
-				s.log.Error("migration v4: add tracks.external_ids failed", "error", err, "component", "lib_store")
-				return fmt.Errorf("migration v4: add tracks.external_ids: %w", err)
-			}
-		}
-
-		version = 4
-	}
-
-	// Version 5: quality profiles with ranked format fallback chains.
-	if version < 5 {
-		if _, err := s.db.Exec("SAVEPOINT migration_v5"); err != nil {
-			s.log.Error("migration v5: savepoint failed", "error", err, "component", "lib_store")
-			return fmt.Errorf("migration v5: %w", err)
-		}
-
-		statements := []string{
-			`CREATE TABLE IF NOT EXISTS quality_profiles (
-				id INTEGER PRIMARY KEY AUTOINCREMENT,
-				name TEXT NOT NULL UNIQUE,
-				description TEXT DEFAULT '',
-				ranked_targets TEXT NOT NULL DEFAULT '[]',
-				fallback_enabled INTEGER NOT NULL DEFAULT 1,
-				search_mode TEXT NOT NULL DEFAULT 'priority',
-				rank_candidates_by_quality INTEGER NOT NULL DEFAULT 0,
-				upgrade_policy TEXT NOT NULL DEFAULT 'acceptable',
-				upgrade_cutoff_index INTEGER NOT NULL DEFAULT 0,
-				replace_lower_quality INTEGER NOT NULL DEFAULT 0,
-				is_default INTEGER NOT NULL DEFAULT 0,
-				created_at TEXT DEFAULT (datetime('now')),
-				updated_at TEXT DEFAULT (datetime('now'))
-			)`,
-			`CREATE INDEX IF NOT EXISTS idx_quality_profiles_default ON quality_profiles(is_default)`,
-			`ALTER TABLE tracks ADD COLUMN quality_profile_id INTEGER`,
-			`ALTER TABLE downloads ADD COLUMN quality_profile_id INTEGER`,
-			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
-			SELECT 'Balanced', 'FLAC preferred, MP3 320 fallback',
-				'[{"label":"FLAC","format":"flac"},{"label":"MP3 320","format":"mp3","min_bitrate":320}]',
-				1, 'priority', 1, 'acceptable', 0, 1
-			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Balanced')`,
-			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
-			SELECT 'Lossless Only', 'FLAC only, no fallback',
-				'[{"label":"FLAC","format":"flac"}]',
-				0, 'priority', 1, 'acceptable', 0, 0
-			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Lossless Only')`,
-			`INSERT INTO quality_profiles (name, description, ranked_targets, fallback_enabled, search_mode, rank_candidates_by_quality, upgrade_policy, upgrade_cutoff_index, is_default)
-			SELECT 'Any Quality', 'Accept any format and bitrate',
-				'[]',
-				1, 'priority', 0, 'acceptable', 0, 0
-			WHERE NOT EXISTS (SELECT 1 FROM quality_profiles WHERE name = 'Any Quality')`,
-		}
-
-		var hasError bool
-		for _, stmt := range statements {
-			if _, err := s.db.Exec(stmt); err != nil {
-				s.log.Error("migration v5 exec failed", "error", err, "component", "lib_store")
-				hasError = true
-				break
-			}
-		}
-
-		if hasError {
-			s.db.Exec("ROLLBACK TO migration_v5")
-			return fmt.Errorf("migration v5: rolled back due to error")
-		}
-
-		if _, err := s.db.Exec("RELEASE migration_v5"); err != nil {
-			s.log.Error("migration v5: release savepoint failed", "error", err, "component", "lib_store")
-			return fmt.Errorf("migration v5: %w", err)
-		}
-
-		version = 5
-	}
-
-	// Version 6: album discovery cache for merged library/discovery track views.
-	if version < 6 {
-		if _, err := s.db.Exec(`CREATE TABLE IF NOT EXISTS album_discovery_cache (
+		// ── Album discovery cache ──
+		`CREATE TABLE IF NOT EXISTS album_discovery_cache (
 			album_id         INTEGER PRIMARY KEY,
 			provider_name    TEXT NOT NULL,
 			provider_album_id TEXT NOT NULL,
 			tracks_json      TEXT NOT NULL,
 			cached_at        TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
-		)`); err != nil {
-			s.log.Error("migration v6 exec failed", "error", err, "component", "lib_store")
-			return fmt.Errorf("migration v6: %w", err)
-		}
-		version = 6
+		)`,
 	}
 
-	// Record current version.
-	if _, err := s.db.Exec(`DELETE FROM schema_version`); err != nil {
-		s.log.Error("migration: clear version failed", "error", err, "component", "lib_store")
-		return fmt.Errorf("migration: clear version: %w", err)
+	// Wrap schema init in a transaction so partial failures don't leave the
+	// database in an inconsistent state.
+	tx, err := s.db.Begin()
+	if err != nil {
+		return fmt.Errorf("schema: begin transaction: %w", err)
 	}
-	if _, err := s.db.Exec(`INSERT INTO schema_version (version) VALUES (?)`, version); err != nil {
-		s.log.Error("migration: set version failed", "error", err, "component", "lib_store")
-		return fmt.Errorf("migration: set version: %w", err)
+	defer tx.Rollback() // no-op after Commit
+
+	for _, stmt := range statements {
+		if _, err := tx.Exec(stmt); err != nil {
+			s.log.Error("schema init failed", "error", err, "component", "lib_store")
+			return fmt.Errorf("schema init: %w", err)
+		}
 	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("schema: commit: %w", err)
+	}
+
 	return nil
 }
 
