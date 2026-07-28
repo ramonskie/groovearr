@@ -292,7 +292,13 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Snapshot old sources before update to skip rebuilding unchanged plugins.
-	oldSources := s.cfg.Get().Sources
+	// Deep-copy — maps are reference types, and cfg.Merge mutates in-place,
+	// which would corrupt the old-vs-new comparison.
+	cfgSnapshot := s.cfg.Get()
+	oldSources := make(map[string]json.RawMessage, len(cfgSnapshot.Sources))
+	for k, v := range cfgSnapshot.Sources {
+		oldSources[k] = append([]byte(nil), v...)
+	}
 
 	err := s.cfg.Update(func(cfg *config.Config) error {
 		// Merge partial onto a copy first to validate, then apply to live config.
