@@ -100,14 +100,14 @@ Plugin interface makes adding new sources straightforward.
 
 | # | Feature | Priority | Effort | Dependencies |
 |---|---------|----------|--------|--------------|
-| 33 | **YouTube downloads** — via yt-dlp subprocess or API wrapper | 🟡 Medium | L | `yt-dlp` binary or Go yt-dlp lib |
-| 34 | **Tidal downloads** — OAuth device auth, search + download + quality selection | 🟡 Medium | L | Tidal API (`tidalapi` port) |
-| 35 | **Qobuz downloads** — REST API auth, search + download | 🟢 Low | L | Qobuz API |
-| 36 | **SoundCloud downloads** — yt-dlp extractor or direct API | 🟢 Low | M | — |
-| 37 | **Torrent downloads (Prowlarr)** — Prowlarr API → qBittorrent/Transmission | 🟢 Low | L | Prowlarr + torrent client |
-| 38 | **Usenet downloads (Prowlarr)** — Prowlarr → SABnzbd/NZBGet | 🟢 Low | L | Prowlarr + usenet client |
-| 39 | **Lidarr integration** — use Lidarr as download source via its API | 🟢 Low | M | Lidarr instance |
-| 40 | **Direct URL download** — paste Tidal/Qobuz track URLs directly | 🟢 Low | S | Tidal/Qobuz clients |
+| 35 | **YouTube downloads** — via yt-dlp subprocess or API wrapper | 🟡 Medium | L | `yt-dlp` binary or Go yt-dlp lib |
+| 36 | **Tidal downloads** — OAuth device auth, search + download + quality selection | 🚧 In Progress | L | Tidal API — uses [go-tiddl](https://github.com/binozo/go-tiddl) v0.1.0 (Apache-2.0) for OAuth device code flow + DASH/BTS manifest download. Plans to upstream search/albums/artists/playlists endpoints to go-tiddl via PR. |
+| 37 | **Qobuz downloads** — REST API auth, search + download | 🟢 Low | L | Qobuz API |
+| 38 | **SoundCloud downloads** — yt-dlp extractor or direct API | 🟢 Low | M | — |
+| 39 | **Torrent downloads (Prowlarr)** — Prowlarr API → qBittorrent/Transmission | 🟢 Low | L | Prowlarr + torrent client |
+| 40 | **Usenet downloads (Prowlarr)** — Prowlarr → SABnzbd/NZBGet | 🟢 Low | L | Prowlarr + usenet client |
+| 41 | **Lidarr integration** — use Lidarr as download source via its API | 🟢 Low | M | Lidarr instance |
+| 42 | **Direct URL download** — paste Tidal/Qobuz track URLs directly | 🟢 Low | S | Tidal/Qobuz clients |
 
 ---
 
