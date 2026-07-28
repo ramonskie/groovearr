@@ -47,6 +47,14 @@ type OAuthInfo struct {
 	ConnectLabel string          `json:"connect_label"`
 	ConnectURL   string          `json:"connect_url"`
 	DependsOn    *FieldDependsOn `json:"depends_on,omitempty"`
+
+	// OAuth flow parameters (set by providers that use device code or PKCE flows).
+	DeviceCode    bool              `json:"device_code,omitempty"`     // use device code grant (not PKCE)
+	AuthorizeURL  string            `json:"authorize_url,omitempty"`   // authorization endpoint
+	TokenURL      string            `json:"token_url,omitempty"`       // token exchange endpoint
+	DeviceCodeURL string            `json:"device_code_url,omitempty"` // device authorization endpoint
+	Scopes        []string          `json:"scopes,omitempty"`          // requested OAuth scopes
+	ExtraParams   map[string]string `json:"extra_params,omitempty"`    // additional device code parameters
 }
 
 // UISlots declares optional UI features a plugin provides beyond config forms.

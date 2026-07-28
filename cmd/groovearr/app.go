@@ -34,6 +34,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/qbittorrent"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
+	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
@@ -108,6 +109,7 @@ func NewApp(configPath string) (*App, error) {
 	pluginReg.RegisterFactory(lastfm.Factory)
 	pluginReg.RegisterFactory(prowlarr.Factory)
 	pluginReg.RegisterFactory(qbittorrent.Factory)
+	pluginReg.RegisterFactory(tidal.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: log}
@@ -225,6 +227,22 @@ func NewApp(configPath string) (*App, error) {
 	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
+				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
+				if err := registry.Rebuild(name, rawCfg, res); err != nil {
+					return err
+				}
+				if playlistSvc != nil {
+					playlistSvc.RefreshSources(registry)
+				}
+				return nil
+			}, func(name string) {
+				if p := registry.Get(name); p != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					p.CheckConnection(ctx)
+				}
+			})
+			tidal.RegisterOAuthRoutes(mux, cfg, pluginReg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
 				if err := registry.Rebuild(name, rawCfg, res); err != nil {
 					return err
