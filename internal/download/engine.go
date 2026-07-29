@@ -252,10 +252,15 @@ func (o *Orchestrator) configuredQueries(title, artist, album string) []string {
 	return queries
 }
 
-// searchSingleQuery queries all configured plugins in parallel with a single
-// search string, scores results with ScoreTrackMatchWithPath (using the
-// candidate's Filename for word-boundary artist matching), and returns
-// candidates meeting the minConfidence threshold.
+// searchSingleQuery queries configured plugins sequentially in priority order
+// (download_order config). Each provider is tried in turn: if it returns
+// results meeting the minConfidence threshold, those are returned immediately.
+// Only when a provider fails or returns no candidates does the search fall
+// through to the next provider. This respects the semantic that priority order
+// means "try provider 1 first, fall back to provider 2 only if needed."
+//
+// Scores candidates with ScoreTrackMatchWithPath, using the candidate's
+// Filename for word-boundary artist matching.
 func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, artist string, durationMs int64, excludeSource string) []Candidate {
 	sourceArtists := []string{}
 	if artist != "" {
@@ -264,56 +269,47 @@ func (o *Orchestrator) searchSingleQuery(ctx context.Context, query, title, arti
 
 	plugins := o.orderedDownloadable()
 
-	type result struct {
-		candidates []Candidate
-	}
-	ch := make(chan result, len(plugins))
-	var wg sync.WaitGroup
-
 	for _, p := range plugins {
 		if p.Name() == excludeSource {
 			continue
 		}
-		wg.Add(1)
-		go func(plugin Plugin) {
-			defer wg.Done()
-			searchTracks, _, searchErr := plugin.Search(ctx, query)
-			if searchErr != nil {
-				o.log.Error("search failed", "plugin", plugin.Name(), "query", query, "error", searchErr, "component", "orchestrator")
-				return
+
+		// Respect context cancellation between provider attempts.
+		if ctx.Err() != nil {
+			return nil
+		}
+
+		searchTracks, _, searchErr := p.Search(ctx, query)
+		if searchErr != nil {
+			o.log.Warn("searchSingleQuery: provider failed, falling back to next",
+				"plugin", p.Name(), "query", query, "error", searchErr, "component", "orchestrator",
+			)
+			continue
+		}
+
+		var candidates []Candidate
+		for _, t := range searchTracks {
+			candidateArtists := []string{}
+			if t.Artist != "" {
+				candidateArtists = []string{t.Artist}
 			}
-			var candidates []Candidate
-			for _, t := range searchTracks {
-				candidateArtists := []string{}
-				if t.Artist != "" {
-					candidateArtists = []string{t.Artist}
-				}
-				score, _ := o.matcher.ScoreTrackMatchWithPath(
-					title, sourceArtists, durationMs,
-					t.Title, candidateArtists, t.Duration,
-					t.Filename,
-				)
-				if score >= minMatchConfidence {
-					candidates = append(candidates, Candidate{Track: t, SourceName: plugin.Name(), Score: score})
-				}
+			score, _ := o.matcher.ScoreTrackMatchWithPath(
+				title, sourceArtists, durationMs,
+				t.Title, candidateArtists, t.Duration,
+				t.Filename,
+			)
+			if score >= minMatchConfidence {
+				candidates = append(candidates, Candidate{Track: t, SourceName: p.Name(), Score: score})
 			}
-			if len(candidates) > 0 {
-				ch <- result{candidates: candidates}
-			}
-		}(p)
+		}
+
+		if len(candidates) > 0 {
+			return candidates
+		}
+		// No results from this provider — continue to next in priority order.
 	}
 
-	// Close channel when all goroutines finish.
-	go func() {
-		wg.Wait()
-		close(ch)
-	}()
-
-	var candidates []Candidate
-	for r := range ch {
-		candidates = append(candidates, r.candidates...)
-	}
-	return candidates
+	return nil
 }
 
 // Candidate is a search result with match score used by FilterByProfile

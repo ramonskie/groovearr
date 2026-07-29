@@ -30,7 +30,7 @@ internal/plugin/           ← Shared framework: BasePlugin, PluginFactory, Regi
 - Name-based lookup + capability-based routing (`WithCapability()`)
 - Automatic initialization from `config.json` `"sources"` map via `InitAll()`
 - Hot-reload via `Registry.Rebuild()` when config changes
-- Plugin queries (all configured sources searched in parallel)
+- Plugin queries (configured sources searched sequentially in `download_order` priority)
 
 **What a plugin gets for free:**
 - Worker pool (bounded goroutines, cancellable contexts, state machine)
