@@ -13,11 +13,14 @@ import (
 
 // Config holds all application settings.
 type Config struct {
-	Sources       map[string]json.RawMessage `json:"sources"`
-	Library       LibraryConfig              `json:"library"`
-	Auth          AuthConfig                 `json:"auth"`
-	MetadataOrder []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
-	DownloadOrder []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
+	Sources        map[string]json.RawMessage `json:"sources"`
+	Library        LibraryConfig              `json:"library"`
+	Auth           AuthConfig                 `json:"auth"`
+	MetadataOrder  []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
+	DownloadOrder  []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
+	AlbumSources   []string                   `json:"album_sources"`  // album-capable source order (e.g. ["prowlarr"])
+	TrackSources   []string                   `json:"track_sources"`  // per-track source order (e.g. ["deezer", "soulseek"])
+	DownloadClient string                    `json:"download_client"` // default download client (e.g. "qbittorrent")
 }
 
 // LibraryConfig holds music library paths.
@@ -25,6 +28,7 @@ type LibraryConfig struct {
 	DownloadPath          string `json:"download_path"`           // download staging directory
 	LibraryPath           string `json:"library_path"`            // where organized downloads end up
 	FolderTemplate        string `json:"folder_template"`         // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	CompilationTemplate   string `json:"compilation_template"`    // template for VA compilations (defaults to "Various Artists/...")
 	PlaylistPath          string `json:"playlist_path"`            // separate folder for playlist downloads
 	PlaylistTemplate      string `json:"playlist_template"`        // e.g. "{position:02d} {artist} - {title}"
 	MaxDownloadWorkers    int    `json:"max_download_workers"`     // concurrent download workers (default 3)
@@ -54,13 +58,17 @@ func intPtr(v int) *int { return &v }
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Sources:       make(map[string]json.RawMessage),
-		MetadataOrder: []string{"deezer", "musicbrainz", "discogs"},
-		DownloadOrder: []string{"soulseek", "deezer"},
+		Sources:        make(map[string]json.RawMessage),
+		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
+		DownloadOrder:  []string{"soulseek", "deezer"},
+		AlbumSources:   []string{},
+		TrackSources:   []string{"deezer", "soulseek"},
+		DownloadClient: "",
 		Library: LibraryConfig{
 			DownloadPath:         "./downloads",
 			LibraryPath:          "./music",
 			FolderTemplate:       "{artist}/{album} ({year})/{track:02d} - {title}",
+			CompilationTemplate:   "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
 			PlaylistPath:         "./playlists",
 			MaxDownloadWorkers:   3,
 			PlaylistTemplate:     "{position:02d} {artist} - {title}",
@@ -179,6 +187,20 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if len(partial.DownloadOrder) > 0 {
 		c.DownloadOrder = partial.DownloadOrder
+	}
+
+	// Album/torrent sources.
+	if len(partial.AlbumSources) > 0 {
+		c.AlbumSources = partial.AlbumSources
+	}
+	if len(partial.TrackSources) > 0 {
+		c.TrackSources = partial.TrackSources
+	}
+	if partial.DownloadClient != "" {
+		c.DownloadClient = partial.DownloadClient
+	}
+	if partial.Library.CompilationTemplate != "" {
+		c.Library.CompilationTemplate = partial.Library.CompilationTemplate
 	}
 }
 

@@ -6,7 +6,10 @@ package download
 
 import (
 	"encoding/json"
+	"strings"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/domain"
 )
 
 // State tracks the lifecycle of a single download.
@@ -101,12 +104,40 @@ type Record struct {
 	ISRC        string `json:"isrc,omitempty"`
 	Bitrate     int    `json:"bitrate,omitempty"` // kbps
 	Format      string `json:"format,omitempty"`  // "flac", "mp3", etc.
+
+	// Album-level download fields. Zero-valued for track downloads.
+	AlbumType        string               `json:"album_type,omitempty"`        // "Album", "Compilation"
+	AlbumTracks      []domain.ExpectedTrack `json:"album_tracks,omitempty"`    // expected track listing
+	DownloadClient   string               `json:"download_client,omitempty"`   // dispatch target (e.g. "qbittorrent")
+	MagnetURI        string               `json:"magnet_uri,omitempty"`        // for torrent sources
+	FolderPath       string               `json:"folder_path,omitempty"`       // downloaded folder path
+	ImportedTrackIDs []int64              `json:"imported_track_ids,omitempty"` // linked library tracks
 }
 
 // IsPendingSource returns true if the record was created via QueuePending
 // and has not yet been resolved to a real download source.
 func (r *Record) IsPendingSource() bool {
 	return r.SourceName == PendingSource || r.Filename == ""
+}
+
+// IsAlbum returns true if this record represents a full album download
+// rather than a single track.
+func (r *Record) IsAlbum() bool {
+	return r.AlbumType != ""
+}
+
+// IsCompilation returns true if the album has multiple artists (VA release).
+func (r *Record) IsCompilation() bool {
+	if strings.EqualFold(r.AlbumType, string(domain.AlbumTypeCompilation)) {
+		return true
+	}
+	artists := make(map[string]bool)
+	for _, t := range r.AlbumTracks {
+		if t.Artist != "" {
+			artists[t.Artist] = true
+		}
+	}
+	return len(artists) > 1
 }
 
 // Meta carries track metadata supplied at queue time.

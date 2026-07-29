@@ -18,29 +18,33 @@ type ImportHandler interface {
 // CompletedDownloadService subscribes to download completion events and runs
 // a sequential chain of import handlers on each completed download.
 type CompletedDownloadService struct {
-	log      *slog.Logger
-	store    Store
-	bus      events.IEventAggregator
-	handlers []ImportHandler
+	log          *slog.Logger
+	store        Store
+	bus          events.IEventAggregator
+	handlers     []ImportHandler
+	albumHandler ImportHandler // runs for album records (replaces handler chain)
 }
 
 // NewCompletedDownloadService creates a service that subscribes to
 // TopicDownloadCompleted on the given event bus and processes completed
-// downloads through the provided handler chain.
+// downloads through the provided handler chain. albumHandler runs for
+// full album downloads instead of the regular handler chain.
 func NewCompletedDownloadService(
 	store Store,
 	bus events.IEventAggregator,
 	logger *slog.Logger,
+	albumHandler ImportHandler,
 	handlers ...ImportHandler,
 ) *CompletedDownloadService {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	s := &CompletedDownloadService{
-		log:      logger,
-		store:    store,
-		bus:      bus,
-		handlers: handlers,
+		log:          logger,
+		store:        store,
+		bus:          bus,
+		albumHandler: albumHandler,
+		handlers:     handlers,
 	}
 	bus.Subscribe(events.TopicDownloadCompleted, s.onDownloadCompleted)
 	return s
@@ -80,7 +84,30 @@ func (s *CompletedDownloadService) onDownloadCompleted(ctx context.Context, even
 	record.State = StateImporting
 	s.bus.Publish(ctx, events.TopicImportStarted, record)
 
-	// Run handler chain sequentially. First failure stops the chain.
+	// Album downloads run through the album import handler instead of
+	// the regular single-track handler chain.
+	if record.IsAlbum() && s.albumHandler != nil {
+		if err := s.albumHandler.Handle(ctx, record); err != nil {
+			s.log.Error("album handler failed", "download_id", record.ID, "error", err, "component", "importer")
+			record.State = StateFailed
+			record.Error = err.Error()
+			if updateErr := s.store.Update(ctx, record); updateErr != nil {
+				s.log.Error("failed to persist album error", "download_id", record.ID, "error", updateErr, "component", "importer")
+			}
+			s.bus.Publish(ctx, events.TopicImportFailed, record)
+			return
+		}
+		s.log.Info("album import complete", "download_id", record.ID, "component", "importer")
+		record.State = StateImported
+		if err := s.store.Update(ctx, record); err != nil {
+			s.log.Error("final state update failed", "download_id", record.ID, "error", err, "component", "importer")
+			return
+		}
+		s.bus.Publish(ctx, events.TopicImportCompleted, record)
+		return
+	}
+
+	// Run handler chain sequentially for single-track downloads.
 	// Re-check state between handlers in case a concurrent cancel took effect.
 	for _, h := range s.handlers {
 		current, checkErr := s.store.Get(ctx, record.ID)

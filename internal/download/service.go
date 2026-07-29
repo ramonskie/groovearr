@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
@@ -166,6 +167,57 @@ func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
 
 	if err := s.store.Insert(ctx, record); err != nil {
 		return "", fmt.Errorf("queue pending: %w", err)
+	}
+
+	s.bus.Publish(ctx, events.TopicDownloadQueued, record)
+	return id, nil
+}
+
+// QueueAlbum creates a single download record for a full album release.
+// Unlike Queue (per-track), this produces ONE record that imports N tracks
+// from a downloaded folder. Used by album-capable sources (prowlarr/torrent).
+func (s *Service) QueueAlbum(ctx context.Context, release domain.AlbumRelease, tracks []domain.ExpectedTrack, downloadClient string) (string, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Dedup: skip if an active album download already exists for the same artist+album.
+	if release.Artist != "" && release.Album != "" {
+		if existing, err := s.store.FindActiveByTitle(ctx, release.Artist, release.Album); err != nil {
+			s.log.Warn("dedup check failed for album, proceeding",
+				"artist", release.Artist, "album", release.Album, "error", err, "component", "download")
+		} else if existing != nil {
+			return existing.ID, nil
+		}
+	}
+
+	id := fmt.Sprintf("%s-%d-%04x", release.SourceName, time.Now().UnixNano(), rand.Intn(0xffff))
+
+	displayName := release.Artist + " - " + release.Album
+	albumType := release.AlbumType
+	if albumType == "" {
+		albumType = "Album"
+	}
+
+	record := &Record{
+		ID:              id,
+		SourceName:      release.SourceName,
+		State:           StateQueued,
+		DisplayName:     displayName,
+		Title:           release.Album, // used by FindActiveByTitle dedup for albums
+		AlbumType:       albumType,
+		AlbumTracks:     tracks,
+		DownloadClient:  downloadClient,
+		Artist:          release.Artist,
+		Album:           release.Album,
+		Year:            release.Year,
+		MagnetURI:       release.MagnetURI,
+		Size:            release.Size,
+		CoverURL:        release.CoverURL,
+		Filename:        release.MagnetURI, // for backward compat with monitor dispatch
+	}
+
+	if err := s.store.Insert(ctx, record); err != nil {
+		return "", fmt.Errorf("queue album: %w", err)
 	}
 
 	s.bus.Publish(ctx, events.TopicDownloadQueued, record)

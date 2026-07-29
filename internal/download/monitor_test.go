@@ -204,7 +204,7 @@ func TestStartQueuedDownloads_PicksUpQueued(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.startQueuedDownloads()
 
 	fresh, err := store.Get(context.Background(), "dl-1")
@@ -255,7 +255,7 @@ func TestStartSingleDownload_BuildsMetaFields(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.startSingleDownload(rec)
 
 	prov.mu.Lock()
@@ -307,7 +307,7 @@ func TestStartSingleDownload_ConcurrencyLimit(t *testing.T) {
 	store.Insert(context.Background(), rec1)
 	store.Insert(context.Background(), rec2)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.startQueuedDownloads()
 
 	freshA, _ := store.Get(context.Background(), "dl-a")
@@ -358,7 +358,7 @@ func TestPollSingle_DownloadImported_TransitionAndCoverSync(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(prov)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 
 	// Manually add tracking so pollSingle can find the download.
 	svc.addMapping("dl-imported", "prov-imported", "testsource",
@@ -421,7 +421,7 @@ func TestPollSingle_DownloadFailed(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(prov)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.addMapping("dl-fail", "prov-fail", "testsource",
 		time.Now(), time.Now().Add(time.Hour))
 
@@ -469,7 +469,7 @@ func TestPollSingle_Timeout(t *testing.T) {
 	prov.timeout = 10 * time.Millisecond
 	reg.Register(prov)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	// Map with deadline already expired.
 	svc.addMapping("dl-timeout", "prov-timeout", "testsource",
 		time.Now(), time.Now().Add(-1*time.Second))
@@ -517,7 +517,7 @@ func TestCheckCancellations_StopsTracking(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(prov)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 
 	// Acquire semaphore (simulating what startSingleDownload does).
 	sem := svc.getSemaphore("testsource", 1)
@@ -591,7 +591,7 @@ func TestScanRetry_CrossProviderSearch(t *testing.T) {
 	reg.Register(origProv)
 	reg.Register(altProv)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.scanRetry()
 
 	fresh, _ := store.Get(context.Background(), "dl-retry")
@@ -639,7 +639,7 @@ func TestScanRetry_NoSourceFound_Skips(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(emptyProv)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.scanRetry()
 
 	fresh, _ := store.Get(context.Background(), "dl-nosource")
@@ -674,7 +674,7 @@ func TestScanRetry_MaxRetries_Exhausted(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(newMonitorTestProvider("soulseek"))
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.scanRetry()
 
 	fresh, _ := store.Get(context.Background(), "dl-exhausted")
@@ -701,7 +701,7 @@ func TestRecoverOrphans_DownloadingToFailed(t *testing.T) {
 	store.Insert(context.Background(), orphanRec)
 
 	reg := NewRegistry()
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.recoverOrphans(context.Background())
 
 	fresh, _ := store.Get(context.Background(), "dl-orphan")
@@ -735,7 +735,7 @@ func TestRecoverOrphans_ImportPending_ReTrigger(t *testing.T) {
 	store.Insert(context.Background(), importPendingRec)
 
 	reg := NewRegistry()
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 	svc.recoverOrphans(context.Background())
 
 	// State should remain importPending (not modified by recovery).
@@ -784,7 +784,7 @@ func TestResolveRetrySource_PopulatesFields(t *testing.T) {
 	reg := NewRegistry()
 	reg.Register(prov)
 
-	svc := NewMonitoringService(store, reg, bus, testLogger())
+	svc := NewMonitoringService(store, reg, nil, "", bus, testLogger())
 
 	found := svc.resolveRetrySource(context.Background(), &rec)
 	if !found {

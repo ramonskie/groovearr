@@ -31,6 +31,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
+	"github.com/ramonskie/groovearr/internal/tagging"
 )
 
 func main() {
@@ -123,8 +124,11 @@ func main() {
 	// Event bus — decouples workers, importers, and SSE notifier.
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
+	// Download client registry — separate from source plugins for albums.
+	downloadClientReg := download.NewDownloadClientRegistry()
+
 	// Monitoring service — scans DB for queued downloads and drives state machine.
-	monitor := download.NewMonitoringService(dlStore, registry, eventBus, mainLog)
+	monitor := download.NewMonitoringService(dlStore, registry, downloadClientReg, currentCfg.Library.DownloadPath, eventBus, mainLog)
 
 	// Download service — queues downloads. Dispatch handled by MonitoringService.
 	downloadSvc := download.NewService(dlStore, eventBus, mainLog)
@@ -135,6 +139,9 @@ func main() {
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
 	downloadSvc.SetQualityProfileStore(qualityProfileStore)
 	monitor.SetQualityProfileStore(qualityProfileStore)
+
+	// Album download path uses live config for hot-reload support.
+	monitor.SetDownloadPathFunc(func() string { return cfg.Get().Library.DownloadPath })
 
 	// Build the import handler chain for completed downloads.
 	renamerCfg := func() (template, root string) {
@@ -150,6 +157,20 @@ func main() {
 	folderTemplate, libraryRoot := renamerCfg()
 	renamer := library.NewRenamer(folderTemplate, libraryRoot, mainLog)
 
+	// Compilation renamer uses the compilation template for VA albums.
+	compTemplate := currentCfg.Library.CompilationTemplate
+	if compTemplate == "" {
+		compTemplate = "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}"
+	}
+	compRenamer := library.NewRenamer(compTemplate, libraryRoot, mainLog)
+
+	// Album import handler — scans folders and imports full album downloads.
+	albumImportHandler := download.NewAlbumImportHandler(
+		tagging.New(mainLog), renamer, compRenamer,
+		download.NewCoverArtHandler(libStore, mainLog),
+		libStore, dlStore, mainLog,
+	)
+
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, mainLog)
 	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
 
@@ -162,12 +183,11 @@ func main() {
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, mainLog)
 
-	// Completed download service subscribes to TopicDownloadCompleted on the
-	// event bus and runs import handlers sequentially on each download.
 	download.NewCompletedDownloadService(
 		dlStore,
 		eventBus,
 		mainLog,
+		albumImportHandler,
 		download.NewFileRenamerHandler(renamer, dlStore, mainLog),
 		download.NewCoverArtHandler(libStore, mainLog),
 		download.NewTagWriterHandler(mainLog),

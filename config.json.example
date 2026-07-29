@@ -26,10 +26,14 @@
     "download_path": "./downloads",
     "library_path": "./music",
     "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}",
+    "compilation_template": "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
     "playlist_path": "./playlists",
     "playlist_template": "{position:02d} {artist} - {title}",
     "playlist_auto_sync_mins": 30
   },
+  "album_sources": [],
+  "track_sources": ["deezer", "soulseek"],
+  "download_client": "",
   "quality": {
     "preferred_format": "flac",
     "min_bitrate": 0

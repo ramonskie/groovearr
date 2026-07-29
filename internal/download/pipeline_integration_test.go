@@ -310,7 +310,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	downloadSvc := download.NewService(dlStore, eventBus, testLogger())
 
 	// Monitoring service — drives the state machine by polling providers.
-	monitor := download.NewMonitoringService(dlStore, reg, eventBus, testLogger())
+	monitor := download.NewMonitoringService(dlStore, reg, nil, "", eventBus, testLogger())
 	monitor.Start(context.Background())
 	defer monitor.Shutdown()
 

@@ -2,10 +2,12 @@ package download
 
 import (
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/sanitize"
 )
 
 // ---------------------------------------------------------------------------
@@ -43,8 +45,8 @@ func (m *MonitoringService) startQueuedDownloads() {
 		// Skip records mid-retry-resolution. Retry() clears source fields
 		// before launching a background goroutine that searches for alternative
 		// sources. Picking up a record with no Filename would cause a spurious
-		// download failure.
-		if rec.Filename == "" {
+		// download failure. Album records use MagnetURI instead of Filename.
+		if !rec.IsAlbum() && rec.Filename == "" {
 			continue
 		}
 
@@ -67,7 +69,27 @@ func (m *MonitoringService) startQueuedDownloads() {
 			continue
 		}
 
-		m.startSingleDownload(fresh)
+		// Route album downloads through the DownloadClient,
+		// track downloads through the existing MonitoredProvider path.
+		if fresh.IsAlbum() {
+			m.log.Info("routing to album download client",
+				"download_id", fresh.ID,
+				"client", fresh.DownloadClient,
+				"album", fresh.Album,
+				"artist", fresh.Artist,
+				"component", "monitor",
+			)
+			m.startAlbumDownload(fresh)
+		} else {
+			m.log.Info("routing to track download plugin",
+				"download_id", fresh.ID,
+				"plugin", fresh.SourceName,
+				"artist", fresh.Artist,
+				"title", fresh.Title,
+				"component", "monitor",
+			)
+			m.startSingleDownload(fresh)
+		}
 	}
 }
 
@@ -187,6 +209,99 @@ func (m *MonitoringService) startSingleDownload(rec *Record) {
 	)
 }
 
+// startAlbumDownload dispatches an album-level download record through
+// the configured DownloadClient. Unlike per-track downloads which use
+// MonitoredProvider, album downloads route through the DownloadClientRegistry.
+func (m *MonitoringService) startAlbumDownload(rec *Record) {
+	downloadID := rec.ID
+
+	if m.downloadClients == nil {
+		m.failRecord(downloadID, StateQueued, "no download client registry configured")
+		return
+	}
+
+	clientName := rec.DownloadClient
+	if clientName == "" {
+		m.failRecord(downloadID, StateQueued, "no download_client set on album record")
+		return
+	}
+
+	dc := m.downloadClients.Get(clientName)
+	if dc == nil {
+		m.failRecord(downloadID, StateQueued,
+			fmt.Sprintf("download client %q not found in registry", clientName))
+		return
+	}
+
+	// Acquire per-client concurrency slot.
+	maxConc := dc.MaxConcurrent()
+	semAcquired := false
+	if maxConc > 0 {
+		sem := m.getSemaphore(clientName, maxConc)
+		select {
+		case sem <- struct{}{}:
+			semAcquired = true
+		default:
+			return // pool full, retry next tick
+		}
+	}
+	defer func() {
+		if semAcquired {
+			m.releaseSemaphore(clientName)
+		}
+	}()
+
+	// Transition state: queued → downloading.
+	if ok, err := m.store.TransitionState(m.ctx, downloadID, StateQueued, StateDownloading); err != nil {
+		m.log.Error("startAlbumDownload: transition failed",
+			"download_id", downloadID, "error", err, "component", "monitor")
+		return
+	} else if !ok {
+		return
+	}
+
+	m.publishRecord(downloadID, StateDownloading, events.TopicDownloadStateChanged)
+
+	savePath := filepath.Join(m.downloadPath(), sanitize.PathSegment(rec.Album))
+
+	uri := rec.MagnetURI
+	if uri == "" {
+		uri = rec.Filename // fallback
+	}
+
+	providerID, err := dc.AddDownload(m.ctx, uri, "music", savePath)
+	if err != nil {
+		m.failRecord(downloadID, StateDownloading,
+			fmt.Sprintf("add download: %v", err))
+		return
+	}
+
+	deadline := time.Now().Add(dc.DownloadTimeout())
+	m.addDownloadClientMapping(downloadID, providerID, clientName, time.Now(), deadline)
+	semAcquired = false
+
+	m.log.Info("album download started",
+		"download_id", downloadID,
+		"client", clientName,
+		"provider_id", providerID,
+		"album", rec.Album,
+		"component", "monitor",
+	)
+}
+
+// downloadPath returns the configured download base path.
+func (m *MonitoringService) downloadPath() string {
+	if m.downloadBasePathFunc != nil {
+		if p := m.downloadBasePathFunc(); p != "" {
+			return p
+		}
+	}
+	if m.downloadBasePath != "" {
+		return m.downloadBasePath
+	}
+	return "./downloads"
+}
+
 // ---------------------------------------------------------------------------
 // Poll active downloads
 // ---------------------------------------------------------------------------
@@ -234,6 +349,13 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 		m.failRecord(md.recordID, StateDownloading, reason)
 		m.removeTracking(md.recordID, md.providerID)
 		m.releaseSemaphore(md.pluginName)
+		return
+	}
+
+	// Track-level downloads poll via MonitoredProvider,
+	// album downloads poll via DownloadClient.
+	if md.downloadClientName != "" {
+		m.pollAlbumDownload(md)
 		return
 	}
 
@@ -390,8 +512,19 @@ func (m *MonitoringService) checkCancellations() {
 			m.log.Info("checkCancellations: state changed externally, cancelling provider download",
 				"download_id", md.recordID, "state", fresh.State, "component", "monitor")
 
-			// Cancel the provider-level download before removing tracking.
-			if plugin := m.registry.Get(md.pluginName); plugin != nil {
+			// Cancel via DownloadClient for album downloads, MonitoredProvider for tracks.
+			if md.downloadClientName != "" && m.downloadClients != nil {
+				if dc := m.downloadClients.Get(md.downloadClientName); dc != nil {
+					if err := dc.Cancel(m.ctx, md.providerID, false); err != nil {
+						m.log.Warn("checkCancellations: client cancel failed",
+							"download_id", md.recordID, "provider_id", md.providerID,
+							"error", err, "component", "monitor")
+					}
+				} else {
+					m.log.Warn("checkCancellations: download client not found, cannot cancel",
+						"download_id", md.recordID, "client", md.downloadClientName, "component", "monitor")
+				}
+			} else if plugin := m.registry.Get(md.pluginName); plugin != nil {
 				if mp, ok := plugin.(MonitoredProvider); ok {
 					if err := mp.Cancel(m.ctx, md.providerID, false); err != nil {
 						m.log.Warn("checkCancellations: provider cancel failed",
@@ -405,6 +538,60 @@ func (m *MonitoringService) checkCancellations() {
 			m.releaseSemaphore(md.pluginName)
 		}
 	}
+}
+
+// ---------------------------------------------------------------------------
+// Album download polling
+// ---------------------------------------------------------------------------
+
+// pollAlbumDownload polls a DownloadClient for an album download's status
+// and handles state transitions.
+func (m *MonitoringService) pollAlbumDownload(md *monitoredDownload) {
+	if m.downloadClients == nil {
+		return
+	}
+
+	dc := m.downloadClients.Get(md.downloadClientName)
+	if dc == nil {
+		m.failRecord(md.recordID, StateDownloading,
+			fmt.Sprintf("download client %q not found", md.downloadClientName))
+		m.removeTracking(md.recordID, md.providerID)
+		m.releaseSemaphore(md.pluginName)
+		return
+	}
+
+	status, err := dc.GetStatus(m.ctx, md.providerID)
+	if err != nil {
+		m.log.Warn("pollAlbumDownload: get status failed",
+			"download_id", md.recordID, "provider_id", md.providerID,
+			"error", err, "component", "monitor")
+		return
+	}
+	if status == nil {
+		return
+	}
+
+	prog, _ := dc.GetProgress(m.ctx, md.providerID)
+
+	bestProgress := status.Progress
+	bestTransferred := status.Transferred
+	bestTotal := status.Size
+	bestSpeed := status.Speed
+	if prog != nil {
+		bestTransferred = prog.Transferred
+		bestTotal = prog.Total
+		bestSpeed = prog.Speed
+		if prog.Total > 0 {
+			bestProgress = float64(prog.Transferred) / float64(prog.Total) * 100
+		}
+	}
+
+	_ = m.store.UpdateProgress(m.ctx, md.recordID, StateDownloading,
+		bestProgress, bestTotal, bestTransferred, bestSpeed,
+		status.FilePath, status.CoverURL)
+
+	m.fireProgress(md.recordID, bestProgress, bestTransferred, bestTotal, bestSpeed)
+	m.handleProviderState(md, status)
 }
 
 // ---------------------------------------------------------------------------

@@ -25,6 +25,7 @@ type monitoredDownload struct {
 	recordID   string // groovearr download ID (store key)
 	providerID string // provider-managed download ID (returned by StartDownload)
 	pluginName string // plugin canonical name for provider lookup
+	downloadClientName string // if set, poll via DownloadClient instead of MonitoredProvider
 	startedAt  time.Time
 	deadline   time.Time
 }
@@ -42,6 +43,14 @@ type MonitoringService struct {
 	store    Store
 	registry *Registry
 	bus      events.IEventAggregator
+
+	// downloadClients provides DownloadClient lookup for album-level downloads.
+	downloadClients *DownloadClientRegistry
+
+	// downloadBasePath is the configured download staging directory.
+	// Prefer live config getter if set; falls back to static value.
+	downloadBasePath     string
+	downloadBasePathFunc func() string
 
 	// qualityProfileStore optionally supplies quality profiles for
 	// auto-retry source resolution. When nil, all sources are equally
@@ -81,6 +90,8 @@ type MonitoringService struct {
 func NewMonitoringService(
 	store Store,
 	registry *Registry,
+	downloadClients *DownloadClientRegistry,
+	downloadBasePath string,
 	bus events.IEventAggregator,
 	logger *slog.Logger,
 ) *MonitoringService {
@@ -89,16 +100,24 @@ func NewMonitoringService(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &MonitoringService{
-		log:                 logger,
-		store:               store,
-		registry:            registry,
-		bus:                 bus,
-		ctx:                 ctx,
-		cancel:              cancel,
+		log:              logger,
+		store:            store,
+		registry:         registry,
+		downloadClients:  downloadClients,
+		downloadBasePath: downloadBasePath,
+		bus:              bus,
+		ctx:              ctx,
+		cancel:           cancel,
 		active:              make(map[string]*monitoredDownload),
 		providerToGroovearr: make(map[string]string),
 		semaphores:          make(map[string]chan struct{}),
 	}
+}
+
+// SetDownloadPathFunc provides a live config getter for the download path.
+// When set, downloadPath() uses this instead of the static base path.
+func (m *MonitoringService) SetDownloadPathFunc(fn func() string) {
+	m.downloadBasePathFunc = fn
 }
 
 // SetQualityProfileStore sets the quality profile store for retry source
@@ -266,6 +285,24 @@ func (m *MonitoringService) addMapping(groovearrID, providerID, pluginName strin
 		pluginName: pluginName,
 		startedAt:  startedAt,
 		deadline:   deadline,
+	}
+	m.activeMu.Unlock()
+
+	m.providerMu.Lock()
+	m.providerToGroovearr[providerID] = groovearrID
+	m.providerMu.Unlock()
+}
+
+// addDownloadClientMapping registers an album download tracked via a DownloadClient.
+func (m *MonitoringService) addDownloadClientMapping(groovearrID, providerID, clientName string, startedAt, deadline time.Time) {
+	m.activeMu.Lock()
+	m.active[groovearrID] = &monitoredDownload{
+		recordID:           groovearrID,
+		providerID:         providerID,
+		pluginName:         clientName,
+		downloadClientName: clientName,
+		startedAt:          startedAt,
+		deadline:           deadline,
 	}
 	m.activeMu.Unlock()
 

@@ -169,6 +169,12 @@ func (s *Store) migrate() error {
 			quality_profile_id INTEGER,
 			isrc TEXT NOT NULL DEFAULT '',
 			library_track_id INTEGER NOT NULL DEFAULT 0,
+			album_type TEXT NOT NULL DEFAULT '',
+			album_tracks TEXT NOT NULL DEFAULT '',
+			download_client TEXT NOT NULL DEFAULT '',
+			magnet_uri TEXT NOT NULL DEFAULT '',
+			folder_path TEXT NOT NULL DEFAULT '',
+			imported_track_ids TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,

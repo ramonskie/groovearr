@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 )
 
@@ -46,8 +47,9 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 			bitrate, format,
 			retry_count, retry_after, playlist_id, quality_profile_id,
 			isrc, library_track_id,
+			album_type, album_tracks, download_client, magnet_uri, folder_path, imported_track_ids,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Username, r.Filename, r.DisplayName,
 		string(download.StateQueued), 0.0,
 		r.Size, 0, 0, "", "",
@@ -56,6 +58,7 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 		r.Bitrate, r.Format,
 		0, r.RetryAfter, r.PlaylistID, r.QualityProfileID,
 		r.ISRC, r.LibraryTrackID,
+		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
 		now, now,
 	)
 	if err != nil {
@@ -81,6 +84,7 @@ func (s *Store) Update(ctx context.Context, r *download.Record) error {
 			retry_count=?, retry_after=?,
 			quality_profile_id=?,
 			isrc=?, library_track_id=?,
+			album_type=?, album_tracks=?, download_client=?, magnet_uri=?, folder_path=?, imported_track_ids=?,
 			updated_at=?
 		WHERE id=?`,
 		r.SourceName, r.Username, r.Filename, r.DisplayName,
@@ -92,6 +96,7 @@ func (s *Store) Update(ctx context.Context, r *download.Record) error {
 		r.RetryCount, r.RetryAfter,
 		r.QualityProfileID,
 		r.ISRC, r.LibraryTrackID,
+		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
 		now, r.ID,
 	)
 	if err != nil {
@@ -304,6 +309,7 @@ const downloadSelect = `SELECT
 	bitrate, format,
 	retry_count, retry_after, playlist_id, quality_profile_id,
 	isrc, library_track_id,
+	album_type, album_tracks, download_client, magnet_uri, folder_path, imported_track_ids,
 	created_at, updated_at
 	FROM downloads`
 
@@ -311,6 +317,7 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 	var r download.Record
 	var stateStr string
 	var playlistID, retryAfter, createdAt, updatedAt string
+	var albumTracksJSON, importedTrackIDsJSON string
 	err := row.Scan(
 		&r.ID, &r.SourceName, &r.Username, &r.Filename, &r.DisplayName, &stateStr,
 		&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
@@ -319,6 +326,7 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 		&r.Bitrate, &r.Format,
 		&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 		&r.ISRC, &r.LibraryTrackID,
+		&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -332,6 +340,8 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 	r.PlaylistID = playlistID
 	r.RetryAfter = retryAfter
 	r.State = download.State(stateStr)
+	r.AlbumTracks = parseAlbumTracksJSON(albumTracksJSON)
+	r.ImportedTrackIDs = parseInt64sJSON(importedTrackIDsJSON)
 	return &r, nil
 }
 
@@ -341,6 +351,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 		var r download.Record
 		var stateStr string
 		var playlistID, retryAfter, createdAt, updatedAt string
+		var albumTracksJSON, importedTrackIDsJSON string
 		if err := rows.Scan(
 			&r.ID, &r.SourceName, &r.Username, &r.Filename, &r.DisplayName, &stateStr,
 			&r.Progress, &r.Size, &r.Transferred, &r.Speed, &r.FilePath, &r.Error,
@@ -349,6 +360,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 			&r.Bitrate, &r.Format,
 			&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 			&r.ISRC, &r.LibraryTrackID,
+			&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
 			&createdAt, &updatedAt,
 		); err != nil {
 			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")
@@ -357,6 +369,8 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 		r.PlaylistID = playlistID
 		r.RetryAfter = retryAfter
 		r.State = download.State(stateStr)
+		r.AlbumTracks = parseAlbumTracksJSON(albumTracksJSON)
+		r.ImportedTrackIDs = parseInt64sJSON(importedTrackIDsJSON)
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {
@@ -364,6 +378,42 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 		return out, err
 	}
 	return out, nil
+}
+
+// ─── JSON helpers ──────────────────────────────────────────────────────
+
+func albumTracksJSON(tracks []domain.ExpectedTrack) string {
+	if len(tracks) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(tracks)
+	return string(b)
+}
+
+func parseAlbumTracksJSON(raw string) []domain.ExpectedTrack {
+	if raw == "" {
+		return nil
+	}
+	var tracks []domain.ExpectedTrack
+	json.Unmarshal([]byte(raw), &tracks)
+	return tracks
+}
+
+func int64sJSON(ids []int64) string {
+	if len(ids) == 0 {
+		return "[]"
+	}
+	b, _ := json.Marshal(ids)
+	return string(b)
+}
+
+func parseInt64sJSON(raw string) []int64 {
+	if raw == "" {
+		return nil
+	}
+	var ids []int64
+	json.Unmarshal([]byte(raw), &ids)
+	return ids
 }
 
 // Ensure interface compliance at compile time.
