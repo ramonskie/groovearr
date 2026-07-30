@@ -29,6 +29,7 @@ import (
 	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
+	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/tagging"
@@ -89,6 +90,7 @@ func main() {
 	pluginReg.RegisterFactory(spotify.Factory)
 	pluginReg.RegisterFactory(discogs.Factory)
 	pluginReg.RegisterFactory(lastfm.Factory)
+	pluginReg.RegisterFactory(tidal.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: mainLog}
@@ -248,6 +250,23 @@ func main() {
 				}
 				// Refresh playlist sources so the playlist service picks up the rebuilt
 				// plugin with its new OAuth tokens.
+				if playlistSvc != nil {
+					playlistSvc.RefreshSources(registry)
+				}
+				return nil
+			}, func(name string) {
+				if p := registry.Get(name); p != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					p.CheckConnection(ctx)
+				}
+			})
+
+			tidal.RegisterOAuthRoutes(mux, cfg, pluginReg, mainLog, func(name string, rawCfg json.RawMessage) error {
+				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: mainLog}
+				if err := registry.Rebuild(name, rawCfg, res); err != nil {
+					return err
+				}
 				if playlistSvc != nil {
 					playlistSvc.RefreshSources(registry)
 				}

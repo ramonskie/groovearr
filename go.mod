@@ -5,10 +5,12 @@ go 1.26.4
 require golang.org/x/crypto v0.54.0
 
 require (
+	github.com/binozo/go-tiddl v0.1.0
 	github.com/bogem/id3v2/v2 v2.1.4
 	github.com/dhowden/tag v0.0.0-20240417053706-3d75831295e8
 	github.com/go-flac/go-flac/v2 v2.0.4
 	github.com/google/uuid v1.6.0
+	golang.org/x/oauth2 v0.36.0
 	golang.org/x/text v0.40.0
 	modernc.org/sqlite v1.54.0
 )
