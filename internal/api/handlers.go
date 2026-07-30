@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -2807,8 +2808,25 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "album id is required"})
 		return
 	}
+
+	// Parse optional artist/album names from request body for album search mode.
+	var req struct {
+		ArtistName string `json:"artist_name"`
+		AlbumName  string `json:"album_name"`
+	}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil && !errors.Is(err, io.EOF) {
+			s.log.Warn("failed to decode album download body",
+				"error", err, "component", "api")
+		}
+	}
+
+	ctx := r.Context()
+
+	// ── Fetch tracks from discovery provider (always needed for fallback) ──
+
 	if s.discoveryReg == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
+		writeJSON(w, http.StatusOK, map[string]any{"mode": "track", "queued": 0, "errors": []string{"no discovery providers configured"}})
 		return
 	}
 
@@ -2817,11 +2835,10 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		providers = s.discoveryReg.Any()
 	}
 	if len(providers) == 0 {
-		writeJSON(w, http.StatusOK, map[string]any{"queued": 0, "errors": []string{"no discovery providers configured"}})
+		writeJSON(w, http.StatusOK, map[string]any{"mode": "track", "queued": 0, "errors": []string{"no discovery providers configured"}})
 		return
 	}
 
-	ctx := r.Context()
 	var tracks []discovery.TrackInfo
 	for _, p := range providers {
 		t, err := p.GetAlbumTracks(ctx, albumID)
@@ -2835,8 +2852,59 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Queue all tracks as pending — source resolution happens in background
-	// via the monitor's resolvePendingSources.
+	// Resolve artist/album names: prefer request body, fall back to track data.
+	// This makes the handler work regardless of whether the UI provided names
+	// (e.g., library download-missing callers may not have URL params).
+	artistName := req.ArtistName
+	albumName := req.AlbumName
+	if artistName == "" && len(tracks) > 0 {
+		artistName = tracks[0].ArtistName
+	}
+	if albumName == "" && len(tracks) > 0 {
+		albumName = tracks[0].AlbumTitle
+	}
+
+	// ── Try album-level download if album sources are configured ──
+
+	if artistName != "" && albumName != "" && s.orchestrator != nil {
+		cfg := s.cfg.Get()
+		if len(cfg.AlbumSources) > 0 && cfg.DownloadClient != "" {
+			query := artistName + " " + albumName
+			releases, searchErr := s.orchestrator.SearchAlbums(ctx, query)
+			if searchErr == nil && len(releases) > 0 {
+				best := releases[0]
+				downloadID, queueErr := s.downloadSvc.QueueAlbum(ctx, best, nil, cfg.DownloadClient)
+				if queueErr != nil {
+					writeError(w, http.StatusInternalServerError, fmt.Errorf("queue album: %w", queueErr))
+					return
+				}
+				s.log.Info("album download queued via album source",
+					"download_id", downloadID,
+					"artist", best.Artist,
+					"album", best.Album,
+					"component", "api",
+				)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"mode":        "album",
+					"download_id": downloadID,
+					"artist":      best.Artist,
+					"album":       best.Album,
+				})
+				return
+			}
+			if searchErr != nil {
+				s.log.Warn("album search failed, falling back to per-track",
+					"artist", artistName, "album", albumName,
+					"error", searchErr, "component", "api")
+			} else {
+				s.log.Info("no album releases found, falling back to per-track",
+					"artist", artistName, "album", albumName, "component", "api")
+			}
+		}
+	}
+
+	// ── Per-track fallback ──
+
 	var queued int
 	var errors []string
 	for _, t := range tracks {
@@ -2858,6 +2926,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
+		"mode":   "track",
 		"queued": queued,
 		"total":  len(tracks),
 		"errors": errors,

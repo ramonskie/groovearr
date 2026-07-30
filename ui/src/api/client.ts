@@ -358,10 +358,20 @@ export function getAlbumTracks(albumId: string, provider?: string) {
   );
 }
 
-export function downloadAlbum(albumId: string) {
+export function downloadAlbum(
+  albumId: string,
+  artistName?: string,
+  albumName?: string,
+) {
   return request<DiscoveryAlbumDownloadResponse>(
     `/api/discover/albums/${encodeURIComponent(albumId)}/download`,
-    { method: "POST" },
+    {
+      method: "POST",
+      body: JSON.stringify({
+        artist_name: artistName || "",
+        album_name: albumName || "",
+      }),
+    },
   );
 }
 

@@ -393,6 +393,18 @@ func TestParseTitle(t *testing.T) {
 			"multi disc set", "Artist - Kill 'Em All; Ride The Lightning; Master Of Puppets - 2021, FLAC",
 			"Artist", "Kill 'Em All; Ride The Lightning; Master Of Puppets",
 		},
+		{
+			"by_artist suffix", `"Album Title" (by Artist Name) 2025, MP3, 320 kbps`,
+			"Artist Name", "Album Title",
+		},
+		{
+			"by_artist with / separator", `/ Stans / STANS (The Official Soundtrack) (by Eminem) 2025, MP3, 320 kbps`,
+			"Eminem", "STANS (The Official Soundtrack)",
+		},
+		{
+			"no separator with by_artist", `Album Name (by Artist) 2025, FLAC`,
+			"Artist", "Album Name",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

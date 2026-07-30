@@ -264,6 +264,28 @@ func parseTitle(title string) (artist, album string) {
 		}
 	}
 
+	// Strip leading/trailing quotes common in RuTracker titles
+	// like `"Album Title" (by Artist) ...`.
+	cleaned = strings.TrimLeft(cleaned, "\"")
+	cleaned = strings.TrimRight(cleaned, "\"")
+
+	// Strip RuTracker forum path prefixes like "/ Stans / Album Title ...".
+	cleaned = stripPathPrefix(cleaned)
+
+	// Extract "(by Artist)" suffix — common on RuTracker soundtrack/compilation
+	// releases formatted as "Album Title (by Eminem) 2025, MP3".
+	// Case-insensitive: "(by ...)", "(By ...)", "(BY ...)".
+	if idx := indexByArtist(cleaned); idx >= 0 {
+		rest := cleaned[idx+5:] // after "(by "
+		if closeIdx := strings.IndexByte(rest, ')'); closeIdx >= 0 {
+			artist = strings.TrimSpace(rest[:closeIdx])
+			album = strings.TrimRight(strings.TrimSpace(cleaned[:idx]), "\"")
+			// Don't run stripTrailingMetadata here — the "(by Artist)" marker
+			// already separates the album title from format metadata.
+			return artist, album
+		}
+	}
+
 	sep := " - "
 	idx := strings.Index(cleaned, sep)
 	if idx < 0 {
@@ -322,6 +344,42 @@ func stripTrailingMetadata(album string) string {
 		}
 	}
 	return album
+}
+
+// stripPathPrefix removes RuTracker forum path prefixes like "/ Stans /" from
+// the beginning of a title. It strips leading "/word /" segments.
+func stripPathPrefix(s string) string {
+	s = strings.TrimSpace(s)
+	for {
+		if !strings.HasPrefix(s, "/") {
+			break
+		}
+		s = strings.TrimLeft(s[1:], " ")
+		// Find the next "/" separator.
+		if idx := strings.IndexByte(s, '/'); idx >= 0 {
+			s = strings.TrimSpace(s[idx+1:])
+		} else {
+			break
+		}
+	}
+	return s
+}
+
+// indexByArtist returns the starting index of a case-insensitive "(by ...)"
+// suffix in s, or -1 if not found.
+func indexByArtist(s string) int {
+	lower := strings.ToLower(s)
+	// Match " (by " with case-insensitive "by".
+	for _, pattern := range []string{" (by ", " (by.", " (by-"} {
+		if idx := strings.Index(lower, pattern); idx >= 0 {
+			return idx
+		}
+	}
+	// Also match " [by " variant.
+	if idx := strings.Index(lower, " [by "); idx >= 0 {
+		return idx
+	}
+	return -1
 }
 
 // imageTitleTerms are lower-case substrings that indicate an ISO or disc-image

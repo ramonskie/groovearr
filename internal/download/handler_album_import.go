@@ -6,8 +6,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io/fs"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -192,25 +192,29 @@ type albumImportTrack struct {
 	Title       string
 }
 
-// scanAudioFiles finds all audio files in a directory (non-recursive).
+// scanAudioFiles finds all audio files in a directory, recursing into
+// subdirectories (e.g., CD1/, CD2/ in multi-disc torrents).
 func (h *AlbumImportHandler) scanAudioFiles(folderPath string) ([]string, error) {
-	entries, err := os.ReadDir(folderPath)
-	if err != nil {
-		return nil, err
-	}
 	exts := map[string]bool{
 		".flac": true, ".mp3": true, ".ogg": true, ".wav": true,
 		".m4a": true, ".aac": true, ".wma": true, ".opus": true,
 		".dsf": true, ".dff": true, ".aiff": true, ".ape": true, ".wv": true,
 	}
 	var files []string
-	for _, e := range entries {
-		if e.IsDir() {
-			continue
+	err := filepath.WalkDir(folderPath, func(path string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
 		}
-		if exts[strings.ToLower(filepath.Ext(e.Name()))] {
-			files = append(files, filepath.Join(folderPath, e.Name()))
+		if d.IsDir() {
+			return nil
 		}
+		if exts[strings.ToLower(filepath.Ext(d.Name()))] {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
 	}
 	sort.Strings(files)
 	return files, nil

@@ -50,6 +50,9 @@ export interface Config {
   auth: AuthConfig;
   metadata_order?: string[];
   download_order?: string[];
+  album_sources?: string[];
+  track_sources?: string[];
+  download_client?: string;
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
@@ -309,9 +312,19 @@ export interface ArtistOverview {
 }
 
 export interface DiscoveryAlbumDownloadResponse {
-  queued: number;
-  total: number;
-  errors: string[];
+  mode: "album" | "track";
+  /** Album mode: single download record ID. */
+  download_id?: string;
+  /** Album mode: resolved artist name. */
+  artist?: string;
+  /** Album mode: resolved album name. */
+  album?: string;
+  /** Track mode: number of tracks queued. */
+  queued?: number;
+  /** Track mode: total tracks on the album. */
+  total?: number;
+  /** Track mode: per-track error messages. */
+  errors?: string[];
 }
 
 export interface DiscoveryTrackEntry {

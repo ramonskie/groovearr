@@ -124,9 +124,15 @@ export default function DiscoverPage() {
     if (!albumId) return;
     downloadAlbumMutation.mutate(albumId, {
       onSuccess: (data) => {
-        toast.success(`${data.queued}/${data.total} tracks queued`);
-        if (data.errors.length > 0) {
-          data.errors.slice(0, 3).forEach((e: string) => toast.error(e));
+        if (data.mode === "album") {
+          toast.success(
+            `Album download queued: ${data.artist} - ${data.album}`,
+          );
+        } else {
+          toast.success(`${data.queued}/${data.total} tracks queued`);
+          if (data.errors && data.errors.length > 0) {
+            data.errors.slice(0, 3).forEach((e: string) => toast.error(e));
+          }
         }
         navigate("/downloads");
       },

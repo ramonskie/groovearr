@@ -121,7 +121,11 @@ func (p *Plugin) SearchAlbum(ctx context.Context, query string) ([]domain.AlbumR
 				format = "mp3"
 			}
 			artist, album := r.Artist, r.Album
-			if artist == "" || album == "" {
+			// Prowlarr's own parsing sometimes misattributes format metadata to
+			// the album field (e.g. "2025, MP3, 320 kbps"). When the parsed
+			// album looks like format metadata or the artist starts with a path
+			// separator, fall back to our local parseTitle.
+			if artist == "" || album == "" || looksLikeFormatMetadata(album) || strings.HasPrefix(strings.TrimSpace(artist), "/") {
 				artist, album = parseTitleFromResult(r)
 			}
 			year := r.Year
@@ -336,6 +340,31 @@ func (p *Plugin) findRuTrackerIndexers(ctx context.Context) ([]prowlarrIndexer, 
 
 func parseTitleFromResult(r torznabResult) (artist, album string) {
 	return parseTitle(r.Title)
+}
+
+// looksLikeFormatMetadata returns true when a string looks like audio format
+// metadata rather than an actual album title (e.g. "2025, MP3, 320 kbps").
+func looksLikeFormatMetadata(s string) bool {
+	s = strings.ToLower(strings.TrimSpace(s))
+	if s == "" || len(s) > 30 {
+		return false
+	}
+	// Match patterns like "2025, mp3, 320 kbps", "2025, flac", etc.
+	hasFormat := strings.Contains(s, "mp3") || strings.Contains(s, "flac") || strings.Contains(s, "kbps")
+	if !hasFormat {
+		return false
+	}
+	// Must also start with a year or be very short.
+	parts := strings.SplitN(s, ",", 2)
+	if len(parts[0]) == 4 {
+		for _, c := range parts[0] {
+			if c < '0' || c > '9' {
+				return false
+			}
+		}
+		return true
+	}
+	return len(s) < 15
 }
 
 func extractYearFromResult(r torznabResult) int {

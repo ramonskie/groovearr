@@ -202,7 +202,19 @@ func (o *Orchestrator) SearchAlbums(ctx context.Context, query string) ([]domain
 			}
 
 			queryWords := strings.Fields(o.matcher.Normalize(query))
-			score, _ := o.matcher.ScoreTrackMatchWithPath(query, queryWords, 0, title, nil, 0, title)
+			candidateArtists := []string{}
+			if releases[i].Artist != "" {
+				candidateArtists = []string{releases[i].Artist}
+			}
+			// Only use filename-based matching when the provider didn't
+			// parse artist/album. Properly parsed releases skip the junk-
+			// artist gate (Gate 1) which would falsely reject album titles
+			// containing words like "Soundtrack".
+			candidateFilename := ""
+			if releases[i].Artist == "" && releases[i].Album == "" {
+				candidateFilename = title
+			}
+			score, _ := o.matcher.ScoreTrackMatchWithPath(query, queryWords, 0, title, candidateArtists, 0, candidateFilename)
 			if score < minMatchConfidence {
 				continue
 			}

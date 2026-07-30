@@ -113,8 +113,8 @@ docker-setup:
 	@echo "    Run 'make docker-restart' to apply."
 
 docker-build:
-	@echo "==> Building Docker image..."
-	docker compose build
+	@echo "==> Building Docker image (--no-cache)..."
+	docker compose build --no-cache
 
 docker-up:
 	@echo "==> Starting services..."
