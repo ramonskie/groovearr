@@ -36,10 +36,10 @@ type rgRef struct {
 	PrimaryType string `json:"primary-type"`
 }
 
-// newTestClient creates an apiClient pointed at a mock server serving the given
+// newTestClient creates an APIClient pointed at a mock server
 // recordings response. The handler is called once per request — the server
 // auto-closes after the test.
-func newTestClient(t *testing.T, recordings []recordingResp) (*apiClient, func()) {
+func newTestClient(t *testing.T, recordings []recordingResp) (*APIClient, func()) {
 	t.Helper()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -53,7 +53,7 @@ func newTestClient(t *testing.T, recordings []recordingResp) (*apiClient, func()
 	srv := httptest.NewServer(handler)
 
 	// Disable rate limiting for tests.
-	client := &apiClient{
+	client := &APIClient{
 		cfg:         MusicBrainzConfig{},
 		httpClient:  srv.Client(),
 		userAgent:   "groovearr-test",
@@ -65,7 +65,7 @@ func newTestClient(t *testing.T, recordings []recordingResp) (*apiClient, func()
 }
 
 // newTestClientWithStatus returns a mock server returning a specific HTTP status.
-func newTestClientWithStatus(t *testing.T, status int) (*apiClient, func()) {
+func newTestClientWithStatus(t *testing.T, status int) (*APIClient, func()) {
 	t.Helper()
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -73,7 +73,7 @@ func newTestClientWithStatus(t *testing.T, status int) (*apiClient, func()) {
 	})
 
 	srv := httptest.NewServer(handler)
-	client := &apiClient{
+	client := &APIClient{
 		cfg:         MusicBrainzConfig{},
 		httpClient:  srv.Client(),
 		userAgent:   "groovearr-test",
@@ -442,7 +442,7 @@ func TestSearchRecording_ContextCancelled(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	client := &apiClient{
+	client := &APIClient{
 		cfg:         MusicBrainzConfig{},
 		httpClient:  srv.Client(),
 		userAgent:   "groovearr-test",
@@ -478,7 +478,7 @@ func TestSearchRecording_InvalidJSON(t *testing.T) {
 	srv := httptest.NewServer(handler)
 	defer srv.Close()
 
-	client := &apiClient{
+	client := &APIClient{
 		cfg:         MusicBrainzConfig{},
 		httpClient:  srv.Client(),
 		userAgent:   "groovearr-test",

@@ -21,6 +21,11 @@ type AlbumProvider interface {
 	// Sources that don't provide track metadata should fall back to
 	// MusicBrainz or return nil to defer to the caller.
 	ResolveTracks(ctx context.Context, release domain.AlbumRelease) ([]domain.ExpectedTrack, error)
+
+	// ResolveTracksForCount is like ResolveTracks but uses the actual
+	// file count (known after download) and torrent title to pick the
+	// best matching release. Returns the resolved MusicBrainz release MBID.
+	ResolveTracksForCount(ctx context.Context, release domain.AlbumRelease, fileCount int, torrentTitle string) ([]domain.ExpectedTrack, string, error)
 }
 
 // DownloadClient handles the actual download execution for album-level

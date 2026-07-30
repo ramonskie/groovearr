@@ -61,6 +61,7 @@ func openTestDB(t *testing.T) *sql.DB {
 			album_type TEXT NOT NULL DEFAULT '',
 			album_tracks TEXT NOT NULL DEFAULT '',
 			download_client TEXT NOT NULL DEFAULT '',
+			provider_id TEXT NOT NULL DEFAULT '',
 			magnet_uri TEXT NOT NULL DEFAULT '',
 			folder_path TEXT NOT NULL DEFAULT '',
 			imported_track_ids TEXT NOT NULL DEFAULT '',

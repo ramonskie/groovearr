@@ -1,6 +1,9 @@
 package matching
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestNormalize(t *testing.T) {
 	e := New()
@@ -618,6 +621,69 @@ func TestMatchingEngine_TableDriven(t *testing.T) {
 			}
 			if conf > tt.maxConf {
 				t.Errorf("%s: confidence %.2f > max %.2f", tt.name, conf, tt.maxConf)
+			}
+		})
+	}
+}
+
+func TestScoreTrackMatchWithPath_SoulseekFilenames(t *testing.T) {
+	e := New()
+
+	tests := []struct {
+		name         string
+		query        string
+		queryArtists []string
+		filename     string
+		minScore     float64
+		maxScore     float64
+	}{
+		{name: "exact match flac", query: "Metallica Battery", queryArtists: []string{"Metallica"}, filename: "Metallica - Battery.flac", minScore: 0.70},
+		{name: "track number prefix", query: "Metallica Master of Puppets", queryArtists: []string{"Metallica"}, filename: "01 - Metallica - Master of Puppets.flac", minScore: 0.55},
+		{name: "underscore separator", query: "Daft Punk Get Lucky", queryArtists: []string{"Daft Punk"}, filename: "daft_punk_-_get_lucky_(original_mix).mp3", minScore: 0.50},
+		{name: "different artist rejected", query: "Metallica Battery", queryArtists: []string{"Metallica"}, filename: "Megadeth - Holy Wars.flac", maxScore: 0.30},
+		{name: "artist in path not filename", query: "Metallica One", queryArtists: []string{"Metallica"}, filename: "/downloads/Metallica/One.flac", minScore: 0.55},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			conf, _ := e.ScoreTrackMatchWithPath(tt.query, tt.queryArtists, 0, tt.filename, nil, 0, tt.filename)
+			if tt.minScore > 0 && conf < tt.minScore {
+				t.Errorf("confidence %.2f < min %.2f for %q", conf, tt.minScore, tt.filename)
+			}
+			if tt.maxScore > 0 && conf > tt.maxScore {
+				t.Errorf("confidence %.2f > max %.2f for %q (should be rejected)", conf, tt.maxScore, tt.filename)
+			}
+		})
+	}
+}
+
+func TestScoreTrackMatchWithPath_AlbumSearchPattern(t *testing.T) {
+	e := New()
+
+	tests := []struct {
+		name     string
+		query    string
+		title    string
+		minScore float64
+		maxScore float64
+	}{
+		{name: "clean title matches", query: "Metallica Master of Puppets", title: "Metallica - Master Of Puppets - 1986, FLAC", minScore: 0.60},
+		{name: "genre prefix handled", query: "Metallica Master of Puppets", title: "(Thrash Metal) [LP] Metallica - Master Of Puppets - 2017, FLAC", minScore: 0.55},
+		{name: "remaster handled", query: "Metallica Master of Puppets", title: "Metallica - Master Of Puppets (Remastered 2017) FLAC", minScore: 0.60},
+		{name: "wrong album rejected", query: "Metallica Master of Puppets", title: "Metallica - Ride The Lightning - 1984, FLAC", maxScore: 0.40},
+		{name: "unrelated rejected", query: "Metallica Master of Puppets", title: "Various Artists - Summer Hits 2023 FLAC", maxScore: 0.10},
+		{name: "partial token match", query: "Daft Punk Discovery", title: "Daft Punk - Discovery - 2001, FLAC", minScore: 0.60},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queryWords := strings.Fields(e.Normalize(tt.query))
+			conf, _ := e.ScoreTrackMatchWithPath(tt.query, queryWords, 0, tt.title, nil, 0, tt.title)
+			if tt.minScore > 0 && conf < tt.minScore {
+				t.Errorf("confidence %.2f < min %.2f for %q", conf, tt.minScore, tt.title)
+			}
+			if tt.maxScore > 0 && conf > tt.maxScore {
+				t.Errorf("confidence %.2f > max %.2f for %q (should be rejected)", conf, tt.maxScore, tt.title)
 			}
 		})
 	}

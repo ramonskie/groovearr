@@ -188,6 +188,11 @@ func (m *mockStore) RecordEvent(ctx context.Context, event *Event) error { retur
 func (m *mockStore) GetEvents(ctx context.Context, downloadID string) ([]Event, error) {
 	return nil, nil
 }
+func (m *mockStore) Delete(ctx context.Context, id string) error {
+	delete(m.records, id)
+	return nil
+}
+
 func (m *mockStore) DeleteTerminal(ctx context.Context) error { return nil }
 func (m *mockStore) Close() error                             { return nil }
 

@@ -120,6 +120,8 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 	mux.HandleFunc("GET /api/config/sources", s.handleGetSources)
 	mux.HandleFunc("POST /api/config/test/{source}", s.handleTestConnection)
 	mux.Handle("POST /api/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleSearch)))
+	mux.Handle("POST /api/albums/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleAlbumSearch)))
+	mux.Handle("POST /api/albums/download-best", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleAlbumDownloadBest)))
 	mux.Handle("POST /api/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownload)))
 	mux.Handle("POST /api/download/match", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadBest)))
 	mux.HandleFunc("GET /api/downloads", s.handleGetDownloads)
@@ -352,6 +354,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 					if err := p.CheckConnection(ctx); err != nil {
 						s.log.Debug("post-rebuild connection check failed", "name", name, "error", err, "component", "api")
 					}
+				} else if bp := s.registry.Inner().Get(name); bp != nil && bp.IsConfigured() {
+					if err := bp.CheckConnection(ctx); err != nil {
+						s.log.Debug("post-rebuild connection check failed", "name", name, "error", err, "component", "api")
+					}
 				}
 			}
 		}()
@@ -414,41 +420,19 @@ type validationError struct {
 func (e *validationError) Error() string { return "validation failed" }
 
 func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
+	inner := s.registry.Inner()
 	var sources []map[string]any
 	seen := make(map[string]bool)
 
-	// Collect from download registry.
-	for _, name := range s.registry.Names() {
-		if seen[name] {
-			continue
-		}
-		if p := s.registry.Get(name); p != nil {
-			seen[name] = true
-			schema := resolveSchema(s.registry.Inner(), name)
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
-		}
-	}
-
-	// Collect from metadata registry (skip already included from download).
-	for _, name := range s.mdRegistry.Names() {
-		if seen[name] {
-			continue
-		}
-		if p := s.mdRegistry.Get(name); p != nil {
-			seen[name] = true
-			schema := resolveSchema(s.mdRegistry.Inner(), name)
-			sources = append(sources, sourceEntry(name, p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
-		}
-	}
-
-	// Collect from discovery registry (skip already included from download/metadata).
-	if s.discoveryReg != nil {
-		for _, p := range s.discoveryReg.Any() {
+	// Enumerate plugins grouped by capability. Order determines section order
+	// in the settings UI. Plugins listing multiple capabilities appear once.
+	for _, cap := range []string{"download", "download_client", "metadata", "discovery", "album_search"} {
+		for _, p := range inner.WithCapability(cap) {
 			if seen[p.Name()] {
 				continue
 			}
 			seen[p.Name()] = true
-			schema := resolveSchema(s.discoveryReg.Inner(), p.Name())
+			schema := resolveSchema(inner, p.Name())
 			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
 		}
 	}
@@ -520,6 +504,11 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 				break
 			}
 		}
+	}
+	// Fallback: inner plugin registry for capabilities without typed wrappers
+	// (album_search, etc.). Type-asserted registries above are preferred paths.
+	if p == nil {
+		p = s.registry.Inner().Get(source)
 	}
 	if p == nil {
 		writeJSON(w, http.StatusNotFound, map[string]string{"error": "source not found"})
@@ -605,6 +594,87 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		"tracks": tracks,
 		"albums": albums,
+	})
+}
+
+func (s *Server) handleAlbumSearch(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Query string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Query == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("query is required"))
+		return
+	}
+
+	releases, err := s.orchestrator.SearchAlbums(r.Context(), req.Query)
+	if err != nil {
+		s.log.Warn("album search failed", "error", err, "component", "api")
+		writeJSON(w, http.StatusOK, map[string]any{"releases": []any{}})
+		return
+	}
+	if releases == nil {
+		releases = []domain.AlbumRelease{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"releases": releases})
+}
+
+// handleAlbumDownloadBest searches album sources, picks the best release,
+// resolves tracks via MusicBrainz, and queues the album download.
+// Request: {"artist":"Metallica","album":"Master of Puppets","download_client":"qbittorrent"}
+func (s *Server) handleAlbumDownloadBest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Artist         string `json:"artist"`
+		Album          string `json:"album"`
+		DownloadClient string `json:"download_client"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if req.Artist == "" || req.Album == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("artist and album are required"))
+		return
+	}
+	if req.DownloadClient == "" {
+		req.DownloadClient = s.cfg.Get().DownloadClient
+	}
+	if req.DownloadClient == "" {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("no download_client configured"))
+		return
+	}
+
+	query := req.Artist + " " + req.Album
+
+	// 1. Search album sources for releases.
+	releases, err := s.orchestrator.SearchAlbums(r.Context(), query)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("album search: %w", err))
+		return
+	}
+	if len(releases) == 0 {
+		writeError(w, http.StatusNotFound, fmt.Errorf("no album releases found for %q", query))
+		return
+	}
+
+	// 2. Best release is always the first (sorted by seeders descending).
+	best := releases[0]
+
+	// 3. Queue the album download. Track resolution happens later,
+	// after download, when AlbumImportHandler knows the actual file count.
+	downloadID, err := s.downloadSvc.QueueAlbum(r.Context(), best, nil, req.DownloadClient)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, fmt.Errorf("queue album: %w", err))
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"download_id": downloadID,
+		"artist":      best.Artist,
+		"album":       best.Album,
 	})
 }
 

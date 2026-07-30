@@ -5,7 +5,7 @@
 Phase 1 introduces the architectural foundation for album-level downloads: new interfaces, data model, import pipeline, and compilation support. **No Prowlarr or qBittorrent plugins.** Existing plugins (soulseek, deezer) remain unchanged.
 
 Phase 2: Delete leftover packages from earlier attempt.
-Phase 3: Prowlarr + qBittorrent plugins — see `docs/prowlarr-integration.md`.
+Phase 3: Prowlarr + qBittorrent plugins — see `docs/prowlarr-integration.md`. ✅ **Complete**.
 
 ## Problem
 
@@ -291,21 +291,32 @@ func (m *MonitoringService) startQueuedDownloads() {
 
 `album_sources` empty until Phase 3. `download_client` empty until Phase 3. Phase 1 ships with the architecture ready but no album providers or download clients installed — nothing breaks.
 
-## Full Flow: Single-Artist Album
+## Full Flow: Single-Artist Album (Phase 3+)
 
 ```
 1. User downloads "Master of Puppets"
 
 2. Orchestrator album pass:
-   album_sources = [] — no providers yet (Phase 3 adds prowlarr)
-   → falls to track pass
+   album_sources = ["prowlarr"]
+   → prowlarr.SearchAlbum("Metallica Master of Puppets")
+     → Prowlarr → find RuTracker indexer (tag="groovearr")
+     → Torznab search → AlbumRelease{magnet, 350MB, 45 seeds}
 
-3. Track pass (existing flow):
-   deezer.Search("Metallica Battery") → found
-   deezer.Search("Metallica Master of Puppets") → found
-   ... 8 individual track downloads
+3. Resolve tracks:
+   → prowlarr.ResolveTracks(release)
+     → MusicBrainz → mbid → recordings → []ExpectedTrack{...}
 
-4. Same as today. No changes in behavior until Phase 3.
+4. QueueAlbum → 1 AlbumRecord{DownloadClient:"qbittorrent"}
+
+5. Dispatch:
+   → qbittorrent.AddDownload(magnet, "music", "./downloads/")
+   → torrent hash
+
+6. Monitor: qbittorrent.GetStatus(hash) → progress → 100%
+
+7. AlbumImportHandler → scan folder → match → tag → rename → library
+
+8. Cleanup: qbittorrent.Cancel(hash, remove_completed=true)
 ```
 
 ## Full Flow: VA Compilation (Dominator 2015)

@@ -51,6 +51,9 @@ type Store interface {
 	// (imported, failed, ignored) and their associated events (via CASCADE).
 	DeleteTerminal(ctx context.Context) error
 
+	// Delete removes a single download record and its events (CASCADE).
+	Delete(ctx context.Context, id string) error
+
 	// Close releases any resources held by the store.
 	Close() error
 }

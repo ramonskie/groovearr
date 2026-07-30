@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
@@ -13,6 +14,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/api"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
@@ -27,11 +29,12 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/discogs"
 	"github.com/ramonskie/groovearr/internal/providers/lastfm"
 	musicbrainz "github.com/ramonskie/groovearr/internal/providers/musicbrainz"
+	"github.com/ramonskie/groovearr/internal/providers/prowlarr"
+	"github.com/ramonskie/groovearr/internal/providers/qbittorrent"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
-	"github.com/ramonskie/groovearr/internal/tagging"
 )
 
 func main() {
@@ -89,6 +92,8 @@ func main() {
 	pluginReg.RegisterFactory(spotify.Factory)
 	pluginReg.RegisterFactory(discogs.Factory)
 	pluginReg.RegisterFactory(lastfm.Factory)
+	pluginReg.RegisterFactory(prowlarr.Factory)
+	pluginReg.RegisterFactory(qbittorrent.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: mainLog}
@@ -125,7 +130,7 @@ func main() {
 	eventBus := events.NewInMemoryEventBus(mainLog)
 
 	// Download client registry — separate from source plugins for albums.
-	downloadClientReg := download.NewDownloadClientRegistry()
+	downloadClientReg := download.NewDownloadClientRegistry(pluginReg)
 
 	// Monitoring service — scans DB for queued downloads and drives state machine.
 	monitor := download.NewMonitoringService(dlStore, registry, downloadClientReg, currentCfg.Library.DownloadPath, eventBus, mainLog)
@@ -133,6 +138,7 @@ func main() {
 	// Download service — queues downloads. Dispatch handled by MonitoringService.
 	downloadSvc := download.NewService(dlStore, eventBus, mainLog)
 	downloadSvc.SetRegistry(registry)
+	downloadSvc.SetDownloadClientRegistry(downloadClientReg)
 
 	// Quality profile store (SQLite) — created early so Service
 	// can use it for search resolution during retries.
@@ -157,22 +163,10 @@ func main() {
 	folderTemplate, libraryRoot := renamerCfg()
 	renamer := library.NewRenamer(folderTemplate, libraryRoot, mainLog)
 
-	// Compilation renamer uses the compilation template for VA albums.
-	compTemplate := currentCfg.Library.CompilationTemplate
-	if compTemplate == "" {
-		compTemplate = "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}"
-	}
-	compRenamer := library.NewRenamer(compTemplate, libraryRoot, mainLog)
-
-	// Album import handler — scans folders and imports full album downloads.
-	albumImportHandler := download.NewAlbumImportHandler(
-		tagging.New(mainLog), renamer, compRenamer,
-		download.NewCoverArtHandler(libStore, mainLog),
-		libStore, dlStore, mainLog,
-	)
-
-	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, mainLog)
-	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
+	// Album import handler — scans folders and feeds matched tracks through
+	// the same import chain used for single-track downloads.
+	// The chain is built below and injected here.
+	var albumImportHandler *download.AlbumImportHandler
 
 	// SSE hub — broadcasts real-time download progress to connected clients.
 	sseHub := sse.NewSSEHub(mainLog)
@@ -183,11 +177,12 @@ func main() {
 	// broadcasts. Also implemented as an ImportHandler for import-completed notifications.
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, mainLog)
 
-	download.NewCompletedDownloadService(
-		dlStore,
-		eventBus,
-		mainLog,
-		albumImportHandler,
+	// Build the standard import handler chain used for both single-track and
+	// album downloads. Album imports feed per-track records through this chain.
+	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, mainLog)
+	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
+
+	importChain := []download.ImportHandler{
 		download.NewFileRenamerHandler(renamer, dlStore, mainLog),
 		download.NewCoverArtHandler(libStore, mainLog),
 		download.NewTagWriterHandler(mainLog),
@@ -195,6 +190,32 @@ func main() {
 		enrichmentHandler,
 		download.NewPlaylistLinkerHandler(libStore, mainLog),
 		sseNotifier,
+	}
+
+	// Track resolver for album imports: called after download completes with
+	// the actual file count to pick the best matching MusicBrainz release.
+	trackResolver := func(ctx context.Context, sourceName, artist, album string, fileCount int, torrentTitle string) ([]domain.ExpectedTrack, string, error) {
+		inner := pluginReg
+		bp := inner.Get(sourceName)
+		if bp == nil {
+			return nil, "", fmt.Errorf("album provider %q not found", sourceName)
+		}
+		ap, ok := bp.(download.AlbumProvider)
+		if !ok {
+			return nil, "", fmt.Errorf("source %q is not an AlbumProvider", sourceName)
+		}
+		release := domain.AlbumRelease{SourceName: sourceName, Artist: artist, Album: album}
+		return ap.ResolveTracksForCount(ctx, release, fileCount, torrentTitle)
+	}
+
+	albumImportHandler = download.NewAlbumImportHandler(importChain, trackResolver, dlStore, libStore, libStore.DB(), mainLog)
+
+	download.NewCompletedDownloadService(
+		dlStore,
+		eventBus,
+		mainLog,
+		albumImportHandler,
+		importChain...,
 	)
 
 	// Playlist service — auto-register plugins that provide playlist sources.
@@ -232,6 +253,7 @@ func main() {
 	// Download orchestrator for search and download-best selection.
 	orch := download.NewOrchestrator(registry, mainLog)
 	orch.SetDownloadOrder(currentCfg.DownloadOrder)
+	orch.SetAlbumSources(currentCfg.AlbumSources)
 
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
@@ -279,6 +301,12 @@ func main() {
 		if p := mdRegistry.Get(name); p != nil && p.IsConfigured() {
 			mainLog.Info("metadata configured", "name", name, "display", p.DisplayName(), "component", "main")
 		}
+	}
+	if dc := downloadClientReg.Get(currentCfg.DownloadClient); dc != nil {
+		mainLog.Info("download client configured", "name", currentCfg.DownloadClient, "display", dc.DisplayName(), "component", "main")
+	}
+	if currentCfg.DownloadClient != "" && downloadClientReg.Get(currentCfg.DownloadClient) == nil {
+		mainLog.Warn("download client not found", "name", currentCfg.DownloadClient, "component", "main")
 	}
 	for _, src := range playlistReg.Configured() {
 		mainLog.Info("playlist configured", "name", src.Name(), "display", src.DisplayName(), "component", "main")

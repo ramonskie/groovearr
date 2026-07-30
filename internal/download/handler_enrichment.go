@@ -134,6 +134,15 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 	trackModified := false
 	albumModified := false
 
+	// Sync album MBID from the download record (resolved by AlbumImportHandler).
+	if record.AlbumMBID != "" && album.ExternalIDs["musicbrainz_release"] == "" {
+		if album.ExternalIDs == nil {
+			album.ExternalIDs = make(map[string]string)
+		}
+		album.ExternalIDs["musicbrainz_release"] = record.AlbumMBID
+		albumModified = true
+	}
+
 	for _, p := range providers {
 		// ── Album title resolution (when missing) ──────────────
 		// Query configured providers to find the album name from artist+title.
@@ -169,6 +178,9 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 			mbid := track.ExternalIDs["musicbrainz_release"]
 			if mbid == "" {
 				mbid = album.ExternalIDs["musicbrainz_release"]
+			}
+			if mbid == "" {
+				mbid = record.AlbumMBID // resolved by AlbumImportHandler
 			}
 			if mbid != "" {
 				if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {

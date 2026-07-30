@@ -86,17 +86,18 @@ func TestExtractTrackNumber(t *testing.T) {
 }
 
 func TestDownloadClientRegistry(t *testing.T) {
-	reg := NewDownloadClientRegistry()
+	pluginReg := plugin.NewRegistry()
 
-	// Empty registry.
+	// Empty registry — no plugin registered.
+	reg := NewDownloadClientRegistry(pluginReg)
 	if dc := reg.Get("nonexistent"); dc != nil {
 		t.Error("expected nil for unregistered client")
 	}
 
-	// Register and retrieve.
+	// Register via plugin registry.
 	f := &stubDC{}
-	reg.RegisterFactory(f)
-	if err := reg.InitAll(map[string]json.RawMessage{"stub": json.RawMessage(`{}`)}, plugin.PluginResources{}); err != nil {
+	pluginReg.RegisterFactory(f)
+	if err := pluginReg.InitAll(map[string]json.RawMessage{"stub": json.RawMessage(`{}`)}, plugin.PluginResources{}); err != nil {
 		t.Fatalf("InitAll: %v", err)
 	}
 	if dc := reg.Get("stub"); dc == nil {
@@ -266,6 +267,15 @@ func (m *mockAlbumStore) FindActiveByTitle(_ context.Context, artist, title stri
 }
 func (m *mockAlbumStore) RecordEvent(_ context.Context, event *Event) error { return nil }
 func (m *mockAlbumStore) GetEvents(_ context.Context, downloadID string) ([]Event, error) { return nil, nil }
+func (m *mockAlbumStore) Delete(ctx context.Context, id string) error {
+	delete(m.records, id)
+	return nil
+}
+
 func (m *mockAlbumStore) DeleteTerminal(_ context.Context) error           { return nil }
 func (m *mockAlbumStore) Close() error                                     { return nil }
+
+
+
+
 

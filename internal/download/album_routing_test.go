@@ -25,11 +25,12 @@ func TestAlbumVsTrackRouting(t *testing.T) {
 	albumClient := &albumClientMock{name: "qbittorrent", dlPath: t.TempDir()}
 
 	// Build registries.
-	clientReg := NewDownloadClientRegistry()
-	clientReg.RegisterFactory(&albumClientFactory{client: albumClient})
-	_ = clientReg.InitAll(map[string]json.RawMessage{
+	pluginReg := plugin.NewRegistry()
+	pluginReg.RegisterFactory(&albumClientFactory{client: albumClient})
+	_ = pluginReg.InitAll(map[string]json.RawMessage{
 		"qbittorrent": json.RawMessage(`{}`),
 	}, plugin.PluginResources{})
+	clientReg := NewDownloadClientRegistry(pluginReg)
 
 	reg := NewRegistry()
 	_ = reg.Inner().Register(trackPlugin)
@@ -165,6 +166,11 @@ func (s *albumTrackStore) FindActiveByTitle(_ context.Context, artist, title str
 }
 func (s *albumTrackStore) RecordEvent(_ context.Context, event *Event) error       { return nil }
 func (s *albumTrackStore) GetEvents(_ context.Context, id string) ([]Event, error)  { return nil, nil }
+func (s *albumTrackStore) Delete(ctx context.Context, id string) error {
+	delete(s.records, id)
+	return nil
+}
+
 func (s *albumTrackStore) DeleteTerminal(_ context.Context) error                  { return nil }
 func (s *albumTrackStore) Close() error                                            { return nil }
 
@@ -257,3 +263,4 @@ func (m *albumTrackMock) Cancel(_ context.Context, id string, remove bool) error
 func (m *albumTrackMock) ActiveDownloads() []string                                { return nil }
 func (m *albumTrackMock) MaxConcurrent() int                                       { return 1 }
 func (m *albumTrackMock) DownloadTimeout() time.Duration                            { return 10 * time.Minute }
+

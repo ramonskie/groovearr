@@ -46,7 +46,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Soulseek configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"slskd_url":"","api_key":"","search_timeout":90,"min_upload_speed":0}`)
+	return json.RawMessage(`{"slskd_url":"","api_key":"","download_path":"","search_timeout":90,"min_upload_speed":0}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
@@ -67,6 +67,13 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Hint:        "Your slskd API key from the slskd web interface.",
 			Secret:      true,
 			Placeholder: "Enter API key",
+		},
+		{
+			Name:        "download_path",
+			Type:        "text",
+			Label:       "Download Path",
+			Hint:        "Override the global download path for Soulseek downloads. Leave empty to use library.download_path.",
+			Placeholder: "./downloads",
 		},
 	}
 }

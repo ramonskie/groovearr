@@ -172,6 +172,7 @@ func (s *Store) migrate() error {
 			album_type TEXT NOT NULL DEFAULT '',
 			album_tracks TEXT NOT NULL DEFAULT '',
 			download_client TEXT NOT NULL DEFAULT '',
+			provider_id TEXT NOT NULL DEFAULT '',
 			magnet_uri TEXT NOT NULL DEFAULT '',
 			folder_path TEXT NOT NULL DEFAULT '',
 			imported_track_ids TEXT NOT NULL DEFAULT '',
@@ -271,6 +272,7 @@ func (s *Store) migrate() error {
 	migrations := []string{
 		`ALTER TABLE playlists ADD COLUMN sync_mode TEXT DEFAULT 'mirror'`,
 		`UPDATE playlists SET sync_mode='mirror' WHERE sync_mode IS NULL OR sync_mode=''`,
+		`ALTER TABLE downloads ADD COLUMN provider_id TEXT DEFAULT ''`,
 	}
 	for _, stmt := range migrations {
 		if _, err := s.db.Exec(stmt); err != nil {

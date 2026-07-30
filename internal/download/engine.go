@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
+	"net/url"
 	"sort"
 	"strings"
 	"sync"
@@ -27,6 +28,7 @@ type Orchestrator struct {
 	matcher       *matching.Engine
 	orderMu       sync.RWMutex
 	downloadOrder []string // priority order for download source queries
+	albumSources  []string // priority order for album-capable sources
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
@@ -45,6 +47,13 @@ func NewOrchestrator(registry *Registry, logger *slog.Logger) *Orchestrator {
 func (o *Orchestrator) SetDownloadOrder(order []string) {
 	o.orderMu.Lock()
 	o.downloadOrder = order
+	o.orderMu.Unlock()
+}
+
+// SetAlbumSources configures the priority order for album-capable sources.
+func (o *Orchestrator) SetAlbumSources(sources []string) {
+	o.orderMu.Lock()
+	o.albumSources = sources
 	o.orderMu.Unlock()
 }
 
@@ -131,6 +140,85 @@ func (o *Orchestrator) Search(ctx context.Context, source, query string) ([]doma
 		allAlbums = append(allAlbums, albums...)
 	}
 	return allTracks, allAlbums, nil
+}
+
+// SearchAlbums queries album-capable sources (e.g. Prowlarr) for full album
+// releases. Sources without any results are skipped silently. Returns the
+// combined release list from all configured album providers.
+func (o *Orchestrator) SearchAlbums(ctx context.Context, query string) ([]domain.AlbumRelease, error) {
+	o.orderMu.RLock()
+	sources := o.albumSources
+	o.orderMu.RUnlock()
+
+	if len(sources) == 0 {
+		return nil, fmt.Errorf("no album sources configured (set album_sources in config)")
+	}
+
+	o.log.Info("searching album sources", "sources", sources, "query", query, "component", "orchestrator")
+
+	var allReleases []domain.AlbumRelease
+	inner := o.registry.Inner()
+
+	for _, name := range sources {
+		bp := inner.Get(name)
+		if bp == nil {
+			o.log.Warn("album source not found in registry", "name", name, "component", "orchestrator")
+			continue
+		}
+		ap, ok := bp.(AlbumProvider)
+		if !ok {
+			o.log.Warn("album source does not implement AlbumProvider", "name", name, "component", "orchestrator")
+			continue
+		}
+		if !ap.IsConfigured() {
+			o.log.Warn("album source not configured", "name", name, "component", "orchestrator")
+			continue
+		}
+
+		o.log.Info("searching album source", "source", name, "query", query, "component", "orchestrator")
+		releases, err := ap.SearchAlbum(ctx, query)
+		if err != nil {
+			o.log.Warn("album search failed", "source", name, "error", err, "component", "orchestrator")
+			continue
+		}
+
+		// Score each release against the query using the matching engine.
+		// Pass query words as source artists so the artist gate requires
+		// the release title to contain query tokens — filters out wrong
+		// albums by the same artist (e.g. "Ride The Lightning" when
+		// searching for "Master of Puppets").
+		for i := range releases {
+			title := releases[i].Artist + " " + releases[i].Album
+			if releases[i].Artist == "" && releases[i].Album == "" {
+				title = extractTitleFromURL(releases[i].MagnetURI)
+			}
+			title = strings.TrimSpace(title)
+
+			// If title resolution completely failed, don't confidence-filter —
+			// the provider already validated this is a relevant result.
+			if title == "" {
+				allReleases = append(allReleases, releases[i])
+				continue
+			}
+
+			queryWords := strings.Fields(o.matcher.Normalize(query))
+			score, _ := o.matcher.ScoreTrackMatchWithPath(query, queryWords, 0, title, nil, 0, title)
+			if score < minMatchConfidence {
+				continue
+			}
+			allReleases = append(allReleases, releases[i])
+		}
+	}
+
+	// Sort: seeders descending (best availability first).
+	sort.Slice(allReleases, func(i, j int) bool {
+		return allReleases[i].Seeders > allReleases[j].Seeders
+	})
+
+	if len(allReleases) == 0 {
+		return []domain.AlbumRelease{}, nil
+	}
+	return allReleases, nil
 }
 
 // FindBestMatch searches all configured sources for tracks matching the given
@@ -447,4 +535,26 @@ func pickBestByTierScore(candidates []Candidate) *Candidate {
 		}
 	}
 	return best
+}
+
+// extractTitleFromURL extracts a title from a download URL or magnet URI.
+func extractTitleFromURL(uri string) string {
+	// Prowlarr download URLs use file= parameter.
+	if idx := strings.LastIndex(uri, "file="); idx >= 0 {
+		raw, _ := url.QueryUnescape(uri[idx+5:])
+		// Strip trailing params if any.
+		if end := strings.IndexAny(raw, "&;"); end >= 0 {
+			raw = raw[:end]
+		}
+		return strings.ReplaceAll(raw, "+", " ")
+	}
+	// Magnet URIs use dn= parameter.
+	if idx := strings.Index(uri, "dn="); idx >= 0 {
+		raw, _ := url.QueryUnescape(uri[idx+3:])
+		if end := strings.IndexAny(raw, "&;"); end >= 0 {
+			raw = raw[:end]
+		}
+		return strings.ReplaceAll(raw, "+", " ")
+	}
+	return uri
 }

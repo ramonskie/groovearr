@@ -44,16 +44,18 @@ type ReleaseInfo struct {
 
 // ReleaseTrack represents a single track within a release lookup.
 type ReleaseTrack struct {
-	Number string
-	Title  string
-	Length int64 // milliseconds
-	ISRCs  []string
+	Position int    // 1-based track position (parsed from Number)
+	Number   string // display number from MusicBrainz (e.g. "1", "A1")
+	Title    string
+	Length   int64  // milliseconds
+	Artist   string // per-track artist credit (for compilations)
+	ISRCs    []string
 }
 
 // ─── API client ────────────────────────────────────────────────────────
 
-// apiClient provides access to the MusicBrainz public API.
-type apiClient struct {
+// APIClient provides access to the MusicBrainz public API.
+type APIClient struct {
 	cfg        MusicBrainzConfig
 	httpClient *http.Client
 	userAgent  string
@@ -65,13 +67,16 @@ type apiClient struct {
 	minInterval time.Duration
 }
 
-// newAPIClient creates a MusicBrainz API client.
-func newAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *apiClient {
+// NewAPIClient creates a MusicBrainz API client.
+func NewAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *APIClient {
+	if logger == nil {
+		logger = slog.Default()
+	}
 	ua := "Groovearr/0.1.0 ( github.com/ramonskie/groovearr )"
 	if cfg.Email != "" {
 		ua = "Groovearr/0.1.0 ( " + cfg.Email + " )"
 	}
-	return &apiClient{
+	return &APIClient{
 		cfg:         cfg,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		userAgent:   ua,
@@ -81,11 +86,20 @@ func newAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *apiClient {
 	}
 }
 
+// SetBaseURL overrides the API base URL. Intended for testing.
+func (c *APIClient) SetBaseURL(u string) { c.baseURL = u }
+
+// SetHTTPClient overrides the HTTP client. Intended for testing.
+func (c *APIClient) SetHTTPClient(client *http.Client) { c.httpClient = client }
+
+// SetMinInterval overrides the rate-limit interval. Intended for testing.
+func (c *APIClient) SetMinInterval(d time.Duration) { c.mu.Lock(); c.minInterval = d; c.mu.Unlock() }
+
 // SearchReleaseGroup returns the first MusicBrainz result for the given artist and album.
 // MusicBrainz orders results by relevance score (descending), so the first result is
 // typically the best match.
 // Returns nil, nil if no match found.
-func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string) (*ReleaseGroupResult, error) {
+func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string) (*ReleaseGroupResult, error) {
 	if artist == "" || album == "" {
 		return nil, nil
 	}
@@ -136,7 +150,7 @@ func (c *apiClient) SearchReleaseGroup(ctx context.Context, artist, album string
 // appears many times (different editions, formats, regions).
 //
 // Returns nil, nil if no match found.
-func (c *apiClient) SearchRecording(ctx context.Context, artist, title string) (*ReleaseGroupResult, error) {
+func (c *APIClient) SearchRecording(ctx context.Context, artist, title string) (*ReleaseGroupResult, error) {
 	if artist == "" || title == "" {
 		return nil, nil
 	}
@@ -227,7 +241,7 @@ func pickMostFrequent(counts map[string]int) string {
 }
 
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
-func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
+func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
 	data, err := c.apiGet(ctx, "/release/"+mbid, map[string]string{
 		"inc": "recordings+isrcs+labels+genres+artist-credits",
 		"fmt": "json",
@@ -261,9 +275,13 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 				Title     string `json:"title"`
 				Length    int64  `json:"length"` // milliseconds
 				Recording struct {
-					ID    string   `json:"id"`
-					Title string   `json:"title"`
-					ISRCs []string `json:"isrcs"`
+					ID           string   `json:"id"`
+					Title        string   `json:"title"`
+					ISRCs        []string `json:"isrcs"`
+					ArtistCredit []struct {
+						Name       string `json:"name"`
+						Joinphrase string `json:"joinphrase"`
+					} `json:"artist-credit"`
 				} `json:"recording"`
 			} `json:"tracks"`
 		} `json:"media"`
@@ -299,11 +317,33 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 	// Extract tracks and ISRCs.
 	for _, medium := range resp.Media {
 		for _, t := range medium.Tracks {
+			pos := 0
+			if n, _ := fmt.Sscanf(t.Number, "%d", &pos); n != 1 {
+				// Non-numeric track number (e.g. "A1" for vinyl, "1-1" for multi-disc).
+				// Extract any leading digit as best-effort position.
+				for _, ch := range t.Number {
+					if ch >= '0' && ch <= '9' {
+						pos = pos*10 + int(ch-'0')
+					} else if pos > 0 {
+						break
+					}
+				}
+			}
+			artist := ""
+			if len(t.Recording.ArtistCredit) > 0 {
+				artist = t.Recording.ArtistCredit[0].Name
+			}
+			for i := 1; i < len(t.Recording.ArtistCredit); i++ {
+				artist += t.Recording.ArtistCredit[i-1].Joinphrase
+				artist += t.Recording.ArtistCredit[i].Name
+			}
 			track := ReleaseTrack{
-				Number: t.Number,
-				Title:  t.Title,
-				Length: t.Length,
-				ISRCs:  t.Recording.ISRCs,
+				Position: pos,
+				Number:   t.Number,
+				Title:    t.Title,
+				Length:   t.Length,
+				Artist:   artist,
+				ISRCs:    t.Recording.ISRCs,
 			}
 			info.Tracks = append(info.Tracks, track)
 			for _, isrc := range t.Recording.ISRCs {
@@ -317,9 +357,87 @@ func (c *apiClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 	return info, nil
 }
 
+// ReleaseGroupRelease is a release within a release group.
+type ReleaseGroupRelease struct {
+	ID             string
+	Title          string
+	Disambiguation string
+	TrackCount     int // total tracks across all media
+}
+
+// LookupReleaseGroup retrieves all releases within a release group.
+func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]ReleaseGroupRelease, error) {
+	data, err := c.apiGet(ctx, "/release-group/"+rgMBID, map[string]string{
+		"inc": "releases",
+		"fmt": "json",
+	})
+	if err != nil {
+		c.log.Error("musicbrainz lookup release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+
+	var resp struct {
+		Releases []struct {
+			ID             string `json:"id"`
+			Title          string `json:"title"`
+			Disambiguation string `json:"disambiguation"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
+		return nil, err
+	}
+
+	releases := make([]ReleaseGroupRelease, len(resp.Releases))
+	for i, r := range resp.Releases {
+		releases[i] = ReleaseGroupRelease{ID: r.ID, Title: r.Title, Disambiguation: r.Disambiguation}
+	}
+	return releases, nil
+}
+
+// SearchReleasesByGroup returns all releases in a release group with their
+// track counts. Uses the MusicBrainz search endpoint — a single API call.
+// Limited to 100 results; groups larger than this are truncated.
+func (c *APIClient) SearchReleasesByGroup(ctx context.Context, rgMBID string) ([]ReleaseGroupRelease, error) {
+	data, err := c.apiGet(ctx, "/release/", map[string]string{
+		"query": `rgid:` + rgMBID,
+		"limit": "100",
+		"fmt":   "json",
+	})
+	if err != nil {
+		c.log.Error("musicbrainz search releases by group failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+
+	var resp struct {
+		Releases []struct {
+			ID             string `json:"id"`
+			Title          string `json:"title"`
+			Disambiguation string `json:"disambiguation"`
+			TrackCount     int    `json:"track-count"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal search releases failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
+		return nil, err
+	}
+
+	releases := make([]ReleaseGroupRelease, len(resp.Releases))
+	for i, r := range resp.Releases {
+		releases[i] = ReleaseGroupRelease{ID: r.ID, Title: r.Title, Disambiguation: r.Disambiguation, TrackCount: r.TrackCount}
+	}
+	return releases, nil
+}
+
 // ─── Internal HTTP ─────────────────────────────────────────────────────
 
-func (c *apiClient) apiGet(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
+func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
 	// Rate limit with mutex for concurrent-safety.
 	c.mu.Lock()
 	elapsed := time.Since(c.lastCall)

@@ -197,6 +197,19 @@ func (m *MonitoringService) startSingleDownload(rec *Record) {
 	// Track the mapping.
 	m.addMapping(downloadID, providerID, plugin.Name(), time.Now(), deadline)
 
+	// Persist ProviderID so Service.Cancel can cancel the provider directly.
+	if rec, err := m.store.Get(m.ctx, downloadID); err == nil && rec != nil && rec.State == StateDownloading {
+		rec.ProviderID = providerID
+		if err := m.store.Update(m.ctx, rec); err != nil {
+			m.log.Warn("failed to persist provider ID on record",
+				"download_id", downloadID,
+				"provider_id", providerID,
+				"error", err,
+				"component", "monitor",
+			)
+		}
+	}
+
 	// Slot held until download completes/fails in pollActiveDownloads.
 	semAcquired = false
 
@@ -276,9 +289,27 @@ func (m *MonitoringService) startAlbumDownload(rec *Record) {
 		return
 	}
 
+	// Track in the active map BEFORE persisting ProviderID to the store.
+	// This ensures checkCancellations has the correct providerID even if the
+	// DB write hasn't completed yet.
 	deadline := time.Now().Add(dc.DownloadTimeout())
 	m.addDownloadClientMapping(downloadID, providerID, clientName, time.Now(), deadline)
 	semAcquired = false
+
+	// Store provider ID on the record so Cancel can find it later.
+	// Only write if the record is still in StateDownloading — a concurrent
+	// Cancel may have already set it to StateIgnored.
+	if rec, err := m.store.Get(m.ctx, downloadID); err == nil && rec != nil && rec.State == StateDownloading {
+		rec.ProviderID = providerID
+		if err := m.store.Update(m.ctx, rec); err != nil {
+			m.log.Warn("failed to persist provider ID on record",
+				"download_id", downloadID,
+				"provider_id", providerID,
+				"error", err,
+				"component", "monitor",
+			)
+		}
+	}
 
 	m.log.Info("album download started",
 		"download_id", downloadID,
@@ -425,7 +456,7 @@ func (m *MonitoringService) pollSingle(md *monitoredDownload) {
 // transitions the groovearr record accordingly.
 func (m *MonitoringService) handleProviderState(md *monitoredDownload, status *Record) {
 	switch status.State {
-	case StateImported:
+	case StateImported, StateImportPending:
 		// Provider says file is on disk → transition to importPending.
 		if ok, err := m.store.TransitionState(m.ctx, md.recordID, StateDownloading, StateImportPending); err != nil {
 			m.log.Error("handleProviderState: transition to importPending failed",
@@ -509,6 +540,14 @@ func (m *MonitoringService) checkCancellations() {
 		}
 
 		if fresh.State != StateDownloading {
+			// StateIgnored means Service.Cancel() already handled the provider
+			// cancellation — skip to avoid double-cancelling.
+			if fresh.State == StateIgnored {
+				m.removeTracking(md.recordID, md.providerID)
+				m.releaseSemaphore(md.pluginName)
+				continue
+			}
+
 			m.log.Info("checkCancellations: state changed externally, cancelling provider download",
 				"download_id", md.recordID, "state", fresh.State, "component", "monitor")
 

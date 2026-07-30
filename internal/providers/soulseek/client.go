@@ -37,6 +37,7 @@ type SoulseekConfig struct {
 	APIKey         string `json:"api_key"`
 	SearchTimeout  int    `json:"search_timeout"`
 	MinUploadSpeed int    `json:"min_upload_speed"`
+	DownloadPath   string `json:"download_path"` // per-plugin download dir (falls back to library.download_path)
 }
 
 // Client implements download.Plugin for Soulseek via slskd REST API.
@@ -65,9 +66,13 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 	if err := json.Unmarshal(cfg, &sc); err != nil {
 		return nil, fmt.Errorf("soulseek: invalid config: %w", err)
 	}
+	dlPath := sc.DownloadPath
+	if dlPath == "" {
+		dlPath = downloadPath // fallback to global library.download_path
+	}
 	return &Client{
 		cfg:               sc,
-		dlPath:            downloadPath,
+		dlPath:            dlPath,
 		baseURL:           strings.TrimRight(sc.SlskdURL, "/"),
 		apiKey:            sc.APIKey,
 		client:            &http.Client{Timeout: 120 * time.Second, Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, soulseekRate)},

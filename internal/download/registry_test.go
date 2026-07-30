@@ -155,6 +155,111 @@ func TestOrchestratorSearch(t *testing.T) {
 	}
 }
 
+// mockAlbumProvider implements AlbumProvider for testing SearchAlbums.
+type mockAlbumProvider struct {
+	name        string
+	display     string
+	configured  bool
+	releases    []domain.AlbumRelease
+}
+
+func (m *mockAlbumProvider) Name() string        { return m.name }
+func (m *mockAlbumProvider) DisplayName() string { return m.display }
+func (m *mockAlbumProvider) IsConfigured() bool  { return m.configured }
+func (m *mockAlbumProvider) Connected() bool     { return true }
+func (m *mockAlbumProvider) CapabilityStatus() map[string]string {
+	return map[string]string{"album_search": "connected"}
+}
+func (m *mockAlbumProvider) CheckConnection(ctx context.Context) error { return nil }
+func (m *mockAlbumProvider) SearchAlbum(ctx context.Context, query string) ([]domain.AlbumRelease, error) {
+	return m.releases, nil
+}
+func (m *mockAlbumProvider) ResolveTracks(ctx context.Context, release domain.AlbumRelease) ([]domain.ExpectedTrack, error) {
+	return nil, nil
+}
+
+func (m *mockAlbumProvider) ResolveTracksForCount(ctx context.Context, release domain.AlbumRelease, fileCount int, torrentTitle string) ([]domain.ExpectedTrack, string, error) {
+	t, _ := m.ResolveTracks(ctx, release)
+	return t, "", nil
+}
+
+func TestSearchAlbumsConfidenceFilter(t *testing.T) {
+	r := NewRegistry()
+	// Register via inner registry so Get(name) works.
+	r.Inner().Register(&mockAlbumProvider{
+		name:       "prowlarr",
+		display:    "Prowlarr",
+		configured: true,
+		releases: []domain.AlbumRelease{
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Metallica+-+Master+Of+Puppets+-+1986+FLAC", Seeders: 45, Size: 350000000},
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Various+Artists+-+Top+40+Hits+2024", Seeders: 100, Size: 500000000},
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Metallica+-+Ride+The+Lightning+FLAC", Seeders: 20, Size: 300000000},
+		},
+	})
+	orch := NewOrchestrator(r, testLogger())
+	orch.SetAlbumSources([]string{"prowlarr"})
+
+	releases, err := orch.SearchAlbums(context.Background(), "Metallica Master of Puppets")
+	if err != nil {
+		t.Fatalf("SearchAlbums: %v", err)
+	}
+
+	// "Various Artists - Top 40 Hits" should be filtered by confidence.
+	// "Ride The Lightning" should also be filtered (wrong album).
+	for _, r := range releases {
+		if r.MagnetURI == "" {
+			continue
+		}
+		title := extractTitleFromURL(r.MagnetURI)
+		if title == "Various+Artists+-+Top+40+Hits+2024" || title == "Metallica+-+Ride+The+Lightning+FLAC" {
+			t.Errorf("unexpected release passed confidence filter: %s", title)
+		}
+	}
+	if len(releases) < 1 {
+		t.Error("expected at least 1 matching release")
+	}
+}
+
+func TestSearchAlbumsSortedBySeeders(t *testing.T) {
+	r := NewRegistry()
+	r.Inner().Register(&mockAlbumProvider{
+		name:       "prowlarr",
+		display:    "Prowlarr",
+		configured: true,
+		releases: []domain.AlbumRelease{
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Metallica+-+Master+Of+Puppets+FLAC", Seeders: 5, Size: 350000000},
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Metallica+Master+of+Puppets+Remastered+FLAC", Seeders: 45, Size: 400000000},
+			{SourceName: "prowlarr", MagnetURI: "https://example.com/torrent?file=Metallica+Master+of+Puppets+FLAC", Seeders: 20, Size: 300000000},
+		},
+	})
+	orch := NewOrchestrator(r, testLogger())
+	orch.SetAlbumSources([]string{"prowlarr"})
+
+	releases, err := orch.SearchAlbums(context.Background(), "Metallica Master of Puppets")
+	if err != nil {
+		t.Fatalf("SearchAlbums: %v", err)
+	}
+
+	if len(releases) < 2 {
+		t.Fatal("expected at least 2 releases")
+	}
+	// Should be sorted descending by seeders.
+	for i := 1; i < len(releases); i++ {
+		if releases[i-1].Seeders < releases[i].Seeders {
+			t.Errorf("releases not sorted by seeders: [%d]=%d, [%d]=%d",
+				i-1, releases[i-1].Seeders, i, releases[i].Seeders)
+		}
+	}
+}
+
+func TestSearchAlbumsNoProviders(t *testing.T) {
+	orch := NewOrchestrator(NewRegistry(), testLogger())
+	_, err := orch.SearchAlbums(context.Background(), "anything")
+	if err == nil {
+		t.Fatal("expected error when no album sources configured")
+	}
+}
+
 func TestFilterByProfile(t *testing.T) {
 	makeCand := func(format string, bitrate int) Candidate {
 		return Candidate{

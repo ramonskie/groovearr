@@ -32,6 +32,7 @@ type Service struct {
 	store               Store
 	bus                 events.IEventAggregator
 	registry            *Registry // needed for retry source resolution
+	downloadClients     *DownloadClientRegistry
 	qualityProfileStore quality.ProfileStore
 	mu                  sync.Mutex
 }
@@ -54,6 +55,14 @@ func (s *Service) SetRegistry(registry *Registry) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.registry = registry
+}
+
+// SetDownloadClientRegistry sets the download client registry for album
+// download cancellation.
+func (s *Service) SetDownloadClientRegistry(reg *DownloadClientRegistry) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.downloadClients = reg
 }
 
 // SetQualityProfileStore sets the quality profile store for retry search resolution.
@@ -254,33 +263,96 @@ func (s *Service) ListActive(ctx context.Context) ([]Record, error) {
 	return s.store.ListActive(ctx)
 }
 
-// Cancel transitions a download to the "ignored" state, persists the change,
-// and fires a state-changed event. The MonitoringService detects the state
-// change and stops tracking the download.
+// Cancel transitions a download to the "ignored" state and directly cancels
+// the provider-level download for both album and track downloads.
 func (s *Service) Cancel(ctx context.Context, id string) error {
 	s.log.Info("cancelling download", "download_id", id, "component", "download")
 
+	s.mu.Lock()
 	record, err := s.store.Get(ctx, id)
 	if err != nil {
+		s.mu.Unlock()
 		s.log.Error("cancel: get failed", "download_id", id, "error", err, "component", "download")
 		return fmt.Errorf("cancel: %w", err)
 	}
 	if record == nil {
+		s.mu.Unlock()
 		s.log.Error("cancel: not found", "download_id", id, "component", "download")
 		return fmt.Errorf("cancel: download %q not found", id)
 	}
 
 	if record.State.Terminal() {
+		s.mu.Unlock()
 		return nil // already terminal — idempotent
 	}
 
+	// Update state BEFORE cancelling the provider. This prevents the monitor's
+	// checkCancellations from issuing a duplicate cancel on the next tick.
 	record.State = StateIgnored
 	if err := s.store.Update(ctx, record); err != nil {
+		s.mu.Unlock()
 		return fmt.Errorf("cancel: %w", err)
 	}
+	s.mu.Unlock()
+
+	// Cancel at the provider level. No lock held — external I/O.
+	s.cancelDownloadClient(ctx, record)
+	s.cancelTrackProvider(ctx, record)
 
 	s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
 	return nil
+}
+
+// cancelDownloadClient cancels an album download via its DownloadClient.
+// If the ProviderID hasn't been persisted yet (race with startAlbumDownload),
+// the monitor's checkCancellations will use its in-memory providerID instead.
+func (s *Service) cancelDownloadClient(ctx context.Context, record *Record) {
+	if !record.IsAlbum() || record.DownloadClient == "" {
+		return
+	}
+	if record.ProviderID == "" {
+		s.log.Warn("cancel: ProviderID not persisted yet, monitor will handle",
+			"download_id", record.ID, "component", "download")
+		return
+	}
+	if s.downloadClients == nil {
+		s.log.Warn("cancel: download client registry not available",
+			"client", record.DownloadClient, "component", "download")
+		return
+	}
+	dc := s.downloadClients.Get(record.DownloadClient)
+	if dc == nil {
+		s.log.Warn("cancel: download client not found",
+			"client", record.DownloadClient, "component", "download")
+		return
+	}
+	if err := dc.Cancel(ctx, record.ProviderID, false); err != nil {
+		s.log.Warn("cancel: provider cancel failed",
+			"download_id", record.ID, "error", err, "component", "download")
+	}
+}
+
+// cancelTrackProvider cancels a track download via its MonitoredProvider.
+func (s *Service) cancelTrackProvider(ctx context.Context, record *Record) {
+	if record.IsAlbum() {
+		return
+	}
+	if s.registry == nil {
+		return
+	}
+	plugin := s.registry.Get(record.SourceName)
+	if plugin == nil {
+		return
+	}
+	mp, ok := plugin.(MonitoredProvider)
+	if !ok {
+		return
+	}
+	if err := mp.Cancel(ctx, record.ProviderID, false); err != nil {
+		s.log.Warn("cancel: track provider cancel failed",
+			"download_id", record.ID, "source", record.SourceName,
+			"error", err, "component", "download")
+	}
 }
 
 // Retry resets a failed download back to "queued", fires a state-changed

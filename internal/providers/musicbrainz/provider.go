@@ -13,10 +13,11 @@ import (
 
 // Client implements metadata.Provider using the MusicBrainz public API.
 // It provides cover art search (via Cover Art Archive), track enrichment
-// (ISRC, genres, label, release date), and artist image lookup (unavailable).
+// (ISRC, genres, label, release date), artist image lookup (unavailable),
+// and album track resolution for download plugins.
 type Client struct {
 	cfg       MusicBrainzConfig
-	api       *apiClient
+	api       *APIClient
 	log       *slog.Logger
 	connected bool
 	mu        sync.RWMutex // protects connected
@@ -26,7 +27,7 @@ type Client struct {
 func NewClient(cfg MusicBrainzConfig, logger *slog.Logger) *Client {
 	return &Client{
 		cfg: cfg,
-		api: newAPIClient(cfg, logger),
+		api: NewAPIClient(cfg, logger),
 		log: logger,
 	}
 }

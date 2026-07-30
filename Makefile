@@ -119,8 +119,11 @@ docker-build:
 docker-up:
 	@echo "==> Starting services..."
 	docker compose up -d
-	@echo "    groovearr: http://localhost:8008"
-	@echo "    slskd:     http://localhost:5030"
+	@echo "    groovearr:    http://localhost:8008"
+	@echo "    slskd:        http://localhost:5030"
+	@echo "    prowlarr:     http://localhost:9696"
+	@echo "    qbittorrent:  http://localhost:8080"
+	@echo "    flaresolverr: http://localhost:8191"
 
 docker-down:
 	@echo "==> Stopping services..."
@@ -131,6 +134,11 @@ docker-logs:
 
 docker-restart: docker-build docker-up
 	@echo "    Rebuilt and restarted."
+	@echo "    groovearr:    http://localhost:8008"
+	@echo "    slskd:        http://localhost:5030"
+	@echo "    prowlarr:     http://localhost:9696"
+	@echo "    qbittorrent:  http://localhost:8080"
+	@echo "    flaresolverr: http://localhost:8191"
 
 # ─── Help ─────────────────────────────────────────────────────
 
@@ -150,7 +158,7 @@ help:
 	@echo "  make dev          force-rebuild and run (for frontend changes)"
 	@echo "  make clean        remove build artifacts"
 	@echo "  make docker-build  build Docker image"
-	@echo "  make docker-up     start groovearr + slskd"
+	@echo "  make docker-up     start full stack"
 	@echo "  make docker-down   stop services"
 	@echo "  make docker-logs   tail all container logs"
 	@echo "  make docker-restart  rebuild + restart (quick test cycle)"

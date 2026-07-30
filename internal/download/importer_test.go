@@ -131,6 +131,11 @@ func (m *mockDownloadStore) GetEvents(ctx context.Context, downloadID string) ([
 	return nil, nil
 }
 
+func (m *mockDownloadStore) Delete(ctx context.Context, id string) error {
+	delete(m.records, id)
+	return nil
+}
+
 func (m *mockDownloadStore) DeleteTerminal(ctx context.Context) error {
 	return nil
 }

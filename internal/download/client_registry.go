@@ -1,69 +1,34 @@
 package download
 
 import (
-	"encoding/json"
-	"fmt"
-	"sync"
-
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
 // DownloadClientRegistry manages DownloadClient plugins and provides
-// name-based lookup. Separated from the main plugin Registry because
-// download clients have a distinct lifecycle (no search, different config).
+// name-based lookup. Plugins are created by the main plugin.Registry
+// (via pluginReg.InitAll); this registry simply casts them to DownloadClient
+// on lookup.
 type DownloadClientRegistry struct {
-	mu       sync.RWMutex
-	clients  map[string]DownloadClient
-	factories []downloadClientFactory
+	pluginReg *plugin.Registry
 }
 
-// downloadClientFactory wraps a plugin.PluginFactory that produces
-// DownloadClient instances.
-type downloadClientFactory struct {
-	factory plugin.PluginFactory
+// NewDownloadClientRegistry creates a DownloadClientRegistry backed by
+// the main plugin registry. DownloadClient plugins must be registered
+// via pluginReg.RegisterFactory() and instantiated via pluginReg.InitAll().
+func NewDownloadClientRegistry(pluginReg *plugin.Registry) *DownloadClientRegistry {
+	return &DownloadClientRegistry{pluginReg: pluginReg}
 }
 
-// NewDownloadClientRegistry creates an empty DownloadClientRegistry.
-func NewDownloadClientRegistry() *DownloadClientRegistry {
-	return &DownloadClientRegistry{clients: make(map[string]DownloadClient)}
-}
-
-// RegisterFactory adds a factory that can produce DownloadClient instances.
-func (r *DownloadClientRegistry) RegisterFactory(f plugin.PluginFactory) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	r.factories = append(r.factories, downloadClientFactory{factory: f})
-}
-
-// Get returns a DownloadClient by name, or nil if not found.
+// Get returns a DownloadClient by name by looking up the plugin in the
+// main registry and casting to DownloadClient. Returns nil if not found
+// or if the plugin does not implement DownloadClient.
 func (r *DownloadClientRegistry) Get(name string) DownloadClient {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.clients[name]
-}
-
-// InitAll instantiates DownloadClients from config. Config keys are
-// matched against factory names. Returns the first error encountered.
-func (r *DownloadClientRegistry) InitAll(sources map[string]json.RawMessage, resources plugin.PluginResources) error {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-
-	for key, rawCfg := range sources {
-		for _, df := range r.factories {
-			if df.factory.Name() != key {
-				continue
-			}
-			base, err := df.factory.Create(rawCfg, resources)
-			if err != nil {
-				return fmt.Errorf("download client %q init: %w", key, err)
-			}
-			dc, ok := base.(DownloadClient)
-			if !ok {
-				return fmt.Errorf("download client factory %q does not produce DownloadClient", key)
-			}
-			r.clients[key] = dc
-			break
-		}
+	if r.pluginReg == nil {
+		return nil
+	}
+	bp := r.pluginReg.Get(name)
+	if dc, ok := bp.(DownloadClient); ok {
+		return dc
 	}
 	return nil
 }

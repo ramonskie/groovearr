@@ -26,6 +26,9 @@ func New(db *sql.DB, logger *slog.Logger) *Store {
 	return &Store{db: db, log: logger}
 }
 
+// DB returns the underlying database connection.
+func (s *Store) DB() *sql.DB { return s.db }
+
 // Close is a no-op — the underlying database connection is owned by the
 // caller (library/sqlite) and should not be closed here.
 func (s *Store) Close() error { return nil }
@@ -47,9 +50,9 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 			bitrate, format,
 			retry_count, retry_after, playlist_id, quality_profile_id,
 			isrc, library_track_id,
-			album_type, album_tracks, download_client, magnet_uri, folder_path, imported_track_ids,
+			album_type, album_tracks, download_client, provider_id, magnet_uri, folder_path, imported_track_ids,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Username, r.Filename, r.DisplayName,
 		string(download.StateQueued), 0.0,
 		r.Size, 0, 0, "", "",
@@ -58,7 +61,7 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 		r.Bitrate, r.Format,
 		0, r.RetryAfter, r.PlaylistID, r.QualityProfileID,
 		r.ISRC, r.LibraryTrackID,
-		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
+		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.ProviderID, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
 		now, now,
 	)
 	if err != nil {
@@ -84,7 +87,7 @@ func (s *Store) Update(ctx context.Context, r *download.Record) error {
 			retry_count=?, retry_after=?,
 			quality_profile_id=?,
 			isrc=?, library_track_id=?,
-			album_type=?, album_tracks=?, download_client=?, magnet_uri=?, folder_path=?, imported_track_ids=?,
+			album_type=?, album_tracks=?, download_client=?, provider_id=?, magnet_uri=?, folder_path=?, imported_track_ids=?,
 			updated_at=?
 		WHERE id=?`,
 		r.SourceName, r.Username, r.Filename, r.DisplayName,
@@ -96,7 +99,7 @@ func (s *Store) Update(ctx context.Context, r *download.Record) error {
 		r.RetryCount, r.RetryAfter,
 		r.QualityProfileID,
 		r.ISRC, r.LibraryTrackID,
-		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
+		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.ProviderID, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
 		now, r.ID,
 	)
 	if err != nil {
@@ -299,6 +302,16 @@ func (s *Store) DeleteTerminal(ctx context.Context) error {
 	return nil
 }
 
+// Delete removes a single download record. Events are removed via CASCADE.
+func (s *Store) Delete(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM downloads WHERE id=?`, id)
+	if err != nil {
+		s.log.Error("delete failed", "error", err, "component", "dl_store")
+		return fmt.Errorf("delete: %w", err)
+	}
+	return nil
+}
+
 // ─── Scan helpers ──────────────────────────────────────────────────────
 
 const downloadSelect = `SELECT
@@ -309,7 +322,7 @@ const downloadSelect = `SELECT
 	bitrate, format,
 	retry_count, retry_after, playlist_id, quality_profile_id,
 	isrc, library_track_id,
-	album_type, album_tracks, download_client, magnet_uri, folder_path, imported_track_ids,
+	album_type, album_tracks, download_client, provider_id, magnet_uri, folder_path, imported_track_ids,
 	created_at, updated_at
 	FROM downloads`
 
@@ -326,7 +339,7 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 		&r.Bitrate, &r.Format,
 		&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 		&r.ISRC, &r.LibraryTrackID,
-		&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
+		&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.ProviderID, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -360,7 +373,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 			&r.Bitrate, &r.Format,
 			&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 			&r.ISRC, &r.LibraryTrackID,
-			&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
+			&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.ProviderID, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
 			&createdAt, &updatedAt,
 		); err != nil {
 			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")

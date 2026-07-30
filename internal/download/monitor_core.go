@@ -162,13 +162,10 @@ func (m *MonitoringService) Shutdown() {
 // run is the main polling goroutine. It ticks at monitorPollInterval (1s)
 // and orchestrates: queued-record scanning, active-download polling,
 // cancellation detection, ActiveDownloads provider sync, and periodic retry.
+// Each tick is individually recoverable — a panic or hang in one tick never
+// kills the monitor.
 func (m *MonitoringService) run() {
 	defer m.wg.Done()
-	defer func() {
-		if r := recover(); r != nil {
-			m.log.Error("monitor panic recovered", "panic", r, "component", "monitor")
-		}
-	}()
 
 	ticker := time.NewTicker(monitorPollInterval)
 	defer ticker.Stop()
@@ -179,8 +176,32 @@ func (m *MonitoringService) run() {
 			m.log.Info("monitor loop stopped", "component", "monitor")
 			return
 		case <-ticker.C:
-			m.tick()
+			m.safeTick()
 		}
+	}
+}
+
+// safeTick wraps tick() with panic recovery and a 30s timeout so a single
+// stuck HTTP call or provider hang never blocks the monitor indefinitely.
+// (Goroutines launched by tick — e.g. resolvePendingSources — use m.ctx
+// and are not bound by this timeout.)
+func (m *MonitoringService) safeTick() {
+	done := make(chan struct{}, 1)
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				m.log.Error("monitor tick panic recovered", "panic", r, "component", "monitor")
+			}
+			done <- struct{}{}
+		}()
+		m.tick()
+	}()
+
+	select {
+	case <-done:
+		// normal completion
+	case <-time.After(30 * time.Second):
+		m.log.Error("monitor tick timed out after 30s — provider may be hung", "component", "monitor")
 	}
 }
 

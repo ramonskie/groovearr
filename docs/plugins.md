@@ -1087,6 +1087,8 @@ internal/providers/<source>/
 |--------|---------|-------|-------------|
 | Soulseek (slskd) | `internal/providers/soulseek` | ~680 | `["download"]` |
 | Deezer | `internal/providers/deezer` | ~1000 | `["download", "playlist"]` |
+| Prowlarr | `internal/providers/prowlarr` | ~500 | `["album_search"]` — implements `download.AlbumProvider` |
+| qBittorrent | `internal/providers/qbittorrent` | ~370 | `["download_client"]` — implements `download.DownloadClient` |
 
 Read `internal/providers/soulseek/client.go` for the simplest HTTP-based plugin.
 Read `internal/providers/deezer/download.go` for a plugin with authentication and

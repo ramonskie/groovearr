@@ -1,4 +1,4 @@
-# Prowlarr + qBittorrent Integration — Phase 3
+# Prowlarr + qBittorrent Integration — Phase 3 ✅ Complete
 
 > Depends on Phase 1 architecture: `AlbumProvider`, `DownloadClient`, `AlbumRecord`, `AlbumImportHandler`, `compilation_template`.
 > See `docs/album-architecture.md` for the foundation interfaces and data model.
@@ -343,17 +343,17 @@ pluginRegistry.RegisterFactory(deezer.Factory)
 
 ## Implementation Order
 
-| Seq | Component | Est. lines |
-|-----|-----------|------------|
-| 1 | `internal/providers/qbittorrent/` — qbitClient + Plugin + factory | ~300 |
-| 2 | `internal/providers/prowlarr/` — torznabClient + Plugin + factory | ~400 |
-| 3 | MusicBrainz track listing in prowlarr.ResolveTracks() | ~150 |
-| 4 | Wire in main.go | ~10 |
-| 5 | Config: prowlarr + qbittorrent sections | ~20 |
+| Seq | Component | Est. lines | Status |
+|-----|-----------|------------|--------|
+| 1 | `internal/providers/qbittorrent/` — qbitClient + Plugin + factory | ~300 | ✅ |
+| 2 | `internal/providers/prowlarr/` — torznabClient + Plugin + factory | ~400 | ✅ |
+| 3 | MusicBrainz track listing in prowlarr.ResolveTracks() | ~150 | ✅ |
+| 4 | Wire in main.go | ~10 | ✅ |
+| 5 | Config: prowlarr + qbittorrent sections | ~20 | ✅ |
 
-Total: ~880 lines.
+Total: ~880 lines. ✅ Complete.
 
-## Dependencies (Phase 1 must be complete)
+## Dependencies (Phase 1 must be complete) ✅ All present
 
 - `download.AlbumProvider` interface
 - `download.DownloadClient` interface + registry
