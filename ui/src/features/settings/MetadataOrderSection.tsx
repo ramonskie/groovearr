@@ -28,7 +28,7 @@ export default function MetadataOrderSection() {
     .map((s) => s.name);
 
   const ordered = [...new Set([...metadataOrder, ...connected])].filter((name) =>
-    (sources ?? []).some((s) => s.name === name && hasMetadata(s)),
+    (sources ?? []).some((s) => s.name === name && hasMetadata(s) && s.enabled !== false),
   );
 
   const handleDragStart = useCallback((index: number) => {

@@ -433,12 +433,12 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[p.Name()] = true
-		schema := resolveSchema(inner, p.Name())
-		enabled := true
-		if enabler, ok := p.(plugin.Enabler); ok {
-			enabled = enabler.IsEnabled()
-		}
-		sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema))
+			schema := resolveSchema(inner, p.Name())
+			enabled := true
+			if enabler, ok := p.(plugin.Enabler); ok {
+				enabled = enabler.IsEnabled()
+			}
+			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema))
 		}
 	}
 
@@ -1316,9 +1316,9 @@ func (s *Server) handleLibraryAlbumDownloadMissing(w http.ResponseWriter, r *htt
 
 // discoveryTrackData is the internal representation used by handleLibraryAlbumDownloadMissing.
 type discoveryTrackData struct {
-	Title        string
-	TrackNumber  int
-	Downloaded   bool
+	Title       string
+	TrackNumber int
+	Downloaded  bool
 }
 
 // getLibraryAlbumDiscoveryData returns discovery tracks for an album, reusing
@@ -2444,9 +2444,9 @@ func (s *Server) handleDiscoverResolveArtist(w http.ResponseWriter, r *http.Requ
 
 // artistOverviewResponse is returned by GET /api/discover/artists/overview.
 type artistOverviewResponse struct {
-	Artist     discovery.ArtistSummary `json:"artist"`
-	TopTracks  []discovery.TrackInfo   `json:"top_tracks"`
-	Discography map[string]int         `json:"discography"` // e.g. {"album":12,"single":5}
+	Artist      discovery.ArtistSummary `json:"artist"`
+	TopTracks   []discovery.TrackInfo   `json:"top_tracks"`
+	Discography map[string]int          `json:"discography"` // e.g. {"album":12,"single":5}
 }
 
 // handleDiscoverArtistOverview resolves an artist by name, fetches top tracks

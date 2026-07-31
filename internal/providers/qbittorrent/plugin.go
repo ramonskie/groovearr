@@ -66,14 +66,16 @@ func newPlugin(cfg Config, downloadPath string, logger *slog.Logger) (*Plugin, e
 
 // ─── plugin.BasePlugin ───────────────────────────────────────────────
 
-func (p *Plugin) Name() string                    { return pluginName }
-func (p *Plugin) DisplayName() string              { return displayName }
-func (p *Plugin) IsConfigured() bool { return p.cfg.URL != "" && p.cfg.APIKey != "" }
-func (p *Plugin) Connected() bool    { p.mu.Lock(); defer p.mu.Unlock(); return p.connected }
+func (p *Plugin) Name() string        { return pluginName }
+func (p *Plugin) DisplayName() string { return displayName }
+func (p *Plugin) IsConfigured() bool  { return p.cfg.URL != "" && p.cfg.APIKey != "" }
+func (p *Plugin) Connected() bool     { p.mu.Lock(); defer p.mu.Unlock(); return p.connected }
 
 // IsEnabled returns false when the plugin has been explicitly disabled.
 func (p *Plugin) IsEnabled() bool { return p.cfg.Enabled }
-func (p *Plugin) CapabilityStatus() map[string]string { return map[string]string{"download_client": p.capStatus()} }
+func (p *Plugin) CapabilityStatus() map[string]string {
+	return map[string]string{"download_client": p.capStatus()}
+}
 
 func (p *Plugin) capStatus() string {
 	if !p.IsConfigured() {
@@ -170,12 +172,10 @@ func (p *Plugin) Cancel(ctx context.Context, providerID string, remove bool) err
 	return p.deleteTorrents(ctx, []string{providerID}, remove)
 }
 
-func (p *Plugin) MaxConcurrent() int     { return 5 }
+func (p *Plugin) MaxConcurrent() int             { return 5 }
 func (p *Plugin) DownloadTimeout() time.Duration { return 2 * time.Hour }
 
 // ─── HTTP methods ────────────────────────────────────────────────────
-
-
 
 func (p *Plugin) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, p.baseURL+"/api/v2"+path, body)
