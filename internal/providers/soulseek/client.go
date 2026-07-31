@@ -33,17 +33,19 @@ const soulseekRate = 10
 
 // SoulseekConfig holds slskd connection and search parameters.
 type SoulseekConfig struct {
-	SlskdURL       string `json:"slskd_url"`
-	APIKey         string `json:"api_key"`
-	SearchTimeout  int    `json:"search_timeout"`
-	MinUploadSpeed int    `json:"min_upload_speed"`
-	DownloadPath   string `json:"download_path"` // per-plugin download dir (falls back to library.download_path)
+	SlskdURL          string `json:"slskd_url"`
+	APIKey            string `json:"api_key"`
+	SearchTimeout     int    `json:"search_timeout"`
+	MinUploadSpeed    int    `json:"min_upload_speed"`
+	DownloadPath      string `json:"download_path"`       // groovearr-visible path for record construction (falls back to library.download_path)
+	SlskdDownloadPath string `json:"slskd_download_path"` // slskd-internal download directory (defaults to "/downloads")
 }
 
 // Client implements download.Plugin for Soulseek via slskd REST API.
 type Client struct {
 	cfg       SoulseekConfig
-	dlPath    string // download staging directory (not from Soulseek config)
+	dlPath    string // groovearr-visible download staging directory (for record paths)
+	slskdPath string // slskd-internal download directory (sent to slskd API)
 	baseURL   string
 	apiKey    string
 	client    *http.Client
@@ -70,9 +72,14 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 	if dlPath == "" {
 		dlPath = downloadPath // fallback to global library.download_path
 	}
+	slskdPath := sc.SlskdDownloadPath
+	if slskdPath == "" {
+		slskdPath = "/downloads" // slskd default download root
+	}
 	return &Client{
 		cfg:               sc,
 		dlPath:            dlPath,
+		slskdPath:         slskdPath,
 		baseURL:           strings.TrimRight(sc.SlskdURL, "/"),
 		apiKey:            sc.APIKey,
 		client:            &http.Client{Timeout: 120 * time.Second, Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, soulseekRate)},
@@ -222,10 +229,13 @@ func (c *Client) StartDownload(ctx context.Context, meta download.Meta) (string,
 	filename := meta.Filename
 	fileSize := meta.Size
 
+	// slskdPath is the download root from slskd's perspective.
+	// dlPath is the groovearr-visible mount point used for record paths.
+	// These differ when volumes are mounted at different paths in each container.
 	downloadReq := []map[string]any{{
 		"filename": filename,
 		"size":     fileSize,
-		"path":     c.dlPath,
+		"path":     c.slskdPath,
 	}}
 
 	body, _ := json.Marshal(downloadReq)

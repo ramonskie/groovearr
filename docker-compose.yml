@@ -12,7 +12,7 @@ services:
     volumes:
       - ./slskd.yml:/app/slskd.yml:Z
       - slskd-data:/app
-      - downloads:/downloads
+      - soulseek-downloads:/downloads
       - music:/music
     ports:
       - "5030:5030"
@@ -52,7 +52,7 @@ services:
       TORRENTING_PORT: 6881
     volumes:
       - qbittorrent-config:/config
-      - downloads:/downloads:rw
+      - qbittorrent-downloads:/downloads:rw
     ports:
       - "8080:8080"
       - "6881:6881"
@@ -67,7 +67,8 @@ services:
       GROOVEARR_ADDR: ":8008"
     volumes:
       - ./config.docker.json:/config/config.json:Z
-      - downloads:/downloads
+      - qbittorrent-downloads:/downloads/qbittorrent
+      - soulseek-downloads:/downloads/soulseek
       - music:/music
       - playlists:/playlists
     ports:
@@ -78,6 +79,7 @@ volumes:
   slskd-data:
   prowlarr-config:
   qbittorrent-config:
-  downloads:
+  soulseek-downloads:
+  qbittorrent-downloads:
   music:
   playlists:

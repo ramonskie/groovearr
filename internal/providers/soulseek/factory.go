@@ -46,7 +46,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Soulseek configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"slskd_url":"","api_key":"","download_path":"","search_timeout":90,"min_upload_speed":0}`)
+	return json.RawMessage(`{"slskd_url":"","api_key":"","download_path":"","slskd_download_path":"","search_timeout":90,"min_upload_speed":0}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
@@ -72,8 +72,15 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Name:        "download_path",
 			Type:        "text",
 			Label:       "Download Path",
-			Hint:        "Override the global download path for Soulseek downloads. Leave empty to use library.download_path.",
-			Placeholder: "./downloads",
+			Hint:        "Groovearr-visible path where slskd downloads appear. Override only when the slskd volume is mounted at a non-default location in groovearr. Leave empty to use library.download_path.",
+			Placeholder: "/downloads",
+		},
+		{
+			Name:        "slskd_download_path",
+			Type:        "text",
+			Label:       "slskd Download Directory",
+			Hint:        "Download directory from slskd's perspective. Must match slskd's configured download root (SLSKD_SHARED_DIR). Defaults to /downloads.",
+			Placeholder: "/downloads",
 		},
 	}
 }
