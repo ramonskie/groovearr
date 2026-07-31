@@ -5,7 +5,7 @@ package plugin
 // hardcoded per-provider React components.
 type ConfigField struct {
 	Name        string           `json:"name"`
-	Type        string           `json:"type"` // "text", "password", "select", "number"
+	Type        string           `json:"type"` // "text", "password", "select", "number", "toggle"
 	Label       string           `json:"label"`
 	Hint        string           `json:"hint,omitempty"`
 	Required    bool             `json:"required"`

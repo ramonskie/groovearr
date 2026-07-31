@@ -29,6 +29,7 @@ const (
 type Config struct {
 	URL             string `json:"url"`              // e.g. http://localhost:8080
 	APIKey          string `json:"api_key"`          // API key from WebUI settings
+	Enabled         bool   `json:"enabled"`          // user-facing enable/disable toggle (default true)
 	Category        string `json:"category"`         // torrent category (default: "music")
 	DownloadPath    string `json:"download_path"`    // per-plugin download dir (falls back to library.download_path)
 	RemoveCompleted bool   `json:"remove_completed"` // remove from client after import
@@ -68,7 +69,10 @@ func newPlugin(cfg Config, downloadPath string, logger *slog.Logger) (*Plugin, e
 func (p *Plugin) Name() string                    { return pluginName }
 func (p *Plugin) DisplayName() string              { return displayName }
 func (p *Plugin) IsConfigured() bool { return p.cfg.URL != "" && p.cfg.APIKey != "" }
-func (p *Plugin) Connected() bool                  { p.mu.Lock(); defer p.mu.Unlock(); return p.connected }
+func (p *Plugin) Connected() bool    { p.mu.Lock(); defer p.mu.Unlock(); return p.connected }
+
+// IsEnabled returns false when the plugin has been explicitly disabled.
+func (p *Plugin) IsEnabled() bool { return p.cfg.Enabled }
 func (p *Plugin) CapabilityStatus() map[string]string { return map[string]string{"download_client": p.capStatus()} }
 
 func (p *Plugin) capStatus() string {

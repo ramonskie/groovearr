@@ -190,6 +190,9 @@ func (c *DownloadClient) DisplayName() string { return downloadDisplayName }
 // IsConfigured returns true if the plugin has a valid ARL token for downloads.
 func (c *DownloadClient) IsConfigured() bool { return c.cfg.ARL != "" }
 
+// IsEnabled returns false when the plugin has been explicitly disabled.
+func (c *DownloadClient) IsEnabled() bool { return c.cfg.Enabled }
+
 // IsMetadataAvailable is always true — the public Deezer API works without auth.
 func (c *DownloadClient) IsMetadataAvailable() bool { return true }
 

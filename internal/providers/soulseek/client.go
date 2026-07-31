@@ -37,6 +37,7 @@ type SoulseekConfig struct {
 	APIKey            string `json:"api_key"`
 	SearchTimeout     int    `json:"search_timeout"`
 	MinUploadSpeed    int    `json:"min_upload_speed"`
+	Enabled           bool   `json:"enabled"`            // user-facing enable/disable toggle (default true)
 	DownloadPath      string `json:"download_path"`       // groovearr-visible path for record construction (falls back to library.download_path)
 	SlskdDownloadPath string `json:"slskd_download_path"` // slskd-internal download directory (defaults to "/downloads")
 }
@@ -112,6 +113,9 @@ func (c *Client) CapabilityStatus() map[string]string {
 	}
 	return map[string]string{"download": s}
 }
+
+// IsEnabled returns false when the plugin has been explicitly disabled.
+func (c *Client) IsEnabled() bool { return c.cfg.Enabled }
 
 // CheckConnection probes the slskd API for reachability.
 func (c *Client) CheckConnection(ctx context.Context) error {

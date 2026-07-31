@@ -14,9 +14,9 @@ var Factory plugin.PluginFactory = &factory{}
 
 type factory struct{}
 
-func (f *factory) Name() string            { return pluginName }
-func (f *factory) DisplayName() string     { return displayName }
-func (f *factory) Capabilities() []string  { return []string{"download_client"} }
+func (f *factory) Name() string           { return pluginName }
+func (f *factory) DisplayName() string    { return displayName }
+func (f *factory) Capabilities() []string { return []string{"download_client"} }
 
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
 	var cfg Config
@@ -45,11 +45,18 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 }
 
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"url":"","api_key":"","download_path":"","category":"music","remove_completed":true}`)
+	return json.RawMessage(`{"url":"","api_key":"","enabled":true,"download_path":"","category":"music","remove_completed":true}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
 	return []plugin.ConfigField{
+		{
+			Name:    "enabled",
+			Type:    "toggle",
+			Label:   "Enabled",
+			Hint:    "Enable or disable qBittorrent. When disabled, health checks are skipped.",
+			Default: "true",
+		},
 		{
 			Name:        "url",
 			Type:        "text",
@@ -88,4 +95,3 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 func (f *factory) Icon() string                   { return "disc" }
 func (f *factory) OAuthConfig() *plugin.OAuthInfo { return nil }
 func (f *factory) UISlots() *plugin.UISlots       { return nil }
-

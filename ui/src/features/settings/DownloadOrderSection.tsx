@@ -21,13 +21,13 @@ export default function DownloadOrderSection() {
   const [dragOver, setDragOver] = useState<number | null>(null);
   const dragItem = useRef<DragState | null>(null);
 
-  // Only show connected download providers.
+  // Only show enabled, connected download providers.
   const connected = (sources ?? [])
-    .filter((s) => hasDownload(s) && s.status === "connected")
+    .filter((s) => hasDownload(s) && s.status === "connected" && s.enabled !== false)
     .map((s) => s.name);
 
   const ordered = [...new Set([...downloadOrder, ...connected])].filter((name) =>
-    (sources ?? []).some((s) => s.name === name && hasDownload(s)),
+    (sources ?? []).some((s) => s.name === name && hasDownload(s) && s.enabled !== false),
   );
 
   const handleDragStart = useCallback((index: number) => {

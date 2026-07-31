@@ -67,6 +67,7 @@ type BasePlugin interface {
     IsConfigured() bool
     CheckConnection(ctx context.Context) error
     Connected() bool
+    CapabilityStatus() map[string]string
 }
 ```
 
@@ -214,6 +215,39 @@ for _, p := range registry.All() {
 }
 ```
 
+### Enabler — Enable/Disable toggle
+
+Implement when the plugin supports user-facing enable/disable. Plugins that do NOT implement
+this are implicitly always enabled. The health checker skips disabled plugins.
+
+```go
+// internal/plugin/plugin.go
+type Enabler interface {
+    IsEnabled() bool
+}
+```
+
+**When to implement:** The plugin reads an `"enabled"` boolean field from its config struct.
+Set `"enabled": true` in `DefaultConfig()` so the toggle defaults to ON.
+
+```go
+// In the plugin config struct:
+type SoulseekConfig struct {
+    // ...
+    Enabled bool `json:"enabled"` // user-facing toggle (default true via DefaultConfig)
+}
+
+// On the client:
+func (c *Client) IsEnabled() bool { return c.cfg.Enabled }
+```
+
+**Factory schema:**
+```go
+{Name: "enabled", Type: "toggle", Label: "Enabled",
+ Hint: "Enable or disable Soulseek. When disabled, health checks are skipped.",
+ Default: "true"}
+```
+
 ### ConfigSchemaProvider — Manifest-Driven UI
 
 Implement when the plugin needs a settings card, OAuth connect button, playlist browser,
@@ -234,12 +268,12 @@ type ConfigSchemaProvider interface {
 ```go
 type ConfigField struct {
     Name        string          `json:"name"`                   // matches JSON config key
-    Type        string          `json:"type"`                   // "text", "password", "select"
+    Type        string          `json:"type"`                   // "text", "password", "select", "number", "toggle"
     Label       string          `json:"label"`                  // form field label
     Hint        string          `json:"hint,omitempty"`         // help text below field
     Required    bool            `json:"required"`               // form validation
     Placeholder string          `json:"placeholder,omitempty"`  // input placeholder
-    Default     string          `json:"default,omitempty"`      // default value
+    Default     string          `json:"default,omitempty"`      // default value (for toggle: "true" or "false")
     Options     []FieldOption   `json:"options,omitempty"`      // select dropdown options
     DependsOn   *FieldDependsOn `json:"depends_on,omitempty"`   // conditional visibility
     Secret      bool            `json:"secret,omitempty"`       // mask value (password type)
@@ -247,7 +281,10 @@ type ConfigField struct {
 }
 ```
 
-**Field types supported:** `"text"`, `"password"`, `"select"`
+**Field types supported:** `"text"`, `"password"`, `"select"`, `"number"`, `"toggle"`
+
+**Toggle fields:** `"toggle"` renders a colored ON/OFF switch (green=ON, red=OFF).
+The value is stored as a JSON string `"true"` or `"false"`. Default should be `"true"`.
 
 **OAuthInfo — OAuth connect button:**
 ```go
@@ -476,10 +513,13 @@ Each plugin defines its own config struct in its package:
 ```go
 // Soulseek
 type SoulseekConfig struct {
-    SlskdURL       string `json:"slskd_url"`
-    APIKey         string `json:"api_key"`
-    SearchTimeout  int    `json:"search_timeout"`
-    MinUploadSpeed int    `json:"min_upload_speed"`
+    SlskdURL          string `json:"slskd_url"`
+    APIKey            string `json:"api_key"`
+    SearchTimeout     int    `json:"search_timeout"`
+    MinUploadSpeed    int    `json:"min_upload_speed"`
+    Enabled           bool   `json:"enabled"`             // user-facing toggle (default true)
+    DownloadPath      string `json:"download_path"`        // groovearr-visible path
+    SlskdDownloadPath string `json:"slskd_download_path"`  // slskd-internal path
 }
 
 // Deezer
@@ -488,6 +528,7 @@ type DeezerConfig struct {
     Quality       string `json:"quality"`
     AllowFallback *bool  `json:"allow_fallback"`
     AccessToken   string `json:"access_token"`
+    Enabled       bool   `json:"enabled"` // user-facing toggle (default true)
 }
 ```
 
@@ -1027,6 +1068,7 @@ and declare `Capabilities() []string{"download", "metadata"}`. Each domain queri
 | Interface | Package | Purpose | Required? |
 |-----------|---------|---------|-----------|
 | `BasePlugin` | `internal/plugin` | Identity, readiness, connectivity | **Yes** (via download.Plugin) |
+| `Enabler` | `internal/plugin` | User-facing enable/disable toggle | No |
 | `PluginFactory` | `internal/plugin` | Self-registration with capabilities | **Yes** |
 | `ConfigSchemaProvider` | `internal/plugin` | UI manifest (config fields, icon, OAuth, slots) | No (recommended) |
 | `download.Plugin` | `internal/download` | Download source contract (extends BasePlugin) | **Yes** (for download sources) |

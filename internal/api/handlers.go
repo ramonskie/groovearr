@@ -433,8 +433,12 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[p.Name()] = true
-			schema := resolveSchema(inner, p.Name())
-			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), p.CapabilityStatus(), schema))
+		schema := resolveSchema(inner, p.Name())
+		enabled := true
+		if enabler, ok := p.(plugin.Enabler); ok {
+			enabled = enabler.IsEnabled()
+		}
+		sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema))
 		}
 	}
 
@@ -457,7 +461,7 @@ func resolveSchema(reg *plugin.Registry, name string) plugin.ConfigSchemaProvide
 	return nil
 }
 
-func sourceEntry(name, displayName string, configured, connected bool, caps map[string]string, schema plugin.ConfigSchemaProvider) map[string]any {
+func sourceEntry(name, displayName string, configured, connected, enabled bool, caps map[string]string, schema plugin.ConfigSchemaProvider) map[string]any {
 	status := "not_configured"
 	if configured {
 		status = "configured"
@@ -469,6 +473,7 @@ func sourceEntry(name, displayName string, configured, connected bool, caps map[
 		"name":         name,
 		"display_name": displayName,
 		"configured":   configured,
+		"enabled":      enabled,
 		"status":       status,
 	}
 	if len(caps) > 0 {

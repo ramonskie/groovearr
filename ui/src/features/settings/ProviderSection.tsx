@@ -21,6 +21,7 @@ export default function ProviderSection({ source }: Props) {
   const {
     register,
     watch,
+    setValue,
     formState: { errors },
   } = useFormContext();
 
@@ -73,7 +74,26 @@ export default function ProviderSection({ source }: Props) {
             hint={field.hint}
             error={fieldError(field.name)}
           >
-            {field.type === "select" ? (
+            {field.type === "toggle" ? (() => {
+              const fieldPath = `${formPrefix}.${field.name}`;
+              const raw = watch(fieldPath) as string | undefined;
+              const enabled = raw === "true" || raw === undefined; // undefined = default true
+              return (
+                <button
+                  type="button"
+                  id={`${source.name}_${field.name}`}
+                  onClick={() => setValue(fieldPath, enabled ? "false" : "true", { shouldDirty: true })}
+                  className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs font-semibold transition-colors ${
+                    enabled
+                      ? "bg-green-600 text-white hover:bg-green-500"
+                      : "bg-red-600 text-white hover:bg-red-500"
+                  }`}
+                >
+                  <span className={`h-2 w-2 rounded-full ${enabled ? "bg-green-200" : "bg-red-200"}`} />
+                  {enabled ? "ON" : "OFF"}
+                </button>
+              );
+            })() : field.type === "select" ? (
               <select
                 id={`${source.name}_${field.name}`}
                 {...register(`${formPrefix}.${field.name}`)}

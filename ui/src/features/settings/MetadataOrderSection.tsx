@@ -24,7 +24,7 @@ export default function MetadataOrderSection() {
   // Build ordered list: metadata-capable providers in metadata_order first,
   // then any connected metadata providers not yet in the order list.
   const connected = (sources ?? [])
-    .filter((s) => hasMetadata(s) && s.capabilities?.metadata === "connected")
+    .filter((s) => hasMetadata(s) && s.capabilities?.metadata === "connected" && s.enabled !== false)
     .map((s) => s.name);
 
   const ordered = [...new Set([...metadataOrder, ...connected])].filter((name) =>

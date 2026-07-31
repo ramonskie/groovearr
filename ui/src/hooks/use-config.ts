@@ -24,6 +24,7 @@ export function useUpdateConfig() {
     mutationFn: (payload: ConfigUpdatePayload) => updateConfig(payload),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["config"] });
+      queryClient.invalidateQueries({ queryKey: ["sources"] });
     },
   });
 }

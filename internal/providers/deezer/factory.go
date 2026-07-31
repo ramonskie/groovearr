@@ -13,6 +13,7 @@ type DeezerConfig struct {
 	Quality       string `json:"quality"`
 	AllowFallback *bool  `json:"allow_fallback"`
 	AccessToken   string `json:"access_token"`
+	Enabled       bool   `json:"enabled"` // user-facing enable/disable toggle (default true)
 }
 
 // Factory is the plugin factory for Deezer.
@@ -52,11 +53,18 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 }
 
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"arl":"","quality":"flac","allow_fallback":true,"access_token":""}`)
+	return json.RawMessage(`{"arl":"","quality":"flac","allow_fallback":true,"access_token":"","enabled":true}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
 	return []plugin.ConfigField{
+		{
+			Name:    "enabled",
+			Type:    "toggle",
+			Label:   "Enabled",
+			Hint:    "Enable or disable Deezer. When disabled, health checks are skipped.",
+			Default: "true",
+		},
 		{
 			Name:        "arl",
 			Type:        "password",

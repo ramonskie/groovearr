@@ -73,13 +73,17 @@ func (r *Registry) All() []BasePlugin {
 	return out
 }
 
-// Configured returns plugins where IsConfigured() == true.
+// Configured returns plugins where IsConfigured() == true and, if the plugin
+// implements Enabler, IsEnabled() == true. Disabled plugins are excluded.
 func (r *Registry) Configured() []BasePlugin {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []BasePlugin
 	for _, name := range r.names {
 		if p, ok := r.plugins[name]; ok && p.IsConfigured() {
+			if enabler, isEnabler := p.(Enabler); isEnabler && !enabler.IsEnabled() {
+				continue
+			}
 			out = append(out, p)
 		}
 	}

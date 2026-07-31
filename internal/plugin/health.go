@@ -101,6 +101,16 @@ func (h *HealthChecker) loop(ctx context.Context) {
 }
 
 func (h *HealthChecker) checkOne(ctx context.Context, p BasePlugin) {
+	// Skip unconfigured plugins — no credentials means the probe will
+	// always fail and produces nothing but noise.
+	if !p.IsConfigured() {
+		return
+	}
+	// Respect explicit disable toggle when the plugin supports it.
+	if enabler, ok := p.(Enabler); ok && !enabler.IsEnabled() {
+		return
+	}
+
 	start := time.Now()
 	err := p.CheckConnection(ctx)
 	elapsed := time.Since(start)

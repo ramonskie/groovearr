@@ -46,11 +46,18 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Soulseek configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"slskd_url":"","api_key":"","download_path":"","slskd_download_path":"","search_timeout":90,"min_upload_speed":0}`)
+	return json.RawMessage(`{"slskd_url":"","api_key":"","enabled":true,"download_path":"","slskd_download_path":"","search_timeout":90,"min_upload_speed":0}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
 	return []plugin.ConfigField{
+		{
+			Name:    "enabled",
+			Type:    "toggle",
+			Label:   "Enabled",
+			Hint:    "Enable or disable Soulseek. When disabled, health checks are skipped.",
+			Default: "true",
+		},
 		{
 			Name:        "slskd_url",
 			Type:        "text",

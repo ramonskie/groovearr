@@ -160,7 +160,7 @@ export interface FieldValidation {
 
 export interface ConfigField {
   name: string;
-  type: "text" | "password" | "select" | "number";
+  type: "text" | "password" | "select" | "number" | "toggle";
   label: string;
   hint?: string;
   required: boolean;
@@ -194,6 +194,8 @@ export interface SourceInfo {
   name: string;
   display_name: string;
   configured: boolean;
+  /** Whether the plugin is enabled (user toggle). Disabled plugins are hidden from selectors. */
+  enabled: boolean;
   status: SourceStatus;
   /** Per-capability status: {"download": "connected", "metadata": "connected"} */
   capabilities?: Record<string, SourceStatus>;
