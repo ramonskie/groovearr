@@ -1,8 +1,9 @@
-import { useEffect, useRef, useCallback, useMemo } from "react";
+import { useEffect, useMemo } from "react";
 import { useForm, FormProvider } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { useSearchParams } from "react-router-dom";
 import { useConfig, useUpdateConfig, useSources } from "../../hooks/use-config";
+import { useAutoSave } from "../../hooks/use-auto-save";
 import SubTabs from "../../components/SubTabs";
 import Spinner from "../../components/Spinner";
 import {
@@ -26,15 +27,15 @@ const TABS = [
 
 type TabId = (typeof TABS)[number]["id"];
 
-const AUTO_SAVE_MS = 1000;
+function useActiveTab(searchParams: URLSearchParams): TabId {
+  const fromParam = searchParams.get("tab");
+  if (fromParam && TABS.some((t) => t.id === fromParam)) return fromParam as TabId;
+  return searchParams.get("spotify") === "connected" ? "sources" : "general";
+}
 
 export default function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const activeTab: TabId = (() => {
-    const fromParam = searchParams.get("tab");
-    if (fromParam && TABS.some((t) => t.id === fromParam)) return fromParam as TabId;
-    return searchParams.get("spotify") === "connected" ? "sources" : "general";
-  })();
+  const activeTab = useActiveTab(searchParams);
 
   const { data: config, isLoading: configLoading, error } = useConfig();
   const { data: sources, isLoading: sourcesLoading } = useSources();
@@ -50,12 +51,8 @@ export default function SettingsPage() {
     defaultValues,
   });
 
-  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   // Pre-fill form when config + sources load. On subsequent refetches
   // (e.g. after auto-save), only fields the user hasn't edited are reset.
-  // This keeps download_order / metadata_order in sync with backend cleanup
-  // while preserving in-progress user edits on source config fields.
   useEffect(() => {
     if (config && sourceList.length > 0) {
       const sourceValues: Record<string, Record<string, string>> = {};
@@ -90,76 +87,7 @@ export default function SettingsPage() {
     }
   }, [config, sourceList, form]);
 
-  // Auto-save on form change with debounce
-  const saveValues = useCallback(
-    (values: SettingsFormValues) => {
-      const sourcesPayload: Record<string, Record<string, unknown>> = {};
-      if (values.sources) {
-        for (const [name, fields] of Object.entries(values.sources)) {
-          if (fields && typeof fields === "object") {
-            const cleaned: Record<string, unknown> = {};
-            const sourceSchema =
-              sourceList.find((s) => s.name === name)?.config_schema ?? [];
-            for (const [k, v] of Object.entries(fields)) {
-              // Toggle fields must be sent as booleans, not strings.
-              const fieldType = sourceSchema.find((f) => f.name === k)?.type;
-              if (fieldType === "toggle") {
-                cleaned[k] = v === "true";
-              } else {
-                cleaned[k] = v ?? "";
-              }
-            }
-            // Preserve server-managed keys (OAuth tokens, etc.) that are
-            // not part of the config schema and not user-editable.
-            const existing = (config?.sources?.[name] ?? {}) as Record<string, unknown>;
-            const schemaFields = new Set(
-              (sourceList.find((s) => s.name === name)?.config_schema ?? []).map((f) => f.name),
-            );
-            for (const [k, v] of Object.entries(existing)) {
-              if (!schemaFields.has(k) && v !== undefined) {
-                cleaned[k] = v;
-              }
-            }
-            sourcesPayload[name] = cleaned;
-          }
-        }
-      }
-
-      updateConfig.mutate({
-        sources: sourcesPayload,
-        library: {
-          download_path: values.download_path ?? "",
-          library_path: values.library_path ?? "",
-          folder_template: values.folder_template ?? "",
-          playlist_path: values.playlist_path ?? "",
-          playlist_template: values.playlist_template ?? "",
-          playlist_auto_sync_mins: values.playlist_auto_sync_mins,
-        },
-        auth: {
-          method: values.auth_method ?? "none",
-          username: values.auth_username ?? "",
-          password: (values.auth_password?.length ?? 0) >= 4 ? values.auth_password : "",
-          local_bypass_subnets: (values.auth_local_bypass_subnets ?? "")
-            .split("\n")
-            .map((s) => s.trim())
-            .filter((s) => s.length > 0),
-        },
-        metadata_order: values.metadata_order,
-        download_order: values.download_order,
-      });
-    },
-    [updateConfig, config, sourceList],
-  );
-
-  useEffect(() => {
-    const sub = form.watch((values) => {
-      if (timerRef.current) clearTimeout(timerRef.current);
-      timerRef.current = setTimeout(() => {
-        saveValues(values as SettingsFormValues);
-      }, AUTO_SAVE_MS);
-    });
-    return () => sub.unsubscribe();
-  }, [form, saveValues]);
+  useAutoSave({ form, updateConfig, config, sourceList });
 
   if (configLoading || sourcesLoading) {
     return (

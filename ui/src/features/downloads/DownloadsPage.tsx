@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useSearchParams } from "react-router-dom";
 import type { DownloadState } from "../../api/types";
 import {
@@ -9,24 +9,20 @@ import {
 } from "../../hooks/use-downloads";
 import { useScanLibrary } from "../../hooks/use-library";
 import { useDownloadEvents } from "../../hooks/use-download-events";
+import { useScanOnComplete } from "../../hooks/use-scan-on-complete";
 import { toast } from "sonner";
 import Button from "../../components/Button";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import DownloadItem from "./DownloadItem";
+import PendingDownloadList from "./PendingDownloadList";
 
 // ─── Constants ──────────────────────────────────────────────────────
 
 type Tab = "pending" | "finished" | "failed";
 
-const TERMINAL_STATES = new Set<DownloadState>([
-  "imported",
-  "ignored",
-]);
-
-const FAILED_STATES = new Set<DownloadState>([
-  "failed",
-]);
+const TERMINAL_STATES = new Set<DownloadState>(["imported", "ignored"]);
+const FAILED_STATES = new Set<DownloadState>(["failed"]);
 
 // ─── Component ──────────────────────────────────────────────────────
 
@@ -44,8 +40,8 @@ function DownloadsPage() {
   const clearCompleted = useClearCompleted();
   const scanLibrary = useScanLibrary();
 
-  // Activate SSE connection.
   useDownloadEvents();
+  const { resetScannedIds } = useScanOnComplete({ downloads, scanLibrary });
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();
@@ -54,52 +50,6 @@ function DownloadsPage() {
     if (fromParam === "pending" || fromParam === "finished" || fromParam === "failed") return fromParam;
     return "pending";
   })();
-  const [showAllQueued, setShowAllQueued] = useState(false);
-
-  // Track which succeeded downloads we have already triggered a scan for.
-  const scannedIds = useRef<Set<string>>(new Set());
-  const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // ─── Cleanup scan timer on unmount ────────────────────────────────
-
-  useEffect(() => {
-    return () => {
-      if (scanTimer.current) clearTimeout(scanTimer.current);
-    };
-  }, []);
-
-  // ─── Auto-scan on completion (debounced 30 s) ─────────────────────
-
-  useEffect(() => {
-    if (!downloads || downloads.length === 0) return;
-
-    const newlySucceeded = downloads.filter(
-      (d) => d.state === "imported" && !scannedIds.current.has(d.id),
-    );
-
-    if (newlySucceeded.length > 0) {
-      if (scanTimer.current) clearTimeout(scanTimer.current);
-      scanTimer.current = setTimeout(() => {
-        for (const d of downloads) {
-          if (d.state === "imported") scannedIds.current.add(d.id);
-        }
-        scanLibrary.mutate(undefined, {
-          onSuccess: (stats) => {
-            toast.success(
-              `Library scanned: ${stats.imported} tracks imported`,
-            );
-          },
-          onError: (err) => {
-            toast.error(
-              `Scan failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-            );
-          },
-        });
-      }, 30_000);
-    }
-  }, [downloads, scanLibrary]);
-
-  // ─── Cancel single download ───────────────────────────────────────
 
   const handleCancel = useCallback(
     (id: string) => {
@@ -110,17 +60,13 @@ function DownloadsPage() {
           setCancellingId(null);
         },
         onError: (err) => {
-          toast.error(
-            `Cancel failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-          );
+          toast.error(`Cancel failed: ${err instanceof Error ? err.message : "Unknown error"}`);
           setCancellingId(null);
         },
       });
     },
     [cancelMutation],
   );
-
-  // ─── Retry single download ─────────────────────────────────────────
 
   const handleRetry = useCallback(
     (id: string) => {
@@ -131,9 +77,7 @@ function DownloadsPage() {
           setCancellingId(null);
         },
         onError: (err) => {
-          toast.error(
-            `Retry failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-          );
+          toast.error(`Retry failed: ${err instanceof Error ? err.message : "Unknown error"}`);
           setCancellingId(null);
         },
       });
@@ -141,21 +85,17 @@ function DownloadsPage() {
     [retryMutation],
   );
 
-  // ─── Clear finished ───────────────────────────────────────────────
-
   const handleClearFinished = useCallback(() => {
     clearCompleted.mutate(undefined, {
       onSuccess: () => {
         toast.success("Finished downloads cleared");
-        scannedIds.current.clear();
+        resetScannedIds();
       },
       onError: (err) => {
-        toast.error(
-          `Clear failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-        );
+        toast.error(`Clear failed: ${err instanceof Error ? err.message : "Unknown error"}`);
       },
     });
-  }, [clearCompleted]);
+  }, [clearCompleted, resetScannedIds]);
 
   // ─── Derived data ─────────────────────────────────────────────────
 
@@ -180,8 +120,6 @@ function DownloadsPage() {
       </div>
     );
   }
-
-  // ─── Error state ──────────────────────────────────────────────────
 
   if (isError) {
     return (
@@ -209,9 +147,7 @@ function DownloadsPage() {
           <h1 className="text-2xl font-bold text-white">Downloads</h1>
           <span
             className={`inline-flex items-center gap-1.5 rounded px-2 py-0.5 text-xs ${
-              sseActive
-                ? "bg-green-900/50 text-green-400"
-                : "bg-yellow-900/50 text-yellow-400"
+              sseActive ? "bg-green-900/50 text-green-400" : "bg-yellow-900/50 text-yellow-400"
             }`}
             title={`SSE: ${sseStatus}`}
           >
@@ -274,98 +210,17 @@ function DownloadsPage() {
         ))}
       </div>
 
-      {/* Pending tab: queue first, then active */}
-      {activeTab === "pending" && (() => {
-        const queued = pendingDownloads.filter(d => d.state === "queued");
-        const failedPending = pendingDownloads.filter(d => d.state === "failedPending");
-        const active = pendingDownloads.filter(d => d.state !== "queued" && d.state !== "failedPending");
+      {/* Pending tab */}
+      {activeTab === "pending" && (
+        <PendingDownloadList
+          pendingDownloads={pendingDownloads}
+          handleCancel={handleCancel}
+          handleRetry={handleRetry}
+          cancellingId={cancellingId}
+        />
+      )}
 
-        if (queued.length === 0 && active.length === 0 && failedPending.length === 0) {
-          return <p className="py-16 text-center text-sm text-slate-500">No pending downloads</p>;
-        }
-
-        return (
-          <div className="mb-6">
-            {active.length > 0 && (
-              <div className="mb-4">
-                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Active &mdash; {active.length} downloading
-                </h2>
-                {active.map((d) => (
-                  <DownloadItem
-                    key={d.id}
-                    download={d}
-                    onCancel={handleCancel}
-                    onRetry={handleRetry}
-                    isCancelling={cancellingId === d.id}
-                  />
-                ))}
-              </div>
-            )}
-            {failedPending.length > 0 && (
-              <div className="mb-4">
-                <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                  Retrying &mdash; {failedPending.length} waiting
-                </h2>
-                {failedPending.map((d) => (
-                  <DownloadItem
-                    key={d.id}
-                    download={d}
-                    onCancel={handleCancel}
-                    onRetry={handleRetry}
-                    isCancelling={cancellingId === d.id}
-                  />
-                ))}
-              </div>
-            )}
-            {(active.length > 0 || failedPending.length > 0) && queued.length > 0 && (
-              <hr className="my-4 border-slate-700/50" />
-            )}
-            {queued.length > 0 && (() => {
-              const QUEUE_PREVIEW = 20;
-              const visible = showAllQueued ? queued : queued.slice(0, QUEUE_PREVIEW);
-              const collapsed = queued.length > QUEUE_PREVIEW && !showAllQueued;
-
-              return (
-                <div>
-                  <h2 className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-500">
-                    Queue &mdash; {queued.length} waiting
-                  </h2>
-                  {visible.map((d) => (
-                    <DownloadItem
-                      key={d.id}
-                      download={d}
-                      onCancel={handleCancel}
-                      onRetry={handleRetry}
-                      isCancelling={cancellingId === d.id}
-                    />
-                  ))}
-                  {collapsed && (
-                    <button
-                      type="button"
-                      onClick={() => setShowAllQueued(true)}
-                      className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-300"
-                    >
-                      Show all {queued.length} queued items
-                    </button>
-                  )}
-                  {showAllQueued && queued.length > QUEUE_PREVIEW && (
-                    <button
-                      type="button"
-                      onClick={() => setShowAllQueued(false)}
-                      className="mt-2 w-full rounded-lg border border-slate-700 bg-slate-800/50 py-2 text-xs text-slate-400 transition-colors hover:bg-slate-800 hover:text-slate-300"
-                    >
-                      Show less
-                    </button>
-                  )}
-                </div>
-              );
-            })()}
-          </div>
-        );
-      })()}
-
-      {/* Finished tab: imported + ignored downloads */}
+      {/* Finished tab */}
       {activeTab === "finished" &&
         (hasFinished ? (
           <div>
@@ -380,12 +235,10 @@ function DownloadsPage() {
             ))}
           </div>
         ) : (
-          <p className="py-16 text-center text-sm text-slate-500">
-            No finished downloads
-          </p>
+          <p className="py-16 text-center text-sm text-slate-500">No finished downloads</p>
         ))}
 
-      {/* Failed tab: failed downloads */}
+      {/* Failed tab */}
       {activeTab === "failed" &&
         (hasFailed ? (
           <div>
@@ -400,9 +253,7 @@ function DownloadsPage() {
             ))}
           </div>
         ) : (
-          <p className="py-16 text-center text-sm text-slate-500">
-            No failed downloads
-          </p>
+          <p className="py-16 text-center text-sm text-slate-500">No failed downloads</p>
         ))}
     </div>
   );
