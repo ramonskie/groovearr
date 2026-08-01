@@ -211,6 +211,7 @@ func (m *albumClientMock) GetProgress(_ context.Context, providerID string) (*Pr
 func (m *albumClientMock) Cancel(_ context.Context, providerID string, remove bool) error { return nil }
 func (m *albumClientMock) MaxConcurrent() int           { return 1 }
 func (m *albumClientMock) DownloadTimeout() time.Duration { return 10 * time.Minute }
+func (m *albumClientMock) DownloadBasePath() string      { return m.dlPath }
 
 type albumClientFactory struct {
 	client *albumClientMock

@@ -128,6 +128,7 @@ func (s *stubDCPlugin) GetProgress(ctx context.Context, providerID string) (*Pro
 func (s *stubDCPlugin) Cancel(ctx context.Context, providerID string, remove bool) error { return nil }
 func (s *stubDCPlugin) MaxConcurrent() int { return 0 }
 func (s *stubDCPlugin) DownloadTimeout() time.Duration { return 0 }
+func (s *stubDCPlugin) DownloadBasePath() string { return "" }
 
 func TestQueueAlbum_CreatesAlbumRecord(t *testing.T) {
 	store := newMockAlbumStore()

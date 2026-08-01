@@ -275,7 +275,7 @@ func (m *MonitoringService) startAlbumDownload(rec *Record) {
 
 	m.publishRecord(downloadID, StateDownloading, events.TopicDownloadStateChanged)
 
-	savePath := filepath.Join(m.downloadPath(), sanitize.PathSegment(rec.Album))
+	savePath := filepath.Join(clientBasePath(m.downloadPath(), dc), sanitize.PathSegment(rec.Album))
 
 	uri := rec.MagnetURI
 	if uri == "" {
@@ -331,6 +331,17 @@ func (m *MonitoringService) downloadPath() string {
 		return m.downloadBasePath
 	}
 	return "./downloads"
+}
+
+// clientBasePath returns the download client's configured base path if set,
+// otherwise falls back to the library's global download path.
+func clientBasePath(globalPath string, dc DownloadClient) string {
+	if dc != nil {
+		if p := dc.DownloadBasePath(); p != "" {
+			return p
+		}
+	}
+	return globalPath
 }
 
 // ---------------------------------------------------------------------------

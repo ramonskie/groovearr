@@ -175,6 +175,9 @@ func (p *Plugin) Cancel(ctx context.Context, providerID string, remove bool) err
 func (p *Plugin) MaxConcurrent() int             { return 5 }
 func (p *Plugin) DownloadTimeout() time.Duration { return 2 * time.Hour }
 
+// DownloadBasePath returns the configured download directory for this client.
+func (p *Plugin) DownloadBasePath() string { return p.dlPath }
+
 // ─── HTTP methods ────────────────────────────────────────────────────
 
 func (p *Plugin) doRequest(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {

@@ -55,4 +55,8 @@ type DownloadClient interface {
 
 	// DownloadTimeout returns the per-download timeout duration.
 	DownloadTimeout() time.Duration
+
+	// DownloadBasePath returns the base directory where downloads are saved.
+	// Returns empty string if the client uses the library's global download path.
+	DownloadBasePath() string
 }
