@@ -145,8 +145,8 @@ func (l *ipRateLimiter) allow(ip, bucketName string) (bool, int) {
 
 	ips, ok := l.visitors[bucketName]
 	if !ok {
-		l.log.Warn("rate limit: unrecognized bucket, allowing", "bucket", bucketName, "component", "api")
-		return true, 0
+		l.log.Error("rate limit: unrecognized bucket, denying", "bucket", bucketName, "component", "api")
+		return false, 60
 	}
 
 	var bucket *rateLimitBucket
@@ -157,8 +157,8 @@ func (l *ipRateLimiter) allow(ip, bucketName string) (bool, int) {
 		}
 	}
 	if bucket == nil {
-		l.log.Warn("rate limit: unrecognized bucket, allowing", "bucket", bucketName, "component", "api")
-		return true, 0
+		l.log.Error("rate limit: unrecognized bucket, denying", "bucket", bucketName, "component", "api")
+		return false, 60
 	}
 
 	now := time.Now()

@@ -55,6 +55,8 @@ type Server struct {
 	log                 *slog.Logger
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
+	bgCtx               context.Context
+	bgCancel            context.CancelFunc
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
@@ -82,6 +84,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
 	}
+	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
 
 	mux := http.NewServeMux()
 
@@ -199,6 +202,7 @@ func (s *Server) ListenAndServe() error {
 
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.bgCancel()
 	s.rateLimiter.Shutdown()
 	s.sessions.Shutdown()
 	return s.httpSrv.Shutdown(ctx)
@@ -1572,6 +1576,12 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 		albumDir = filepath.Join(cfg.Library.LibraryPath, resolved)
 	}
 
+	// Defense-in-depth: ensure resolved path stays within library root.
+	if cleanDir, cleanRoot := filepath.Clean(albumDir), filepath.Clean(cfg.Library.LibraryPath); !strings.HasPrefix(cleanDir, cleanRoot+string(os.PathSeparator)) && cleanDir != cleanRoot {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+
 	coverPath := filepath.Join(albumDir, "cover.jpg")
 	f, err := os.Open(coverPath)
 	if err != nil {
@@ -1808,7 +1818,7 @@ func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		ctx, cancel := context.WithTimeout(s.bgCtx, 10*time.Minute)
 		defer cancel()
 		if err := s.playlistSvc.SyncPlaylist(ctx, id); err != nil {
 			s.log.Error("playlist sync failed", "playlist_id", id, "error", err, "component", "api")

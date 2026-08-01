@@ -33,11 +33,12 @@ func newTorznabClient(baseURL, apiKey string) *torznabClient {
 // indexers returns all Prowlarr indexers.
 func (c *torznabClient) indexers(ctx context.Context) ([]prowlarrIndexer, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/v1/indexer?apikey="+url.QueryEscape(c.apiKey), nil)
+		c.baseURL+"/api/v1/indexer", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Api-Key", c.apiKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -60,11 +61,12 @@ func (c *torznabClient) indexers(ctx context.Context) ([]prowlarrIndexer, error)
 // tags returns all Prowlarr tags (id → label mapping for name-based filtering).
 func (c *torznabClient) tags(ctx context.Context) ([]prowlarrTag, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.baseURL+"/api/v1/tag?apikey="+url.QueryEscape(c.apiKey), nil)
+		c.baseURL+"/api/v1/tag", nil)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Accept", "application/json")
+	req.Header.Set("X-Api-Key", c.apiKey)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -163,7 +165,7 @@ func (c *torznabClient) searchMusic(ctx context.Context, indexerID int, query st
 // ─── XML types ───────────────────────────────────────────────────────
 
 type torznabRSS struct {
-	XMLName xml.Name      `xml:"rss"`
+	XMLName xml.Name       `xml:"rss"`
 	Channel torznabChannel `xml:"channel"`
 }
 
@@ -385,7 +387,7 @@ func indexByArtist(s string) int {
 // imageTitleTerms are lower-case substrings that indicate an ISO or disc-image
 // release rather than extractable audio files.
 var imageTitleTerms = []string{
-	".iso", "(iso)", "[iso]", " iso ","iso image", "образ диска",
+	".iso", "(iso)", "[iso]", " iso ", "iso image", "образ диска",
 	"sacd-r", "sacd iso",
 	"dvd-a", "dvd-audio",
 	"dts-cd", "dts cd ",
