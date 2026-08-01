@@ -27,12 +27,13 @@ const (
 
 // Config holds the qBittorrent WebUI connection settings.
 type Config struct {
-	URL             string `json:"url"`              // e.g. http://localhost:8080
-	APIKey          string `json:"api_key"`          // API key from WebUI settings
-	Enabled         bool   `json:"enabled"`          // user-facing enable/disable toggle (default true)
-	Category        string `json:"category"`         // torrent category (default: "music")
-	DownloadPath    string `json:"download_path"`    // per-plugin download dir (falls back to library.download_path)
-	RemoveCompleted bool   `json:"remove_completed"` // remove from client after import
+	URL              string `json:"url"`                // e.g. http://localhost:8080
+	APIKey           string `json:"api_key"`            // API key from WebUI settings
+	Enabled          bool   `json:"enabled"`            // user-facing enable/disable toggle (default true)
+	Category         string `json:"category"`           // torrent category (default: "music")
+	DownloadPath     string `json:"download_path"`      // groovearr-visible path (falls back to library.download_path)
+	QbtDownloadRoot  string `json:"qbt_download_root"`  // qBittorrent-internal download root (defaults to "/downloads")
+	RemoveCompleted  bool   `json:"remove_completed"`   // remove from client after import
 }
 
 // Plugin implements download.DownloadClient for qBittorrent.
@@ -42,6 +43,7 @@ type Plugin struct {
 	log     *slog.Logger
 	baseURL string
 	dlPath  string
+	qbtRoot string // qBittorrent-internal download root (for path translation)
 
 	mu        sync.Mutex
 	connected bool
@@ -53,12 +55,17 @@ func newPlugin(cfg Config, downloadPath string, logger *slog.Logger) (*Plugin, e
 	if cfg.URL == "" {
 		return nil, fmt.Errorf("qbittorrent: url is required")
 	}
+	qbtRoot := cfg.QbtDownloadRoot
+	if qbtRoot == "" {
+		qbtRoot = "/downloads"
+	}
 	baseURL := strings.TrimRight(cfg.URL, "/")
 	p := &Plugin{
 		cfg:     cfg,
 		log:     logger,
 		baseURL: baseURL,
 		dlPath:  downloadPath,
+		qbtRoot: qbtRoot,
 		http:    &http.Client{Timeout: 30 * time.Second, Transport: &http.Transport{DisableKeepAlives: true}},
 	}
 	return p, nil
@@ -255,6 +262,7 @@ func (p *Plugin) downloadTorrentFile(ctx context.Context, uri string) ([]byte, e
 
 // resolveRecentHash returns the hash of the torrent we just added, filtered
 // by category and save path to avoid picking up a concurrently added torrent.
+// Retries on empty results — qBittorrent may not have indexed the torrent yet.
 func (p *Plugin) resolveRecentHash(ctx context.Context, category, savepath string) (string, error) {
 	query := url.Values{}
 	query.Set("sort", "added_on")
@@ -264,33 +272,50 @@ func (p *Plugin) resolveRecentHash(ctx context.Context, category, savepath strin
 		query.Set("category", category)
 	}
 
-	resp, err := p.doRequest(ctx, http.MethodGet, "/torrents/info?"+query.Encode(), nil, "")
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
+	const maxRetries = 5
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		resp, err := p.doRequest(ctx, http.MethodGet, "/torrents/info?"+query.Encode(), nil, "")
+		if err != nil {
+			return "", err
+		}
 
-	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("resolve hash: %d", resp.StatusCode)
-	}
+		// Fail fast on client errors — retrying won't help auth/forbidden.
+		if resp.StatusCode >= 400 && resp.StatusCode < 500 {
+			resp.Body.Close()
+			return "", fmt.Errorf("resolve hash: %d", resp.StatusCode)
+		}
 
-	var infos []torrentInfo
-	if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
-		return "", err
-	}
-	if len(infos) == 0 {
-		return "", fmt.Errorf("torrent added but not found in list")
-	}
+		var infos []torrentInfo
+		if resp.StatusCode == http.StatusOK {
+			if err := json.NewDecoder(resp.Body).Decode(&infos); err != nil {
+				resp.Body.Close()
+				return "", err
+			}
+		}
+		resp.Body.Close()
 
-	// Pick the newest torrent whose save path matches. If none match, fall
-	// back to the most recently added (it's very likely ours).
-	savepathLower := strings.ToLower(savepath)
-	for _, info := range infos {
-		if strings.Contains(strings.ToLower(info.SavePath), savepathLower) {
-			return info.Hash, nil
+		if len(infos) > 0 {
+			savepathLower := strings.ToLower(savepath)
+			for _, info := range infos {
+				if strings.Contains(strings.ToLower(info.SavePath), savepathLower) {
+					return info.Hash, nil
+				}
+			}
+			return infos[0].Hash, nil
+		}
+
+		if attempt < maxRetries-1 {
+			p.log.Debug("torrent not yet in list, retrying",
+				"attempt", attempt+1, "component", "qbittorrent")
+			select {
+			case <-ctx.Done():
+				return "", ctx.Err()
+			case <-time.After(500 * time.Millisecond):
+			}
 		}
 	}
-	return infos[0].Hash, nil
+
+	return "", fmt.Errorf("torrent added but not found in list")
 }
 
 func (p *Plugin) getTorrentInfo(ctx context.Context, hash string) (*torrentInfo, error) {
@@ -345,19 +370,26 @@ func (p *Plugin) deleteTorrents(ctx context.Context, hashes []string, deleteFile
 // ─── State mapping ───────────────────────────────────────────────────
 
 func (p *Plugin) mapToRecord(info *torrentInfo) *download.Record {
+	filePath := info.ContentPath
+	if filePath == "" {
+		filePath = info.SavePath + "/" + info.Name
+	}
+	// Translate qBittorrent's container path to groovearr's mount point.
+	// qBittorrent reports paths from its own filesystem (default: /downloads/...).
+	// groovearr mounts the same volume at p.dlPath (e.g. /downloads/qbittorrent).
+	if p.dlPath != "" && p.dlPath != p.qbtRoot {
+		filePath = strings.Replace(filePath, p.qbtRoot+"/", p.dlPath+"/", 1)
+	}
 	rec := &download.Record{
 		ID:          info.Hash,
 		SourceName:  pluginName,
 		DisplayName: info.Name,
-		FilePath:    info.ContentPath,
+		FilePath:    filePath,
 		Size:        info.TotalSize,
 		Progress:    info.Progress * 100,
 		Transferred: info.TotalSize - info.AmountLeft,
 		Speed:       info.DlSpeed,
 		State:       mapState(info),
-	}
-	if rec.FilePath == "" {
-		rec.FilePath = info.SavePath + "/" + info.Name
 	}
 	return rec
 }

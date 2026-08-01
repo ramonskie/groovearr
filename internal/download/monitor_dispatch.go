@@ -275,7 +275,7 @@ func (m *MonitoringService) startAlbumDownload(rec *Record) {
 
 	m.publishRecord(downloadID, StateDownloading, events.TopicDownloadStateChanged)
 
-	savePath := filepath.Join(clientBasePath(m.downloadPath(), dc), sanitize.PathSegment(rec.Album))
+	savePath := filepath.Join(m.downloadPath(), sanitize.PathSegment(rec.Album))
 
 	uri := rec.MagnetURI
 	if uri == "" {

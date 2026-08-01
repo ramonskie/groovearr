@@ -45,7 +45,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 }
 
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"url":"","api_key":"","enabled":true,"download_path":"","category":"music","remove_completed":true}`)
+	return json.RawMessage(`{"url":"","api_key":"","enabled":true,"download_path":"","qbt_download_root":"/downloads","category":"music","remove_completed":true}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
@@ -81,6 +81,13 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Label:       "Download Path",
 			Hint:        "Override the global download path for qBittorrent downloads. Leave empty to use library.download_path.",
 			Placeholder: "./downloads",
+		},
+		{
+			Name:        "qbt_download_root",
+			Type:        "text",
+			Label:       "qBittorrent Root",
+			Hint:        "Download root path inside qBittorrent's container (default: /downloads). Only needed when running in Docker with different volume mounts.",
+			Default:     "/downloads",
 		},
 		{
 			Name:    "category",
