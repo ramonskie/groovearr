@@ -57,7 +57,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -78,7 +78,7 @@ func NewServer(addr string, logger *slog.Logger, cfg *config.Persistence, regist
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
 	}
-	s.bgCtx, s.bgCancel = context.WithCancel(context.Background())
+	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 
 	mux := http.NewServeMux()
 
@@ -326,9 +326,17 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rebuild only plugins whose config changed.
+	s.reconcileAfterConfigUpdate(oldSources)
+	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
+}
+
+// reconcileAfterConfigUpdate rebuilds changed plugins, syncs provider orders,
+// refreshes playlist sources, and ensures required directories exist.
+func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessage) {
 	updated := s.cfg.Get()
 	resources := plugin.PluginResources{DownloadPath: updated.Library.DownloadPath, Logger: s.log}
+
+	// Rebuild only plugins whose config changed.
 	var rebuilt []string
 	for name, newCfg := range updated.Sources {
 		oldCfg, existed := oldSources[name]
@@ -346,7 +354,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// state without waiting for the periodic health checker (every 5 min).
 	if len(rebuilt) > 0 {
 		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			ctx, cancel := context.WithTimeout(s.bgCtx, 30*time.Second)
 			defer cancel()
 			for _, name := range rebuilt {
 				if p := s.registry.Get(name); p != nil && p.IsConfigured() {
@@ -367,30 +375,33 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// appear in the order without manual UI reordering.
 	syncedMdOrder := mergeAvailableProviders(updated.MetadataOrder, s.mdRegistry.Available())
 	if len(syncedMdOrder) > 0 {
-		s.metadataResolver.SetProviderOrder(syncedMdOrder)
 		if s.enrichmentHandler != nil {
 			s.enrichmentHandler.SetProviderOrder(syncedMdOrder)
 		}
-		// Persist if the config order is stale (missing available providers).
+		if s.metadataResolver != nil {
+			s.metadataResolver.SetProviderOrder(syncedMdOrder)
+		}
 		if !stringSlicesEqual(syncedMdOrder, updated.MetadataOrder) {
-			_ = s.cfg.Update(func(cfg *config.Config) error {
+			if err := s.cfg.Update(func(cfg *config.Config) error {
 				cfg.MetadataOrder = syncedMdOrder
 				return nil
-			})
+			}); err != nil {
+				s.log.Warn("failed to persist synced metadata order", "error", err, "component", "api")
+			}
 		}
 	}
 
 	// Re-apply download source order, synced with connected providers.
-	// Stale entries for disconnected providers (like Deezer without ARL)
-	// are dropped from the config order on save.
 	if s.orchestrator != nil {
 		syncedDlOrder := connectedNames(s.registry.Configured(), updated.DownloadOrder)
 		s.orchestrator.SetDownloadOrder(syncedDlOrder)
 		if !stringSlicesEqual(syncedDlOrder, updated.DownloadOrder) {
-			_ = s.cfg.Update(func(cfg *config.Config) error {
+			if err := s.cfg.Update(func(cfg *config.Config) error {
 				cfg.DownloadOrder = syncedDlOrder
 				return nil
-			})
+			}); err != nil {
+				s.log.Warn("failed to persist synced download order", "error", err, "component", "api")
+			}
 		}
 	}
 
@@ -407,8 +418,6 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "saved"})
 }
 
 // validationError carries config validation failures.

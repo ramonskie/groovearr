@@ -109,19 +109,31 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 	// Post-library mode: enrich existing library records.
 
 	track, err := h.libStore.GetTrack(ctx, record.LibraryTrackID)
-	if err != nil || track == nil {
+	if err != nil {
+		h.log.Error("track lookup failed", "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
+		return nil
+	}
+	if track == nil {
 		h.log.Warn("track not found, skipping", "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
 
 	artist, err := h.libStore.GetArtist(ctx, track.ArtistID)
-	if err != nil || artist == nil {
+	if err != nil {
+		h.log.Error("artist lookup failed", "artist_id", track.ArtistID, "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
+		return nil
+	}
+	if artist == nil {
 		h.log.Warn("artist not found, skipping", "artist_id", track.ArtistID, "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
 
 	album, err := h.libStore.GetAlbum(ctx, track.AlbumID)
-	if err != nil || album == nil {
+	if err != nil {
+		h.log.Error("album lookup failed", "album_id", track.AlbumID, "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
+		return nil
+	}
+	if album == nil {
 		h.log.Warn("album not found, skipping", "album_id", track.AlbumID, "track_id", record.LibraryTrackID, "component", "enrichment")
 		return nil
 	}
@@ -144,93 +156,12 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 	}
 
 	for _, p := range providers {
-		// ── Album title resolution (when missing) ──────────────
-		// Query configured providers to find the album name from artist+title.
-		// Try full artist first, then primary artist fallback for comma-separated
-		// Spotify co-artist strings (e.g., "The Moon, DJ Ghost").
-		if album.Title == "" {
-			if found := p.SearchAlbum(ctx, artist.Name, track.Title); found != "" {
-				album.Title = found
+		if tMod, aMod := h.enrichFromProvider(ctx, p, artist, album, track, record); tMod || aMod {
+			if tMod {
+				trackModified = true
+			}
+			if aMod {
 				albumModified = true
-			} else if primary := primaryArtist(artist.Name); primary != artist.Name {
-				if found := p.SearchAlbum(ctx, primary, track.Title); found != "" {
-					album.Title = found
-					albumModified = true
-				}
-			}
-		}
-
-		// ── Cover art (artist+album search) ────────────────────
-		if album.Title == "" {
-			continue // can't search for cover without an album name
-		}
-		if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
-			h.downloadCoverIfMissing(ctx, album, cover)
-		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
-			// Fallback: try primary artist for comma-separated co-artists.
-			if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
-				h.downloadCoverIfMissing(ctx, album, cover2)
-			}
-		}
-
-		// ── Cover art (MBID-based, e.g. Cover Art Archive) ────
-		if caa, ok := p.(metadata.CoverArtArchiveProvider); ok {
-			mbid := track.ExternalIDs["musicbrainz_release"]
-			if mbid == "" {
-				mbid = album.ExternalIDs["musicbrainz_release"]
-			}
-			if mbid == "" {
-				mbid = record.AlbumMBID // resolved by AlbumImportHandler
-			}
-			if mbid != "" {
-				if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
-					h.downloadCoverIfMissing(ctx, album, cover)
-				}
-			}
-		}
-
-		// ── Track enrichment ──────────────────────────────────
-		meta, err := p.EnrichTrack(ctx, track)
-		if err != nil {
-			h.log.Warn("enrich track error", "provider", p.Name(), "error", err, "component", "enrichment")
-			continue
-		}
-		if meta == nil {
-			continue
-		}
-
-		if meta.ISRC != "" && track.ISRC == "" {
-			track.ISRC = meta.ISRC
-			trackModified = true
-		}
-		if len(meta.Genres) > 0 && len(album.Genres) == 0 {
-			album.Genres = meta.Genres
-			albumModified = true
-		}
-		if meta.ReleaseDate != "" && album.ReleaseDate == "" {
-			album.ReleaseDate = meta.ReleaseDate
-			albumModified = true
-		}
-		if meta.Label != "" {
-			if album.ExternalIDs == nil {
-				album.ExternalIDs = make(map[string]string)
-			}
-			if _, exists := album.ExternalIDs["label"]; !exists {
-				album.ExternalIDs["label"] = meta.Label
-				albumModified = true
-			}
-		}
-
-		// Merge external IDs (MusicBrainz MBIDs, etc.).
-		if len(meta.ExternalIDs) > 0 {
-			if track.ExternalIDs == nil {
-				track.ExternalIDs = make(map[string]string)
-			}
-			for k, v := range meta.ExternalIDs {
-				if _, exists := track.ExternalIDs[k]; !exists {
-					track.ExternalIDs[k] = v
-					trackModified = true
-				}
 			}
 		}
 	}
@@ -476,6 +407,108 @@ func (h *MetadataEnrichmentHandler) enrichArtistImageLocked(ctx context.Context,
 
 // Compile-time interface check.
 var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
+
+// enrichFromProvider runs album title resolution, cover art download, and track
+// metadata enrichment for a single provider. Returns whether track or album was
+// modified so the caller can persist changes.
+func (h *MetadataEnrichmentHandler) enrichFromProvider(
+	ctx context.Context,
+	p metadata.Provider,
+	artist *domain.Artist,
+	album *domain.Album,
+	track *domain.Track,
+	record *Record,
+) (trackModified, albumModified bool) {
+	// Album title resolution (when missing).
+	// Try full artist first, then primary artist fallback for comma-separated
+	// Spotify co-artist strings (e.g., "The Moon, DJ Ghost").
+	if album.Title == "" {
+		if found := p.SearchAlbum(ctx, artist.Name, track.Title); found != "" {
+			album.Title = found
+			albumModified = true
+		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+			if found := p.SearchAlbum(ctx, primary, track.Title); found != "" {
+				album.Title = found
+				albumModified = true
+			}
+		}
+	}
+
+	// Cover art (artist+album search).
+	if album.Title == "" {
+		return // can't search for cover without an album name
+	}
+	if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
+		h.downloadCoverIfMissing(ctx, album, cover)
+	} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+		if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
+			h.downloadCoverIfMissing(ctx, album, cover2)
+		}
+	}
+
+	// Cover art (MBID-based, e.g. Cover Art Archive).
+	if caa, ok := p.(metadata.CoverArtArchiveProvider); ok {
+		mbid := track.ExternalIDs["musicbrainz_release"]
+		if mbid == "" {
+			mbid = album.ExternalIDs["musicbrainz_release"]
+		}
+		if mbid == "" {
+			mbid = record.AlbumMBID
+		}
+		if mbid != "" {
+			if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
+				h.downloadCoverIfMissing(ctx, album, cover)
+			}
+		}
+	}
+
+	// Track enrichment.
+	meta, err := p.EnrichTrack(ctx, track)
+	if err != nil {
+		h.log.Warn("enrich track error", "provider", p.Name(), "error", err, "component", "enrichment")
+		return
+	}
+	if meta == nil {
+		return
+	}
+
+	if meta.ISRC != "" && track.ISRC == "" {
+		track.ISRC = meta.ISRC
+		trackModified = true
+	}
+	if len(meta.Genres) > 0 && len(album.Genres) == 0 {
+		album.Genres = meta.Genres
+		albumModified = true
+	}
+	if meta.ReleaseDate != "" && album.ReleaseDate == "" {
+		album.ReleaseDate = meta.ReleaseDate
+		albumModified = true
+	}
+	if meta.Label != "" {
+		if album.ExternalIDs == nil {
+			album.ExternalIDs = make(map[string]string)
+		}
+		if _, exists := album.ExternalIDs["label"]; !exists {
+			album.ExternalIDs["label"] = meta.Label
+			albumModified = true
+		}
+	}
+
+	// Merge external IDs (MusicBrainz MBIDs, etc.).
+	if len(meta.ExternalIDs) > 0 {
+		if track.ExternalIDs == nil {
+			track.ExternalIDs = make(map[string]string)
+		}
+		for k, v := range meta.ExternalIDs {
+			if _, exists := track.ExternalIDs[k]; !exists {
+				track.ExternalIDs[k] = v
+				trackModified = true
+			}
+		}
+	}
+
+	return
+}
 
 // primaryArtist returns the primary artist name by stripping featured/collaboration
 // suffixes. Handles non-breaking spaces (\u00a0) commonly found in audio file metadata
