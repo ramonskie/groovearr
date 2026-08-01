@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -70,8 +71,11 @@ func (h *AlbumImportHandler) Handle(ctx context.Context, record *Record) error {
 		folderPath = record.FolderPath
 	}
 
-	// 1. Find audio files in the downloaded folder.
-	audioFiles, err := h.scanAudioFiles(folderPath)
+	// 1. Wait for the download folder to appear on disk. qBittorrent and
+	// other clients may signal completion before files are fully written.
+	// Retry with backoff so we don't immediately fail and fall back to
+	// alternative sources.
+	audioFiles, err := h.scanWithRetry(ctx, folderPath)
 	if err != nil {
 		return fmt.Errorf("album import: scan folder: %w", err)
 	}
@@ -192,7 +196,43 @@ type albumImportTrack struct {
 	Title       string
 }
 
-// scanAudioFiles finds all audio files in a directory, recursing into
+// scanWithRetry calls scanAudioFiles with exponential backoff, retrying
+// when the download folder hasn't appeared on disk yet. This handles the
+// common race where the download client (qBittorrent) reports completion
+// before files are fully flushed to storage.
+func (h *AlbumImportHandler) scanWithRetry(ctx context.Context, folderPath string) ([]string, error) {
+	const maxRetries = 6
+	delay := 1 * time.Second
+
+	for attempt := 0; attempt < maxRetries; attempt++ {
+		files, err := h.scanAudioFiles(folderPath)
+		if err == nil {
+			return files, nil
+		}
+
+		// Only retry when the folder is genuinely absent — don't mask
+		// permission errors or other unrecoverable failures.
+		if !os.IsNotExist(err) || attempt == maxRetries-1 {
+			return nil, err
+		}
+
+		h.log.Info("album import: download folder not ready, retrying",
+			"folder", folderPath,
+			"attempt", attempt+1,
+			"delay", delay,
+			"component", "album_import",
+		)
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(delay):
+		}
+		delay *= 2
+	}
+
+	return nil, fmt.Errorf("album import: folder not found after %d attempts: %s", maxRetries, folderPath)
+}
 // subdirectories (e.g., CD1/, CD2/ in multi-disc torrents).
 func (h *AlbumImportHandler) scanAudioFiles(folderPath string) ([]string, error) {
 	exts := map[string]bool{
