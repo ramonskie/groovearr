@@ -14,7 +14,7 @@ import (
 // leave fields empty rather than blocking the queue pipeline.
 type MetadataResolver struct {
 	registry      *Registry
-	providerOrder []string // priority order for provider queries
+	providerOrder *ProviderOrder // shared live source for provider priority
 	log           *slog.Logger
 }
 
@@ -29,15 +29,18 @@ func NewMetadataResolver(registry *Registry, logger *slog.Logger) *MetadataResol
 	}
 }
 
-// SetProviderOrder configures the priority order for metadata provider queries.
-func (r *MetadataResolver) SetProviderOrder(order []string) {
+// SetProviderOrder configures the shared live source for the metadata provider
+// priority order. Read on each query so runtime config changes apply without
+// a restart. Pass nil to fall back to registration order.
+func (r *MetadataResolver) SetProviderOrder(order *ProviderOrder) {
 	r.providerOrder = order
 }
 
 // orderedProviders returns configured providers sorted by providerOrder.
 func (r *MetadataResolver) orderedProviders() []Provider {
 	providers := r.registry.Available()
-	if len(r.providerOrder) == 0 {
+	order := r.providerOrder.Current()
+	if len(order) == 0 {
 		return providers
 	}
 	// Index providers by name.
@@ -48,7 +51,7 @@ func (r *MetadataResolver) orderedProviders() []Provider {
 	// Build ordered list.
 	var ordered []Provider
 	seen := make(map[string]bool)
-	for _, name := range r.providerOrder {
+	for _, name := range order {
 		if p, ok := byName[name]; ok && !seen[name] {
 			ordered = append(ordered, p)
 			seen[name] = true

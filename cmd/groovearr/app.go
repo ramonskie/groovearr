@@ -34,6 +34,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/qbittorrent"
 	"github.com/ramonskie/groovearr/internal/providers/soulseek"
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
+	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
 )
@@ -44,9 +45,9 @@ type App struct {
 	cfg      *config.Persistence
 	libStore *sqlite.Store
 
-	monitor *download.MonitoringService
-	srv     *api.Server
-	bgCtx   context.Context
+	monitor  *download.MonitoringService
+	srv      *api.Server
+	bgCtx    context.Context
 	bgCancel context.CancelFunc
 
 	// Fields needed for startup logging.
@@ -108,6 +109,7 @@ func NewApp(configPath string) (*App, error) {
 	pluginReg.RegisterFactory(lastfm.Factory)
 	pluginReg.RegisterFactory(prowlarr.Factory)
 	pluginReg.RegisterFactory(qbittorrent.Factory)
+	pluginReg.RegisterFactory(tidal.Factory)
 
 	// Initialize all plugins from config.
 	resources := plugin.PluginResources{DownloadPath: currentCfg.Library.DownloadPath, Logger: log}
@@ -130,9 +132,12 @@ func NewApp(configPath string) (*App, error) {
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
+	// Single shared source of truth for metadata provider priority.
+	metadataOrder := metadata.NewProviderOrder(func() []string { return cfg.Get().MetadataOrder })
+
 	// Metadata resolver.
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
-	metadataResolver.SetProviderOrder(currentCfg.MetadataOrder)
+	metadataResolver.SetProviderOrder(metadataOrder)
 
 	// Plugin health checker.
 	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, log)
@@ -144,13 +149,18 @@ func NewApp(configPath string) (*App, error) {
 	// Download client registry.
 	downloadClientReg := download.NewDownloadClientRegistry(pluginReg)
 
+	// Single shared source of truth for download source priority.
+	downloadOrder := download.NewDownloadOrder(func() []string { return cfg.Get().DownloadOrder })
+
 	// Monitoring service.
 	monitor := download.NewMonitoringService(dlStore, registry, downloadClientReg, currentCfg.Library.DownloadPath, eventBus, log)
+	monitor.SetDownloadOrderProvider(downloadOrder)
 
 	// Download service.
 	downloadSvc := download.NewService(dlStore, eventBus, log)
 	downloadSvc.SetRegistry(registry)
 	downloadSvc.SetDownloadClientRegistry(downloadClientReg)
+	downloadSvc.SetDownloadOrderProvider(downloadOrder)
 
 	// Quality profile store.
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
@@ -170,7 +180,7 @@ func NewApp(configPath string) (*App, error) {
 
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
-	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
+	enrichmentHandler.SetProviderOrder(metadataOrder)
 
 	importChain := []download.ImportHandler{
 		download.NewFileRenamerHandler(renamer, dlStore, log),
@@ -213,7 +223,7 @@ func NewApp(configPath string) (*App, error) {
 
 	// Download orchestrator.
 	orch := download.NewOrchestrator(registry, log)
-	orch.SetDownloadOrder(currentCfg.DownloadOrder)
+	orch.SetDownloadOrderProvider(downloadOrder)
 	orch.SetAlbumSources(currentCfg.AlbumSources)
 
 	// HTTP server.
@@ -225,6 +235,22 @@ func NewApp(configPath string) (*App, error) {
 	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
+				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
+				if err := registry.Rebuild(name, rawCfg, res); err != nil {
+					return err
+				}
+				if playlistSvc != nil {
+					playlistSvc.RefreshSources(registry)
+				}
+				return nil
+			}, func(name string) {
+				if p := registry.Get(name); p != nil {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+					defer cancel()
+					p.CheckConnection(ctx)
+				}
+			})
+			tidal.RegisterOAuthRoutes(mux, cfg, pluginReg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
 				if err := registry.Rebuild(name, rawCfg, res); err != nil {
 					return err

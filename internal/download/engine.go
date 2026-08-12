@@ -27,8 +27,8 @@ type Orchestrator struct {
 	registry      *Registry
 	matcher       *matching.Engine
 	orderMu       sync.RWMutex
-	downloadOrder []string // priority order for download source queries
-	albumSources  []string // priority order for album-capable sources
+	downloadOrder *DownloadOrder // shared live source for download priority
+	albumSources  []string       // priority order for album-capable sources
 }
 
 // NewOrchestrator creates an orchestrator with the given plugin registry.
@@ -43,10 +43,12 @@ func NewOrchestrator(registry *Registry, logger *slog.Logger) *Orchestrator {
 	}
 }
 
-// SetDownloadOrder configures the priority order for download source queries.
-func (o *Orchestrator) SetDownloadOrder(order []string) {
+// SetDownloadOrderProvider configures the shared live source for the download
+// source priority order. Read on each query so runtime config changes apply.
+// Pass nil to fall back to registration order.
+func (o *Orchestrator) SetDownloadOrderProvider(provider *DownloadOrder) {
 	o.orderMu.Lock()
-	o.downloadOrder = order
+	o.downloadOrder = provider
 	o.orderMu.Unlock()
 }
 
@@ -61,7 +63,7 @@ func (o *Orchestrator) SetAlbumSources(sources []string) {
 func (o *Orchestrator) orderedConfigured() []Plugin {
 	plugins := o.registry.Configured()
 	o.orderMu.RLock()
-	order := o.downloadOrder
+	order := o.downloadOrder.Current()
 	o.orderMu.RUnlock()
 	if len(order) == 0 || len(plugins) <= 1 {
 		return plugins

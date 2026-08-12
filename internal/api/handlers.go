@@ -372,29 +372,25 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 
 	// Sync metadata order with available providers before applying.
 	// This ensures newly-configured providers (like Spotify dev mode)
-	// appear in the order without manual UI reordering.
+	// appear in the order without manual UI reordering. The resolver and
+	// enrichment handler read the order live from config via the shared
+	// ProviderOrder, so persisting the synced order here propagates it.
 	syncedMdOrder := mergeAvailableProviders(updated.MetadataOrder, s.mdRegistry.Available())
-	if len(syncedMdOrder) > 0 {
-		if s.enrichmentHandler != nil {
-			s.enrichmentHandler.SetProviderOrder(syncedMdOrder)
-		}
-		if s.metadataResolver != nil {
-			s.metadataResolver.SetProviderOrder(syncedMdOrder)
-		}
-		if !stringSlicesEqual(syncedMdOrder, updated.MetadataOrder) {
-			if err := s.cfg.Update(func(cfg *config.Config) error {
-				cfg.MetadataOrder = syncedMdOrder
-				return nil
-			}); err != nil {
-				s.log.Warn("failed to persist synced metadata order", "error", err, "component", "api")
-			}
+	if len(syncedMdOrder) > 0 && !stringSlicesEqual(syncedMdOrder, updated.MetadataOrder) {
+		if err := s.cfg.Update(func(cfg *config.Config) error {
+			cfg.MetadataOrder = syncedMdOrder
+			return nil
+		}); err != nil {
+			s.log.Warn("failed to persist synced metadata order", "error", err, "component", "api")
 		}
 	}
 
 	// Re-apply download source order, synced with connected providers.
+	// The orchestrator and monitor/service read the order live from config via
+	// the shared DownloadOrder provider, so persisting the synced order here is
+	// sufficient to propagate it everywhere.
 	if s.orchestrator != nil {
 		syncedDlOrder := connectedNames(s.registry.Configured(), updated.DownloadOrder)
-		s.orchestrator.SetDownloadOrder(syncedDlOrder)
 		if !stringSlicesEqual(syncedDlOrder, updated.DownloadOrder) {
 			if err := s.cfg.Update(func(cfg *config.Config) error {
 				cfg.DownloadOrder = syncedDlOrder

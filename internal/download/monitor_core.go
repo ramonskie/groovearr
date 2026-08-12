@@ -22,12 +22,12 @@ const (
 
 // monitoredDownload tracks a single download being driven by the monitoring service.
 type monitoredDownload struct {
-	recordID   string // groovearr download ID (store key)
-	providerID string // provider-managed download ID (returned by StartDownload)
-	pluginName string // plugin canonical name for provider lookup
+	recordID           string // groovearr download ID (store key)
+	providerID         string // provider-managed download ID (returned by StartDownload)
+	pluginName         string // plugin canonical name for provider lookup
 	downloadClientName string // if set, poll via DownloadClient instead of MonitoredProvider
-	startedAt  time.Time
-	deadline   time.Time
+	startedAt          time.Time
+	deadline           time.Time
 }
 
 // MonitoringService drives the download state machine by polling MonitoredProvider
@@ -56,6 +56,12 @@ type MonitoringService struct {
 	// auto-retry source resolution. When nil, all sources are equally
 	// eligible (default profile applied by Orchestrator).
 	qualityProfileStore quality.ProfileStore
+
+	// downloadOrder is the shared live source for the download source priority
+	// order, read on each resolution so runtime download_order changes take
+	// effect without a restart. Applied to orchestrators created for
+	// pending-source resolution and retries so they respect the user's config.
+	downloadOrder *DownloadOrder
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -100,14 +106,14 @@ func NewMonitoringService(
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	return &MonitoringService{
-		log:              logger,
-		store:            store,
-		registry:         registry,
-		downloadClients:  downloadClients,
-		downloadBasePath: downloadBasePath,
-		bus:              bus,
-		ctx:              ctx,
-		cancel:           cancel,
+		log:                 logger,
+		store:               store,
+		registry:            registry,
+		downloadClients:     downloadClients,
+		downloadBasePath:    downloadBasePath,
+		bus:                 bus,
+		ctx:                 ctx,
+		cancel:              cancel,
 		active:              make(map[string]*monitoredDownload),
 		providerToGroovearr: make(map[string]string),
 		semaphores:          make(map[string]chan struct{}),
@@ -126,6 +132,15 @@ func (m *MonitoringService) SetDownloadPathFunc(fn func() string) {
 // sources during automatic retries.
 func (m *MonitoringService) SetQualityProfileStore(store quality.ProfileStore) {
 	m.qualityProfileStore = store
+}
+
+// SetDownloadOrderProvider sets the shared live source for the download
+// source priority order. Called once at construction with the shared
+// DownloadOrder instance, so resolvePendingSources and resolveRetrySource
+// pick up runtime download_order changes without a restart. Must be set
+// before Start() — reads are unsynchronized, mirroring SetDownloadPathFunc.
+func (m *MonitoringService) SetDownloadOrderProvider(provider *DownloadOrder) {
+	m.downloadOrder = provider
 }
 
 // Start recovers orphaned downloads from a previous run, resolves pending
