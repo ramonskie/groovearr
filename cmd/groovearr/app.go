@@ -148,11 +148,13 @@ func NewApp(configPath string) (*App, error) {
 
 	// Monitoring service.
 	monitor := download.NewMonitoringService(dlStore, registry, downloadClientReg, currentCfg.Library.DownloadPath, eventBus, log)
+	monitor.SetDownloadOrderFunc(func() []string { return cfg.Get().DownloadOrder })
 
 	// Download service.
 	downloadSvc := download.NewService(dlStore, eventBus, log)
 	downloadSvc.SetRegistry(registry)
 	downloadSvc.SetDownloadClientRegistry(downloadClientReg)
+	downloadSvc.SetDownloadOrderFunc(func() []string { return cfg.Get().DownloadOrder })
 
 	// Quality profile store.
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())

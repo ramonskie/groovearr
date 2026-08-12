@@ -147,6 +147,7 @@ type ArtistSearchResult struct {
 	Name    string `json:"name"`
 	Picture string `json:"picture"`
 	URL     string `json:"url"`
+	Type    string `json:"type"` // MAIN, FEATURED, etc.
 }
 
 // AlbumDetail is the full album response from /v1/albums/{id}.
@@ -207,34 +208,54 @@ type TrackInfo struct {
 }
 
 // PlaylistInfo represents a user playlist from the v2 my-collection endpoint.
+// The v2 folders endpoint wraps each playlist: top-level fields (trn, name) plus
+// the playlist itself nested under "data".
 type PlaylistInfo struct {
-	UUID              string `json:"uuid"`
-	ID                string `json:"id"`
-	TRN               string `json:"trn"`
-	Name              string `json:"name"`
-	Title             string `json:"title"`
-	Description       string `json:"description"`
-	NumTracks         int    `json:"numTracks"`
-	NumVideos         int    `json:"numVideos"`
-	Duration          int    `json:"duration"`
-	Type              string `json:"type"`
-	Public            bool   `json:"public"`
-	Popularity        int    `json:"popularity"`
-	Picture           string `json:"picture"`
-	SquarePicture     string `json:"squarePicture"`
-	LastItemAddedAt   string `json:"lastItemAddedAt"`
-	LastUpdated       string `json:"lastUpdated"`
-	Created           string `json:"created"`
-	UserDateAdded     string `json:"userDateAdded"`
-	ETag              string `json:"etag"`
+	TRN  string        `json:"trn"`
+	Name string        `json:"name"`
+	Data *PlaylistData `json:"data,omitempty"`
+
+	UUID            string `json:"uuid"`
+	ID              string `json:"id"`
+	Title           string `json:"title"`
+	Description     string `json:"description"`
+	NumTracks       int    `json:"numTracks"`
+	NumVideos       int    `json:"numVideos"`
+	Duration        int    `json:"duration"`
+	Type            string `json:"type"`
+	Public          bool   `json:"public"`
+	Popularity      int    `json:"popularity"`
+	Picture         string `json:"picture"`
+	SquarePicture   string `json:"squarePicture"`
+	LastItemAddedAt string `json:"lastItemAddedAt"`
+	LastUpdated     string `json:"lastUpdated"`
+	Created         string `json:"created"`
+	UserDateAdded   string `json:"userDateAdded"`
+	ETag            string `json:"etag"`
+}
+
+// PlaylistData is the playlist object nested under "data" in the v2
+// my-collection folders response.
+type PlaylistData struct {
+	UUID           string `json:"uuid"`
+	Title          string `json:"title"`
+	Description    string `json:"description"`
+	NumberOfTracks int    `json:"numberOfTracks"`
+	NumberOfVideos int    `json:"numberOfVideos"`
+	Duration       int    `json:"duration"`
+	Type           string `json:"type"`
+	Created        string `json:"created"`
+	LastUpdated    string `json:"lastUpdated"`
 }
 
 // PlaylistTrackItem is a track from /v1/playlists/{uuid}/tracks.
+// The v1 endpoint returns the track object flat (no "item" wrapper), with
+// playlist-specific fields (dateAdded, index, itemUuid) appended.
 type PlaylistTrackItem struct {
-	Item   TrackInfo `json:"item"`
-	Cut    string    `json:"cut"`
+	TrackInfo
 	DateAdded string `json:"dateAdded"`
-	Index  int       `json:"index"`
+	Index     int    `json:"index"`
+	ItemUUID  string `json:"itemUuid"`
 }
 
 // searchPayload is the combined /v1/search response wrapper.

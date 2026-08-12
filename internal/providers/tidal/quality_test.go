@@ -202,18 +202,15 @@ func TestImageURL(t *testing.T) {
 func TestPlaylistTrackItemUnmarshal(t *testing.T) {
 	t.Run("full track item", func(t *testing.T) {
 		raw := `{
-			"item": {
-				"id": 12345,
-				"title": "Test Track",
-				"duration": 245,
-				"isrc": "US-ABC-12-34567",
-				"artist": {"id": 1, "name": "Test Artist"},
-				"album": {"id": 10, "title": "Test Album"},
-				"audioQuality": "LOSSLESS",
-				"trackNumber": 5,
-				"volumeNumber": 1
-			},
-			"cut": "radio-edit",
+			"id": 12345,
+			"title": "Test Track",
+			"duration": 245,
+			"isrc": "US-ABC-12-34567",
+			"artist": {"id": 1, "name": "Test Artist"},
+			"album": {"id": 10, "title": "Test Album"},
+			"audioQuality": "LOSSLESS",
+			"trackNumber": 5,
+			"volumeNumber": 1,
 			"dateAdded": "2024-01-01T00:00:00Z",
 			"index": 3
 		}`
@@ -221,20 +218,20 @@ func TestPlaylistTrackItemUnmarshal(t *testing.T) {
 		if err := json.Unmarshal([]byte(raw), &item); err != nil {
 			t.Fatalf("unmarshal failed: %v", err)
 		}
-		if item.Item.ID != 12345 {
-			t.Errorf("ID = %d, want 12345", item.Item.ID)
+		if item.ID != 12345 {
+			t.Errorf("ID = %d, want 12345", item.ID)
 		}
-		if item.Item.Title != "Test Track" {
-			t.Errorf("Title = %q, want Test Track", item.Item.Title)
+		if item.Title != "Test Track" {
+			t.Errorf("Title = %q, want Test Track", item.Title)
 		}
-		if item.Item.Artist.Name != "Test Artist" {
-			t.Errorf("Artist = %q, want Test Artist", item.Item.Artist.Name)
+		if item.Artist.Name != "Test Artist" {
+			t.Errorf("Artist = %q, want Test Artist", item.Artist.Name)
 		}
-		if item.Item.Album.Title != "Test Album" {
-			t.Errorf("Album = %q, want Test Album", item.Item.Album.Title)
+		if item.Album.Title != "Test Album" {
+			t.Errorf("Album = %q, want Test Album", item.Album.Title)
 		}
-		if item.Item.ISRC != "US-ABC-12-34567" {
-			t.Errorf("ISRC = %q, want US-ABC-12-34567", item.Item.ISRC)
+		if item.ISRC != "US-ABC-12-34567" {
+			t.Errorf("ISRC = %q, want US-ABC-12-34567", item.ISRC)
 		}
 		if item.Index != 3 {
 			t.Errorf("Index = %d, want 3", item.Index)
@@ -242,13 +239,13 @@ func TestPlaylistTrackItemUnmarshal(t *testing.T) {
 	})
 
 	t.Run("minimal track item", func(t *testing.T) {
-		raw := `{"item":{"id":1,"title":"Min","duration":100,"audioQuality":"LOW","artist":{"id":0,"name":""},"album":{"id":0,"title":""}}}`
+		raw := `{"id":1,"title":"Min","duration":100,"audioQuality":"LOW","artist":{"id":0,"name":""},"album":{"id":0,"title":""}}`
 		var item PlaylistTrackItem
 		if err := json.Unmarshal([]byte(raw), &item); err != nil {
 			t.Fatalf("unmarshal failed: %v", err)
 		}
-		if item.Item.ID != 1 {
-			t.Errorf("ID = %d, want 1", item.Item.ID)
+		if item.ID != 1 {
+			t.Errorf("ID = %d, want 1", item.ID)
 		}
 	})
 }
@@ -274,6 +271,66 @@ func TestPlaylistInfoUnmarshal(t *testing.T) {
 	}
 	if info.NumTracks != 42 {
 		t.Errorf("NumTracks = %d, want 42", info.NumTracks)
+	}
+}
+
+func TestPlaylistInfoUnmarshalV2Folders(t *testing.T) {
+	raw := `{
+		"trn": "trn:playlist:abc-123",
+		"itemType": "PLAYLIST",
+		"name": "Mock Playlist Alpha",
+		"data": {
+			"uuid": "abc-123",
+			"title": "Mock Playlist Alpha",
+			"numberOfTracks": 8,
+			"description": "test playlist",
+			"type": "USER"
+		}
+	}`
+	var info PlaylistInfo
+	if err := json.Unmarshal([]byte(raw), &info); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	if info.Data == nil {
+		t.Fatal("Data = nil, want nested playlist data")
+	}
+	if info.Data.UUID != "abc-123" {
+		t.Errorf("Data.UUID = %q, want abc-123", info.Data.UUID)
+	}
+	if info.Data.Title != "Mock Playlist Alpha" {
+		t.Errorf("Data.Title = %q, want Mock Playlist Alpha", info.Data.Title)
+	}
+	if info.Data.NumberOfTracks != 8 {
+		t.Errorf("Data.NumberOfTracks = %d, want 8", info.Data.NumberOfTracks)
+	}
+}
+
+func TestPrimaryArtistName(t *testing.T) {
+	main := func(name string) ArtistSearchResult {
+		return ArtistSearchResult{Name: name, Type: "MAIN"}
+	}
+	feat := func(name string) ArtistSearchResult {
+		return ArtistSearchResult{Name: name, Type: "FEATURED"}
+	}
+
+	tests := []struct {
+		name    string
+		artist  ArtistSearchResult
+		artists []ArtistSearchResult
+		want    string
+	}{
+		{"singular artist wins", ArtistSearchResult{Name: "Mock Artist"}, []ArtistSearchResult{feat("Mock Feat Artist")}, "Mock Artist"},
+		{"prefers MAIN over FEATURED", ArtistSearchResult{}, []ArtistSearchResult{feat("Mock Feat Artist"), main("Mock Main Artist")}, "Mock Main Artist"},
+		{"falls back to first named", ArtistSearchResult{}, []ArtistSearchResult{feat("Mock Feat Artist")}, "Mock Feat Artist"},
+		{"skips unnamed, uses MAIN", ArtistSearchResult{}, []ArtistSearchResult{{Name: "", Type: "MAIN"}, main("Mock Main Artist")}, "Mock Main Artist"},
+		{"empty when no artists", ArtistSearchResult{}, nil, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := primaryArtistName(tt.artist, tt.artists); got != tt.want {
+				t.Errorf("primaryArtistName() = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

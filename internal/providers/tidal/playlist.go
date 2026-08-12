@@ -28,18 +28,43 @@ func (a *playlistSourceAdapter) GetUserPlaylists(ctx context.Context) ([]playlis
 		a.client.log.Error("tidal get user playlists failed", "error", err, "component", "tidal")
 		return nil, err
 	}
-	out := make([]playlist.PlaylistInfo, len(raw))
-	for i, p := range raw {
-		name := p.Title
+	out := make([]playlist.PlaylistInfo, 0, len(raw))
+	for _, p := range raw {
+		// The v2 folders endpoint wraps each playlist under "data"; the
+		// top-level fields are folder-item metadata (trn, name). Prefer the
+		// nested playlist object for the authoritative id and title.
+		uuid := p.UUID
+		name := p.Name
 		if name == "" {
-			name = p.Name
+			name = p.Title
 		}
-		out[i] = playlist.PlaylistInfo{
-			SourceID:    p.UUID,
+		description := p.Description
+		trackCount := p.NumTracks
+		if p.Data != nil {
+			if p.Data.UUID != "" {
+				uuid = p.Data.UUID
+			}
+			if p.Data.Title != "" {
+				name = p.Data.Title
+			}
+			if description == "" {
+				description = p.Data.Description
+			}
+			if trackCount == 0 {
+				trackCount = p.Data.NumberOfTracks
+			}
+		}
+		if uuid == "" {
+			// Folder item without a resolvable playlist ID — skip it rather
+			// than emitting a broken playlist that can't be browsed/imported.
+			continue
+		}
+		out = append(out, playlist.PlaylistInfo{
+			SourceID:    uuid,
 			Name:        strings.TrimSpace(name),
-			Description: strings.TrimSpace(p.Description),
-			TrackCount:  p.NumTracks,
-		}
+			Description: strings.TrimSpace(description),
+			TrackCount:  trackCount,
+		})
 	}
 	return out, nil
 }
@@ -56,16 +81,15 @@ func (a *playlistSourceAdapter) GetPlaylistTracks(ctx context.Context, sourceID 
 	}
 	out := make([]playlist.TrackInfo, len(raw))
 	for i, item := range raw {
-		t := item.Item
-		durMs := int64(t.Duration) * 1000
-		artist := t.Artist.Name
+		durMs := int64(item.Duration) * 1000
+		artist := primaryArtistName(item.Artist, item.Artists)
 		out[i] = playlist.TrackInfo{
-			SourceTrackID: strconv.FormatInt(t.ID, 10),
-			Title:         strings.TrimSpace(t.Title),
+			SourceTrackID: strconv.FormatInt(item.ID, 10),
+			Title:         strings.TrimSpace(item.Title),
 			Artist:        strings.TrimSpace(artist),
-			Album:         strings.TrimSpace(t.Album.Title),
+			Album:         strings.TrimSpace(item.Album.Title),
 			DurationMs:    durMs,
-			ISRC:          strings.TrimSpace(t.ISRC),
+			ISRC:          strings.TrimSpace(item.ISRC),
 		}
 	}
 	return out, name, nil

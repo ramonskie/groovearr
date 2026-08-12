@@ -246,7 +246,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.TrackResult
 
 	trackResults := make([]domain.TrackResult, len(tracks))
 	for i, t := range tracks {
-		artist := t.Artist.Name
+		artist := primaryArtistName(t.Artist, t.Artists)
 		album := t.Album.Title
 		cover := t.Album.Cover
 		if cover != "" {
@@ -276,7 +276,7 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.TrackResult
 		if len(a.ReleaseDate) >= 4 {
 			year = a.ReleaseDate[:4]
 		}
-		artistName := a.Artist.Name
+		artistName := primaryArtistName(a.Artist, a.Artists)
 		albumResults = append(albumResults, domain.AlbumResult{
 			Username:        "tidal",
 			AlbumTitle:      a.Title,
@@ -288,6 +288,28 @@ func (c *Client) Search(ctx context.Context, query string) ([]domain.TrackResult
 	}
 
 	return trackResults, albumResults, nil
+}
+
+// primaryArtistName resolves the primary artist from a Tidal response object.
+// Some v1 endpoints (notably /search) omit the singular "artist" field and
+// only return the "artists" array, where each entry carries a type
+// (MAIN/FEATURED/etc.). Prefer the singular field, then the MAIN artist,
+// then the first named artist.
+func primaryArtistName(artist ArtistSearchResult, artists []ArtistSearchResult) string {
+	if artist.Name != "" {
+		return artist.Name
+	}
+	for _, a := range artists {
+		if strings.EqualFold(a.Type, "MAIN") && a.Name != "" {
+			return a.Name
+		}
+	}
+	for _, a := range artists {
+		if a.Name != "" {
+			return a.Name
+		}
+	}
+	return ""
 }
 
 // ─── download.MonitoredProvider ─────────────────────────────────────────
@@ -635,7 +657,7 @@ func (c *Client) SearchCover(ctx context.Context, artist, album string) (*metada
 			continue
 		}
 		// Verify artist matches to avoid wrong cover for common album names.
-		if !strings.EqualFold(a.Artist.Name, artist) {
+		if !strings.EqualFold(primaryArtistName(a.Artist, a.Artists), artist) {
 			continue
 		}
 		coverURL := ImageURL(a.Cover, 1280, 1280)
@@ -770,10 +792,11 @@ func (c *Client) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 				year = y
 			}
 		}
+		artistName := primaryArtistName(a.Artist, a.Artists)
 		out = append(out, discovery.AlbumResult{
 			ProviderID:   strconv.FormatInt(a.ID, 10),
 			ProviderName: "tidal",
-			ArtistName:   a.Artist.Name,
+			ArtistName:   artistName,
 			Title:        a.Title,
 			CoverURL:     coverURL,
 			TrackCount:   a.NumTracks,
@@ -796,12 +819,12 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 		c.log.Error("tidal get album tracks failed", "error", err, "albumID", providerAlbumID, "component", "tidal")
 		return nil, err
 	}
-	artistName := album.Artist.Name
+	artistName := primaryArtistName(album.Artist, album.Artists)
 	out := make([]discovery.TrackInfo, len(tracks))
 	for i, t := range tracks {
 		trackArtist := artistName
-		if t.Artist.Name != "" {
-			trackArtist = t.Artist.Name
+		if pa := primaryArtistName(t.Artist, t.Artists); pa != "" {
+			trackArtist = pa
 		}
 		out[i] = discovery.TrackInfo{
 			ProviderID:  strconv.FormatInt(t.ID, 10),
@@ -834,7 +857,7 @@ func (c *Client) GetArtistTopTracks(ctx context.Context, providerArtistID string
 	for i, t := range tracks {
 		out[i] = discovery.TrackInfo{
 			ProviderID:  strconv.FormatInt(t.ID, 10),
-			ArtistName:  t.Artist.Name,
+			ArtistName:  primaryArtistName(t.Artist, t.Artists),
 			AlbumTitle:  t.Album.Title,
 			Title:       t.Title,
 			TrackNumber: t.TrackNumber,
@@ -1024,10 +1047,11 @@ func (c *Client) searchAlbumsInternal(ctx context.Context, query string, limit i
 				year = y
 			}
 		}
+		artistName := primaryArtistName(a.Artist, a.Artists)
 		out = append(out, discovery.AlbumResult{
 			ProviderID:   strconv.FormatInt(a.ID, 10),
 			ProviderName: "tidal",
-			ArtistName:   a.Artist.Name,
+			ArtistName:   artistName,
 			Title:        a.Title,
 			CoverURL:     coverURL,
 			TrackCount:   a.NumTracks,

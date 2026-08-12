@@ -57,6 +57,13 @@ type MonitoringService struct {
 	// eligible (default profile applied by Orchestrator).
 	qualityProfileStore quality.ProfileStore
 
+	// downloadOrderFunc provides the configured priority order for download
+	// source queries, read live on each resolution so runtime config changes
+	// take effect without a restart. Applied to orchestrators created for
+	// pending-source resolution and retries so they respect the user's
+	// download_order config.
+	downloadOrderFunc func() []string
+
 	ctx    context.Context
 	cancel context.CancelFunc
 	wg     sync.WaitGroup
@@ -126,6 +133,24 @@ func (m *MonitoringService) SetDownloadPathFunc(fn func() string) {
 // sources during automatic retries.
 func (m *MonitoringService) SetQualityProfileStore(store quality.ProfileStore) {
 	m.qualityProfileStore = store
+}
+
+// SetDownloadOrderFunc provides a live config getter for the download order.
+// Called once at construction with a getter reading the current config, so
+// resolvePendingSources and resolveRetrySource pick up runtime download_order
+// changes without a restart. Must be set before Start() — reads are
+// unsynchronized, mirroring SetDownloadPathFunc.
+func (m *MonitoringService) SetDownloadOrderFunc(fn func() []string) {
+	m.downloadOrderFunc = fn
+}
+
+// resolveDownloadOrder returns the effective download order from the live
+// getter, or nil when unset (registration order is used in that case).
+func (m *MonitoringService) resolveDownloadOrder() []string {
+	if m.downloadOrderFunc != nil {
+		return m.downloadOrderFunc()
+	}
+	return nil
 }
 
 // Start recovers orphaned downloads from a previous run, resolves pending
