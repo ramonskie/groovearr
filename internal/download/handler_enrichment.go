@@ -35,7 +35,7 @@ type MetadataEnrichmentHandler struct {
 	log           *slog.Logger
 	registry      *metadata.Registry
 	discoveryReg  *discovery.Registry
-	providerOrder []string // priority order for provider queries
+	providerOrder *metadata.ProviderOrder // shared live source for provider priority
 	libStore      enrichmentStore
 	httpClient    *http.Client
 	tagger        *tagging.Tagger
@@ -64,15 +64,18 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *dis
 	}
 }
 
-// SetProviderOrder configures the priority order for metadata provider queries.
-func (h *MetadataEnrichmentHandler) SetProviderOrder(order []string) {
+// SetProviderOrder configures the shared live source for the metadata provider
+// priority order. Read on each query so runtime config changes apply without
+// a restart. Pass nil to fall back to registration order.
+func (h *MetadataEnrichmentHandler) SetProviderOrder(order *metadata.ProviderOrder) {
 	h.providerOrder = order
 }
 
 // orderedProviders returns configured providers sorted by providerOrder.
 func (h *MetadataEnrichmentHandler) orderedProviders() []metadata.Provider {
 	providers := h.registry.Available()
-	if len(h.providerOrder) == 0 {
+	order := h.providerOrder.Current()
+	if len(order) == 0 {
 		return providers
 	}
 	byName := make(map[string]metadata.Provider, len(providers))
@@ -81,7 +84,7 @@ func (h *MetadataEnrichmentHandler) orderedProviders() []metadata.Provider {
 	}
 	var ordered []metadata.Provider
 	seen := make(map[string]bool)
-	for _, name := range h.providerOrder {
+	for _, name := range order {
 		if p, ok := byName[name]; ok && !seen[name] {
 			ordered = append(ordered, p)
 			seen[name] = true

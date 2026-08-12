@@ -45,9 +45,9 @@ type App struct {
 	cfg      *config.Persistence
 	libStore *sqlite.Store
 
-	monitor *download.MonitoringService
-	srv     *api.Server
-	bgCtx   context.Context
+	monitor  *download.MonitoringService
+	srv      *api.Server
+	bgCtx    context.Context
 	bgCancel context.CancelFunc
 
 	// Fields needed for startup logging.
@@ -132,9 +132,12 @@ func NewApp(configPath string) (*App, error) {
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
+	// Single shared source of truth for metadata provider priority.
+	metadataOrder := metadata.NewProviderOrder(func() []string { return cfg.Get().MetadataOrder })
+
 	// Metadata resolver.
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
-	metadataResolver.SetProviderOrder(currentCfg.MetadataOrder)
+	metadataResolver.SetProviderOrder(metadataOrder)
 
 	// Plugin health checker.
 	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, log)
@@ -146,15 +149,18 @@ func NewApp(configPath string) (*App, error) {
 	// Download client registry.
 	downloadClientReg := download.NewDownloadClientRegistry(pluginReg)
 
+	// Single shared source of truth for download source priority.
+	downloadOrder := download.NewDownloadOrder(func() []string { return cfg.Get().DownloadOrder })
+
 	// Monitoring service.
 	monitor := download.NewMonitoringService(dlStore, registry, downloadClientReg, currentCfg.Library.DownloadPath, eventBus, log)
-	monitor.SetDownloadOrderFunc(func() []string { return cfg.Get().DownloadOrder })
+	monitor.SetDownloadOrderProvider(downloadOrder)
 
 	// Download service.
 	downloadSvc := download.NewService(dlStore, eventBus, log)
 	downloadSvc.SetRegistry(registry)
 	downloadSvc.SetDownloadClientRegistry(downloadClientReg)
-	downloadSvc.SetDownloadOrderFunc(func() []string { return cfg.Get().DownloadOrder })
+	downloadSvc.SetDownloadOrderProvider(downloadOrder)
 
 	// Quality profile store.
 	qualityProfileStore := quality.NewSQLiteProfileStore(libStore.DB())
@@ -174,7 +180,7 @@ func NewApp(configPath string) (*App, error) {
 
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
-	enrichmentHandler.SetProviderOrder(currentCfg.MetadataOrder)
+	enrichmentHandler.SetProviderOrder(metadataOrder)
 
 	importChain := []download.ImportHandler{
 		download.NewFileRenamerHandler(renamer, dlStore, log),
@@ -217,7 +223,7 @@ func NewApp(configPath string) (*App, error) {
 
 	// Download orchestrator.
 	orch := download.NewOrchestrator(registry, log)
-	orch.SetDownloadOrder(currentCfg.DownloadOrder)
+	orch.SetDownloadOrderProvider(downloadOrder)
 	orch.SetAlbumSources(currentCfg.AlbumSources)
 
 	// HTTP server.

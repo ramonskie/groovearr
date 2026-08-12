@@ -34,7 +34,7 @@ type Service struct {
 	registry            *Registry // needed for retry source resolution
 	downloadClients     *DownloadClientRegistry
 	qualityProfileStore quality.ProfileStore
-	downloadOrderFunc   func() []string
+	downloadOrder       *DownloadOrder
 	mu                  sync.Mutex
 }
 
@@ -73,13 +73,14 @@ func (s *Service) SetQualityProfileStore(store quality.ProfileStore) {
 	s.qualityProfileStore = store
 }
 
-// SetDownloadOrderFunc provides a live config getter for the download order.
-// Applied to the orchestrator used in Retry source resolution so API-initiated
-// retries honor the user's download_order, mirroring the monitoring service.
-func (s *Service) SetDownloadOrderFunc(fn func() []string) {
+// SetDownloadOrderProvider sets the shared live source for the download
+// source priority order, applied to the orchestrator used in Retry source
+// resolution so API-initiated retries honor the user's download_order,
+// mirroring the monitoring service.
+func (s *Service) SetDownloadOrderProvider(provider *DownloadOrder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.downloadOrderFunc = fn
+	s.downloadOrder = provider
 }
 
 // Queue creates a new download record in "queued" state, persists it via the
@@ -218,21 +219,21 @@ func (s *Service) QueueAlbum(ctx context.Context, release domain.AlbumRelease, t
 	}
 
 	record := &Record{
-		ID:              id,
-		SourceName:      release.SourceName,
-		State:           StateQueued,
-		DisplayName:     displayName,
-		Title:           release.Album, // used by FindActiveByTitle dedup for albums
-		AlbumType:       albumType,
-		AlbumTracks:     tracks,
-		DownloadClient:  downloadClient,
-		Artist:          release.Artist,
-		Album:           release.Album,
-		Year:            release.Year,
-		MagnetURI:       release.MagnetURI,
-		Size:            release.Size,
-		CoverURL:        release.CoverURL,
-		Filename:        release.MagnetURI, // for backward compat with monitor dispatch
+		ID:             id,
+		SourceName:     release.SourceName,
+		State:          StateQueued,
+		DisplayName:    displayName,
+		Title:          release.Album, // used by FindActiveByTitle dedup for albums
+		AlbumType:      albumType,
+		AlbumTracks:    tracks,
+		DownloadClient: downloadClient,
+		Artist:         release.Artist,
+		Album:          release.Album,
+		Year:           release.Year,
+		MagnetURI:      release.MagnetURI,
+		Size:           release.Size,
+		CoverURL:       release.CoverURL,
+		Filename:       release.MagnetURI, // for backward compat with monitor dispatch
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {
@@ -533,9 +534,7 @@ func (s *Service) resolveRetrySource(ctx context.Context, rec *Record) {
 	}
 
 	orch := NewOrchestrator(registry, s.log)
-	if s.downloadOrderFunc != nil {
-		orch.SetDownloadOrder(s.downloadOrderFunc())
-	}
+	orch.SetDownloadOrderProvider(s.downloadOrder)
 
 	var profile *quality.QualityProfile
 	if profileStore != nil {

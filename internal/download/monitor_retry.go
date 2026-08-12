@@ -108,7 +108,7 @@ func (m *MonitoringService) resolveRetrySource(ctx context.Context, rec *Record)
 	}
 
 	orch := NewOrchestrator(m.registry, m.log)
-	orch.SetDownloadOrder(m.resolveDownloadOrder())
+	orch.SetDownloadOrderProvider(m.downloadOrder)
 
 	var profile *quality.QualityProfile
 	if m.qualityProfileStore != nil {
@@ -259,7 +259,7 @@ func (m *MonitoringService) resolvePendingSources(ctx context.Context) {
 
 	m.log.Info("resolvePendingSources: resolving sources", "count", len(pending), "component", "monitor")
 	orch := NewOrchestrator(m.registry, m.log)
-	orch.SetDownloadOrder(m.resolveDownloadOrder())
+	orch.SetDownloadOrderProvider(m.downloadOrder)
 
 	var profile *quality.QualityProfile
 	if m.qualityProfileStore != nil {
