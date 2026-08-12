@@ -59,9 +59,9 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           PACKAGE="${GITHUB_REPOSITORY##*/}"
-          if ! gh api --method POST "user/packages/container/${PACKAGE}/visibility" \
+          if ! gh api --method PATCH "user/packages/container/${PACKAGE}" \
             -f visibility=public >/dev/null 2>&1; then
-            echo "package not visible yet on first run — will be set on next run"
+            echo "package visibility update failed (will be retried on next run)"
           else
             echo "package ${PACKAGE} set to public"
           fi
