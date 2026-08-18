@@ -11,9 +11,11 @@ import SidebarNav from "./components/SidebarNav";
 import Spinner from "./components/Spinner";
 import { useAuth } from "./context/AuthContext";
 import { useDownloads } from "./hooks/use-downloads";
+import { useSetupStatus } from "./hooks/use-config";
 import type { DownloadState } from "./api/types";
 
 const LoginPage = lazy(() => import("./features/auth/LoginPage"));
+const SetupWizard = lazy(() => import("./features/setup/SetupWizard"));
 
 export type PageName =
   | "discover"
@@ -82,6 +84,23 @@ function pathToPage(pathname: string): PageName {
 
 // ─── App shell ───────────────────────────────────────────────────────
 
+// Redirects to the first-run wizard until setup is dismissed, and away from it
+// once the flag lands. Both "Done" and "Skip for now" persist setup_completed;
+// the refetch after that PUT is async, so the gate must be bidirectional to
+// clear the wizard once needs_setup flips to false.
+function SetupGate() {
+  const location = useLocation();
+  const { data } = useSetupStatus();
+
+  if (data?.needs_setup && location.pathname !== "/setup") {
+    return <Navigate to="/setup" replace />;
+  }
+  if (data && !data.needs_setup && location.pathname === "/setup") {
+    return <Navigate to="/discover" replace />;
+  }
+  return null;
+}
+
 function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
@@ -106,6 +125,7 @@ function AppShell() {
 
   return (
     <Layout sidebar={sidebar}>
+      <SetupGate />
       <Suspense fallback={<PageFallback />}>
         <Routes>
           <Route index element={<Navigate to="/discover" replace />} />
@@ -115,6 +135,7 @@ function AppShell() {
           <Route path="/library" element={<LibraryPage />} />
           <Route path="/playlists" element={<PlaylistsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          <Route path="/setup" element={<SetupWizard />} />
         </Routes>
       </Suspense>
     </Layout>

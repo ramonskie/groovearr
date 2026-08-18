@@ -111,6 +111,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 
 	// API routes.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
 	mux.Handle("POST /api/login", withRateLimit("login", s.rateLimiter, http.HandlerFunc(s.handleLogin)))
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
 	mux.HandleFunc("GET /api/config", s.handleGetConfig)
@@ -279,6 +280,13 @@ func withCORS(next http.Handler) http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleSetupStatus reports whether the first-run setup wizard should be shown.
+// It's driven by a setup_completed flag: true until the wizard's Done/Skip has
+// been persisted, regardless of which sources happen to be configured.
+func (s *Server) handleSetupStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]bool{"needs_setup": !s.cfg.Get().SetupCompleted})
 }
 
 func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {

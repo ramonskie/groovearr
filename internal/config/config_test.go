@@ -169,3 +169,26 @@ func TestMergeSources(t *testing.T) {
 		t.Errorf("library.download_path not merged, got %s", cfg.Library.DownloadPath)
 	}
 }
+
+func TestMergeAlbumSourcesPresenceBased(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.AlbumSources = []string{"prowlarr"}
+
+	// Absent field (nil) leaves the existing value untouched.
+	cfg.Merge(&Config{})
+	if len(cfg.AlbumSources) != 1 || cfg.AlbumSources[0] != "prowlarr" {
+		t.Errorf("absent album_sources should be unchanged, got %v", cfg.AlbumSources)
+	}
+
+	// Explicit empty array clears the setting.
+	cfg.Merge(&Config{AlbumSources: []string{}})
+	if len(cfg.AlbumSources) != 0 {
+		t.Errorf("empty album_sources should clear, got %v", cfg.AlbumSources)
+	}
+
+	// Non-empty value replaces.
+	cfg.Merge(&Config{AlbumSources: []string{"prowlarr"}})
+	if len(cfg.AlbumSources) != 1 || cfg.AlbumSources[0] != "prowlarr" {
+		t.Errorf("album_sources not replaced, got %v", cfg.AlbumSources)
+	}
+}

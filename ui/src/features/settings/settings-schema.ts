@@ -65,6 +65,10 @@ export function buildFormSchema(sources: SourceInfo[]) {
 
     // Download provider order
     download_order: z.array(z.string()).optional(),
+
+    // Track / album source routing + default download client
+    album_sources: z.array(z.string()).optional(),
+    download_client: z.string().optional(),
   });
 }
 
@@ -97,6 +101,8 @@ export function buildDefaults(sources: SourceInfo[]) {
     auth_local_bypass_subnets: "",
     metadata_order: [] as string[],
     download_order: [] as string[],
+    album_sources: [] as string[],
+    download_client: "",
   };
 }
 

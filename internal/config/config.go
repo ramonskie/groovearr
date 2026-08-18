@@ -19,8 +19,8 @@ type Config struct {
 	MetadataOrder  []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
 	DownloadOrder  []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
 	AlbumSources   []string                   `json:"album_sources"`  // album-capable source order (e.g. ["prowlarr"])
-	TrackSources   []string                   `json:"track_sources"`  // per-track source order (e.g. ["deezer", "soulseek"])
 	DownloadClient string                    `json:"download_client"` // default download client (e.g. "qbittorrent")
+	SetupCompleted bool                      `json:"setup_completed"` // first-run wizard dismissed
 }
 
 // LibraryConfig holds music library paths.
@@ -62,7 +62,6 @@ func DefaultConfig() Config {
 		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder:  []string{"soulseek", "deezer"},
 		AlbumSources:   []string{},
-		TrackSources:   []string{"deezer", "soulseek"},
 		DownloadClient: "",
 		Library: LibraryConfig{
 			DownloadPath:         "./downloads",
@@ -182,22 +181,25 @@ func (c *Config) mergeFields(partial *Config) {
 		c.Auth.LocalBypassSubnets = partial.Auth.LocalBypassSubnets
 	}
 
-	if len(partial.MetadataOrder) > 0 {
+	// Order/source arrays merge when present (non-nil), so an explicitly empty
+	// array from the UI clears the setting. JSON decodes an absent field to nil
+	// and "[]" to an empty non-nil slice.
+	if partial.MetadataOrder != nil {
 		c.MetadataOrder = partial.MetadataOrder
 	}
-	if len(partial.DownloadOrder) > 0 {
+	if partial.DownloadOrder != nil {
 		c.DownloadOrder = partial.DownloadOrder
 	}
 
 	// Album/torrent sources.
-	if len(partial.AlbumSources) > 0 {
+	if partial.AlbumSources != nil {
 		c.AlbumSources = partial.AlbumSources
-	}
-	if len(partial.TrackSources) > 0 {
-		c.TrackSources = partial.TrackSources
 	}
 	if partial.DownloadClient != "" {
 		c.DownloadClient = partial.DownloadClient
+	}
+	if partial.SetupCompleted {
+		c.SetupCompleted = true
 	}
 	if partial.Library.CompilationTemplate != "" {
 		c.Library.CompilationTemplate = partial.Library.CompilationTemplate

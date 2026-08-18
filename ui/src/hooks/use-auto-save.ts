@@ -68,6 +68,8 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
         },
         metadata_order: values.metadata_order,
         download_order: values.download_order,
+        album_sources: values.album_sources,
+        download_client: values.download_client,
       });
     },
     [updateConfig, config, sourceList],

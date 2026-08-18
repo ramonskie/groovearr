@@ -260,7 +260,7 @@ type torrentInfo struct {
 ```json
 {
   "album_sources": ["prowlarr"],
-  "track_sources": ["deezer", "soulseek"],
+  "download_order": ["deezer", "soulseek"],
   "download_client": "qbittorrent",
 
   "prowlarr": {

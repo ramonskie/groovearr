@@ -5,6 +5,7 @@ import SubTabs from "../../components/SubTabs";
 import ProviderSection from "./ProviderSection";
 import MetadataOrderSection from "./MetadataOrderSection";
 import DownloadOrderSection from "./DownloadOrderSection";
+import SourceRoutingSection from "./SourceRoutingSection";
 
 const TABS = [
   { id: "providers", label: "Providers" },
@@ -60,6 +61,7 @@ export default function SourcesSettings() {
         <div className="space-y-4">
           <MetadataOrderSection />
           <DownloadOrderSection />
+          <SourceRoutingSection />
         </div>
       )}
     </div>

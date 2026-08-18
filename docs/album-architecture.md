@@ -36,7 +36,7 @@ Groovearr's download pipeline is track-based: 1 download record = 1 audio file. 
 │                    ORCHESTRATOR                              │
 │                                                              │
 │  Album request → album_sources first, fallback to track     │
-│  Track request → track_sources only                         │
+│  Track request → download_order only                         │
 └──────────────────────────────────────────────────────────────┘
                     │
                     ▼
@@ -277,7 +277,7 @@ func (m *MonitoringService) startQueuedDownloads() {
 ```json
 {
   "album_sources": [],
-  "track_sources": ["deezer", "soulseek"],
+  "download_order": ["deezer", "soulseek"],
   "download_client": "",
 
   "library": {
@@ -368,6 +368,6 @@ func (m *MonitoringService) startQueuedDownloads() {
 
 - `download.Plugin` unchanged — Soulseek/Deezer untouched
 - `download.MonitoredProvider` unchanged — existing plugins keep working
-- `download_order` config replaced by `album_sources` + `track_sources`
-- Default config matches current behavior (album_sources=[], track_sources=["deezer","soulseek"])
+- `download_order` keeps serving as the per-track priority list; `album_sources` is added for album-capable providers
+- Default config matches current behavior (album_sources=[], download_order=["deezer","soulseek"])
 - No breaking changes until Phase 3 installs actual album providers

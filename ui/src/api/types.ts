@@ -51,8 +51,8 @@ export interface Config {
   metadata_order?: string[];
   download_order?: string[];
   album_sources?: string[];
-  track_sources?: string[];
   download_client?: string;
+  setup_completed?: boolean;
 }
 
 /** Partial config payload for PUT /api/config — all fields optional. */
@@ -62,6 +62,9 @@ export interface ConfigUpdatePayload {
   auth?: Partial<AuthConfig>;
   metadata_order?: string[];
   download_order?: string[];
+  album_sources?: string[];
+  download_client?: string;
+  setup_completed?: boolean;
 }
 
 export interface UpdateConfigResponse {

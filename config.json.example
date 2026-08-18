@@ -1,41 +1,83 @@
 {
-  "soulseek": {
-    "slskd_url": "http://localhost:5030",
-    "api_key": "your-slskd-api-key",
-    "search_timeout": 60,
-    "min_upload_speed": 0
-  },
-  "deezer": {
-    "arl": "your-deezer-arl-token",
-    "quality": "flac",
-    "allow_fallback": true,
-    "access_token": ""
-  },
-  "spotify": {
-    "mode": "free",
-    "client_id": "",
-    "client_secret": "",
-    "redirect_uri": "http://localhost:8008/api/spotify/callback",
-    "tokens": {
+  "sources": {
+    "soulseek": {
+      "slskd_url": "http://slskd:5030",
+      "api_key": "your-slskd-api-key",
+      "search_timeout": 60,
+      "min_upload_speed": 0,
+      "enabled": true,
+      "download_path": "/downloads/soulseek"
+    },
+    "deezer": {
+      "arl": "your-deezer-arl-token",
+      "quality": "flac",
+      "allow_fallback": true,
       "access_token": "",
-      "refresh_token": "",
-      "expires_at": 0
+      "enabled": true
+    },
+    "spotify": {
+      "mode": "free",
+      "client_id": "",
+      "client_secret": "",
+      "redirect_uri": "http://localhost:8008/api/spotify/callback",
+      "tokens": {
+        "access_token": "",
+        "refresh_token": "",
+        "expires_at": 0
+      }
+    },
+    "tidal": {
+      "client_id": "",
+      "client_secret": "",
+      "country_code": "US",
+      "quality": "LOSSLESS",
+      "access_token": "",
+      "refresh_token": ""
+    },
+    "musicbrainz": {
+      "email": "you@example.com"
+    },
+    "coverartarchive": {},
+    "discogs": {
+      "consumer_key": "",
+      "consumer_secret": ""
+    },
+    "lastfm": {
+      "api_key": ""
+    },
+    "prowlarr": {
+      "url": "http://prowlarr:9696",
+      "api_key": "your-prowlarr-api-key",
+      "indexer_tag": "groovearr",
+      "categories": [3040]
+    },
+    "qbittorrent": {
+      "url": "http://qbittorrent:8080",
+      "api_key": "your-qbittorrent-api-key",
+      "category": "music",
+      "download_path": "/downloads/qbittorrent",
+      "qbt_download_root": "/downloads",
+      "remove_completed": true,
+      "enabled": true
     }
   },
   "library": {
-    "download_path": "./downloads",
-    "library_path": "./music",
+    "download_path": "/downloads",
+    "library_path": "/music",
     "folder_template": "{artist}/{album} ({year})/{track:02d} - {title}",
     "compilation_template": "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
-    "playlist_path": "./playlists",
+    "playlist_path": "/playlists",
     "playlist_template": "{position:02d} {artist} - {title}",
     "playlist_auto_sync_mins": 30
   },
-  "album_sources": [],
-  "track_sources": ["deezer", "soulseek"],
-  "download_client": "",
-  "quality": {
-    "preferred_format": "flac",
-    "min_bitrate": 0
-  }
+  "auth": {
+    "method": "none",
+    "username": "",
+    "password": "",
+    "api_key": ""
+  },
+  "metadata_order": ["deezer", "spotify", "discogs", "musicbrainz", "coverartarchive", "tidal"],
+  "download_order": ["tidal", "soulseek"],
+  "album_sources": ["prowlarr"],
+  "download_client": "qbittorrent"
 }

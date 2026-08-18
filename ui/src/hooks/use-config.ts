@@ -4,10 +4,21 @@ import {
   updateConfig,
   getSources,
   testConnection,
+  getSetupStatus,
 } from "../api/client";
 import type {
   ConfigUpdatePayload,
 } from "../api/types";
+
+// ─── Setup status (first-run wizard) ───────────────────────────────
+
+export function useSetupStatus() {
+  return useQuery({
+    queryKey: ["setup-status"] as const,
+    queryFn: getSetupStatus,
+    staleTime: 30_000,
+  });
+}
 
 // ─── Config ─────────────────────────────────────────────────────────
 
@@ -25,6 +36,7 @@ export function useUpdateConfig() {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["config"] });
       queryClient.invalidateQueries({ queryKey: ["sources"] });
+      queryClient.invalidateQueries({ queryKey: ["setup-status"] });
     },
   });
 }

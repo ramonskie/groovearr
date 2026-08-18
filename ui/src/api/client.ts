@@ -129,6 +129,16 @@ export function updateConfig(
   });
 }
 
+// ─── Setup ───────────────────────────────────────────────────────
+
+export interface SetupStatus {
+  needs_setup: boolean;
+}
+
+export function getSetupStatus(): Promise<SetupStatus> {
+  return request<SetupStatus>("/api/setup/status");
+}
+
 // ─── Sources ───────────────────────────────────────────────────────
 
 export function getSources(): Promise<SourceInfo[]> {
