@@ -11,6 +11,15 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 	var sources []map[string]any
 	seen := make(map[string]bool)
 
+	build := func(p plugin.BasePlugin) map[string]any {
+		schema := resolveSchema(inner, p.Name())
+		enabled := true
+		if enabler, ok := p.(plugin.Enabler); ok {
+			enabled = enabler.IsEnabled()
+		}
+		return sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema)
+	}
+
 	// Enumerate plugins grouped by capability. Order determines section order
 	// in the settings UI. Plugins listing multiple capabilities appear once.
 	for _, cap := range []string{"download", "download_client", "metadata", "discovery", "album_search"} {
@@ -19,13 +28,19 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 				continue
 			}
 			seen[p.Name()] = true
-			schema := resolveSchema(inner, p.Name())
-			enabled := true
-			if enabler, ok := p.(plugin.Enabler); ok {
-				enabled = enabler.IsEnabled()
-			}
-			sources = append(sources, sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema))
+			sources = append(sources, build(p))
 		}
+	}
+
+	// Include remaining plugins that declare none of the listed capabilities
+	// (e.g. free-mode Spotify, which exposes no capabilities). They are still
+	// configurable and must appear in the sources UI and setup wizard.
+	for _, p := range inner.All() {
+		if seen[p.Name()] {
+			continue
+		}
+		seen[p.Name()] = true
+		sources = append(sources, build(p))
 	}
 
 	writeJSON(w, http.StatusOK, sources)

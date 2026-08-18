@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -11,7 +12,9 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/metadata"
+	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
 // ─── parsePagination ─────────────────────────────────────────────────
@@ -116,13 +119,13 @@ func TestStringSlicesEqual(t *testing.T) {
 // mockProvider implements metadata.Provider for testing.
 type mockProvider struct{ name string }
 
-func (m *mockProvider) Name() string                                { return m.name }
-func (m *mockProvider) DisplayName() string                         { return m.name }
-func (m *mockProvider) IsConfigured() bool                          { return true }
-func (m *mockProvider) IsMetadataAvailable() bool                   { return true }
-func (m *mockProvider) CheckConnection(context.Context) error       { return nil }
-func (m *mockProvider) Connected() bool                             { return true }
-func (m *mockProvider) CapabilityStatus() map[string]string         { return nil }
+func (m *mockProvider) Name() string                          { return m.name }
+func (m *mockProvider) DisplayName() string                   { return m.name }
+func (m *mockProvider) IsConfigured() bool                    { return true }
+func (m *mockProvider) IsMetadataAvailable() bool             { return true }
+func (m *mockProvider) CheckConnection(context.Context) error { return nil }
+func (m *mockProvider) Connected() bool                       { return true }
+func (m *mockProvider) CapabilityStatus() map[string]string   { return nil }
 func (m *mockProvider) SearchAlbum(ctx context.Context, artist, title string) string {
 	return ""
 }
@@ -204,12 +207,12 @@ func TestHandleUpdateConfig_EmptyMergeOK(t *testing.T) {
 	mdReg := metadata.NewRegistry()
 	srv := &Server{
 		log: log, cfg: cfg, bgCtx: context.Background(),
-		mdRegistry:       mdReg,
-		metadataResolver: nil, // not used when no available providers
+		mdRegistry:        mdReg,
+		metadataResolver:  nil, // not used when no available providers
 		enrichmentHandler: nil, // guarded by nil check
-		orchestrator:     nil, // guarded by nil check
-		playlistSvc:      nil, // guarded by nil check
-		registry:         nil, // not accessed when Sources is empty
+		orchestrator:      nil, // guarded by nil check
+		playlistSvc:       nil, // guarded by nil check
+		registry:          nil, // not accessed when Sources is empty
 	}
 
 	req := httptest.NewRequest(http.MethodPut, "/api/config", strings.NewReader("{}"))
@@ -232,4 +235,93 @@ func testPersistence(t *testing.T) *config.Persistence {
 		t.Fatal(err)
 	}
 	return p
+}
+
+// fakeBasePlugin is a minimal plugin.PluginFactory-created plugin whose
+// capabilities mirror either a capability-grouped source or a source with
+// no declared capabilities (e.g. free-mode Spotify).
+type fakeBasePlugin struct {
+	name    string
+	display string
+	cap     string
+}
+
+func (p *fakeBasePlugin) Name() string                              { return p.name }
+func (p *fakeBasePlugin) DisplayName() string                       { return p.display }
+func (p *fakeBasePlugin) IsConfigured() bool                        { return true }
+func (p *fakeBasePlugin) CheckConnection(ctx context.Context) error { return nil }
+func (p *fakeBasePlugin) Connected() bool                           { return true }
+func (p *fakeBasePlugin) CapabilityStatus() map[string]string {
+	if p.cap == "" {
+		return nil
+	}
+	return map[string]string{p.cap: "connected"}
+}
+
+type fakeFactory struct {
+	name    string
+	display string
+	cap     string
+}
+
+func (f *fakeFactory) Name() string        { return f.name }
+func (f *fakeFactory) DisplayName() string { return f.display }
+func (f *fakeFactory) Capabilities() []string {
+	if f.cap == "" {
+		return nil
+	}
+	return []string{f.cap}
+}
+func (f *fakeFactory) Create(_ json.RawMessage, _ plugin.PluginResources) (plugin.BasePlugin, error) {
+	return &fakeBasePlugin{name: f.name, display: f.display, cap: f.cap}, nil
+}
+func (f *fakeFactory) ValidateConfig(_ json.RawMessage) error { return nil }
+func (f *fakeFactory) DefaultConfig() json.RawMessage         { return json.RawMessage(`{}`) }
+
+func TestHandleGetSources_IncludesNoCapabilityPlugins(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+
+	reg := plugin.NewRegistry()
+	for _, f := range []plugin.PluginFactory{
+		&fakeFactory{name: "downloadsrc", display: "DownloadSrc", cap: "download"},
+		&fakeFactory{name: "nocapsrc", display: "NoCapSource", cap: ""},
+	} {
+		if err := reg.RegisterFactory(f); err != nil {
+			t.Fatal(err)
+		}
+	}
+	res := plugin.PluginResources{Logger: log}
+	if err := reg.InitAll(map[string]json.RawMessage{
+		"downloadsrc": json.RawMessage(`{}`),
+		"nocapsrc":    json.RawMessage(`{}`),
+	}, res); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{log: log, registry: download.NewRegistryFrom(reg)}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/config/sources", nil)
+	rec := httptest.NewRecorder()
+	srv.handleGetSources(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	names := make(map[string]bool, len(got))
+	for _, s := range got {
+		names[s["name"].(string)] = true
+	}
+	if !names["downloadsrc"] {
+		t.Error("capability-grouped plugin missing from /api/config/sources")
+	}
+	if !names["nocapsrc"] {
+		t.Error("no-capability plugin (e.g. free-mode Spotify) missing from /api/config/sources")
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d sources, want 2 (deduplicated): %v", len(got), names)
+	}
 }
