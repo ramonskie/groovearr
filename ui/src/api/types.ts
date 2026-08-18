@@ -202,6 +202,8 @@ export interface SourceInfo {
   status: SourceStatus;
   /** Per-capability status: {"download": "connected", "metadata": "connected"} */
   capabilities?: Record<string, SourceStatus>;
+  /** Per-capability access model: {"metadata": "public"} = works without provider credentials */
+  capability_access?: Record<string, "public" | "account">;
   /** Provider icon identifier (maps to Lucide icon in providerIcons.ts) */
   icon?: string;
   /** Configuration fields for rendering the settings card */

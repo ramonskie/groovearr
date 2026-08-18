@@ -6,6 +6,7 @@ interface BadgeProps {
   variant?: BadgeVariant;
   children: ReactNode;
   className?: string;
+  title?: string;
 }
 
 const variantClasses: Record<BadgeVariant, string> = {
@@ -15,9 +16,10 @@ const variantClasses: Record<BadgeVariant, string> = {
   muted: "bg-slate-800 text-slate-400 border-slate-700",
 };
 
-const Badge: FC<BadgeProps> = ({ variant = "muted", children, className = "" }) => {
+const Badge: FC<BadgeProps> = ({ variant = "muted", children, className = "", title }) => {
   return (
     <span
+      title={title}
       className={`inline-flex items-center rounded border px-2 py-0.5 text-xs font-semibold ${variantClasses[variant]} ${className}`}
     >
       {children}

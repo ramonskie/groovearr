@@ -63,7 +63,7 @@ export default function ProviderSection({ source }: Props) {
   return (
     <Card
       title={source.display_name}
-      actions={<CapabilityBadges capabilities={source.capabilities} />}
+      actions={<CapabilityBadges capabilities={source.capabilities} capabilityAccess={source.capability_access} />}
     >
       <div className="space-y-4">
         {fields.filter(isVisible).map((field) => (

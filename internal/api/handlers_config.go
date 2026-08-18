@@ -17,7 +17,11 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 		if enabler, ok := p.(plugin.Enabler); ok {
 			enabled = enabler.IsEnabled()
 		}
-		return sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), schema)
+		var access map[string]string
+		if ca, ok := p.(plugin.CapabilityAccess); ok {
+			access = ca.CapabilityAccess()
+		}
+		return sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), access, schema)
 	}
 
 	// Enumerate plugins grouped by capability. Order determines section order
@@ -62,7 +66,7 @@ func resolveSchema(reg *plugin.Registry, name string) plugin.ConfigSchemaProvide
 	return nil
 }
 
-func sourceEntry(name, displayName string, configured, connected, enabled bool, caps map[string]string, schema plugin.ConfigSchemaProvider) map[string]any {
+func sourceEntry(name, displayName string, configured, connected, enabled bool, caps map[string]string, access map[string]string, schema plugin.ConfigSchemaProvider) map[string]any {
 	status := "not_configured"
 	if configured {
 		status = "configured"
@@ -79,6 +83,9 @@ func sourceEntry(name, displayName string, configured, connected, enabled bool, 
 	}
 	if len(caps) > 0 {
 		entry["capabilities"] = caps
+	}
+	if len(access) > 0 {
+		entry["capability_access"] = access
 	}
 	if schema != nil {
 		entry["icon"] = schema.Icon()
@@ -122,13 +129,22 @@ func (s *Server) handleTestConnection(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !p.IsConfigured() {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source not configured", "status": "not_configured"})
-		return
+		// Sources with a capability that works without credentials (e.g.
+		// Deezer's public metadata API) can be tested — mirror the health
+		// checker's gate.
+		if !plugin.CanProbeUnconfigured(p) {
+			writeJSON(w, http.StatusBadRequest, map[string]string{"error": "source not configured", "status": "not_configured"})
+			return
+		}
 	}
 
 	err := p.CheckConnection(r.Context())
 	if err != nil {
-		writeJSON(w, http.StatusBadGateway, map[string]any{"status": "configured", "error": err.Error()})
+		status := "configured"
+		if !p.IsConfigured() {
+			status = "not_configured"
+		}
+		writeJSON(w, http.StatusBadGateway, map[string]any{"status": status, "error": err.Error()})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "connected"})

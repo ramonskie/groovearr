@@ -217,7 +217,10 @@ func (c *Client) CapabilityStatus() map[string]string {
 	metaStatus := "not_configured"
 	if hasToken {
 		metaStatus = "configured"
-		// Metadata works as long as token is set.
+		// Metadata works as long as the session is healthy.
+		if c.Connected() {
+			metaStatus = "connected"
+		}
 	}
 	return map[string]string{
 		"download":  dlStatus,

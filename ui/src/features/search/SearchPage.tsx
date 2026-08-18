@@ -160,17 +160,20 @@ function SearchPage() {
               {/* Capability dots */}
               {caps && Object.keys(caps).length > 0 && (
                 <span className="flex gap-0.5 mr-0.5">
-                  {Object.entries(caps).map(([cap, st]) => (
+                  {Object.entries(caps).map(([cap, st]) => {
+                    const access = s.capability_access?.[cap];
+                    return (
                     <span
                       key={cap}
-                      title={`${cap}: ${st}`}
+                      title={access === "public" ? `${cap}: ${st} (public API)` : `${cap}: ${st}`}
                       className={`h-1.5 w-1.5 rounded-full ${
                         st === "connected" ? "bg-green-400"
                         : st === "configured" ? "bg-yellow-400"
                         : "bg-slate-600"
                       }`}
                     />
-                  ))}
+                    );
+                  })}
                 </span>
               )}
               {s.display_name}

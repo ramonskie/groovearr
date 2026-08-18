@@ -241,14 +241,16 @@ func testPersistence(t *testing.T) *config.Persistence {
 // capabilities mirror either a capability-grouped source or a source with
 // no declared capabilities (e.g. free-mode Spotify).
 type fakeBasePlugin struct {
-	name    string
-	display string
-	cap     string
+	name         string
+	display      string
+	cap          string
+	access       map[string]string
+	unconfigured bool
 }
 
 func (p *fakeBasePlugin) Name() string                              { return p.name }
 func (p *fakeBasePlugin) DisplayName() string                       { return p.display }
-func (p *fakeBasePlugin) IsConfigured() bool                        { return true }
+func (p *fakeBasePlugin) IsConfigured() bool                        { return !p.unconfigured }
 func (p *fakeBasePlugin) CheckConnection(ctx context.Context) error { return nil }
 func (p *fakeBasePlugin) Connected() bool                           { return true }
 func (p *fakeBasePlugin) CapabilityStatus() map[string]string {
@@ -257,11 +259,14 @@ func (p *fakeBasePlugin) CapabilityStatus() map[string]string {
 	}
 	return map[string]string{p.cap: "connected"}
 }
+func (p *fakeBasePlugin) CapabilityAccess() map[string]string { return p.access }
 
 type fakeFactory struct {
-	name    string
-	display string
-	cap     string
+	name         string
+	display      string
+	cap          string
+	access       map[string]string
+	unconfigured bool
 }
 
 func (f *fakeFactory) Name() string        { return f.name }
@@ -273,7 +278,7 @@ func (f *fakeFactory) Capabilities() []string {
 	return []string{f.cap}
 }
 func (f *fakeFactory) Create(_ json.RawMessage, _ plugin.PluginResources) (plugin.BasePlugin, error) {
-	return &fakeBasePlugin{name: f.name, display: f.display, cap: f.cap}, nil
+	return &fakeBasePlugin{name: f.name, display: f.display, cap: f.cap, access: f.access, unconfigured: f.unconfigured}, nil
 }
 func (f *fakeFactory) ValidateConfig(_ json.RawMessage) error { return nil }
 func (f *fakeFactory) DefaultConfig() json.RawMessage         { return json.RawMessage(`{}`) }
@@ -323,5 +328,97 @@ func TestHandleGetSources_IncludesNoCapabilityPlugins(t *testing.T) {
 	}
 	if len(got) != 2 {
 		t.Errorf("got %d sources, want 2 (deduplicated): %v", len(got), names)
+	}
+}
+
+func TestHandleGetSources_SurfacesCapabilityAccess(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	reg := plugin.NewRegistry()
+	// Deezer-like: discovery/metadata served via public API.
+	f := &fakeFactory{
+		name:    "pubsrc",
+		display: "PublicSrc",
+		cap:     "metadata",
+		access:  map[string]string{"metadata": "public"},
+	}
+	if err := reg.RegisterFactory(f); err != nil {
+		t.Fatal(err)
+	}
+	res := plugin.PluginResources{Logger: log}
+	if err := reg.InitAll(map[string]json.RawMessage{"pubsrc": json.RawMessage(`{}`)}, res); err != nil {
+		t.Fatal(err)
+	}
+
+	srv := &Server{log: log, registry: download.NewRegistryFrom(reg)}
+	req := httptest.NewRequest(http.MethodGet, "/api/config/sources", nil)
+	rec := httptest.NewRecorder()
+	srv.handleGetSources(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d: %s", rec.Code, rec.Body.String())
+	}
+	var got []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("got %d sources, want 1", len(got))
+	}
+	access, ok := got[0]["capability_access"].(map[string]any)
+	if !ok {
+		t.Fatalf("capability_access missing or wrong type: %v", got[0]["capability_access"])
+	}
+	if access["metadata"] != "public" {
+		t.Errorf("capability_access.metadata = %v, want public", access["metadata"])
+	}
+}
+
+func TestHandleTestConnection_PublicCapWithoutConfig(t *testing.T) {
+	log := slog.New(slog.DiscardHandler)
+	reg := plugin.NewRegistry()
+	// Deezer-like: public metadata capability, never configured. The
+	// unconfigured flag forces IsConfigured()==false so the public-cap gate
+	// in handleTestConnection is actually exercised.
+	f := &fakeFactory{
+		name:         "pubsrc",
+		display:      "PublicSrc",
+		cap:          "metadata",
+		access:       map[string]string{"metadata": "public"},
+		unconfigured: true,
+	}
+	if err := reg.RegisterFactory(f); err != nil {
+		t.Fatal(err)
+	}
+	res := plugin.PluginResources{Logger: log}
+	if err := reg.InitAll(map[string]json.RawMessage{"pubsrc": json.RawMessage(`{}`)}, res); err != nil {
+		t.Fatal(err)
+	}
+	srv := &Server{log: log, registry: download.NewRegistryFrom(reg), mdRegistry: metadata.NewRegistry()}
+
+	// Public-capability source: test succeeds via CheckConnection (nil here).
+	req := httptest.NewRequest(http.MethodPost, "/api/config/sources/pubsrc/test", nil)
+	req.SetPathValue("source", "pubsrc")
+	rec := httptest.NewRecorder()
+	srv.handleTestConnection(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Errorf("public-cap source status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+
+	// No public capability: still rejected as not configured.
+	noreg := plugin.NewRegistry()
+	nf := &fakeFactory{name: "privsrc", display: "PrivSrc", cap: "download", unconfigured: true}
+	if err := noreg.RegisterFactory(nf); err != nil {
+		t.Fatal(err)
+	}
+	if err := noreg.InitAll(map[string]json.RawMessage{"privsrc": json.RawMessage(`{}`)}, res); err != nil {
+		t.Fatal(err)
+	}
+	srv2 := &Server{log: log, registry: download.NewRegistryFrom(noreg), mdRegistry: metadata.NewRegistry()}
+	req2 := httptest.NewRequest(http.MethodPost, "/api/config/sources/privsrc/test", nil)
+	req2.SetPathValue("source", "privsrc")
+	rec2 := httptest.NewRecorder()
+	srv2.handleTestConnection(rec2, req2)
+	if rec2.Code != http.StatusBadRequest {
+		t.Errorf("no-public-cap source status = %d, want 400", rec2.Code)
 	}
 }

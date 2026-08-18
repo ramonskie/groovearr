@@ -208,6 +208,21 @@ func TestClientCapabilityStatus(t *testing.T) {
 	if status["download"] != "not_configured" {
 		t.Errorf("download status = %q, want not_configured", status["download"])
 	}
+
+	// With a token and a passing session check, all capabilities should be
+	// "connected" so the UI shows green badges, not ambiguous yellow.
+	cl := client.(*Client)
+	cl.mu.Lock()
+	cl.cfg.AccessToken = "test-token"
+	cl.connected = true
+	cl.mu.Unlock()
+
+	status = client.CapabilityStatus()
+	for _, cap := range []string{"download", "playlist", "discovery", "metadata"} {
+		if status[cap] != "connected" {
+			t.Errorf("%s status = %q, want connected", cap, status[cap])
+		}
+	}
 }
 
 func TestClientConnected(t *testing.T) {

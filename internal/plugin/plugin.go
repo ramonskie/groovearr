@@ -40,3 +40,31 @@ type Enabler interface {
 	// by the user (enabled: false in config). Default is true.
 	IsEnabled() bool
 }
+
+// CapabilityAccess is an optional interface that reports how each capability
+// is accessed. Values are "public" (works without the provider's credentials,
+// e.g. Deezer's metadata via the public API) or "account" (requires configured
+// credentials). Capabilities omitted from the map default to "account".
+// The UI uses this to explain why a capability works without configuration.
+type CapabilityAccess interface {
+	CapabilityAccess() map[string]string
+}
+
+// CanProbeUnconfigured reports whether a plugin can serve a capability without
+// its primary credentials, making a connectivity probe meaningful even when
+// IsConfigured() is false. A plugin qualifies if it serves metadata without
+// credentials (metadataAvailable) or exposes a capability marked "public".
+// Both the health checker and the test-connection handler use this gate.
+func CanProbeUnconfigured(p BasePlugin) bool {
+	if ma, ok := p.(metadataAvailable); ok && ma.IsMetadataAvailable() {
+		return true
+	}
+	if ca, ok := p.(CapabilityAccess); ok {
+		for _, v := range ca.CapabilityAccess() {
+			if v == "public" {
+				return true
+			}
+		}
+	}
+	return false
+}

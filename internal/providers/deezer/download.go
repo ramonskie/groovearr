@@ -196,17 +196,32 @@ func (c *DownloadClient) IsEnabled() bool { return c.cfg.Enabled }
 // IsMetadataAvailable is always true — the public Deezer API works without auth.
 func (c *DownloadClient) IsMetadataAvailable() bool { return true }
 
+// CapabilityAccess reports which capabilities are served by Deezer's public
+// API (no ARL required). download/playlist are omitted and default to "account".
+func (c *DownloadClient) CapabilityAccess() map[string]string {
+	return map[string]string{"discovery": "public", "metadata": "public"}
+}
+
 // CapabilityStatus reports per-capability connection status from health checks.
 func (c *DownloadClient) CapabilityStatus() map[string]string {
 	dlStatus := "not_configured"
 	if c.cfg.ARL != "" {
 		dlStatus = "configured"
-		if c.Connected() {
+		if c.isAuthenticated() {
 			dlStatus = "connected"
 		}
 	}
-	pubStatus := "configured"
-	if c.Connected() {
+	// Discovery/metadata use the public Deezer API which works without an ARL.
+	// Report "connected" only when the API has actually been verified reachable
+	// (public-health check passed, or authenticated — both prove the service is
+	// reachable). Never infer green from availability alone, and never show a
+	// misleading "configured" yellow for an unverified metadata-only mode.
+	pubStatus := "not_configured"
+	c.tokenMu.RLock()
+	publicHealthy := c.publicHealthy
+	authenticated := c.authenticated
+	c.tokenMu.RUnlock()
+	if publicHealthy || authenticated {
 		pubStatus = "connected"
 	}
 	return map[string]string{
@@ -224,20 +239,28 @@ func (c *DownloadClient) UserID() int {
 	return c.userID
 }
 
-// CheckConnection verifies the Deezer connection. When ARL is configured,
-// authenticates with Deezer for downloads. When ARL is empty, only checks
-// the public metadata API — metadata works without authentication.
+// CheckConnection verifies the Deezer connection. The public metadata API is
+// always probed — discovery/metadata work without an ARL, so their status
+// reflects the public API's actual reachability. When ARL is configured,
+// authentication is additionally verified for downloads/playlists.
 func (c *DownloadClient) CheckConnection(ctx context.Context) error {
+	// Reset health state so a failed check can't leave stale green status.
+	c.tokenMu.Lock()
+	c.publicHealthy = false
+	c.authenticated = false
+	c.tokenMu.Unlock()
+
+	// Public metadata API works regardless of ARL — probe it always.
+	_, err := c.api.SearchTracks(ctx, "test", 1)
+	c.tokenMu.Lock()
+	c.publicHealthy = err == nil
+	c.tokenMu.Unlock()
+	if err != nil {
+		c.log.Error("deezer metadata check failed", "error", err, "component", "deezer")
+		return fmt.Errorf("deezer: public API unreachable: %w", err)
+	}
 	if c.cfg.ARL == "" {
-		// Metadata-only mode: verify public API is reachable.
-		_, err := c.api.SearchTracks(ctx, "test", 1)
-		c.tokenMu.Lock()
-		c.publicHealthy = err == nil
-		c.tokenMu.Unlock()
-		if err != nil {
-			c.log.Error("deezer metadata check failed", "error", err, "component", "deezer")
-			return fmt.Errorf("deezer: public API unreachable: %w", err)
-		}
+		// Metadata-only mode: no auth to verify.
 		return nil
 	}
 	// Use a shorter timeout for the connection test, then restore original.
@@ -507,6 +530,12 @@ func (c *DownloadClient) authenticate() error {
 		c.log.Error("authenticate failed: ARL not set", "component", "deezer")
 		return fmt.Errorf("deezer: ARL token not set")
 	}
+
+	// Treat as unauthenticated until this attempt succeeds. Prevents stale
+	// "connected" status when a previously-valid ARL expires mid-run.
+	c.tokenMu.Lock()
+	c.authenticated = false
+	c.tokenMu.Unlock()
 
 	resp, err := c.gwCall(context.Background(), "deezer.getUserData", nil)
 	if err != nil {

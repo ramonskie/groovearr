@@ -16,6 +16,14 @@ type HealthStatus struct {
 	CheckedAt time.Time
 }
 
+// metadataAvailable marks plugins that can serve metadata without their
+// primary credentials (e.g. Deezer via the public API without an ARL).
+// The health checker probes these even when IsConfigured() is false so
+// their reachability can be verified and reflected in capability status.
+type metadataAvailable interface {
+	IsMetadataAvailable() bool
+}
+
 // HealthChecker periodically verifies plugin connectivity by calling
 // CheckConnection on each registered plugin. Results are reported via
 // the plugin's Connected() method (which providers implement as an
@@ -102,9 +110,17 @@ func (h *HealthChecker) loop(ctx context.Context) {
 
 func (h *HealthChecker) checkOne(ctx context.Context, p BasePlugin) {
 	// Skip unconfigured plugins — no credentials means the probe will
-	// always fail and produces nothing but noise.
+	// always fail and produces nothing but noise. Exception: providers that
+	// can serve metadata without their primary credentials (e.g. Deezer's
+	// public API) are still probed so that reachability can be verified and
+	// reflected in their capability status.
 	if !p.IsConfigured() {
-		return
+		// Providers that serve a capability without credentials (e.g. Deezer's
+		// public metadata API) are still probed so reachability can be verified
+		// and reflected in capability status. Others produce only noise.
+		if !CanProbeUnconfigured(p) {
+			return
+		}
 	}
 	// Respect explicit disable toggle when the plugin supports it.
 	if enabler, ok := p.(Enabler); ok && !enabler.IsEnabled() {
