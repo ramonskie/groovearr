@@ -12,10 +12,14 @@ Everything is configured through the **Groovearr web UI** — no config file edi
 ## 1. Start the stack
 
 ```bash
-cp config.json.example config.docker.json
+cp .env.example .env        # Soulseek account credentials (edit to your own)
+make docker-setup           # generate slskd.yml (account + Groovearr API key)
 docker compose up -d
 docker compose ps
 ```
+
+No config file is needed upfront — Groovearr creates one automatically and the
+**setup wizard** walks you through connecting your first source on first open.
 
 | Service     | URL                          | Notes                          |
 |-------------|------------------------------|--------------------------------|

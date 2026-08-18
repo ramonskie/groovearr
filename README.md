@@ -78,9 +78,8 @@ volumes for downloads, music, and playlists.
 ### First run
 
 ```bash
-cp config.json.example config.docker.json   # container paths (/downloads, /music)
-cp .env.example .env                        # Soulseek account credentials
-make docker-setup                           # generate slskd.yml (account + Groovearr API key)
+cp .env.example .env        # Soulseek account credentials
+make docker-setup           # generate slskd.yml (account + Groovearr API key)
 docker compose up -d
 ```
 
@@ -92,9 +91,9 @@ docker compose up -d
 | qBittorrent | http://localhost:8080 |
 | FlareSolverr| http://localhost:8191 |
 
-Open **http://localhost:8008** — on first run Groovearr walks you through a
-setup wizard to connect your first download source (Soulseek and/or
-Prowlarr + qBittorrent). Full walkthrough in the
+No config file needed upfront — Groovearr creates one automatically and open
+**http://localhost:8008** for the setup wizard to connect your first download
+source (Soulseek and/or Prowlarr + qBittorrent). Full walkthrough in the
 [Setup Guide](docs/setup.md).
 
 ## Project Structure
