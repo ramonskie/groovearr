@@ -354,7 +354,10 @@ ISRC, genres, release dates, external IDs, cover art, and artist images from
 the configured metadata providers. Outgoing requests honor each provider's own
 rate limits; the artist-image refresh runs once per artist. Tracks that are
 already fully enriched (ISRC, external IDs, genres, release date, cover, and
-artist image all present) are skipped without hitting the providers.
+artist image all present) are skipped without hitting the providers. Provider
+order matters: once the top provider fills a track's fields, lower-priority
+providers are not called. Enrichment runs with a small worker pool (saturating
+provider rate limits) while serializing per album.
 
 **Response** `202`: `{ "job": {...}, "started": true }` as above.
 

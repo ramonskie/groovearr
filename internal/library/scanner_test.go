@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	"github.com/dhowden/tag"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
@@ -247,6 +248,49 @@ func TestReadFileTags(t *testing.T) {
 			t.Errorf("discNum = %d, want 1", tags.DiscNum)
 		}
 	})
+}
+
+func TestHasArtistImage(t *testing.T) {
+	root := t.TempDir()
+	artistDir := filepath.Join(root, "Artist")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(albumDir, 0o755)
+	track := filepath.Join(albumDir, "01 - Track.flac")
+
+	if hasArtistImage(track) {
+		t.Error("expected no artist image initially")
+	}
+	os.WriteFile(filepath.Join(artistDir, "artist.jpg"), []byte("x"), 0o644)
+	if !hasArtistImage(track) {
+		t.Error("expected artist image detected")
+	}
+}
+
+func TestWriteAlbumCoverDoesNotDuplicateArtistImage(t *testing.T) {
+	root := t.TempDir()
+	artistDir := filepath.Join(root, "Artist")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(albumDir, 0o755)
+	track := filepath.Join(albumDir, "01 - Track.flac")
+
+	store := &mockStore{artists: map[string]int64{}, albums: map[string]int64{}}
+	scanner := NewScanner(store, testLogger())
+
+	png := &tag.Picture{Ext: "png", MIMEType: "image/png", Data: []byte("pngdata")}
+	jpg := &tag.Picture{Ext: "jpg", MIMEType: "image/jpeg", Data: []byte("jpgdata")}
+
+	scanner.writeAlbumCover(t.Context(), track, root, "Artist", png)
+	if _, err := os.Stat(filepath.Join(artistDir, "artist.png")); err != nil {
+		t.Fatalf("expected artist.png written: %v", err)
+	}
+
+	scanner.writeAlbumCover(t.Context(), track, root, "Artist", jpg)
+	if _, err := os.Stat(filepath.Join(artistDir, "artist.png")); err != nil {
+		t.Fatalf("artist.png should remain: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(artistDir, "artist.jpg")); err == nil {
+		t.Error("artist.jpg should not be added when artist.png already exists")
+	}
 }
 
 func TestScannerScanPath(t *testing.T) {

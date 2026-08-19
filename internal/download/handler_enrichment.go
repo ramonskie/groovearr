@@ -236,6 +236,18 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 				albumModified = true
 			}
 		}
+
+		// Bulk job only: stop once the track and album are fully populated.
+		// With the metadata provider order configured (e.g. Spotify/Tidal on
+		// top), the first provider fills everything and the lower-priority
+		// providers are never called — this is what makes whole-library
+		// enrichment tractable. The per-download path intentionally runs every
+		// provider so fields like MusicBrainz MBIDs and label aren't lost.
+		if bulk && track.ISRC != "" && len(track.ExternalIDs) > 0 &&
+			len(album.Genres) > 0 && album.ReleaseDate != "" &&
+			library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath)) {
+			break
+		}
 	}
 
 	// Enrich artist image from discovery providers (Deezer, Spotify, etc.).
@@ -503,30 +515,33 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 		}
 	}
 
-	// Cover art (artist+album search).
+	// Cover art (artist+album search) — skipped when a cover already exists on
+	// disk (e.g. extracted by the scanner), so no network call is wasted.
 	if album.Title == "" {
 		return // can't search for cover without an album name
 	}
-	if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
-		h.downloadCoverIfMissing(ctx, album, cover)
-	} else if primary := primaryArtist(artist.Name); primary != artist.Name {
-		if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
-			h.downloadCoverIfMissing(ctx, album, cover2)
+	if !library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath)) {
+		if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
+			h.downloadCoverIfMissing(ctx, album, cover)
+		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+			if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
+				h.downloadCoverIfMissing(ctx, album, cover2)
+			}
 		}
-	}
 
-	// Cover art (MBID-based, e.g. Cover Art Archive).
-	if caa, ok := p.(metadata.CoverArtArchiveProvider); ok {
-		mbid := track.ExternalIDs["musicbrainz_release"]
-		if mbid == "" {
-			mbid = album.ExternalIDs["musicbrainz_release"]
-		}
-		if mbid == "" {
-			mbid = record.AlbumMBID
-		}
-		if mbid != "" {
-			if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
-				h.downloadCoverIfMissing(ctx, album, cover)
+		// Cover art (MBID-based, e.g. Cover Art Archive).
+		if caa, ok := p.(metadata.CoverArtArchiveProvider); ok {
+			mbid := track.ExternalIDs["musicbrainz_release"]
+			if mbid == "" {
+				mbid = album.ExternalIDs["musicbrainz_release"]
+			}
+			if mbid == "" {
+				mbid = record.AlbumMBID
+			}
+			if mbid != "" {
+				if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
+					h.downloadCoverIfMissing(ctx, album, cover)
+				}
 			}
 		}
 	}

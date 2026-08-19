@@ -119,6 +119,23 @@ func HasCoverFile(dir string) bool {
 	return CoverFilePath(dir) != ""
 }
 
+// artistImageNames are the local artist portrait filenames.
+var artistImageNames = []string{
+	"artist.jpg", "artist.jpeg", "artist.png", "artist.webp", "artist.gif",
+}
+
+// hasArtistImage reports whether the artist directory for a track already
+// contains a local artist image in any format.
+func hasArtistImage(trackPath string) bool {
+	artistDir := ArtistDirFromTrack(trackPath)
+	for _, name := range artistImageNames {
+		if _, err := os.Stat(filepath.Join(artistDir, name)); err == nil {
+			return true
+		}
+	}
+	return false
+}
+
 // coverExt maps an embedded picture to a safe cover file extension.
 func coverExt(p *tag.Picture) string {
 	// Prefer the MIME type (the authoritative field embedded in the tag), then
@@ -225,8 +242,11 @@ func (s *Scanner) writeAlbumCover(ctx context.Context, trackPath, libraryRoot, a
 
 	ext := coverExt(p)
 
-	coverPath := filepath.Join(albumDir, "cover."+ext)
-	if _, err := os.Stat(coverPath); err != nil {
+	// Write the cover only when no cover image of any format exists yet — an
+	// album that already has folder.jpg/cover.png doesn't get a redundant one.
+	// The artist image below is still extracted regardless.
+	if !HasCoverFile(albumDir) {
+		coverPath := filepath.Join(albumDir, "cover."+ext)
 		if err := os.WriteFile(coverPath, p.Data, 0o644); err != nil {
 			s.log.Warn("write cover failed", "path", coverPath, "error", err, "component", "scanner")
 		} else {
@@ -235,13 +255,15 @@ func (s *Scanner) writeAlbumCover(ctx context.Context, trackPath, libraryRoot, a
 	}
 
 	// Artist image lives one level up from the album directory, but only in a
-	// nested {artist}/{album} layout — never the scan root itself.
+	// nested {artist}/{album} layout — never the scan root itself. Written only
+	// when no portrait exists in any format, so a sibling track with a
+	// different image format doesn't add or overwrite a second portrait.
 	artistDir := ArtistDirFromTrack(trackPath)
 	if artistDir == rootClean {
 		return
 	}
-	artistPath := filepath.Join(artistDir, "artist."+ext)
-	if _, err := os.Stat(artistPath); err != nil {
+	if !hasArtistImage(trackPath) {
+		artistPath := filepath.Join(artistDir, "artist."+ext)
 		if err := os.WriteFile(artistPath, p.Data, 0o644); err != nil {
 			s.log.Warn("write artist image failed", "path", artistPath, "error", err, "component", "scanner")
 		} else {
@@ -390,8 +412,11 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		if existing != nil {
 			stats.Skipped++
 			// Backfill embedded artwork for albums that were scanned before
-			// cover extraction existed.
-			if needCover && !HasCoverFile(albumDir) {
+			// cover extraction existed. Runs when either the cover or the
+			// artist image is missing — albums that already carried a
+			// cover.jpg/folder.jpg on disk would otherwise skip extraction
+			// entirely and never get an artist image.
+			if needCover && (!HasCoverFile(albumDir) || !hasArtistImage(path)) {
 				s.backfillCover(ctx, path, absRoot)
 			}
 			return nil
@@ -453,7 +478,7 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		_ = trackID
 
 		// Extract embedded artwork for newly imported albums.
-		if needCover && tags != nil && tags.Picture != nil && !HasCoverFile(albumDir) {
+		if needCover && tags != nil && tags.Picture != nil {
 			s.writeAlbumCover(ctx, path, absRoot, artistName, tags.Picture)
 		}
 

@@ -6,7 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 )
@@ -115,6 +118,11 @@ func (s *Server) scanRunner(ctx context.Context, report func(jobs.Report)) error
 // enrichRunner runs metadata enrichment over every track in the library. The
 // handler skips already-enriched tracks and attempts each artist's image at
 // most once per run, so provider load stays proportional to what's missing.
+//
+// Tracks are enriched concurrently with a small worker pool: each provider
+// client rate-limits its own shared transport, so concurrency saturates those
+// limits instead of exceeding them — a strictly sequential run over tens of
+// thousands of tracks would otherwise take hours.
 func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) error {
 	if s.enrichmentHandler == nil {
 		return nil
@@ -130,22 +138,64 @@ func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) err
 	}
 
 	s.enrichmentHandler.ResetBulk()
-	errors := 0
+
+	const workers = 4
+	sem := make(chan struct{}, workers)
+	// Tracks of the same album are enriched sequentially: each enrichTrack does
+	// a read-modify-write on the album row, so concurrent workers would clobber
+	// each other's field updates. Different albums still run concurrently.
+	var (
+		wg         sync.WaitGroup
+		mu         sync.Mutex
+		albumSemMu sync.Mutex
+		albumSems  = make(map[int64]chan struct{})
+		failed     int
+		done       atomic.Int64
+	)
+	albumSem := func(albumID int64) chan struct{} {
+		albumSemMu.Lock()
+		defer albumSemMu.Unlock()
+		s, ok := albumSems[albumID]
+		if !ok {
+			s = make(chan struct{}, 1)
+			albumSems[albumID] = s
+		}
+		return s
+	}
 	for i := range tracks {
-		if err := ctx.Err(); err != nil {
-			return err
+		if ctx.Err() != nil {
+			break
 		}
 		t := &tracks[i]
-		if err := s.enrichmentHandler.EnrichLibraryTrack(ctx, t.ID); err != nil {
-			if ctx.Err() != nil {
-				// Cancelled mid-track (provider call aborted) — stop cleanly
-				// instead of counting it as a real failure.
-				return ctx.Err()
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(t *domain.Track) {
+			defer func() { <-sem; wg.Done() }()
+			as := albumSem(t.AlbumID)
+			select {
+			case as <- struct{}{}:
+			case <-ctx.Done():
+				return
 			}
-			errors++
-			s.log.Warn("enrich track failed", "track_id", t.ID, "error", err, "component", "jobs")
-		}
-		report(jobs.Report{Done: i + 1, Total: total, Message: t.Title})
+			defer func() { <-as }()
+			if err := s.enrichmentHandler.EnrichLibraryTrack(ctx, t.ID); err != nil {
+				if ctx.Err() != nil {
+					// Cancelled mid-track (provider call aborted) — not a real
+					// failure; the job reports cancelled after wg.Wait.
+					return
+				}
+				mu.Lock()
+				failed++
+				mu.Unlock()
+				s.log.Warn("enrich track failed", "track_id", t.ID, "error", err, "component", "jobs")
+			}
+			n := done.Add(1)
+			report(jobs.Report{Done: int(n), Total: total, Message: t.Title})
+		}(t)
+	}
+	wg.Wait()
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	// Surface the outcome in the final progress message (shown once the job
@@ -153,7 +203,7 @@ func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) err
 	report(jobs.Report{
 		Done:    total,
 		Total:   total,
-		Message: fmt.Sprintf("processed %d tracks, %d errors", total, errors),
+		Message: fmt.Sprintf("processed %d tracks, %d errors", total, failed),
 	})
 	return nil
 }
