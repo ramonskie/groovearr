@@ -119,21 +119,95 @@ func HasCoverFile(dir string) bool {
 	return CoverFilePath(dir) != ""
 }
 
-// artistImageNames are the local artist portrait filenames.
-var artistImageNames = []string{
+// ArtistImageNames are the local artist portrait filenames the scanner
+// recognizes and the HTTP layer serves. Shared so both agree on what counts
+// as an artist image ("artists.jpg" is common in hand-maintained libraries).
+var ArtistImageNames = []string{
 	"artist.jpg", "artist.jpeg", "artist.png", "artist.webp", "artist.gif",
+	"artists.jpg", "artists.png",
+}
+
+// artistImageFileIn returns the name of the first existing artist image in the
+// given artist directory, or "" when none exists.
+func artistImageFileIn(artistDir string) string {
+	for _, name := range ArtistImageNames {
+		if _, err := os.Stat(filepath.Join(artistDir, name)); err == nil {
+			return name
+		}
+	}
+	return ""
+}
+
+// artistImageFile returns the name of the first existing artist image in the
+// artist directory for the given track, or "" when none exists.
+func artistImageFile(trackPath string) string {
+	return artistImageFileIn(ArtistDirFromTrack(trackPath))
 }
 
 // hasArtistImage reports whether the artist directory for a track already
 // contains a local artist image in any format.
 func hasArtistImage(trackPath string) bool {
-	artistDir := ArtistDirFromTrack(trackPath)
-	for _, name := range artistImageNames {
-		if _, err := os.Stat(filepath.Join(artistDir, name)); err == nil {
+	return artistImageFile(trackPath) != ""
+}
+
+// recordArtistThumb ensures the DB thumbnail for the artist owning this
+// folder is set when a local artist image exists on disk. Primarily surfaces
+// portraits that pre-date the scanner (never touched the DB). Mirrors
+// writeAlbumCover's compilation guard: a folder whose name doesn't match the
+// embedded tag artist (e.g. "Various Artists") is a grouping directory, so its
+// image is never recorded as the folder name's artist thumbnail. Looks the
+// artist up by folder name, so it never attributes an image to the wrong
+// artist.
+//
+// Returns true when a later track in the same directory should be tried
+// (this track's tags didn't match the folder name — a sibling may), false
+// when nothing more can be done for the directory this run.
+func (s *Scanner) recordArtistThumb(ctx context.Context, trackPath, artistDir string) bool {
+	img := artistImageFileIn(artistDir)
+	if img == "" {
+		// No portrait on disk; the outcome can't change for sibling tracks.
+		return false
+	}
+	// Compilations group other artists' tracks under a directory whose name
+	// doesn't match the embedded artist. Recording its portrait as that
+	// folder name's artist thumbnail would point at a file outside their own
+	// directory — same guard writeAlbumCover applies. Unreadable tags fall
+	// through and keep the folder-name behavior. Only this check can differ
+	// between sibling tracks, so a mismatch retries with the next one.
+	if tags, err := readFileTags(trackPath); err == nil && tags != nil && tags.Artist != "" {
+		if !strings.EqualFold(filepath.Base(artistDir), tags.Artist) {
 			return true
 		}
 	}
+	folderName := filepath.Base(artistDir)
+	if folderName == "" {
+		return false
+	}
+	artist, err := s.store.GetArtistByName(ctx, folderName)
+	if err != nil || artist == nil {
+		return false
+	}
+	// Never clobber a remote URL; only fill an empty thumb or refresh a local
+	// artist.* value.
+	if artist.ThumbURL != "" && !IsLocalArtistThumb(artist.ThumbURL) {
+		return false
+	}
+	if err := s.store.SetArtistThumbURL(ctx, artist.ID, img); err != nil {
+		return false
+	}
 	return false
+}
+
+// IsLocalArtistThumb reports whether a thumb_url points at a local artist
+// image file (artist.* or artists.*) as opposed to a remote URL. Local thumbs
+// are bare filenames; a value containing a path separator is a (scheme-less)
+// URL, so it never counts as local. Shared with the HTTP layer so it
+// transforms every filename ArtistImageNames records.
+func IsLocalArtistThumb(thumbURL string) bool {
+	if strings.Contains(thumbURL, "/") {
+		return false
+	}
+	return strings.HasPrefix(thumbURL, "artist.") || strings.HasPrefix(thumbURL, "artists.")
 }
 
 // coverExt maps an embedded picture to a safe cover file extension.
@@ -288,7 +362,7 @@ func (s *Scanner) writeAlbumCover(ctx context.Context, trackPath, libraryRoot, a
 	}
 	// Only record a local thumbnail when the artist has none yet, or already
 	// points at a local artist.* image — never clobber a remote URL.
-	if artist.ThumbURL == "" || strings.HasPrefix(artist.ThumbURL, "artist.") {
+	if artist.ThumbURL == "" || IsLocalArtistThumb(artist.ThumbURL) {
 		_ = s.store.SetArtistThumbURL(ctx, artist.ID, "artist."+ext)
 	}
 }
@@ -373,6 +447,9 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 	// Once a cover lands on disk (or the cap is hit) extraction stops.
 	coverAttempts := make(map[string]int)
 	const maxCoverAttempts = 4
+	// artistThumbsDone tracks artist directories whose DB thumbnail was
+	// already reconciled this run (avoids one lookup per track).
+	artistThumbsDone := make(map[string]bool)
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -396,6 +473,7 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		// Resolve the album directory so multi-disc albums ({album}/Disc N)
 		// share one cover/artist entry and one attempt budget.
 		albumDir := AlbumDirFromTrack(path)
+		artistDir := ArtistDirFromTrack(path)
 
 		needCover := coverAttempts[albumDir] < maxCoverAttempts
 		if needCover {
@@ -419,6 +497,9 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 			if needCover && (!HasCoverFile(albumDir) || !hasArtistImage(path)) {
 				s.backfillCover(ctx, path, absRoot)
 			}
+			// Surface an on-disk artist portrait even when it pre-dates the
+			// scanner (the DB thumb_url was never recorded for it).
+			s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone)
 			return nil
 		}
 
@@ -481,11 +562,40 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		if needCover && tags != nil && tags.Picture != nil {
 			s.writeAlbumCover(ctx, path, absRoot, artistName, tags.Picture)
 		}
+		// Reconcile the DB thumbnail with any on-disk artist portrait (also
+		// catches folders whose embedded tag artist differs from the name).
+		s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone)
 
 		stats.Imported++
 		return nil
 	})
 	return stats, err
+}
+
+// recordArtistThumbOnce reconciles the DB thumbnail for an artist directory
+// with the on-disk portrait, at most once per directory per scan run.
+func (s *Scanner) recordArtistThumbOnce(ctx context.Context, trackPath, artistDir, libraryRoot string, done map[string]bool) {
+	rootClean := filepath.Clean(libraryRoot)
+	albumDir := AlbumDirFromTrack(trackPath)
+	if albumDir == rootClean {
+		return // tracks loose in the scan root have no artist folder
+	}
+	if filepath.Clean(artistDir) == rootClean {
+		// Flat layout ({root}/Artist/track.flac) has no album level: the
+		// artist folder is the track's own directory.
+		artistDir = albumDir
+	}
+	if done[artistDir] {
+		return
+	}
+	// Mark the directory reconciled unless a later sibling track might still
+	// surface the portrait (its tags could match the folder where this one's
+	// didn't). A directory with no image on disk is terminal — every track
+	// would draw the same blank, so stop re-statting the image candidates.
+	if s.recordArtistThumb(ctx, trackPath, artistDir) {
+		return
+	}
+	done[artistDir] = true
 }
 
 // backfillCover extracts embedded artwork for an already-imported album whose
