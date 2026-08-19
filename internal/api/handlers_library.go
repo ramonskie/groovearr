@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -91,7 +92,7 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 
 	// Transform local image paths to API URLs for the frontend.
 	for i := range artists {
-		if strings.HasPrefix(artists[i].ThumbURL, "artist.") {
+		if library.IsLocalArtistThumb(artists[i].ThumbURL) {
 			artists[i].ThumbURL = fmt.Sprintf("/api/artist-image/%d", artists[i].ID)
 		}
 	}
@@ -112,6 +113,93 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = offset
 	writeJSON(w, http.StatusOK, albums)
+}
+
+// duplicateArtistEntry is one artist inside a duplicate-name group.
+type duplicateArtistEntry struct {
+	ID     int64  `json:"id"`
+	Name   string `json:"name"`
+	Tracks int    `json:"track_count"`
+}
+
+// duplicateGroup is a set of artists whose names differ only by case (the
+// common "Acda en de Munnik" / "Acda en De Munnik" split). The first entry is
+// the canonical pick (most tracks, ties by name).
+type duplicateGroup struct {
+	Name    string                 `json:"name"`
+	Artists []duplicateArtistEntry `json:"artists"`
+}
+
+// handleLibraryArtistDuplicates lists artists that collide case-insensitively,
+// so the UI can offer one-click merges. Name groups are ordered by total
+// tracks so the first entry is the sensible merge target.
+func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+
+	byLower := map[string][]domain.Artist{}
+	for off := 0; ; off += 200 {
+		artists, err := s.store.ListArtists(ctx, off, 200)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		if len(artists) == 0 {
+			break
+		}
+		for _, a := range artists {
+			key := strings.ToLower(a.Name)
+			byLower[key] = append(byLower[key], a)
+		}
+	}
+
+	groups := []duplicateGroup{}
+	for key, list := range byLower {
+		if len(list) < 2 {
+			continue
+		}
+		entries := make([]duplicateArtistEntry, 0, len(list))
+		for _, a := range list {
+			ts, _ := s.store.GetTracksByArtist(ctx, a.ID)
+			entries = append(entries, duplicateArtistEntry{ID: a.ID, Name: a.Name, Tracks: len(ts)})
+		}
+		sort.SliceStable(entries, func(i, j int) bool {
+			if entries[i].Tracks != entries[j].Tracks {
+				return entries[i].Tracks > entries[j].Tracks
+			}
+			return entries[i].Name < entries[j].Name
+		})
+		groups = append(groups, duplicateGroup{Name: key, Artists: entries})
+	}
+	sort.SliceStable(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
+
+	writeJSON(w, http.StatusOK, map[string]any{"groups": groups})
+}
+
+// handleLibraryArtistMerge folds one artist into another, reassigning its
+// albums and tracks. Body: {"remove_id": N}; keep = the path artistID.
+func (s *Server) handleLibraryArtistMerge(w http.ResponseWriter, r *http.Request) {
+	keepID, err := strconv.ParseInt(r.PathValue("artistID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
+		return
+	}
+	var req struct {
+		RemoveID int64 `json:"remove_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid body: %w", err))
+		return
+	}
+	if req.RemoveID == 0 {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("remove_id is required"))
+		return
+	}
+
+	if err := s.store.MergeArtists(r.Context(), keepID, req.RemoveID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"merged": true})
 }
 
 // sqlDBProvider is satisfied by types that expose a *sql.DB (e.g. *sqlite.Store).
@@ -565,7 +653,7 @@ func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
 		return
 	}
-	if strings.HasPrefix(artist.ThumbURL, "artist.") {
+	if library.IsLocalArtistThumb(artist.ThumbURL) {
 		artist.ThumbURL = fmt.Sprintf("/api/artist-image/%d", artist.ID)
 	}
 	writeJSON(w, http.StatusOK, artist)
@@ -671,13 +759,11 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 }
 
 // coverImageNames and artistImageNames are the local image filenames the
-// library serves for albums and artists respectively. The cover list is shared
-// with the scanner so extraction and serving agree on what counts as a cover.
+// library serves for albums and artists respectively. Both lists are shared
+// with the scanner so extraction and serving agree on what counts as artwork.
 var coverImageNames = library.CoverCandidates
 
-var artistImageNames = []string{
-	"artist.jpg", "artist.jpeg", "artist.png", "artist.webp", "artist.gif",
-}
+var artistImageNames = library.ArtistImageNames
 
 // serveLibraryImage opens the first existing file from candidates in dir and
 // streams it to the client with caching headers. Returns os.ErrNotExist when
@@ -732,8 +818,24 @@ func (s *Server) handleArtistImage(w http.ResponseWriter, r *http.Request) {
 	tracks, _ := s.store.GetTracksByArtist(ctx, artistID)
 	if len(tracks) > 0 && tracks[0].FilePath != "" {
 		// Tracks live at {artist}/{album}/track.ext (or {artist}/{album}/Disc N/track.ext).
-		artistDir = library.ArtistDirFromTrack(tracks[0].FilePath)
-	} else {
+		dir := library.ArtistDirFromTrack(tracks[0].FilePath)
+		// Flat layout ({root}/{Artist}/track.ext) has no album level, so
+		// ArtistDirFromTrack resolves to the library root. Resolve to the
+		// track's own folder instead, mirroring the scanner — otherwise every
+		// flat-layout artist would serve an artist.jpg dropped in the root.
+		if filepath.Clean(dir) == filepath.Clean(cfg.Library.LibraryPath) {
+			dir = library.AlbumDirFromTrack(tracks[0].FilePath)
+		}
+		// Only serve from the artist's own folder. A shared compilation
+		// grouping (e.g. "Various Artists") would leak one artist's image onto
+		// every artist whose albums live there. A folder that merely differs
+		// in name from the stored artist is still served — it's the track's
+		// real home.
+		if !library.IsCompilationDir(dir) {
+			artistDir = dir
+		}
+	}
+	if artistDir == "" {
 		// Fallback: construct from library root + artist name.
 		artistDir = filepath.Join(cfg.Library.LibraryPath, artist.Name)
 	}

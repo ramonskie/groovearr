@@ -17,6 +17,10 @@ type Store interface {
 	ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error)
 	SearchArtists(ctx context.Context, query string, limit int) ([]domain.Artist, error)
 	SetArtistThumbURL(ctx context.Context, artistID int64, thumbURL string) error
+	// MergeArtists folds removeID into keepID, reassigning its albums and
+	// tracks and deleting the removed row. Used to collapse case-variant
+	// duplicate artists into one.
+	MergeArtists(ctx context.Context, keepID, removeID int64) error
 
 	// Albums.
 	UpsertAlbum(ctx context.Context, album *domain.Album) (int64, error)

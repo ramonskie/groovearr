@@ -338,6 +338,96 @@ func (s *Store) UpsertArtist(ctx context.Context, artist *domain.Artist) (int64,
 	return 0, fmt.Errorf("artist insert failed: %s", artist.Name)
 }
 
+// MergeArtists folds removeID into keepID: its albums and tracks are
+// reassigned to keepID, its thumb and external IDs are merged in, and the
+// removed artist row is deleted. Case-variant duplicates ("Acda en de Munnik"
+// vs "Acda en De Munnik") become one artist.
+func (s *Store) MergeArtists(ctx context.Context, keepID, removeID int64) error {
+	if keepID == removeID {
+		return fmt.Errorf("cannot merge an artist into itself")
+	}
+	keep, err := s.GetArtist(ctx, keepID)
+	if err != nil {
+		return err
+	}
+	if keep == nil {
+		return fmt.Errorf("artist %d not found", keepID)
+	}
+	remove, err := s.GetArtist(ctx, removeID)
+	if err != nil {
+		return err
+	}
+	if remove == nil {
+		return fmt.Errorf("artist %d not found", removeID)
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+
+	// Keep a non-empty thumbnail.
+	if keep.ThumbURL == "" && remove.ThumbURL != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE artists SET thumb_url=?, updated_at=? WHERE id=?`, remove.ThumbURL, now, keepID); err != nil {
+			return err
+		}
+	}
+	// Merge external IDs (remove's keys win only where keep has none).
+	if err := mergeJSONMaps(ctx, tx, keepID, remove.ExternalIDs); err != nil {
+		return err
+	}
+
+	// Reassign albums and tracks to the surviving artist. albums has no unique
+	// (artist_id, title) constraint, so this cannot conflict.
+	if _, err := tx.ExecContext(ctx, `UPDATE albums SET artist_id=? WHERE artist_id=?`, keepID, removeID); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `UPDATE tracks SET artist_id=? WHERE artist_id=?`, keepID, removeID); err != nil {
+		return err
+	}
+
+	if _, err := tx.ExecContext(ctx, `DELETE FROM artists WHERE id=?`, removeID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// mergeJSONMaps merges the JSON external_ids map from srcArtistID into the
+// artist row dstID (only adding keys keep doesn't already have), inside tx.
+func mergeJSONMaps(ctx context.Context, tx *sql.Tx, dstID int64, src map[string]string) error {
+	if len(src) == 0 {
+		return nil
+	}
+	var cur string
+	if err := tx.QueryRowContext(ctx, `SELECT external_ids FROM artists WHERE id=?`, dstID).Scan(&cur); err != nil {
+		return err
+	}
+	merged := map[string]string{}
+	if cur != "" && cur != "null" {
+		if err := json.Unmarshal([]byte(cur), &merged); err != nil {
+			merged = map[string]string{}
+		}
+	}
+	changed := false
+	for k, v := range src {
+		if _, ok := merged[k]; !ok {
+			merged[k] = v
+			changed = true
+		}
+	}
+	if !changed {
+		return nil
+	}
+	b, err := json.Marshal(merged)
+	if err != nil {
+		return err
+	}
+	_, err = tx.ExecContext(ctx, `UPDATE artists SET external_ids=?, updated_at=? WHERE id=?`, string(b), time.Now().UTC().Format(time.RFC3339), dstID)
+	return err
+}
+
 func (s *Store) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
 	row := s.db.QueryRowContext(ctx, `
 		SELECT id, name, genres, summary, thumb_url,
@@ -352,7 +442,7 @@ func (s *Store) GetArtistByName(ctx context.Context, name string) (*domain.Artis
 		SELECT id, name, genres, summary, thumb_url,
 			external_ids, created_at, updated_at,
 			COALESCE((SELECT al.id FROM albums al WHERE al.artist_id = artists.id ORDER BY al.year, al.title LIMIT 1), 0)
-		FROM artists WHERE name=?`, name)
+		FROM artists WHERE name=? COLLATE NOCASE ORDER BY id LIMIT 1`, name)
 	return s.scanArtist(row)
 }
 

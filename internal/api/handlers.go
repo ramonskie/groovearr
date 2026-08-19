@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -47,6 +48,8 @@ type Server struct {
 	playlistSvc         *playlist.Service
 	qualityProfileStore quality.ProfileStore
 	jobs                *jobs.Manager
+	organizeMu          sync.Mutex
+	organizeReport      *organizeReport
 	httpSrv             *http.Server
 	log                 *slog.Logger
 	rateLimiter         *ipRateLimiter
@@ -131,6 +134,8 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.Handle("POST /api/downloads/{id}/retry", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleRetryDownload)))
 	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
+	mux.HandleFunc("GET /api/library/artists/duplicates", s.handleLibraryArtistDuplicates)
+	mux.Handle("POST /api/library/artists/{artistID}/merge", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryArtistMerge)))
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
 	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
@@ -145,6 +150,8 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.HandleFunc("GET /api/jobs", s.handleGetJob)
 	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobScan)))
 	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, http.HandlerFunc(s.handleJobEnrich)))
+	mux.Handle("POST /api/jobs/organize", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobOrganize)))
+	mux.HandleFunc("GET /api/jobs/organize/report", s.handleOrganizeReport)
 	mux.HandleFunc("POST /api/jobs/cancel", s.handleJobCancel)
 
 	// Playlist routes.

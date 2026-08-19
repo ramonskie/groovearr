@@ -13,6 +13,108 @@ func testLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(io.Discard, nil))
 }
 
+func TestStore_GetArtistByNameCaseInsensitive(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	id, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Acda en De Munnik"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The same name in different case resolves to the existing artist, so an
+	// import of "Acda en de Munnik" reuses it instead of creating a duplicate.
+	got, err := store.GetArtistByName(ctx, "Acda en de Munnik")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.ID != id {
+		t.Fatalf("case-insensitive lookup got %+v, want id %d", got, id)
+	}
+}
+
+func TestStore_MergeArtists(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	keepID, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Acda en de Munnik", ThumbURL: "artist.jpg", ExternalIDs: map[string]string{"musicbrainz": "mb-keep"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeID, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Acda en De Munnik", ExternalIDs: map[string]string{"deezer": "dz-remove"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Two albums under the duplicate artists (same title is allowed — no
+	// unique constraint), one track each.
+	keepAlbum, err := store.UpsertAlbum(ctx, &domain.Album{ArtistID: keepID, Title: "Hier Zijn", Year: 2004, TrackCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	removeAlbum, err := store.UpsertAlbum(ctx, &domain.Album{ArtistID: removeID, Title: "Hier Zijn", Year: 2004, TrackCount: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = store.UpsertTrack(ctx, &domain.Track{AlbumID: removeAlbum, ArtistID: removeID, Title: "De Kapitein Deel II", FilePath: "/music/x.flac"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.MergeArtists(ctx, keepID, removeID); err != nil {
+		t.Fatal(err)
+	}
+
+	// The removed artist is gone.
+	if removed, _ := store.GetArtist(ctx, removeID); removed != nil {
+		t.Fatal("removed artist still present")
+	}
+	// Its album now belongs to the surviving artist.
+	albums, err := store.GetAlbumsByArtist(ctx, keepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(albums) != 2 {
+		t.Fatalf("expected 2 albums under kept artist, got %d", len(albums))
+	}
+	// Its track moved with it.
+	tracks, err := store.GetTracksByAlbum(ctx, removeAlbum)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tracks) != 1 || tracks[0].ArtistID != keepID {
+		t.Fatalf("track not reassigned: %+v", tracks)
+	}
+	// External ids merged (remove's keys added to keep's).
+	keep, err := store.GetArtist(ctx, keepID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keep.ExternalIDs["musicbrainz"] != "mb-keep" || keep.ExternalIDs["deezer"] != "dz-remove" {
+		t.Errorf("external_ids not merged: %v", keep.ExternalIDs)
+	}
+	if keep.ThumbURL != "artist.jpg" {
+		t.Errorf("thumb should stay on the surviving artist, got %q", keep.ThumbURL)
+	}
+	_ = keepAlbum
+
+	// Merging an artist into itself is rejected.
+	if err := store.MergeArtists(ctx, keepID, keepID); err == nil {
+		t.Error("expected error when merging an artist into itself")
+	}
+}
+
 func TestStore_ArtistCRUD(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
 	store, err := New(dbPath, testLogger())

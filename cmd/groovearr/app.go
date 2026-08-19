@@ -169,8 +169,8 @@ func NewApp(configPath string) (*App, error) {
 	monitor.SetDownloadPathFunc(func() string { return cfg.Get().Library.DownloadPath })
 
 	// Renamer.
-	folderTemplate, libraryRoot := readRenamerConfig(cfg)
-	renamer := library.NewRenamer(folderTemplate, libraryRoot, log)
+	folderTemplate, compilationTemplate, libraryRoot := readRenamerConfig(cfg)
+	renamer := library.NewRenamerWithCompilation(folderTemplate, compilationTemplate, libraryRoot, log)
 
 	// SSE hub + notifier.
 	sseHub := sse.NewSSEHub(log)
@@ -341,10 +341,12 @@ func (app *App) Run() {
 	app.libStore.Close()
 }
 
-// readRenamerConfig reads the folder template and library root from config.
-func readRenamerConfig(cfg *config.Persistence) (template, root string) {
+// readRenamerConfig reads the folder/compilation templates and library root
+// from config.
+func readRenamerConfig(cfg *config.Persistence) (template, compilationTemplate, root string) {
 	c := cfg.Get()
 	template = c.Library.FolderTemplate
+	compilationTemplate = c.Library.CompilationTemplate
 	root = c.Library.LibraryPath
 	if root == "" {
 		root = c.Library.DownloadPath

@@ -130,6 +130,7 @@ func (m *mockStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, er
 func (m *mockStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
 	return m.artists[name], nil
 }
+func (m *mockStore) MergeArtists(ctx context.Context, keepID, removeID int64) error { return nil }
 func (m *mockStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	return nil, nil
 }

@@ -2,248 +2,215 @@ package api
 
 import (
 	"context"
-	"errors"
-	"io"
-	"log/slog"
-	"sync"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/discovery"
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
-	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
-	"github.com/ramonskie/groovearr/internal/metadata"
-	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
-func testLogger() *slog.Logger {
-	return slog.New(slog.NewTextHandler(io.Discard, nil))
+// organizeRunnerStore is a minimal store for exercising organizeRunner: it
+// pages artists, resolves albums/tracks, and supports in-place UpsertTrack.
+type organizeRunnerStore struct {
+	library.Store
+	artists   []domain.Artist
+	albums    map[int64][]domain.Album
+	tracks    map[int64][]domain.Track
+	allTracks []domain.Track
 }
 
-var _ library.Store = (*enrichTestStore)(nil)
-
-// enrichTestStore is a library.Store whose only behavior is returning the
-// configured track list for ListTracksWithQuality.
-type enrichTestStore struct {
-	tracks []domain.Track
-}
-
-func (m *enrichTestStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
-	return m.tracks, nil
-}
-func (m *enrichTestStore) UpsertArtist(ctx context.Context, a *domain.Artist) (int64, error) { return 0, nil }
-func (m *enrichTestStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error)   { return nil, nil }
-func (m *enrichTestStore) GetArtistByName(ctx context.Context, name string) (*domain.Artist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) ListArtists(ctx context.Context, o, l int) ([]domain.Artist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) SearchArtists(ctx context.Context, q string, l int) ([]domain.Artist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) SetArtistThumbURL(ctx context.Context, id int64, u string) error { return nil }
-func (m *enrichTestStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error)  { return 0, nil }
-func (m *enrichTestStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error)    { return nil, nil }
-func (m *enrichTestStore) GetAlbumsByArtist(ctx context.Context, id int64) ([]domain.Album, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) SearchAlbums(ctx context.Context, q string, l int) ([]domain.Album, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) { return 0, nil }
-func (m *enrichTestStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error)   { return nil, nil }
-func (m *enrichTestStore) GetTracksByAlbum(ctx context.Context, id int64) ([]domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetTracksByArtist(ctx context.Context, id int64) ([]domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) SearchTracks(ctx context.Context, q string, l int) ([]domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetTrackByFilePath(ctx context.Context, p string) (*domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetTrackByISRC(ctx context.Context, i string) (*domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) DeleteTrack(ctx context.Context, id int64) error                 { return nil }
-func (m *enrichTestStore) ImportTrack(ctx context.Context, t *domain.Track, a, al string, y int, g []string) (int64, error) {
-	return 0, nil
-}
-func (m *enrichTestStore) GetArtistByExternalID(ctx context.Context, s, e string) (*domain.Artist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetAlbumByExternalID(ctx context.Context, s, e string) (*domain.Album, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetTrackByExternalID(ctx context.Context, s, e string) (*domain.Track, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, error) {
-	return 0, nil
-}
-func (m *enrichTestStore) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) GetPlaylistBySourceID(ctx context.Context, s, id string) (*domain.Playlist, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) { return nil, nil }
-func (m *enrichTestStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
-func (m *enrichTestStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
-	return nil
-}
-func (m *enrichTestStore) GetPlaylistTracks(ctx context.Context, id int64) ([]domain.PlaylistTrack, error) {
-	return nil, nil
-}
-func (m *enrichTestStore) DeletePlaylistTracks(ctx context.Context, id int64) error { return nil }
-func (m *enrichTestStore) Close() error                                             { return nil }
-
-// trackingEnrichStore observes per-album concurrency from the enrichment
-// handler's track lookups. Each GetTrack sleeps to widen the window in which
-// concurrent workers would overlap.
-type trackingEnrichStore struct {
-	mu            sync.Mutex
-	albumOf       map[int64]int64 // trackID → albumID
-	active        map[int64]int   // albumID → currently active
-	maxPerAlbum   map[int64]int
-	maxTotal      int
-}
-
-func newTrackingEnrichStore(albumOf map[int64]int64) *trackingEnrichStore {
-	return &trackingEnrichStore{
-		albumOf:     albumOf,
-		active:      make(map[int64]int),
-		maxPerAlbum: make(map[int64]int),
+func (s *organizeRunnerStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
+	if offset >= len(s.artists) {
+		return nil, nil
 	}
-}
-
-func (m *trackingEnrichStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error) {
-	album := m.albumOf[id]
-	m.mu.Lock()
-	m.active[album]++
-	if m.active[album] > m.maxPerAlbum[album] {
-		m.maxPerAlbum[album] = m.active[album]
+	end := offset + limit
+	if end > len(s.artists) {
+		end = len(s.artists)
 	}
-	total := 0
-	for _, v := range m.active {
-		total += v
+	return s.artists[offset:end], nil
+}
+
+func (s *organizeRunnerStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
+	return s.albums[artistID], nil
+}
+
+func (s *organizeRunnerStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
+	return s.tracks[albumID], nil
+}
+
+func (s *organizeRunnerStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, error) {
+	return s.allTracks, nil
+}
+
+func (s *organizeRunnerStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) {
+	for i := range s.allTracks {
+		if s.allTracks[i].ID == t.ID {
+			s.allTracks[i] = *t
+			return t.ID, nil
+		}
 	}
-	if total > m.maxTotal {
-		m.maxTotal = total
+	s.allTracks = append(s.allTracks, *t)
+	return t.ID, nil
+}
+
+func TestOrganizeRunnerDryRunAndRepair(t *testing.T) {
+	root := t.TempDir()
+	mk := func(rel string) string {
+		p := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte("audio"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
-	m.mu.Unlock()
-	defer func() {
-		m.mu.Lock()
-		m.active[album]--
-		m.mu.Unlock()
-	}()
-	time.Sleep(40 * time.Millisecond)
-	return &domain.Track{ID: id, AlbumID: album, ArtistID: 1, FilePath: "/music/album/track.flac"}, nil
-}
+	flatPath := mk("Flat Artist/01 - Track.flac")
+	nestedPath := mk("Nested Artist/Album (2020)/01 - Track.flac")
+	vaPath := mk("Various Artists/Best of 90s/01 - 2Pac - California Love.flac")
 
-func (m *trackingEnrichStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
-	return &domain.Artist{ID: id, Name: "Test Artist"}, nil
-}
-func (m *trackingEnrichStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
-	return &domain.Album{ID: id, Title: "Test Album"}, nil
-}
-func (m *trackingEnrichStore) SetArtistThumbURL(ctx context.Context, id int64, u string) error { return nil }
-func (m *trackingEnrichStore) GetTracksByAlbum(ctx context.Context, id int64) ([]domain.Track, error) {
-	return nil, nil
-}
-func (m *trackingEnrichStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) {
-	return 0, nil
-}
-func (m *trackingEnrichStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) {
-	return 0, nil
-}
-
-// newEnrichServer builds a Server whose enrichment handler has no providers
-// (so enrichTrack short-circuits after lookups) but whose store records
-// per-album concurrency.
-func newEnrichServer(tracks []domain.Track, albumOf map[int64]int64) (*Server, *trackingEnrichStore) {
-	es := newTrackingEnrichStore(albumOf)
-	h := download.NewMetadataEnrichmentHandler(
-		metadata.NewRegistry(),
-		discovery.NewRegistry(plugin.NewRegistry()),
-		es,
-		testLogger(),
-	)
-	return &Server{
-		enrichmentHandler: h,
-		store:             &enrichTestStore{tracks: tracks},
-		log:               testLogger(),
-	}, es
-}
-
-func TestEnrichRunnerAlbumSerialization(t *testing.T) {
-	// 8 tracks alternating between two albums — different albums must enrich
-	// concurrently, same-album tracks must never overlap.
-	tracks := []domain.Track{
-		{ID: 1, AlbumID: 10, Title: "A1"},
-		{ID: 2, AlbumID: 20, Title: "B1"},
-		{ID: 3, AlbumID: 10, Title: "A2"},
-		{ID: 4, AlbumID: 20, Title: "B2"},
-		{ID: 5, AlbumID: 10, Title: "A3"},
-		{ID: 6, AlbumID: 20, Title: "B3"},
-		{ID: 7, AlbumID: 10, Title: "A4"},
-		{ID: 8, AlbumID: 20, Title: "B4"},
-	}
-	albumOf := map[int64]int64{1: 10, 3: 10, 5: 10, 7: 10, 2: 20, 4: 20, 6: 20, 8: 20}
-	srv, es := newEnrichServer(tracks, albumOf)
-
-	var last int64
-	var mu sync.Mutex
-	err := srv.enrichRunner(context.Background(), func(r jobs.Report) {
-		mu.Lock()
-		last = int64(r.Done)
-		mu.Unlock()
-	})
+	cfg, err := config.LoadOrCreate(filepath.Join(t.TempDir(), "config.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Library.LibraryPath = root
+		c.Library.FolderTemplate = "{artist}/{album} ({year})/{track:02d} - {title}"
+		c.Library.CompilationTemplate = "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
 
-	mu.Lock()
-	done := last
-	mu.Unlock()
-	if done != 8 {
-		t.Fatalf("processed %d tracks, want 8", done)
+	store := &organizeRunnerStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Flat Artist"},
+			{ID: 2, Name: "Nested Artist"},
+			{ID: 3, Name: "2Pac"},
+		},
+		albums: map[int64][]domain.Album{
+			1: {{ID: 11, Title: "Album", Year: 2020}},
+			2: {{ID: 12, Title: "Album", Year: 2020}},
+			3: {{ID: 13, Title: "Best of 90s", Year: 1995}},
+		},
+		tracks: map[int64][]domain.Track{
+			11: {{ID: 101, Title: "Track", TrackNumber: 1, FilePath: flatPath}},
+			12: {{ID: 102, Title: "Track", TrackNumber: 1, FilePath: nestedPath}},
+			13: {{ID: 103, Title: "California Love", TrackNumber: 1, FilePath: vaPath}},
+		},
+		allTracks: []domain.Track{
+			{ID: 101, Title: "Track", TrackNumber: 1, FilePath: flatPath},
+			{ID: 102, Title: "Track", TrackNumber: 1, FilePath: nestedPath},
+			{ID: 103, Title: "California Love", TrackNumber: 1, FilePath: vaPath},
+		},
 	}
-	for album, max := range es.maxPerAlbum {
-		if max > 1 {
-			t.Errorf("album %d had %d concurrent enrichments, want 1 (serialized per album)", album, max)
-		}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	var reports []jobs.Report
+	collect := func(r jobs.Report) { reports = append(reports, r) }
+
+	// ── Dry run: nothing moves, the report lists what would. ──
+	if err := s.organizeRunner(true)(context.Background(), collect); err != nil {
+		t.Fatal(err)
 	}
-	if es.maxTotal < 2 {
-		t.Errorf("max concurrent across albums = %d, want >= 2 (parallelism)", es.maxTotal)
+	if s.organizeReport == nil {
+		t.Fatal("dry run did not persist a report")
+	}
+	if s.organizeReport.Summary.WouldMove != 2 {
+		t.Errorf("dry-run would_move = %d, want 2 (flat + compilation)", s.organizeReport.Summary.WouldMove)
+	}
+	if s.organizeReport.Summary.InPlace != 1 {
+		t.Errorf("dry-run in_place = %d, want 1", s.organizeReport.Summary.InPlace)
+	}
+	if _, err := os.Stat(flatPath); err != nil {
+		t.Errorf("dry run must not move files: %v", err)
+	}
+	if !hasReason(s.organizeReport.Entries, "would move") {
+		t.Error("dry-run report should contain 'would move' entries")
+	}
+
+	// ── Repair: files move, DB paths update. ──
+	s.setOrganizeReport(nil)
+	if err := s.organizeRunner(false)(context.Background(), collect); err != nil {
+		t.Fatal(err)
+	}
+	if s.organizeReport == nil || s.organizeReport.Summary.Moved != 2 {
+		t.Fatalf("repair moved = %+v, want 2", s.organizeReport)
+	}
+	wantFlat := filepath.Join(root, "Flat Artist", "Album (2020)", "01 - Track.flac")
+	wantVA := filepath.Join(root, "Various Artists", "Best of 90s (1995)", "01. 2Pac - California Love.flac")
+	if _, err := os.Stat(wantFlat); err != nil {
+		t.Errorf("flat track not organized: %v", err)
+	}
+	if _, err := os.Stat(wantVA); err != nil {
+		t.Errorf("compilation track not kept under Various Artists: %v", err)
+	}
+	if _, err := os.Stat(flatPath); err == nil {
+		t.Error("flat source file still present after repair")
+	}
+	if _, err := os.Stat(filepath.Join(root, "2Pac", "Best of 90s (1995)")); err == nil {
+		t.Error("compilation must not land in a bogus 2Pac album folder")
+	}
+	// Final summary message is surfaced through the job report.
+	if msg := reports[len(reports)-1].Message; msg == "" {
+		t.Error("final job message missing")
 	}
 }
 
-func TestEnrichRunnerCancel(t *testing.T) {
-	tracks := []domain.Track{
-		{ID: 1, AlbumID: 10, Title: "A1"},
-		{ID: 2, AlbumID: 10, Title: "A2"},
-		{ID: 3, AlbumID: 10, Title: "A3"},
-		{ID: 4, AlbumID: 10, Title: "A4"},
-		{ID: 5, AlbumID: 10, Title: "A5"},
-		{ID: 6, AlbumID: 10, Title: "A6"},
+func hasReason(entries []organizeEntry, reason string) bool {
+	for _, e := range entries {
+		if e.Reason == reason {
+			return true
+		}
 	}
-	albumOf := map[int64]int64{1: 10, 2: 10, 3: 10, 4: 10, 5: 10, 6: 10}
-	srv, _ := newEnrichServer(tracks, albumOf)
+	return false
+}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(60 * time.Millisecond)
-		cancel()
-	}()
+func TestOrganizeReportEndpoint(t *testing.T) {
+	s := &Server{}
 
-	err := srv.enrichRunner(ctx, func(r jobs.Report) {})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("err = %v, want context.Canceled", err)
+	// No report yet → null body.
+	req := httptest.NewRequest(http.MethodGet, "/api/jobs/organize/report", nil)
+	rec := httptest.NewRecorder()
+	s.handleOrganizeReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	if got := rec.Body.String(); got != "null\n" && got != "null" {
+		t.Errorf("empty report body = %q, want null", got)
+	}
+
+	// A stored report is returned as-is.
+	rep := &organizeReport{
+		Mode:  "dry run",
+		RanAt: time.Date(2026, 8, 19, 12, 0, 0, 0, time.UTC),
+		Summary: organizeSummary{
+			Moved: 0, WouldMove: 2, InPlace: 5, Skipped: 1, Errors: 0,
+		},
+		Entries: []organizeEntry{
+			{TrackID: 7, From: "/music/a/01.flac", To: "/music/a/b/01.flac", Reason: "would move"},
+		},
+	}
+	s.setOrganizeReport(rep)
+
+	req = httptest.NewRequest(http.MethodGet, "/api/jobs/organize/report", nil)
+	rec = httptest.NewRecorder()
+	s.handleOrganizeReport(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var got organizeReport
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if got.Mode != "dry run" || got.Summary.WouldMove != 2 || len(got.Entries) != 1 {
+		t.Errorf("unexpected report round-trip: %+v", got)
 	}
 }

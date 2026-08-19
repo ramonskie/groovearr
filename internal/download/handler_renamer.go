@@ -48,7 +48,7 @@ func (h *FileRenamerHandler) Handle(ctx context.Context, record *Record) error {
 		DiscNum:  record.DiscNumber,
 	}
 
-	newPath, err := h.renamer.Rename(srcPath, meta)
+	newPath, err := h.renamer.RenameFor(srcPath, meta, record.IsCompilation())
 	if err != nil {
 		h.log.Error("rename failed", "filename", record.Filename, "error", err, "component", "renamer")
 		return fmt.Errorf("renamer: rename %s: %w", record.Filename, err)

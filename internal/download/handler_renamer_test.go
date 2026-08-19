@@ -52,6 +52,54 @@ func TestFileRenamerHandler(t *testing.T) {
 	}
 }
 
+func TestFileRenamerHandler_Compilation(t *testing.T) {
+	tmpDir := t.TempDir()
+	srcDir := filepath.Join(tmpDir, "downloads")
+	libRoot := filepath.Join(tmpDir, "library")
+	os.MkdirAll(srcDir, 0o755)
+
+	srcFile := filepath.Join(srcDir, "test.mp3")
+	if err := os.WriteFile(srcFile, []byte("dummy audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	store := newMockDownloadStore()
+	record := &Record{
+		ID:          "test-rename-va",
+		FilePath:    srcFile,
+		Filename:    "test.mp3",
+		Artist:      "2Pac",
+		Album:       "Best of 90s",
+		Title:       "California Love",
+		TrackNumber: 1,
+		Year:        1995,
+		AlbumType:   "Compilation",
+	}
+	store.Insert(context.Background(), record)
+
+	// A compilation-aware renamer routes the record through the compilation
+	// template, exactly like the organizer — same paths across every flow.
+	renamer := library.NewRenamerWithCompilation(
+		"{artist}/{album} ({year})/{track:02d} - {title}",
+		"Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
+		libRoot, nil,
+	)
+	handler := NewFileRenamerHandler(renamer, store, nil)
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+
+	got, _ := store.Get(context.Background(), "test-rename-va")
+	want := filepath.Join(libRoot, "Various Artists", "Best of 90s (1995)", "01. 2Pac - California Love.mp3")
+	if got.FilePath != want {
+		t.Errorf("compilation path = %q, want %q", got.FilePath, want)
+	}
+	if _, err := os.Stat(want); err != nil {
+		t.Errorf("renamed file should exist at %s: %v", want, err)
+	}
+}
+
 func TestFileRenamerHandler_NoFilePath(t *testing.T) {
 	store := newMockDownloadStore()
 	handler := NewFileRenamerHandler(&library.Renamer{}, store, nil)
