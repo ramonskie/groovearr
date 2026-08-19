@@ -13,22 +13,50 @@ import (
 )
 
 // Renamer moves downloaded files into the library using a PathResolver template.
+// Compilation tracks (VA albums) are routed through the compilation template so
+// every flow — download, import, organize — produces the same paths.
 type Renamer struct {
-	resolver *PathResolver
-	root     string // absolute base directory for resolved paths
-	log      *slog.Logger
+	resolver            *PathResolver
+	compilationResolver *PathResolver // VA albums; falls back to resolver when nil
+	root                string        // absolute base directory for resolved paths
+	log                 *slog.Logger
 }
 
 // NewRenamer creates a Renamer with a folder template and root directory.
+// Compilation tracks fall back to the folder template.
 func NewRenamer(template, root string, logger *slog.Logger) *Renamer {
+	return newRenamer(template, "", root, logger)
+}
+
+// NewRenamerWithCompilation creates a Renamer that additionally routes
+// compilation tracks through the compilation template.
+func NewRenamerWithCompilation(template, compilationTemplate, root string, logger *slog.Logger) *Renamer {
+	return newRenamer(template, compilationTemplate, root, logger)
+}
+
+func newRenamer(template, compilationTemplate, root string, logger *slog.Logger) *Renamer {
 	if logger == nil {
 		logger = slog.Default()
 	}
-	return &Renamer{
-		resolver: NewPathResolver(template),
-		root:     root,
-		log:      logger,
+	var compilation *PathResolver
+	if compilationTemplate != "" {
+		compilation = NewPathResolver(compilationTemplate)
 	}
+	return &Renamer{
+		resolver:            NewPathResolver(template),
+		compilationResolver: compilation,
+		root:                root,
+		log:                 logger,
+	}
+}
+
+// resolverFor returns the template matching the compilation flag — the single
+// source of truth for how every flow maps a VA album to a directory layout.
+func (r *Renamer) resolverFor(compilation bool) *PathResolver {
+	if compilation && r.compilationResolver != nil {
+		return r.compilationResolver
+	}
+	return r.resolver
 }
 
 // RenameOrganized satisfies the deezer.FileRenamer interface for post-download organization.
@@ -54,9 +82,54 @@ type FileMeta struct {
 	DiscNum  int
 }
 
-// Rename moves filePath to a computed path under the configured root using the template.
-// Returns the new absolute path, or the original path if renaming is skipped (e.g., missing metadata).
+// Rename moves filePath to a computed path under the configured root using the
+// folder template. Returns the new absolute path, or the original path if
+// renaming is skipped (e.g., missing metadata).
 func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
+	return r.RenameFor(filePath, meta, false)
+}
+
+// RenameFor moves filePath using the folder template, or the compilation
+// template for VA albums. Both the download renamer handler and the library
+// organizer go through this so every flow produces identical paths.
+func (r *Renamer) RenameFor(filePath string, meta FileMeta, compilation bool) (string, error) {
+	targetPath := r.target(filePath, meta, compilation)
+	if targetPath == "" {
+		return filePath, nil
+	}
+
+	// If source and target are the same, nothing to do.
+	if filepath.Clean(filePath) == filepath.Clean(targetPath) {
+		return filePath, nil
+	}
+
+	// Ensure the target directory exists.
+	dir := filepath.Dir(targetPath)
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return filePath, fmt.Errorf("mkdir %s: %w", dir, err)
+	}
+
+	// Move the file. Falls back to copy+delete on cross-device errors (e.g. Docker volumes).
+	if err := os.Rename(filePath, targetPath); err != nil {
+		if strings.Contains(err.Error(), "cross-device") {
+			// Copy + delete for cross-filesystem moves (Docker volumes).
+			if copyErr := r.copyFile(filePath, targetPath); copyErr != nil {
+				return filePath, fmt.Errorf("copy %s → %s: %w", filePath, targetPath, copyErr)
+			}
+			os.Remove(filePath)
+		} else {
+			return filePath, fmt.Errorf("rename %s → %s: %w", filePath, targetPath, err)
+		}
+	}
+
+	return targetPath, nil
+}
+
+// target computes the absolute destination path for filePath under the
+// configured root using the template matching the compilation flag, filling
+// missing metadata from embedded tags. Returns "" when the file cannot be
+// organized (no artist name). It does not touch the filesystem.
+func (r *Renamer) target(filePath string, meta FileMeta, compilation bool) string {
 	ext := strings.TrimPrefix(filepath.Ext(filePath), ".")
 
 	// Build resolve args: use provided metadata, fall back to ID3 tags, then filename parsing.
@@ -88,12 +161,12 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 		}
 	}
 	if artist == "" {
-		return filePath, nil
+		return ""
 	}
 
 	albumType := "Album"
 
-	resolved := r.resolver.Resolve(ResolveArgs{
+	resolved := r.resolverFor(compilation).Resolve(ResolveArgs{
 		Artist:    artist,
 		Album:     album,
 		Year:      meta.Year,
@@ -105,7 +178,7 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 	})
 
 	if resolved == "" {
-		return filePath, nil
+		return ""
 	}
 
 	targetPath := filepath.Join(r.root, resolved+"."+ext)
@@ -115,32 +188,7 @@ func (r *Renamer) Rename(filePath string, meta FileMeta) (string, error) {
 	if abs, err := filepath.Abs(targetPath); err == nil {
 		targetPath = abs
 	}
-
-	// If source and target are the same, nothing to do.
-	if filepath.Clean(filePath) == filepath.Clean(targetPath) {
-		return filePath, nil
-	}
-
-	// Ensure the target directory exists.
-	dir := filepath.Dir(targetPath)
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return filePath, fmt.Errorf("mkdir %s: %w", dir, err)
-	}
-
-	// Move the file. Falls back to copy+delete on cross-device errors (e.g. Docker volumes).
-	if err := os.Rename(filePath, targetPath); err != nil {
-		if strings.Contains(err.Error(), "cross-device") {
-			// Copy + delete for cross-filesystem moves (Docker volumes).
-			if copyErr := r.copyFile(filePath, targetPath); copyErr != nil {
-				return filePath, fmt.Errorf("copy %s → %s: %w", filePath, targetPath, copyErr)
-			}
-			os.Remove(filePath)
-		} else {
-			return filePath, fmt.Errorf("rename %s → %s: %w", filePath, targetPath, err)
-		}
-	}
-
-	return targetPath, nil
+	return targetPath
 }
 
 // copyFile copies a file from src to dst.
