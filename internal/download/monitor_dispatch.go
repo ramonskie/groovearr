@@ -6,6 +6,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/sanitize"
 )
@@ -330,7 +331,7 @@ func (m *MonitoringService) downloadPath() string {
 	if m.downloadBasePath != "" {
 		return m.downloadBasePath
 	}
-	return "./downloads"
+	return config.DefaultDownloadPath
 }
 
 // clientBasePath returns the download client's configured base path if set,

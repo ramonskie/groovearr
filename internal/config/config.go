@@ -16,23 +16,23 @@ type Config struct {
 	Sources        map[string]json.RawMessage `json:"sources"`
 	Library        LibraryConfig              `json:"library"`
 	Auth           AuthConfig                 `json:"auth"`
-	MetadataOrder  []string                   `json:"metadata_order"` // provider priority (e.g. ["deezer", "musicbrainz"])
-	DownloadOrder  []string                   `json:"download_order"` // download source priority (e.g. ["soulseek", "deezer"])
-	AlbumSources   []string                   `json:"album_sources"`  // album-capable source order (e.g. ["prowlarr"])
-	DownloadClient string                    `json:"download_client"` // default download client (e.g. "qbittorrent")
-	SetupCompleted bool                      `json:"setup_completed"` // first-run wizard dismissed
+	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
+	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
+	AlbumSources   []string                   `json:"album_sources"`   // album-capable source order (e.g. ["prowlarr"])
+	DownloadClient string                     `json:"download_client"` // default download client (e.g. "qbittorrent")
+	SetupCompleted bool                       `json:"setup_completed"` // first-run wizard dismissed
 }
 
 // LibraryConfig holds music library paths.
 type LibraryConfig struct {
-	DownloadPath          string `json:"download_path"`           // download staging directory
-	LibraryPath           string `json:"library_path"`            // where organized downloads end up
-	FolderTemplate        string `json:"folder_template"`         // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
-	CompilationTemplate   string `json:"compilation_template"`    // template for VA compilations (defaults to "Various Artists/...")
-	PlaylistPath          string `json:"playlist_path"`            // separate folder for playlist downloads
-	PlaylistTemplate      string `json:"playlist_template"`        // e.g. "{position:02d} {artist} - {title}"
-	MaxDownloadWorkers    int    `json:"max_download_workers"`     // concurrent download workers (default 3)
-	PlaylistAutoSyncMins  *int   `json:"playlist_auto_sync_mins"`  // interval for auto-sync (nil/0 = disabled, default 30)
+	DownloadPath         string `json:"download_path"`           // download staging directory
+	LibraryPath          string `json:"library_path"`            // where organized downloads end up
+	FolderTemplate       string `json:"folder_template"`         // e.g. "{artist}/{album} ({year})/{track:02d} - {title}"
+	CompilationTemplate  string `json:"compilation_template"`    // template for VA compilations (defaults to "Various Artists/...")
+	PlaylistPath         string `json:"playlist_path"`           // separate folder for playlist downloads
+	PlaylistTemplate     string `json:"playlist_template"`       // e.g. "{position:02d} {artist} - {title}"
+	MaxDownloadWorkers   int    `json:"max_download_workers"`    // concurrent download workers (default 3)
+	PlaylistAutoSyncMins *int   `json:"playlist_auto_sync_mins"` // interval for auto-sync (nil/0 = disabled, default 30)
 }
 
 // AuthConfig holds authentication settings.
@@ -55,6 +55,15 @@ var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 
 func intPtr(v int) *int { return &v }
 
+// Default library paths target the Docker image's mount points. Every
+// installation runs in Docker; local/command-line runs override these with
+// GROOVEARR_* env vars before the config file is first created.
+const (
+	DefaultLibraryPath  = "/music"
+	DefaultDownloadPath = "/downloads"
+	DefaultPlaylistPath = "/playlists"
+)
+
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
@@ -64,15 +73,31 @@ func DefaultConfig() Config {
 		AlbumSources:   []string{},
 		DownloadClient: "",
 		Library: LibraryConfig{
-			DownloadPath:         "./downloads",
-			LibraryPath:          "./music",
+			DownloadPath:         DefaultDownloadPath,
+			LibraryPath:          DefaultLibraryPath,
 			FolderTemplate:       "{artist}/{album} ({year})/{track:02d} - {title}",
-			CompilationTemplate:   "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
-			PlaylistPath:         "./playlists",
+			CompilationTemplate:  "Various Artists/{album} ({year})/{track:02d}. {artist} - {title}",
+			PlaylistPath:         DefaultPlaylistPath,
 			MaxDownloadWorkers:   3,
 			PlaylistTemplate:     "{position:02d} {artist} - {title}",
-			PlaylistAutoSyncMins:  intPtr(30),
+			PlaylistAutoSyncMins: intPtr(30),
 		},
+	}
+}
+
+// applyEnvPathDefaults overrides the default library paths from GROOVEARR_*
+// environment variables. Applied only when no config file exists yet — a
+// persisted config keeps whatever the user wrote. The Docker defaults are the
+// container mount points; a local command-line run sets these env vars instead.
+func applyEnvPathDefaults(cfg *Config) {
+	if p := os.Getenv("GROOVEARR_LIBRARY_PATH"); p != "" {
+		cfg.Library.LibraryPath = p
+	}
+	if p := os.Getenv("GROOVEARR_DOWNLOAD_PATH"); p != "" {
+		cfg.Library.DownloadPath = p
+	}
+	if p := os.Getenv("GROOVEARR_PLAYLIST_PATH"); p != "" {
+		cfg.Library.PlaylistPath = p
 	}
 }
 
@@ -426,6 +451,31 @@ func expandPaths(cfg *Config) {
 	if cfg.Library.PlaylistPath != "" && !filepath.IsAbs(cfg.Library.PlaylistPath) {
 		if abs, err := filepath.Abs(cfg.Library.PlaylistPath); err == nil {
 			cfg.Library.PlaylistPath = abs
+		}
+	}
+}
+
+// contractPaths restores the previous raw (on-disk) path form when a path was
+// set to the normalized expansion of it. Consumers like the settings UI echo
+// the absolute value Get() returns, so an unchanged relative path would
+// otherwise be rewritten to a machine-specific absolute path on every save.
+// Comparison is on the cleaned form so a trailing slash or ".." in the echo
+// still contracts. Any genuinely new value (different absolute path, or a new
+// relative path) is kept as written.
+func contractPaths(cur *LibraryConfig, prev LibraryConfig) {
+	if prev.DownloadPath != "" {
+		if abs, err := filepath.Abs(prev.DownloadPath); err == nil && filepath.Clean(cur.DownloadPath) == abs {
+			cur.DownloadPath = prev.DownloadPath
+		}
+	}
+	if prev.LibraryPath != "" {
+		if abs, err := filepath.Abs(prev.LibraryPath); err == nil && filepath.Clean(cur.LibraryPath) == abs {
+			cur.LibraryPath = prev.LibraryPath
+		}
+	}
+	if prev.PlaylistPath != "" {
+		if abs, err := filepath.Abs(prev.PlaylistPath); err == nil && filepath.Clean(cur.PlaylistPath) == abs {
+			cur.PlaylistPath = prev.PlaylistPath
 		}
 	}
 }

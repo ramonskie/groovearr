@@ -34,11 +34,16 @@ func LoadOrCreate(path string) (*Persistence, error) {
 	return p, nil
 }
 
-// Get returns a copy of the current config.
+// Get returns a copy of the current config. Relative library paths are
+// normalized to absolute in the returned copy so every consumer (scanner,
+// downloads, image serving) resolves the same root; the on-disk file keeps
+// whatever the user wrote.
 func (p *Persistence) Get() Config {
 	p.mu.RLock()
 	defer p.mu.RUnlock()
-	return p.cfg
+	cfg := p.cfg
+	expandPaths(&cfg)
+	return cfg
 }
 
 // Update merges partial config and persists to disk.
@@ -46,9 +51,14 @@ func (p *Persistence) Get() Config {
 func (p *Persistence) Update(fn func(cfg *Config) error) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	prev := p.cfg.Library
 	if err := fn(&p.cfg); err != nil {
 		return err
 	}
+	// The settings UI echoes the normalized absolute paths Get() returns back
+	// on save. Contract that echo so unchanged relative paths stay relative on
+	// disk instead of being rewritten to machine-specific absolute values.
+	contractPaths(&p.cfg.Library, prev)
 	return p.save()
 }
 
@@ -88,7 +98,15 @@ func (p *Persistence) reload() error {
 		}
 	}
 
+	// First run: apply GROOVEARR_* path defaults before persisting. A file
+	// that already exists keeps whatever the user wrote.
+	if _, statErr := os.Stat(p.path); os.IsNotExist(statErr) {
+		applyEnvPathDefaults(&cfg)
+	}
+
 	p.cfg = cfg
+	// Paths are normalized to absolute only on read (see Get); the on-disk
+	// file keeps whatever the user wrote, and every load re-reads it as-is.
 
 	// If the file didn't exist, readConfigFile returned defaults — persist them.
 	if _, statErr := os.Stat(p.path); os.IsNotExist(statErr) || needsSave {
