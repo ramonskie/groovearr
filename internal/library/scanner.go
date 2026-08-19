@@ -2,6 +2,7 @@
 package library
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"log/slog"
@@ -46,6 +47,7 @@ type tagMeta struct {
 	TrackNum int
 	DiscNum  int
 	Genre    string
+	Picture  *tag.Picture
 }
 
 // readFileTags attempts to read audio metadata from a file using ID3/FLAC/Vorbis tags.
@@ -75,6 +77,7 @@ func readFileTags(path string) (*tagMeta, error) {
 		TrackNum: trackNum,
 		DiscNum:  discNum,
 		Genre:    strings.TrimSpace(m.Genre()),
+		Picture:  m.Picture(),
 	}
 
 	// If no structured artist, try AlbumArtist.
@@ -88,6 +91,184 @@ func readFileTags(path string) (*tagMeta, error) {
 	}
 
 	return meta, nil
+}
+
+// CoverCandidates are common cover image filenames that mark an album
+// directory as already having artwork on disk. Shared with the HTTP layer so
+// the extractor and the cover server agree on what counts as a cover.
+var CoverCandidates = []string{
+	"cover.jpg", "cover.jpeg", "cover.png", "cover.webp", "cover.gif",
+	"folder.jpg", "folder.jpeg", "folder.png", "folder.webp",
+	"front.jpg", "front.png",
+}
+
+// CoverFilePath returns the path of the first existing cover image in dir, or
+// "" when none of the known cover names exist.
+func CoverFilePath(dir string) string {
+	for _, name := range CoverCandidates {
+		p := filepath.Join(dir, name)
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+	return ""
+}
+
+// HasCoverFile reports whether dir already contains a cover image.
+func HasCoverFile(dir string) bool {
+	return CoverFilePath(dir) != ""
+}
+
+// coverExt maps an embedded picture to a safe cover file extension.
+func coverExt(p *tag.Picture) string {
+	// Prefer the MIME type (the authoritative field embedded in the tag), then
+	// sniff the actual bytes, then the extension. The extension can lie — tag
+	// parsers often default it to "jpg" even when the embedded data is PNG.
+	switch strings.ToLower(p.MIMEType) {
+	case "image/jpeg":
+		return "jpg"
+	case "image/png":
+		return "png"
+	case "image/webp":
+		return "webp"
+	case "image/gif":
+		return "gif"
+	}
+	if ext := sniffImageExt(p.Data); ext != "" {
+		return ext
+	}
+	switch strings.ToLower(strings.TrimPrefix(strings.TrimSpace(p.Ext), ".")) {
+	case "jpg", "png", "webp", "gif":
+		return strings.ToLower(strings.TrimPrefix(strings.TrimSpace(p.Ext), "."))
+	case "jpeg":
+		return "jpg"
+	}
+	return "jpg"
+}
+
+// sniffImageExt detects an image format from its magic bytes, falling back to
+// "jpg". Used when a tag picture carries no usable extension or MIME type so a
+// PNG isn't written to a .jpg file.
+func sniffImageExt(data []byte) string {
+	switch {
+	case len(data) >= 8 && bytes.HasPrefix(data, []byte("\x89PNG\r\n\x1a\n")):
+		return "png"
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return "jpg"
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "webp"
+	case len(data) >= 6 && (bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a"))):
+		return "gif"
+	}
+	return "jpg"
+}
+
+// discDirRE matches album subfolders that hold a disc, e.g. "Disc 1", "CD2",
+// "disc-01". Tracks inside these sit one level deeper than {artist}/{album}.
+var discDirRE = regexp.MustCompile(`(?i)^(disc|disk|cd|dvd)\s*-?\s*\d+$`)
+
+// AlbumDirFromTrack resolves the album directory for a track file path. For
+// the standard {library}/{artist}/{album}/track layout this is the track's
+// parent; for multi-disc layouts ({album}/Disc N/track) it is the disc
+// folder's parent. Returns "" for a path with no parent.
+func AlbumDirFromTrack(trackPath string) string {
+	dir := filepath.Dir(trackPath)
+	if isDiscDir(dir) {
+		return filepath.Dir(dir)
+	}
+	return dir
+}
+
+// ArtistDirFromTrack resolves the artist directory for a track file path —
+// the parent of the album directory.
+func ArtistDirFromTrack(trackPath string) string {
+	return filepath.Dir(AlbumDirFromTrack(trackPath))
+}
+
+// isDiscDir reports whether dir looks like a disc subfolder of an album. A
+// matching name alone isn't enough — an album literally named "Disc 1" or
+// "CD2" would otherwise be misclassified as a disc folder — so the parent must
+// also contain a sibling disc-named directory. Reads the parent directory;
+// only called for disc-named folders.
+func isDiscDir(dir string) bool {
+	if !discDirRE.MatchString(filepath.Base(dir)) {
+		return false
+	}
+	parent := filepath.Dir(dir)
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		return false
+	}
+	base := filepath.Base(dir)
+	for _, e := range entries {
+		if e.IsDir() && e.Name() != base && discDirRE.MatchString(e.Name()) {
+			return true
+		}
+	}
+	return false
+}
+
+// writeAlbumCover extracts an embedded picture to the album and artist
+// directories and records the artist thumbnail in the library store. It is
+// best-effort — failures are logged and never fail the scan.
+//
+// libraryRoot guards both writes: artwork is never written into the scan root
+// itself (tracks loose in the root, or an album that resolves to the root),
+// and the artist image only runs when the artist directory is nested below
+// the scan root.
+func (s *Scanner) writeAlbumCover(ctx context.Context, trackPath, libraryRoot, artistName string, p *tag.Picture) {
+	rootClean := filepath.Clean(libraryRoot)
+	albumDir := AlbumDirFromTrack(trackPath)
+	if albumDir == rootClean {
+		return // never write artwork into the library root
+	}
+
+	ext := coverExt(p)
+
+	coverPath := filepath.Join(albumDir, "cover."+ext)
+	if _, err := os.Stat(coverPath); err != nil {
+		if err := os.WriteFile(coverPath, p.Data, 0o644); err != nil {
+			s.log.Warn("write cover failed", "path", coverPath, "error", err, "component", "scanner")
+		} else {
+			s.log.Info("extracted cover art", "path", coverPath, "component", "scanner")
+		}
+	}
+
+	// Artist image lives one level up from the album directory, but only in a
+	// nested {artist}/{album} layout — never the scan root itself.
+	artistDir := ArtistDirFromTrack(trackPath)
+	if artistDir == rootClean {
+		return
+	}
+	artistPath := filepath.Join(artistDir, "artist."+ext)
+	if _, err := os.Stat(artistPath); err != nil {
+		if err := os.WriteFile(artistPath, p.Data, 0o644); err != nil {
+			s.log.Warn("write artist image failed", "path", artistPath, "error", err, "component", "scanner")
+		} else {
+			s.log.Info("extracted artist image", "path", artistPath, "component", "scanner")
+		}
+	}
+
+	if artistName == "" {
+		return
+	}
+	// Compilations group other artists' tracks under a directory whose name
+	// doesn't match the embedded artist (e.g. "Various Artists"). Recording
+	// the image as that artist's thumbnail would point at a file outside
+	// their own directory — skip the thumb write (the image file itself is
+	// still useful as the directory's portrait).
+	if !strings.EqualFold(filepath.Base(artistDir), artistName) {
+		return
+	}
+	artist, err := s.store.GetArtistByName(ctx, artistName)
+	if err != nil || artist == nil {
+		return
+	}
+	// Only record a local thumbnail when the artist has none yet, or already
+	// points at a local artist.* image — never clobber a remote URL.
+	if artist.ThumbURL == "" || strings.HasPrefix(artist.ThumbURL, "artist.") {
+		_ = s.store.SetArtistThumbURL(ctx, artist.ID, "artist."+ext)
+	}
 }
 
 // TagMeta holds metadata extracted from audio file tags (exported version of tagMeta).
@@ -126,17 +307,56 @@ var audioExtensions = map[string]bool{
 	".wma": true, ".wav": true,
 }
 
+// CountAudioFiles returns the number of audio files under root. Used to
+// estimate scan progress ahead of time. The walk aborts when ctx is cancelled.
+func CountAudioFiles(ctx context.Context, root string) (int, error) {
+	count := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if d.IsDir() {
+			return nil
+		}
+		if audioExtensions[strings.ToLower(filepath.Ext(path))] {
+			count++
+		}
+		return nil
+	})
+	return count, err
+}
+
 // ScanPath walks a directory tree and imports any new audio files.
 func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) {
+	return s.ScanPathWithProgress(ctx, root, nil)
+}
+
+// ScanPathWithProgress walks a directory tree and imports any new audio files,
+// invoking onProgress with each audio file path it examines. The walk stops
+// early when ctx is cancelled.
+func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgress func(path string)) (ScanStats, error) {
 	absRoot, err := filepath.Abs(root)
 	if err != nil {
 		absRoot = root
 	}
 
 	var stats ScanStats
+	// coverAttempts bounds how many audio files per album directory are probed
+	// for embedded artwork in a single run. The first file may lack a picture
+	// while a sibling has one (e.g. art embedded only in track 1 but lexical
+	// order makes another file first), so we try a few files before giving up.
+	// Once a cover lands on disk (or the cap is hit) extraction stops.
+	coverAttempts := make(map[string]int)
+	const maxCoverAttempts = 4
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
+		}
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if d.IsDir() {
 			return nil
@@ -148,6 +368,17 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		}
 
 		stats.Scanned++
+		if onProgress != nil {
+			onProgress(path)
+		}
+		// Resolve the album directory so multi-disc albums ({album}/Disc N)
+		// share one cover/artist entry and one attempt budget.
+		albumDir := AlbumDirFromTrack(path)
+
+		needCover := coverAttempts[albumDir] < maxCoverAttempts
+		if needCover {
+			coverAttempts[albumDir]++
+		}
 
 		// Check if already imported (use absolute path).
 		existing, dbErr := s.store.GetTrackByFilePath(ctx, path)
@@ -158,6 +389,11 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		}
 		if existing != nil {
 			stats.Skipped++
+			// Backfill embedded artwork for albums that were scanned before
+			// cover extraction existed.
+			if needCover && !HasCoverFile(albumDir) {
+				s.backfillCover(ctx, path, absRoot)
+			}
 			return nil
 		}
 
@@ -216,10 +452,25 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 		}
 		_ = trackID
 
+		// Extract embedded artwork for newly imported albums.
+		if needCover && tags != nil && tags.Picture != nil && !HasCoverFile(albumDir) {
+			s.writeAlbumCover(ctx, path, absRoot, artistName, tags.Picture)
+		}
+
 		stats.Imported++
 		return nil
 	})
 	return stats, err
+}
+
+// backfillCover extracts embedded artwork for an already-imported album whose
+// directory has no cover file on disk.
+func (s *Scanner) backfillCover(ctx context.Context, path, libraryRoot string) {
+	tags, err := readFileTags(path)
+	if err != nil || tags == nil || tags.Picture == nil {
+		return
+	}
+	s.writeAlbumCover(ctx, path, libraryRoot, tags.Artist, tags.Picture)
 }
 
 // FormatHumanSize returns a human-readable file size.

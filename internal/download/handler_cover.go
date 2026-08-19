@@ -43,11 +43,12 @@ func (h *CoverArtHandler) Handle(ctx context.Context, record *Record) error {
 		return nil
 	}
 
-	albumDir := filepath.Dir(record.FilePath)
+	albumDir := library.AlbumDirFromTrack(record.FilePath)
 	coverPath := filepath.Join(albumDir, "cover.jpg")
 
-	// Skip if cover already cached.
-	if _, err := os.Stat(coverPath); err == nil {
+	// Skip if a cover already exists in any format (the scanner may have
+	// extracted cover.png/webp from the files).
+	if library.HasCoverFile(albumDir) {
 		return nil
 	}
 

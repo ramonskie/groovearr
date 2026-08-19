@@ -477,3 +477,56 @@ func writeVorbisString(buf *bytes.Buffer, s string) {
 func writeVorbisComment(buf *bytes.Buffer, key, value string) {
 	writeVorbisString(buf, key+"="+value)
 }
+
+func TestAlbumDirFromTrack(t *testing.T) {
+	root := t.TempDir()
+	artistDir := filepath.Join(root, "Artist")
+	albumDir := filepath.Join(artistDir, "Album")
+	// Multi-disc album: Disc 1 needs a Disc 2 sibling to be recognized.
+	os.MkdirAll(filepath.Join(albumDir, "Disc 2"), 0o755)
+	// An album literally named "Disc 1" — parent has no disc-named sibling.
+	literalDiscAlbum := filepath.Join(artistDir, "Disc 1")
+	os.MkdirAll(literalDiscAlbum, 0o755)
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"standard", filepath.Join(albumDir, "01 - Track.flac"), albumDir},
+		{"multi-disc", filepath.Join(albumDir, "Disc 1", "01 - Track.flac"), albumDir},
+		{"multi-disc-cd", filepath.Join(albumDir, "CD2", "02 - Track.flac"), albumDir},
+		{"disc-named-album", filepath.Join(literalDiscAlbum, "01 - Track.flac"), literalDiscAlbum},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := AlbumDirFromTrack(tt.path); got != tt.want {
+				t.Errorf("AlbumDirFromTrack(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestArtistDirFromTrack(t *testing.T) {
+	root := t.TempDir()
+	artistDir := filepath.Join(root, "Artist")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(filepath.Join(albumDir, "Disc 2"), 0o755)
+
+	tests := []struct {
+		name string
+		path string
+		want string
+	}{
+		{"standard", filepath.Join(albumDir, "01 - Track.flac"), artistDir},
+		{"multi-disc", filepath.Join(albumDir, "Disc 1", "01 - Track.flac"), artistDir},
+		{"multi-disc-cd", filepath.Join(albumDir, "CD2", "02 - Track.flac"), artistDir},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ArtistDirFromTrack(tt.path); got != tt.want {
+				t.Errorf("ArtistDirFromTrack(%q) = %q, want %q", tt.path, got, tt.want)
+			}
+		})
+	}
+}

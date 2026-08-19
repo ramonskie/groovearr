@@ -76,7 +76,7 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 
 	// Transform local image paths to API URLs for the frontend.
 	for i := range artists {
-		if artists[i].ThumbURL == "artist.jpg" {
+		if strings.HasPrefix(artists[i].ThumbURL, "artist.") {
 			artists[i].ThumbURL = fmt.Sprintf("/api/artist-image/%d", artists[i].ID)
 		}
 	}
@@ -583,7 +583,7 @@ func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
 		return
 	}
-	if artist.ThumbURL == "artist.jpg" {
+	if strings.HasPrefix(artist.ThumbURL, "artist.") {
 		artist.ThumbURL = fmt.Sprintf("/api/artist-image/%d", artist.ID)
 	}
 	writeJSON(w, http.StatusOK, artist)
@@ -652,7 +652,7 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 	var albumDir string
 	tracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
 	if len(tracks) > 0 && tracks[0].FilePath != "" {
-		albumDir = filepath.Dir(tracks[0].FilePath)
+		albumDir = library.AlbumDirFromTrack(tracks[0].FilePath)
 	} else {
 		// Fall back to constructing the path from the folder template.
 		resolver := library.NewPathResolver(cfg.Library.FolderTemplate)
@@ -678,26 +678,49 @@ func (s *Server) handleCoverArt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	coverPath := filepath.Join(albumDir, "cover.jpg")
-	f, err := os.Open(coverPath)
-	if err != nil {
+	if err := serveLibraryImage(w, r, albumDir, coverImageNames); err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, fmt.Errorf("cover not found"))
-		} else {
-			s.log.Error("cover open failed", "path", coverPath, "error", err, "component", "api")
-			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
-		return
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		s.log.Error("cover stat failed", "path", coverPath, "error", err, "component", "api")
+		s.log.Error("cover serve failed", "album_id", albumID, "error", err, "component", "api")
 		writeError(w, http.StatusInternalServerError, err)
-		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
-	http.ServeContent(w, r, "cover.jpg", fi.ModTime(), f)
+}
+
+// coverImageNames and artistImageNames are the local image filenames the
+// library serves for albums and artists respectively. The cover list is shared
+// with the scanner so extraction and serving agree on what counts as a cover.
+var coverImageNames = library.CoverCandidates
+
+var artistImageNames = []string{
+	"artist.jpg", "artist.jpeg", "artist.png", "artist.webp", "artist.gif",
+}
+
+// serveLibraryImage opens the first existing file from candidates in dir and
+// streams it to the client with caching headers. Returns os.ErrNotExist when
+// none of the candidates exist.
+func serveLibraryImage(w http.ResponseWriter, r *http.Request, dir string, candidates []string) error {
+	for _, name := range candidates {
+		p := filepath.Join(dir, name)
+		f, err := os.Open(p)
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		fi, err := f.Stat()
+		if err != nil {
+			f.Close()
+			return err
+		}
+		w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
+		http.ServeContent(w, r, name, fi.ModTime(), f)
+		f.Close()
+		return nil
+	}
+	return os.ErrNotExist
 }
 
 // handleArtistImage serves the artist.jpg image from the artist's library directory.
@@ -726,8 +749,8 @@ func (s *Server) handleArtistImage(w http.ResponseWriter, r *http.Request) {
 	// Try to find the artist directory from existing tracks.
 	tracks, _ := s.store.GetTracksByArtist(ctx, artistID)
 	if len(tracks) > 0 && tracks[0].FilePath != "" {
-		// Tracks are stored as {artist}/{album}/track.ext, so parent-of-parent = artist dir.
-		artistDir = filepath.Dir(filepath.Dir(tracks[0].FilePath))
+		// Tracks live at {artist}/{album}/track.ext (or {artist}/{album}/Disc N/track.ext).
+		artistDir = library.ArtistDirFromTrack(tracks[0].FilePath)
 	} else {
 		// Fallback: construct from library root + artist name.
 		artistDir = filepath.Join(cfg.Library.LibraryPath, artist.Name)
@@ -739,24 +762,12 @@ func (s *Server) handleArtistImage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	imagePath := filepath.Join(artistDir, "artist.jpg")
-	f, err := os.Open(imagePath)
-	if err != nil {
+	if err := serveLibraryImage(w, r, artistDir, artistImageNames); err != nil {
 		if os.IsNotExist(err) {
 			writeError(w, http.StatusNotFound, fmt.Errorf("artist image not found"))
-		} else {
-			s.log.Error("artist image open failed", "path", imagePath, "error", err, "component", "api")
-			writeError(w, http.StatusInternalServerError, err)
+			return
 		}
-		return
-	}
-	defer f.Close()
-	fi, err := f.Stat()
-	if err != nil {
-		s.log.Error("artist image stat failed", "path", imagePath, "error", err, "component", "api")
+		s.log.Error("artist image serve failed", "artist_id", artistID, "error", err, "component", "api")
 		writeError(w, http.StatusInternalServerError, err)
-		return
 	}
-	w.Header().Set("Cache-Control", "public, max-age=300, must-revalidate")
-	http.ServeContent(w, r, "artist.jpg", fi.ModTime(), f)
 }
