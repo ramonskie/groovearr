@@ -62,13 +62,28 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 	var artists []domain.Artist
 	var err error
 	if q != "" {
-		artists, err = s.store.SearchArtists(ctx, q, limit)
+		// SearchArtists has no offset — fetch offset+limit and slice so search
+		// results paginate identically to the plain list.
+		fetched, err := s.store.SearchArtists(ctx, q, offset+limit)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
+		start := offset
+		if start > len(fetched) {
+			start = len(fetched)
+		}
+		end := start + limit
+		if end > len(fetched) {
+			end = len(fetched)
+		}
+		artists = fetched[start:end]
 	} else {
 		artists, err = s.store.ListArtists(ctx, offset, limit)
-	}
-	if err != nil {
-		writeError(w, http.StatusInternalServerError, err)
-		return
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err)
+			return
+		}
 	}
 	if artists == nil {
 		artists = []domain.Artist{}

@@ -438,6 +438,9 @@ func (e *validationError) Error() string { return "validation failed" }
 func parsePagination(r *http.Request) (q string, offset, limit int) {
 	q = r.URL.Query().Get("q")
 	offset, _ = strconv.Atoi(r.URL.Query().Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
 	limit, _ = strconv.Atoi(r.URL.Query().Get("limit"))
 	if limit <= 0 || limit > 1000 {
 		limit = 200

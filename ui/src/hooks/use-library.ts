@@ -1,4 +1,10 @@
-import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
+import { useMemo } from "react";
+import {
+  useInfiniteQuery,
+  useQuery,
+  useMutation,
+  useQueryClient,
+} from "@tanstack/react-query";
 import {
   getLibraryTracks,
   getLibraryArtists,
@@ -10,6 +16,7 @@ import {
   downloadMissingForAlbum,
   scanLibrary,
 } from "../api/client";
+import type { Artist } from "../api/types";
 
 // ─── Shared cache config ────────────────────────────────────────────
 
@@ -18,6 +25,12 @@ const libDefaults = {
   staleTime: 30 * 60 * 1000,       // 30m — refetch in background after this
   gcTime: 24 * 60 * 60 * 1000,     // 24h — don't garbage collect
 } as const;
+
+// ─── Artist list pagination ─────────────────────────────────────────
+
+const ARTIST_PAGE_SIZE = 100;
+// Request one extra item per page so we can detect whether more pages exist.
+const ARTIST_FETCH_LIMIT = ARTIST_PAGE_SIZE + 1;
 
 // ─── Queries ────────────────────────────────────────────────────────
 
@@ -30,11 +43,27 @@ export function useLibraryTracks(q?: string) {
 }
 
 export function useLibraryArtists(q?: string) {
-  return useQuery({
+  const query = useInfiniteQuery({
     queryKey: ["library", "artists", q] as const,
-    queryFn: () => getLibraryArtists({ q }),
+    queryFn: ({ pageParam }) =>
+      getLibraryArtists({ q, offset: pageParam as number, limit: ARTIST_FETCH_LIMIT }),
+    initialPageParam: 0,
+    getNextPageParam: (lastPage, allPages) => {
+      if (!lastPage || lastPage.length <= ARTIST_PAGE_SIZE) return undefined;
+      return allPages.length * ARTIST_PAGE_SIZE;
+    },
     ...libDefaults,
   });
+
+  const artists = useMemo(() => {
+    const items: Artist[] = [];
+    for (const page of query.data?.pages ?? []) {
+      items.push(...(page ?? []).slice(0, ARTIST_PAGE_SIZE));
+    }
+    return items;
+  }, [query.data]);
+
+  return { ...query, artists };
 }
 
 export function useLibraryAlbums(q?: string) {

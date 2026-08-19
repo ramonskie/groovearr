@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import type { Artist } from "../../api/types";
@@ -8,6 +8,9 @@ interface ArtistsSectionProps {
   isLoading: boolean;
   isError: boolean;
   error: unknown;
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+  onLoadMore?: () => void;
   onSelectArtist: (artistId: number) => void;
 }
 
@@ -62,8 +65,54 @@ export default function ArtistsSection({
   isLoading,
   isError,
   error,
+  hasNextPage,
+  isFetchingNextPage,
+  onLoadMore,
   onSelectArtist,
 }: ArtistsSectionProps) {
+  // Infinite scroll: load the next page when the sentinel scrolls into view.
+  // The observer is created once and reads live values through refs, so a
+  // finished page load never re-triggers a chain of loads while the sentinel
+  // stays in view — the next load waits for the user to scroll again.
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
+  const hasNextPageRef = useRef(hasNextPage);
+  hasNextPageRef.current = hasNextPage;
+  const fetchingRef = useRef(false);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries[0]?.isIntersecting &&
+          hasNextPageRef.current &&
+          !fetchingRef.current &&
+          !isError &&
+          onLoadMoreRef.current
+        ) {
+          fetchingRef.current = true;
+          // Swallow the rejection — fetchNextPage failure is surfaced via
+          // isError; unhandled rejections would spam the console.
+          Promise.resolve(onLoadMoreRef.current())
+            .catch(() => {})
+            .finally(() => {
+              fetchingRef.current = false;
+            });
+        }
+      },
+      { rootMargin: "300px" },
+    );
+    observer.observe(el);
+    observerRef.current = observer;
+    return () => observer.disconnect();
+    // Created once; live values come from the refs. Only error-state changes
+    // warrant a rebuild (to stop loading on failure).
+  }, [isError]);
+
   if (isLoading) {
     return (
       <section className="mb-6">
@@ -120,6 +169,14 @@ export default function ArtistsSection({
           />
         ))}
       </div>
+      {hasNextPage && (
+        <div
+          ref={sentinelRef}
+          className="flex items-center justify-center py-6"
+        >
+          {isFetchingNextPage ? <Spinner size="sm" /> : null}
+        </div>
+      )}
     </section>
   );
 }

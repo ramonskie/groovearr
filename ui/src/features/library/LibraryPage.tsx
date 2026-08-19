@@ -113,10 +113,13 @@ export default function LibraryPage() {
       {/* Artist list view */}
       {selectedArtistId === null && (
         <ArtistsSection
-          artists={artists.data ?? []}
+          artists={artists.artists}
           isLoading={artists.isLoading}
           isError={artists.isError}
           error={artists.error}
+          hasNextPage={artists.hasNextPage}
+          isFetchingNextPage={artists.isFetchingNextPage}
+          onLoadMore={artists.fetchNextPage}
           onSelectArtist={handleSelectArtist}
         />
       )}
