@@ -549,39 +549,6 @@ func getLibraryAlbumDiscoveryData(ctx context.Context, s *Server, albumID int64,
 	return nil, fmt.Errorf("no discovery data found for album %d", albumID)
 }
 
-func (s *Server) handleLibraryScan(w http.ResponseWriter, r *http.Request) {
-	cfg := s.cfg.Get()
-
-	// Scan the library root only — download path is staging, not scanned.
-	paths := []string{cfg.Library.LibraryPath}
-	if paths[0] == "" {
-		paths[0] = "./music"
-	}
-
-	ctx := r.Context()
-	var agg library.ScanStats
-	for _, p := range paths {
-		stats, err := s.scanner.ScanPath(ctx, p)
-		if err != nil {
-			s.log.Error("scan error", "path", p, "error", err, "component", "scanner")
-			agg.Errors++
-			continue
-		}
-		agg.Imported += stats.Imported
-		agg.Scanned += stats.Scanned
-		agg.Skipped += stats.Skipped
-		agg.Errors += stats.Errors
-	}
-
-	writeJSON(w, http.StatusOK, map[string]any{
-		"scanned":  agg.Scanned,
-		"imported": agg.Imported,
-		"skipped":  agg.Skipped,
-		"errors":   agg.Errors,
-		"paths":    paths,
-	})
-}
-
 func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 	idStr := r.PathValue("artistID")
 	id, err := strconv.ParseInt(idStr, 10, 64)

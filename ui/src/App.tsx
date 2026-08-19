@@ -12,6 +12,7 @@ import Spinner from "./components/Spinner";
 import { useAuth } from "./context/AuthContext";
 import { useDownloads } from "./hooks/use-downloads";
 import { useSetupStatus } from "./hooks/use-config";
+import { useJobWatcher } from "./hooks/use-job";
 import type { DownloadState } from "./api/types";
 
 const LoginPage = lazy(() => import("./features/auth/LoginPage"));
@@ -106,6 +107,10 @@ function AppShell() {
   const navigate = useNavigate();
   const { data: downloads } = useDownloads();
   const { logout, authMethod } = useAuth();
+
+  // Keep the background-job query alive app-wide and refresh the library when
+  // a scan/enrich job finishes.
+  useJobWatcher();
 
   const activePage = pathToPage(location.pathname);
 

@@ -17,7 +17,8 @@ import type {
   Track,
   Artist,
   Album,
-  ScanStats,
+  Job,
+  StartJobResponse,
   PaginationParams,
   PlaylistSourceItem,
   Playlist,
@@ -221,8 +222,22 @@ export function getLibraryAlbums(params?: PaginationParams): Promise<Album[]> {
   return request<Album[]>(`/api/library/albums${toQuery(params)}`);
 }
 
-export function scanLibrary(): Promise<ScanStats> {
-  return request<ScanStats>("/api/library/scan", { method: "POST" });
+// ─── Background jobs ────────────────────────────────────────────────
+
+export function getJob(): Promise<Job | null> {
+  return request<Job | null>("/api/jobs");
+}
+
+export function startScanJob(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/jobs/scan", { method: "POST" });
+}
+
+export function startEnrichJob(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/jobs/enrich", { method: "POST" });
+}
+
+export function cancelJob(): Promise<Job | null> {
+  return request<Job | null>("/api/jobs/cancel", { method: "POST" });
 }
 
 export function getCoverArt(albumId: number): Promise<Blob> {

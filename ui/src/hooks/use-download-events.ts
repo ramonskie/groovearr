@@ -76,6 +76,18 @@ export function useDownloadEvents() {
       queryClient.invalidateQueries({ queryKey: ["library"] });
     });
 
+    // A finished background scan/enrich job may have changed the library.
+    es.addEventListener("job_completed", (e: MessageEvent) => {
+      try {
+        const job = JSON.parse(e.data) as { type?: string };
+        if (job?.type === "scan" || job?.type === "enrich") {
+          queryClient.invalidateQueries({ queryKey: ["library"] });
+        }
+      } catch {
+        // Malformed event — ignore.
+      }
+    });
+
     es.onerror = () => {
       if (!mountedRef.current) return;
       es.close();

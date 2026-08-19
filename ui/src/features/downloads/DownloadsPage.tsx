@@ -7,8 +7,8 @@ import {
   useRetryDownload,
   useClearCompleted,
 } from "../../hooks/use-downloads";
-import { useScanLibrary } from "../../hooks/use-library";
 import { useDownloadEvents } from "../../hooks/use-download-events";
+import { useStartScanJob } from "../../hooks/use-job";
 import { useScanOnComplete } from "../../hooks/use-scan-on-complete";
 import { toast } from "sonner";
 import Button from "../../components/Button";
@@ -38,10 +38,10 @@ function DownloadsPage() {
   const cancelMutation = useCancelDownload();
   const retryMutation = useRetryDownload();
   const clearCompleted = useClearCompleted();
-  const scanLibrary = useScanLibrary();
+  const startScan = useStartScanJob();
 
   useDownloadEvents();
-  const { resetScannedIds } = useScanOnComplete({ downloads, scanLibrary });
+  const { resetScannedIds } = useScanOnComplete({ downloads, startScan });
 
   const [cancellingId, setCancellingId] = useState<string | null>(null);
   const [searchParams, setSearchParams] = useSearchParams();

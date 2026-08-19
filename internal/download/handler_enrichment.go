@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/tagging"
 )
@@ -42,6 +44,9 @@ type MetadataEnrichmentHandler struct {
 
 	enrichMu  sync.Mutex
 	enriching map[int64]chan struct{} // artistID → completion signal for dedup
+
+	bulkMu      sync.Mutex
+	bulkArtists map[int64]bool // bulk-job artists whose image was attempted this run
 }
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
@@ -61,6 +66,7 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *dis
 		httpClient:   &http.Client{Timeout: 30 * time.Second},
 		tagger:       tagging.New(logger),
 		enriching:    make(map[int64]chan struct{}),
+		bulkArtists:  make(map[int64]bool),
 	}
 }
 
@@ -69,6 +75,22 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *dis
 // a restart. Pass nil to fall back to registration order.
 func (h *MetadataEnrichmentHandler) SetProviderOrder(order *metadata.ProviderOrder) {
 	h.providerOrder = order
+}
+
+// EnrichLibraryTrack runs the full metadata enrichment for an existing library
+// track, without a download record. Used by the background enrichment job to
+// enrich a scanned library. Missing metadata fields are filled in; existing
+// values are preserved.
+func (h *MetadataEnrichmentHandler) EnrichLibraryTrack(ctx context.Context, trackID int64) error {
+	return h.enrichTrack(ctx, &Record{LibraryTrackID: trackID}, true)
+}
+
+// ResetBulk clears the per-run artist-image dedup state. Call once at the
+// start of each bulk enrichment job so artists are retried across runs.
+func (h *MetadataEnrichmentHandler) ResetBulk() {
+	h.bulkMu.Lock()
+	defer h.bulkMu.Unlock()
+	h.bulkArtists = make(map[int64]bool)
 }
 
 // orderedProviders returns configured providers sorted by providerOrder.
@@ -105,7 +127,20 @@ func (h *MetadataEnrichmentHandler) orderedProviders() []metadata.Provider {
 // Failures are non-fatal — the import continues with whatever metadata
 // was successfully enriched.
 func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) error {
-	if record.LibraryTrackID == 0 || record.FilePath == "" {
+	// Enrichment failures are non-fatal for downloads — the record must never
+	// be marked failed because a provider lookup failed. enrichTrack already
+	// logs the failure; the returned error is only surfaced to the bulk job.
+	_ = h.enrichTrack(ctx, record, false)
+	return nil
+}
+
+// enrichTrack is the shared implementation of Handle. When bulk is true (the
+// bulk library job), already-enriched tracks are skipped entirely and the
+// artist-image refresh is attempted at most once per artist per run (tracked
+// in bulkArtists) — so a failed image fetch for one artist never causes every
+// subsequent track of that artist to re-hit the metadata providers.
+func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Record, bulk bool) error {
+	if record.LibraryTrackID == 0 {
 		return nil
 	}
 
@@ -114,31 +149,65 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 	track, err := h.libStore.GetTrack(ctx, record.LibraryTrackID)
 	if err != nil {
 		h.log.Error("track lookup failed", "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
-		return nil
+		return fmt.Errorf("track lookup: %w", err)
 	}
 	if track == nil {
 		h.log.Warn("track not found, skipping", "track_id", record.LibraryTrackID, "component", "enrichment")
-		return nil
+		return fmt.Errorf("track %d not found", record.LibraryTrackID)
+	}
+	if record.FilePath == "" {
+		record.FilePath = track.FilePath
+	}
+	if record.FilePath == "" {
+		return fmt.Errorf("track %d has no file path", record.LibraryTrackID)
 	}
 
 	artist, err := h.libStore.GetArtist(ctx, track.ArtistID)
 	if err != nil {
 		h.log.Error("artist lookup failed", "artist_id", track.ArtistID, "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
-		return nil
+		return fmt.Errorf("artist lookup: %w", err)
 	}
 	if artist == nil {
 		h.log.Warn("artist not found, skipping", "artist_id", track.ArtistID, "track_id", record.LibraryTrackID, "component", "enrichment")
-		return nil
+		return fmt.Errorf("artist %d not found", track.ArtistID)
 	}
 
 	album, err := h.libStore.GetAlbum(ctx, track.AlbumID)
 	if err != nil {
 		h.log.Error("album lookup failed", "album_id", track.AlbumID, "track_id", record.LibraryTrackID, "error", err, "component", "enrichment")
-		return nil
+		return fmt.Errorf("album lookup: %w", err)
 	}
 	if album == nil {
 		h.log.Warn("album not found, skipping", "album_id", track.AlbumID, "track_id", record.LibraryTrackID, "component", "enrichment")
-		return nil
+		return fmt.Errorf("album %d not found", track.AlbumID)
+	}
+
+	// Bulk mode: skip tracks whose metadata and cover are already complete —
+	// re-running the providers for them is pure waste. The artist image is
+	// handled separately (below): attempted at most once per artist per run,
+	// so a failed fetch doesn't re-trigger per-track metadata enrichment.
+	skipArtistImage := false
+	if bulk {
+		hasCover := library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath))
+		metadataComplete := track.ISRC != "" && len(track.ExternalIDs) > 0 &&
+			len(album.Genres) > 0 && album.ReleaseDate != "" && hasCover
+
+		h.bulkMu.Lock()
+		imageAttempted := h.bulkArtists[track.ArtistID]
+		if !imageAttempted {
+			h.bulkArtists[track.ArtistID] = true
+		}
+		h.bulkMu.Unlock()
+		skipArtistImage = imageAttempted
+
+		if metadataComplete {
+			// Metadata and cover present — only a missing artist portrait may
+			// remain, fetched once per artist per run.
+			if artist.ThumbURL == "" && !imageAttempted && h.discoveryReg != nil {
+				h.enrichArtistImage(ctx, artist, track)
+			}
+			return nil
+		}
 	}
 
 	providers := h.orderedProviders()
@@ -171,18 +240,17 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 
 	// Enrich artist image from discovery providers (Deezer, Spotify, etc.).
 	// Always tries to refresh — existing wrong images get corrected on re-import.
-	if h.discoveryReg != nil {
+	if h.discoveryReg != nil && !skipArtistImage {
 		h.enrichArtistImage(ctx, artist, track)
 	}
 
 	// ── Sync thumb_url with on-disk cover (run once after all providers) ─
-	// The CoverArtHandler (step 3) may have already downloaded cover.jpg,
+	// The CoverArtHandler (step 3) may have already downloaded cover art,
 	// but album didn't exist in the library yet at that point. Ensure
-	// thumb_url is set if cover.jpg exists on disk.
+	// thumb_url is set if any cover image exists on disk.
 	if album.ThumbURL == "" {
 		if tracks, err := h.libStore.GetTracksByAlbum(ctx, album.ID); err == nil && len(tracks) > 0 {
-			coverPath := filepath.Join(filepath.Dir(tracks[0].FilePath), "cover.jpg")
-			if _, err := os.Stat(coverPath); err == nil {
+			if library.HasCoverFile(library.AlbumDirFromTrack(tracks[0].FilePath)) {
 				album.ThumbURL = "cover.jpg"
 				albumModified = true
 			}
@@ -203,10 +271,7 @@ func (h *MetadataEnrichmentHandler) Handle(ctx context.Context, record *Record) 
 
 	// Re-write tags if track or album metadata changed.
 	if trackModified || albumModified {
-		coverPath := filepath.Join(filepath.Dir(track.FilePath), "cover.jpg")
-		if _, err := os.Stat(coverPath); err != nil {
-			coverPath = "" // no cover to embed
-		}
+		coverPath := library.CoverFilePath(library.AlbumDirFromTrack(track.FilePath))
 		if err := h.tagger.WriteTags(track.FilePath, artist.Name, album.Title, track.Title, coverPath); err != nil {
 			h.log.Warn("re-tag failed", "file", track.FilePath, "error", err, "component", "enrichment")
 		}
@@ -228,13 +293,14 @@ func (h *MetadataEnrichmentHandler) downloadCoverIfMissing(ctx context.Context, 
 		return
 	}
 
-	albumDir := filepath.Dir(tracks[0].FilePath)
-	coverPath := filepath.Join(albumDir, "cover.jpg")
+	albumDir := library.AlbumDirFromTrack(tracks[0].FilePath)
 
-	// Don't overwrite existing covers.
-	if _, err := os.Stat(coverPath); err == nil {
+	// Don't overwrite existing covers (any format).
+	if library.HasCoverFile(albumDir) {
 		return
 	}
+
+	coverPath := filepath.Join(albumDir, "cover.jpg")
 
 	url := cover.ImageURL
 	if url == "" {
@@ -286,8 +352,8 @@ func (h *MetadataEnrichmentHandler) downloadArtistImage(ctx context.Context, art
 		return
 	}
 
-	// Determine artist directory (parent of album directory).
-	artistDir := filepath.Dir(filepath.Dir(track.FilePath))
+	// Determine artist directory (parent of album directory, disc-aware).
+	artistDir := library.ArtistDirFromTrack(track.FilePath)
 	artistPath := filepath.Join(artistDir, "artist.jpg")
 
 	url := result.ImageURL

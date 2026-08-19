@@ -310,21 +310,64 @@ List/search library albums.
 
 **Response** `200`: `[Album, ...]`
 
-### `POST /api/library/scan`
+### `GET /api/jobs`
 
-Trigger a filesystem scan of the library path. Imports new files and skips duplicates
-(by file path).
+Return the current (or last) background job, or `null` when none has run.
 
 **Response** `200`:
 ```json
 {
-  "scanned": 150,
-  "imported": 12,
-  "skipped": 138,
-  "errors": 0,
-  "paths": ["/music"]
+  "type": "scan",
+  "state": "running",
+  "progress": 42.5,
+  "message": "03 - Nightcall.flac",
+  "done": 850,
+  "total": 2000,
+  "started_at": "2026-08-18T10:00:00Z",
+  "finished_at": null,
+  "error": ""
 }
 ```
+
+`state` is one of `idle | running | completed | failed | cancelled`.
+
+### `POST /api/jobs/scan`
+
+Start a background filesystem scan of the library path. Imports new files,
+skips duplicates (by file path), and backfills embedded cover art. If a job is
+already running, the current job is returned with `started: false` instead.
+
+**Response** `202` (or `200` when a job was already running):
+```json
+{
+  "job": { "type": "scan", "state": "running", "progress": 0, "done": 0, "total": 2000 },
+  "started": true
+}
+```
+
+Rate-limited: 2 req/min per client IP (override via `RATE_SCAN`).
+
+### `POST /api/jobs/enrich`
+
+Start a background metadata enrichment of the whole library — fills in missing
+ISRC, genres, release dates, external IDs, cover art, and artist images from
+the configured metadata providers. Outgoing requests honor each provider's own
+rate limits; the artist-image refresh runs once per artist. Tracks that are
+already fully enriched (ISRC, external IDs, genres, release date, cover, and
+artist image all present) are skipped without hitting the providers.
+
+**Response** `202`: `{ "job": {...}, "started": true }` as above.
+
+Rate-limited: 2 req/min per client IP (override via `RATE_ENRICH`).
+
+### `POST /api/jobs/cancel`
+
+Request cancellation of the running job.
+
+**Response** `200`: the current `Job`
+
+Job progress is also streamed to SSE clients (`/api/events`) as `job_started`,
+`job_progress`, `job_completed`, `job_failed`, and `job_cancelled` events.
 
 ### `GET /api/covers/{albumID}`
 

@@ -1,14 +1,14 @@
-import { useEffect, useRef, useCallback } from "react";
-import { toast } from "sonner";
+import { useCallback, useEffect, useRef } from "react";
 import type { DownloadRecord as DownloadItemType } from "../api/types";
+import type { StartJobResponse } from "../api/types";
 import type { UseMutationResult } from "@tanstack/react-query";
 
 interface UseScanOnCompleteOptions {
   downloads: DownloadItemType[] | undefined;
-  scanLibrary: UseMutationResult<unknown, Error, void>;
+  startScan: UseMutationResult<StartJobResponse, Error, void>;
 }
 
-export function useScanOnComplete({ downloads, scanLibrary }: UseScanOnCompleteOptions) {
+export function useScanOnComplete({ downloads, startScan }: UseScanOnCompleteOptions) {
   const scannedIds = useRef<Set<string>>(new Set());
   const scanTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -35,21 +35,11 @@ export function useScanOnComplete({ downloads, scanLibrary }: UseScanOnCompleteO
         for (const d of downloads) {
           if (d.state === "imported") scannedIds.current.add(d.id);
         }
-        scanLibrary.mutate(undefined, {
-          onSuccess: (stats: any) => {
-            toast.success(
-              `Library scanned: ${stats.imported} tracks imported`,
-            );
-          },
-          onError: (err) => {
-            toast.error(
-              `Scan failed: ${err instanceof Error ? err.message : "Unknown error"}`,
-            );
-          },
-        });
+        // Toasts for success/failure are handled by useStartScanJob.
+        startScan.mutate(undefined);
       }, 30_000);
     }
-  }, [downloads, scanLibrary]);
+  }, [downloads, startScan]);
 
   return { resetScannedIds };
 }

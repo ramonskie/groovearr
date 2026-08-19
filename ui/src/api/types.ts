@@ -489,12 +489,26 @@ export interface Album {
   release_date?: string;
 }
 
-export interface ScanStats {
-  scanned: number;
-  imported: number;
-  skipped: number;
-  errors: number;
-  paths: string[];
+// ─── Background jobs ────────────────────────────────────────────────
+
+export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
+
+export interface Job {
+  type: "scan" | "enrich";
+  state: JobState;
+  progress: number; // 0-100
+  message?: string;
+  done: number;
+  total: number;
+  started_at?: string;
+  finished_at?: string;
+  error?: string;
+}
+
+export interface StartJobResponse {
+  job: Job;
+  /** True when this request started the job; false when another was already running. */
+  started: boolean;
 }
 
 export interface PaginationParams {

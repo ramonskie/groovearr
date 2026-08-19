@@ -10,7 +10,6 @@ import {
 import ArtistsSection from "./ArtistsSection";
 import ArtistDetailView from "./ArtistDetailView";
 import AlbumDetailView from "./AlbumDetailView";
-import ScanButton from "./ScanButton";
 
 export default function LibraryPage() {
   const [searchParams, setSearchParams] = useSearchParams();
@@ -90,7 +89,6 @@ export default function LibraryPage() {
       {/* Header */}
       <div className="mb-6 flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-xl font-bold text-white">Library</h1>
-        <ScanButton />
       </div>
 
       {/* Search bar — only in list view */}

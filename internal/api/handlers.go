@@ -19,6 +19,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -45,6 +46,7 @@ type Server struct {
 	matcher             *matching.Engine
 	playlistSvc         *playlist.Service
 	qualityProfileStore quality.ProfileStore
+	jobs                *jobs.Manager
 	httpSrv             *http.Server
 	log                 *slog.Logger
 	rateLimiter         *ipRateLimiter
@@ -79,6 +81,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		sessions:            newSessionStore(),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
+	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)
 
 	mux := http.NewServeMux()
 
@@ -129,7 +132,6 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
-	mux.Handle("POST /api/library/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleLibraryScan)))
 	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
@@ -137,6 +139,13 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
 	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
 	mux.Handle("POST /api/library/albums/{albumID}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownloadMissing)))
+
+	// Background jobs. Scan/enrich are rate-limited per client IP: both walk
+	// the whole library and enrich additionally hits external metadata providers.
+	mux.HandleFunc("GET /api/jobs", s.handleGetJob)
+	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobScan)))
+	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, http.HandlerFunc(s.handleJobEnrich)))
+	mux.HandleFunc("POST /api/jobs/cancel", s.handleJobCancel)
 
 	// Playlist routes.
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -195,9 +204,12 @@ func (s *Server) ListenAndServe() error {
 	return s.httpSrv.ListenAndServe()
 }
 
-// Shutdown gracefully stops the server.
+// Shutdown gracefully stops the server. The background job context is
+// cancelled first; Shutdown blocks until any running job stops so the store
+// is not closed underneath an in-flight scan/enrich.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.bgCancel()
+	s.jobs.Shutdown()
 	s.rateLimiter.Shutdown()
 	s.sessions.Shutdown()
 	return s.httpSrv.Shutdown(ctx)
