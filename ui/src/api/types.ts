@@ -494,7 +494,7 @@ export interface Album {
 export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Job {
-  type: "scan" | "enrich";
+  type: "scan" | "enrich" | "organize";
   state: JobState;
   progress: number; // 0-100
   message?: string;
@@ -509,6 +509,48 @@ export interface StartJobResponse {
   job: Job;
   /** True when this request started the job; false when another was already running. */
   started: boolean;
+}
+
+// ─── Organize report ────────────────────────────────────────────────
+
+export interface OrganizeEntry {
+  track_id: number;
+  from: string;
+  to: string;
+  reason: string;
+}
+
+export interface OrganizeSummary {
+  moved: number;
+  would_move: number;
+  in_place: number;
+  skipped: number;
+  errors: number;
+}
+
+export interface OrganizeReport {
+  mode: "dry run" | "repair";
+  ran_at: string;
+  summary: OrganizeSummary;
+  entries: OrganizeEntry[];
+  truncated: boolean;
+}
+
+// ─── Artist duplicates ──────────────────────────────────────────────
+
+export interface DuplicateArtistEntry {
+  id: number;
+  name: string;
+  track_count: number;
+}
+
+export interface DuplicateGroup {
+  name: string;
+  artists: DuplicateArtistEntry[];
+}
+
+export interface ArtistDuplicatesResponse {
+  groups: DuplicateGroup[];
 }
 
 export interface PaginationParams {

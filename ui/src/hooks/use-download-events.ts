@@ -76,12 +76,20 @@ export function useDownloadEvents() {
       queryClient.invalidateQueries({ queryKey: ["library"] });
     });
 
-    // A finished background scan/enrich job may have changed the library.
+    // A finished background scan/enrich/organize job may have changed the library.
     es.addEventListener("job_completed", (e: MessageEvent) => {
       try {
         const job = JSON.parse(e.data) as { type?: string };
-        if (job?.type === "scan" || job?.type === "enrich") {
+        if (
+          job?.type === "scan" ||
+          job?.type === "enrich" ||
+          job?.type === "organize"
+        ) {
           queryClient.invalidateQueries({ queryKey: ["library"] });
+        }
+        // Organize writes its report only on completion — refetch it.
+        if (job?.type === "organize") {
+          queryClient.invalidateQueries({ queryKey: ["organize"] });
         }
       } catch {
         // Malformed event — ignore.

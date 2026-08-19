@@ -40,6 +40,8 @@ import type {
   QualityProfile,
   QualityProfileCreatePayload,
   QualityProfileUpdatePayload,
+  OrganizeReport,
+  ArtistDuplicatesResponse,
 } from "./types";
 
 // ─── Base fetch wrapper ────────────────────────────────────────────
@@ -234,6 +236,33 @@ export function startScanJob(): Promise<StartJobResponse> {
 
 export function startEnrichJob(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/jobs/enrich", { method: "POST" });
+}
+
+export function startOrganizeJob(dryRun: boolean): Promise<StartJobResponse> {
+  return request<StartJobResponse>(`/api/jobs/organize?dryRun=${dryRun}`, {
+    method: "POST",
+  });
+}
+
+export function getOrganizeReport(): Promise<OrganizeReport | null> {
+  return request<OrganizeReport | null>("/api/jobs/organize/report");
+}
+
+export function getArtistDuplicates(): Promise<ArtistDuplicatesResponse> {
+  return request<ArtistDuplicatesResponse>("/api/library/artists/duplicates");
+}
+
+export function mergeArtists(
+  keepId: number,
+  removeId: number,
+): Promise<{ merged: boolean }> {
+  return request<{ merged: boolean }>(
+    `/api/library/artists/${keepId}/merge`,
+    {
+      method: "POST",
+      body: JSON.stringify({ remove_id: removeId }),
+    },
+  );
 }
 
 export function cancelJob(): Promise<Job | null> {

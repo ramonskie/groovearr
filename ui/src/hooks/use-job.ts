@@ -5,6 +5,7 @@ import {
   getJob,
   startScanJob,
   startEnrichJob,
+  startOrganizeJob,
   cancelJob,
 } from "../api/client";
 
@@ -46,6 +47,8 @@ export function useJobWatcher() {
     if (prev === "running" && state !== "running") {
       // A cancelled scan may still have imported partial files.
       queryClient.invalidateQueries({ queryKey: ["library"] });
+      // Organize writes its report only on completion — refetch it.
+      queryClient.invalidateQueries({ queryKey: ["organize"] });
       if (state === "completed") {
         toast.success(
           job?.message ||
@@ -112,6 +115,41 @@ export function useStartScanJob() {
 
 export function useStartEnrichJob() {
   return useStartJob("enrich");
+}
+
+/**
+ * Starts the folder-template organize job. `mutate(true)` = dry run (report
+ * only), `mutate(false)` = repair (moves files).
+ */
+export function useStartOrganizeJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (dryRun: boolean) => startOrganizeJob(dryRun),
+    onSuccess: ({ job, started }) => {
+      queryClient.setQueryData(["jobs", "current"], job);
+      if (!started) return;
+      queryClient.invalidateQueries({ queryKey: ["organize"] });
+      if (job.state === "running") {
+        toast.info("Library organize started");
+        return;
+      }
+      queryClient.invalidateQueries({ queryKey: ["library"] });
+      if (job.state === "completed") {
+        toast.success(job.message || "Library organize complete");
+      } else if (job.state === "failed") {
+        toast.error(`Job failed: ${job.error ?? "unknown error"}`);
+      } else if (job.state === "cancelled") {
+        toast.info("Job cancelled");
+      }
+    },
+    onError: (err) => {
+      toast.error(
+        `Failed to start organize: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      );
+    },
+  });
 }
 
 export function useCancelJob() {
