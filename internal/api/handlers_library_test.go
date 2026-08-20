@@ -71,6 +71,7 @@ func TestArtistThumbURLTransform(t *testing.T) {
 			{ID: 1, Name: "Local Singular", ThumbURL: "artist.jpg"},
 			{ID: 2, Name: "Local Plural", ThumbURL: "artists.jpg"},
 			{ID: 3, Name: "Remote", ThumbURL: "https://example.com/a.jpg"},
+			{ID: 4, Name: "Various Artists", ThumbURL: "artist.jpg"},
 		},
 	}
 	s := &Server{cfg: cfg, store: store, log: logger}
@@ -92,6 +93,7 @@ func TestArtistThumbURLTransform(t *testing.T) {
 			1: "/api/artist-image/1",
 			2: "/api/artist-image/2",
 			3: "https://example.com/a.jpg",
+			4: "", // compilation groupings show the placeholder avatar
 		}
 		for _, a := range got {
 			if a.ThumbURL != want[a.ID] {
@@ -116,6 +118,25 @@ func TestArtistThumbURLTransform(t *testing.T) {
 		}
 		if got.ThumbURL != "/api/artist-image/2" {
 			t.Errorf("artist 2 thumb_url = %q, want /api/artist-image/2", got.ThumbURL)
+		}
+	})
+
+	t.Run("detail blanks compilation grouping portrait", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/artists/4", nil)
+		req.SetPathValue("artistID", "4")
+		rec := httptest.NewRecorder()
+		s.handleLibraryArtist(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		body, _ := io.ReadAll(rec.Result().Body)
+		var got domain.Artist
+		if err := json.Unmarshal(body, &got); err != nil {
+			t.Fatalf("bad response JSON: %v", err)
+		}
+		if got.ThumbURL != "" {
+			t.Errorf("Various Artists thumb_url = %q, want empty (placeholder)", got.ThumbURL)
 		}
 	})
 }

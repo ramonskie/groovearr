@@ -187,6 +187,11 @@ func (s *Scanner) recordArtistThumb(ctx context.Context, trackPath, artistDir st
 	if err != nil || artist == nil {
 		return false
 	}
+	// Compilation groupings ("Various Artists") never get a portrait — they
+	// show their placeholder avatar in the UI.
+	if IsCompilationArtist(artist.Name) {
+		return false
+	}
 	// Never clobber a remote URL; only fill an empty thumb or refresh a local
 	// artist.* value.
 	if artist.ThumbURL != "" && !IsLocalArtistThumb(artist.ThumbURL) {
@@ -360,6 +365,11 @@ func (s *Scanner) writeAlbumCover(ctx context.Context, trackPath, libraryRoot, a
 	if err != nil || artist == nil {
 		return
 	}
+	// Compilation groupings ("Various Artists") never get a portrait — they
+	// show their placeholder avatar in the UI.
+	if IsCompilationArtist(artist.Name) {
+		return
+	}
 	// Only record a local thumbnail when the artist has none yet, or already
 	// points at a local artist.* image — never clobber a remote URL.
 	if artist.ThumbURL == "" || IsLocalArtistThumb(artist.ThumbURL) {
@@ -450,6 +460,10 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 	// artistThumbsDone tracks artist directories whose DB thumbnail was
 	// already reconciled this run (avoids one lookup per track).
 	artistThumbsDone := make(map[string]bool)
+	// artistThumbAttempts bounds how many sibling tracks probe a directory
+	// whose portrait exists but whose tags keep failing the compilation guard
+	// (e.g. every track of a grouping folder carries a different artist).
+	artistThumbAttempts := make(map[string]int)
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -499,7 +513,7 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 			}
 			// Surface an on-disk artist portrait even when it pre-dates the
 			// scanner (the DB thumb_url was never recorded for it).
-			s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone)
+			s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone, artistThumbAttempts)
 			return nil
 		}
 
@@ -564,7 +578,7 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		}
 		// Reconcile the DB thumbnail with any on-disk artist portrait (also
 		// catches folders whose embedded tag artist differs from the name).
-		s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone)
+		s.recordArtistThumbOnce(ctx, path, artistDir, absRoot, artistThumbsDone, artistThumbAttempts)
 
 		stats.Imported++
 		return nil
@@ -572,9 +586,15 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 	return stats, err
 }
 
+// maxArtistThumbAttempts bounds how many tracks probe a directory before the
+// reconciliation is abandoned for the run (mirrors maxCoverAttempts).
+const maxArtistThumbAttempts = 4
+
 // recordArtistThumbOnce reconciles the DB thumbnail for an artist directory
-// with the on-disk portrait, at most once per directory per scan run.
-func (s *Scanner) recordArtistThumbOnce(ctx context.Context, trackPath, artistDir, libraryRoot string, done map[string]bool) {
+// with the on-disk portrait, at most once per directory per scan run. The
+// attempts map bounds retries for directories whose tracks keep failing the
+// compilation guard.
+func (s *Scanner) recordArtistThumbOnce(ctx context.Context, trackPath, artistDir, libraryRoot string, done map[string]bool, attempts map[string]int) {
 	rootClean := filepath.Clean(libraryRoot)
 	albumDir := AlbumDirFromTrack(trackPath)
 	if albumDir == rootClean {
@@ -593,6 +613,16 @@ func (s *Scanner) recordArtistThumbOnce(ctx context.Context, trackPath, artistDi
 	// didn't). A directory with no image on disk is terminal — every track
 	// would draw the same blank, so stop re-statting the image candidates.
 	if s.recordArtistThumb(ctx, trackPath, artistDir) {
+		// A grouping directory never records a portrait, so its retries are
+		// always futile — bound them so a big VA folder doesn't re-probe the
+		// image candidates and re-parse tags for every track. Real artist
+		// folders keep retrying until a matching track appears.
+		if IsCompilationDir(artistDir) {
+			attempts[artistDir]++
+			if attempts[artistDir] >= maxArtistThumbAttempts {
+				done[artistDir] = true
+			}
+		}
 		return
 	}
 	done[artistDir] = true

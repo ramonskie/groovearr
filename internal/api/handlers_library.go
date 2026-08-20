@@ -90,8 +90,14 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 		artists = []domain.Artist{}
 	}
 
-	// Transform local image paths to API URLs for the frontend.
+	// Transform local image paths to API URLs for the frontend. Compilation
+	// groupings ("Various Artists") carry no portrait — they show the
+	// placeholder avatar instead.
 	for i := range artists {
+		if library.IsCompilationArtist(artists[i].Name) {
+			artists[i].ThumbURL = ""
+			continue
+		}
 		if library.IsLocalArtistThumb(artists[i].ThumbURL) {
 			artists[i].ThumbURL = fmt.Sprintf("/api/artist-image/%d", artists[i].ID)
 		}
@@ -653,7 +659,10 @@ func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, fmt.Errorf("artist not found"))
 		return
 	}
-	if library.IsLocalArtistThumb(artist.ThumbURL) {
+	// Compilation groupings show the placeholder avatar, never a portrait.
+	if library.IsCompilationArtist(artist.Name) {
+		artist.ThumbURL = ""
+	} else if library.IsLocalArtistThumb(artist.ThumbURL) {
 		artist.ThumbURL = fmt.Sprintf("/api/artist-image/%d", artist.ID)
 	}
 	writeJSON(w, http.StatusOK, artist)

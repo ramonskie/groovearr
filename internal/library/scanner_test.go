@@ -299,7 +299,7 @@ func TestRecordArtistThumbFlatLayout(t *testing.T) {
 	}
 	scanner := NewScanner(store, testLogger())
 
-	scanner.recordArtistThumbOnce(t.Context(), track, ArtistDirFromTrack(track), root, map[string]bool{})
+	scanner.recordArtistThumbOnce(t.Context(), track, ArtistDirFromTrack(track), root, map[string]bool{}, map[string]int{})
 
 	if got := store.thumbs[1]; got != "artists.jpg" {
 		t.Fatalf("thumb = %q, want artists.jpg (flat layout portrait surfaced)", got)
@@ -318,7 +318,7 @@ func TestRecordArtistThumbOnceSkipsLooseRootTracks(t *testing.T) {
 	}
 	scanner := NewScanner(store, testLogger())
 
-	scanner.recordArtistThumbOnce(t.Context(), track, ArtistDirFromTrack(track), root, map[string]bool{})
+	scanner.recordArtistThumbOnce(t.Context(), track, ArtistDirFromTrack(track), root, map[string]bool{}, map[string]int{})
 
 	if _, set := store.thumbs[1]; set {
 		t.Error("loose root tracks must not be attributed an artist thumbnail")
@@ -346,12 +346,12 @@ func TestRecordArtistThumbOnceRetriesUntilMatch(t *testing.T) {
 	scanner := NewScanner(store, testLogger())
 	done := map[string]bool{}
 
-	scanner.recordArtistThumbOnce(t.Context(), track01, artistDir, root, done)
+	scanner.recordArtistThumbOnce(t.Context(), track01, artistDir, root, done, map[string]int{})
 	if _, set := store.thumbs[1]; set {
 		t.Fatal("guest-featured first track must not record the portrait")
 	}
 
-	scanner.recordArtistThumbOnce(t.Context(), track02, artistDir, root, done)
+	scanner.recordArtistThumbOnce(t.Context(), track02, artistDir, root, done, map[string]int{})
 	if got := store.thumbs[1]; got != "artists.jpg" {
 		t.Fatalf("thumb = %q, want artists.jpg (later sibling surfaced the portrait)", got)
 	}
@@ -369,9 +369,38 @@ func TestRecordArtistThumbOnceTerminalWithoutImage(t *testing.T) {
 	scanner := NewScanner(store, testLogger())
 
 	done := map[string]bool{}
-	scanner.recordArtistThumbOnce(t.Context(), track, artistDir, root, done)
+	scanner.recordArtistThumbOnce(t.Context(), track, artistDir, root, done, map[string]int{})
 	if !done[artistDir] {
 		t.Error("image-less directory should be marked done so sibling tracks don't re-stat the candidates")
+	}
+}
+
+func TestRecordArtistThumbOnceBoundsRetries(t *testing.T) {
+	root := t.TempDir()
+	// A grouping folder with an on-disk portrait whose tracks all carry a
+	// different tag artist — the compilation guard retries forever. The
+	// attempt bound must terminate the probe so a big VA folder doesn't re-stat
+	// the image candidates and re-parse tags for every track.
+	artistDir := filepath.Join(root, "Various Artists")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(albumDir, 0o755)
+	os.WriteFile(filepath.Join(artistDir, "artists.jpg"), []byte("x"), 0o644)
+	track := filepath.Join(albumDir, "01 - Track.flac")
+	os.WriteFile(track, minimalFLAC("2Pac", "Album", "Track", 2020, 1, 1), 0o644)
+
+	store := &mockStore{artists: map[string]int64{"Various Artists": 1}, albums: map[string]int64{}, thumbs: map[int64]string{}}
+	scanner := NewScanner(store, testLogger())
+
+	done := map[string]bool{}
+	attempts := map[string]int{}
+	for i := 0; i < maxArtistThumbAttempts; i++ {
+		scanner.recordArtistThumbOnce(t.Context(), track, artistDir, root, done, attempts)
+	}
+	if !done[artistDir] {
+		t.Errorf("directory not marked done after %d retries", maxArtistThumbAttempts)
+	}
+	if _, set := store.thumbs[1]; set {
+		t.Error("compilation guard should prevent recording the grouping portrait")
 	}
 }
 
@@ -421,6 +450,32 @@ func TestRecordArtistThumbMatchingTagRecords(t *testing.T) {
 
 	if got := store.thumbs[1]; got != "artists.jpg" {
 		t.Fatalf("thumb = %q, want artists.jpg (matching folder/tag artist)", got)
+	}
+}
+
+func TestRecordArtistThumbSkipsCompilationArtist(t *testing.T) {
+	root := t.TempDir()
+	// A track tagged "Various Artists" in the matching folder: the compilation
+	// guard passes, but a grouping artist must never get a portrait — it shows
+	// its placeholder avatar instead.
+	artistDir := filepath.Join(root, "Various Artists")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(albumDir, 0o755)
+	os.WriteFile(filepath.Join(artistDir, "artists.jpg"), []byte("x"), 0o644)
+	track := filepath.Join(albumDir, "01 - Track.flac")
+	os.WriteFile(track, minimalFLAC("Various Artists", "Album", "Track", 2020, 1, 1), 0o644)
+
+	store := &mockStore{
+		artists: map[string]int64{"Various Artists": 1},
+		albums:  map[string]int64{},
+		thumbs:  map[int64]string{},
+	}
+	scanner := NewScanner(store, testLogger())
+
+	scanner.recordArtistThumb(t.Context(), track, artistDir)
+
+	if _, set := store.thumbs[1]; set {
+		t.Error("compilation grouping artist must not get a portrait")
 	}
 }
 
