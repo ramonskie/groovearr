@@ -66,6 +66,12 @@ jobs:
             echo "package ${PACKAGE} set to public"
           fi
 
+      - name: Generate changelog
+        if: github.ref_type == 'tag'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./.github/scripts/gen-changelog.sh /tmp/release-notes.md
+
       - name: Create GitHub release
         if: github.ref_type == 'tag'
         env:
@@ -74,4 +80,4 @@ jobs:
           VERSION="${GITHUB_REF_NAME#v}"
           gh release create "$GITHUB_REF_NAME" \
             --title "Groovearr ${VERSION}" \
-            --generate-notes
+            --notes-file /tmp/release-notes.md
