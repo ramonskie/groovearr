@@ -689,12 +689,15 @@ func TestArtistDuplicatesUsesDiscoveryProviderForName(t *testing.T) {
 	}
 }
 
-func TestArtistDuplicatesRespectsProviderOrder(t *testing.T) {
+func TestArtistDuplicatesPrefersMusicBrainz(t *testing.T) {
 	// "musicbrainz" returns the correctly-cased name; "deezer" (discovery)
-	// returns the misspelled one. The configured metadata order decides which
-	// wins.
-	t.Run("deezer first", func(t *testing.T) {
-		s, _ := artistOrderTestServer(t, []string{"deezer", "musicbrainz"})
+	// returns the misspelled one. MusicBrainz is the authority for casing, so
+	// its spelling wins regardless of the configured metadata order.
+	for _, order := range [][]string{
+		{"deezer", "musicbrainz"},
+		{"musicbrainz", "deezer"},
+	} {
+		s, _ := artistOrderTestServer(t, order)
 		req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
 		rec := httptest.NewRecorder()
 		s.handleLibraryArtistDuplicates(rec, req)
@@ -702,35 +705,67 @@ func TestArtistDuplicatesRespectsProviderOrder(t *testing.T) {
 			Groups []duplicateGroup `json:"groups"`
 		}
 		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("bad JSON: %v", err)
+			t.Fatalf("order %v: bad JSON: %v", order, err)
 		}
 		if len(body.Groups) != 1 {
-			t.Fatalf("expected 1 group, got %d", len(body.Groups))
-		}
-		if body.Groups[0].Canonical != "Danny De Munk" {
-			t.Errorf("canonical_name = %q, want deezer's 'Danny De Munk' (deezer first)", body.Groups[0].Canonical)
-		}
-	})
-
-	t.Run("musicbrainz first", func(t *testing.T) {
-		s, _ := artistOrderTestServer(t, []string{"musicbrainz", "deezer"})
-		req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
-		rec := httptest.NewRecorder()
-		s.handleLibraryArtistDuplicates(rec, req)
-		var body struct {
-			Groups []duplicateGroup `json:"groups"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("bad JSON: %v", err)
-		}
-		if len(body.Groups) != 1 {
-			t.Fatalf("expected 1 group, got %d", len(body.Groups))
+			t.Fatalf("order %v: expected 1 group, got %d", order, len(body.Groups))
 		}
 		if body.Groups[0].Canonical != "Danny de Munk" {
-			t.Errorf("canonical_name = %q, want musicbrainz's 'Danny de Munk' (musicbrainz first)", body.Groups[0].Canonical)
+			t.Errorf("order %v: canonical_name = %q, want musicbrainz's 'Danny de Munk'", order, body.Groups[0].Canonical)
 		}
 		if body.Groups[0].Artists[0].ID != 2 {
-			t.Errorf("keeper = id %d, want id 2 (canonical casing)", body.Groups[0].Artists[0].ID)
+			t.Errorf("order %v: keeper = id %d, want id 2 (canonical casing)", order, body.Groups[0].Artists[0].ID)
 		}
+	}
+}
+
+func TestArtistDuplicatesFallsBackToDiscoveryWhenMusicBrainzUnknown(t *testing.T) {
+	// MusicBrainz is authoritative but has no entry for this artist; the
+	// discovery-backed provider fills in the canonical spelling.
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Danny De Munk"},
+			{ID: 2, Name: "Danny de Munk"},
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 11}, {ID: 12}, {ID: 13}},
+			2: {{ID: 21}},
+		},
+	}
+	pluginReg := plugin.NewRegistry()
+	_ = pluginReg.Register(&stubNameProvider{name: "musicbrainz"}) // returns "" (unknown)
+	_ = pluginReg.Register(&stubDiscoveryNameProvider{
+		name: "deezer",
+		names: map[string][]discovery.ArtistSummary{
+			"dannydemunk": {{Name: "Danny De Munk"}},
+		},
 	})
+	_ = pluginReg.RegisterFactory(&stubDiscoveryFactory{name: "deezer"})
+
+	s := &Server{
+		store:        store,
+		mdRegistry:   metadata.NewRegistryFrom(pluginReg),
+		discoveryReg: discovery.NewRegistry(pluginReg),
+		artistNames:  newArtistNameCache(),
+		log:          testAPILogger(),
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryArtistDuplicates(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Groups []duplicateGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(body.Groups) != 1 {
+		t.Fatalf("expected 1 group, got %d", len(body.Groups))
+	}
+	if body.Groups[0].Canonical != "Danny De Munk" {
+		t.Errorf("canonical_name = %q, want deezer's 'Danny De Munk' (fallback)", body.Groups[0].Canonical)
+	}
 }

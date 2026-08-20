@@ -279,29 +279,38 @@ func (s *Server) discoveryCapableProviders() map[string]bool {
 	return set
 }
 
-// lookupCanonicalArtist asks each provider, in metadata order, for the
-// canonical spelling. Providers with a dedicated name lookup (MusicBrainz)
-// are used directly; discovery-capable providers (Deezer, Spotify, Tidal,
-// Discogs, Last.fm) contribute via SearchArtists. Returns the last provider
+// lookupCanonicalArtist resolves the canonical spelling for an artist.
+// MusicBrainz (providers with a dedicated name lookup) is authoritative for
+// casing and is consulted first, in provider order. Providers that only
+// expose artist search (Deezer, Spotify, Tidal, Discogs, Last.fm) act as a
+// fallback for artists MusicBrainz doesn't know. Returns the last provider
 // error when every provider fails, so callers can distinguish "not found"
 // (authoritative, cache long) from "couldn't reach a provider" (transient,
 // cache briefly).
 func (s *Server) lookupCanonicalArtist(ctx context.Context, name string) (string, error) {
 	var lastErr error
+
+	// Pass 1: dedicated name lookups (MusicBrainz) — authoritative for casing.
+	for _, p := range s.orderedMetadataProviders() {
+		anp, ok := p.(metadata.ArtistNameProvider)
+		if !ok {
+			continue
+		}
+		got, err := anp.CanonicalArtistName(ctx, name)
+		if err != nil {
+			lastErr = err
+			s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
+			continue
+		}
+		if got != "" {
+			return got, nil
+		}
+	}
+
+	// Pass 2: artist search fallback for artists MusicBrainz doesn't know.
 	want := strutil.NormalizeName(name)
 	discCapable := s.discoveryCapableProviders()
 	for _, p := range s.orderedMetadataProviders() {
-		if anp, ok := p.(metadata.ArtistNameProvider); ok {
-			got, err := anp.CanonicalArtistName(ctx, name)
-			if err != nil {
-				lastErr = err
-				s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
-				continue
-			}
-			if got != "" {
-				return got, nil
-			}
-		}
 		if !discCapable[p.Name()] {
 			continue
 		}
