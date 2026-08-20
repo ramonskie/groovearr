@@ -9,10 +9,17 @@ import SourceRoutingSection from "./SourceRoutingSection";
 
 const TABS = [
   { id: "providers", label: "Providers" },
+  { id: "torrent", label: "Torrent Providers" },
   { id: "priority", label: "Priority" },
 ] as const;
 
 type TabId = (typeof TABS)[number]["id"];
+
+const hasVisibleConfig = (s: {
+  config_schema?: unknown[];
+  oauth?: { enabled?: boolean };
+}) =>
+  (s.config_schema && s.config_schema.length > 0) || s.oauth?.enabled === true;
 
 export default function SourcesSettings() {
   const { data: sources, isLoading } = useSources();
@@ -49,7 +56,18 @@ export default function SourcesSettings() {
       {tab === "providers" && (
         <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
           {(sources ?? [])
-            .filter((s) => (s.config_schema && s.config_schema.length > 0) || s.oauth?.enabled)
+            .filter((s) => !s.torrent && hasVisibleConfig(s))
+            .sort((a, b) => a.display_name.localeCompare(b.display_name))
+            .map((source) => (
+              <ProviderSection key={source.name} source={source} />
+            ))}
+        </div>
+      )}
+
+      {tab === "torrent" && (
+        <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+          {(sources ?? [])
+            .filter((s) => s.torrent && hasVisibleConfig(s))
             .sort((a, b) => a.display_name.localeCompare(b.display_name))
             .map((source) => (
               <ProviderSection key={source.name} source={source} />

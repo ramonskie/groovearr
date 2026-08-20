@@ -212,6 +212,8 @@ export interface SourceInfo {
   oauth?: OAuthConfig;
   /** Optional UI feature flags */
   ui_slots?: UISlots;
+  /** True when the provider is part of the torrent pipeline (e.g. Prowlarr + qBittorrent) */
+  torrent?: boolean;
 }
 
 export interface TestConnectionResponse {

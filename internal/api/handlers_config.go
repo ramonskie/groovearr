@@ -21,7 +21,18 @@ func (s *Server) handleGetSources(w http.ResponseWriter, r *http.Request) {
 		if ca, ok := p.(plugin.CapabilityAccess); ok {
 			access = ca.CapabilityAccess()
 		}
-		return sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), access, schema)
+		entry := sourceEntry(p.Name(), p.DisplayName(), p.IsConfigured(), p.Connected(), enabled, p.CapabilityStatus(), access, schema)
+		// Mark torrent providers (e.g. Prowlarr search + qBittorrent client) so the
+		// UI can group them in a dedicated settings tab.
+		if f := inner.Factory(p.Name()); f != nil {
+			for _, c := range f.Capabilities() {
+				if c == "torrent" {
+					entry["torrent"] = true
+					break
+				}
+			}
+		}
+		return entry
 	}
 
 	// Enumerate plugins grouped by capability. Order determines section order

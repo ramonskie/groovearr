@@ -51,14 +51,23 @@ func TestFactoryBasics(t *testing.T) {
 		t.Errorf("DisplayName() = %q, want %q", Factory.DisplayName(), "qBittorrent")
 	}
 	caps := Factory.Capabilities()
-	if len(caps) != 1 || caps[0] != "download_client" {
-		t.Errorf("Capabilities() = %v, want [download_client]", caps)
+	if len(caps) != 2 || !hasCap(caps, "download_client") || !hasCap(caps, "torrent") {
+		t.Errorf("Capabilities() = %v, want [download_client torrent]", caps)
 	}
 	// Icon is on ConfigSchemaProvider, not PluginFactory.
 	var csp interface{ Icon() string } = &factory{}
 	if icon := csp.Icon(); icon != "disc" {
 		t.Errorf("Icon() = %q, want %q", icon, "disc")
 	}
+}
+
+func hasCap(caps []string, want string) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func TestPluginBasics(t *testing.T) {
@@ -89,14 +98,14 @@ func TestPluginBasics(t *testing.T) {
 
 func TestPluginNotConfigured(t *testing.T) {
 	p, err := newPlugin(Config{}, "", nil)
-	if err == nil {
-		t.Fatal("newPlugin with empty URL should fail")
+	if err != nil {
+		t.Fatalf("newPlugin with empty config should construct (validation is deferred): %v", err)
 	}
-
-	// Manual construction for IsConfigured test.
-	p = &Plugin{cfg: Config{}}
 	if p.IsConfigured() {
 		t.Error("IsConfigured() should be false with empty config")
+	}
+	if p.Connected() {
+		t.Error("Connected() should be false with empty config")
 	}
 }
 

@@ -52,9 +52,6 @@ type Plugin struct {
 var _ download.DownloadClient = (*Plugin)(nil)
 
 func newPlugin(cfg Config, downloadPath string, logger *slog.Logger) (*Plugin, error) {
-	if cfg.URL == "" {
-		return nil, fmt.Errorf("qbittorrent: url is required")
-	}
 	qbtRoot := cfg.QbtDownloadRoot
 	if qbtRoot == "" {
 		qbtRoot = "/downloads"

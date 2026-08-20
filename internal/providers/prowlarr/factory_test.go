@@ -53,9 +53,18 @@ func TestFactoryBasics(t *testing.T) {
 		t.Errorf("DisplayName() = %q, want %q", Factory.DisplayName(), "Prowlarr")
 	}
 	caps := Factory.Capabilities()
-	if len(caps) != 1 || caps[0] != "album_search" {
-		t.Errorf("Capabilities() = %v, want [album_search]", caps)
+	if len(caps) != 2 || !hasCap(caps, "album_search") || !hasCap(caps, "torrent") {
+		t.Errorf("Capabilities() = %v, want [album_search torrent]", caps)
 	}
+}
+
+func hasCap(caps []string, want string) bool {
+	for _, c := range caps {
+		if c == want {
+			return true
+		}
+	}
+	return false
 }
 
 func testPlugin(t *testing.T) *Plugin {
