@@ -79,5 +79,14 @@
   "metadata_order": ["deezer", "spotify", "discogs", "musicbrainz", "coverartarchive", "tidal"],
   "download_order": ["tidal", "soulseek"],
   "album_sources": ["prowlarr"],
-  "download_client": "qbittorrent"
+  "download_client": "qbittorrent",
+  "logging": {
+    "level": "info",
+    "format": "json",
+    "max_size_mb": 10,
+    "max_backups": 3,
+    "max_age_days": 7,
+    "compress": true,
+    "captured_max": 2000
+  }
 }

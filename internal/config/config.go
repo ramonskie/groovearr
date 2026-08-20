@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+
+	"github.com/ramonskie/groovearr/internal/logger"
 )
 
 // Config holds all application settings.
@@ -16,6 +18,7 @@ type Config struct {
 	Sources        map[string]json.RawMessage `json:"sources"`
 	Library        LibraryConfig              `json:"library"`
 	Auth           AuthConfig                 `json:"auth"`
+	Logging        *LoggingConfig             `json:"logging"`         // log level, format, rotation policy
 	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
 	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
 	AlbumSources   []string                   `json:"album_sources"`   // album-capable source order (e.g. ["prowlarr"])
@@ -51,9 +54,56 @@ type AuthConfig struct {
 	LocalBypassSubnets []string `json:"local_bypass_subnets"` // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
 }
 
+// LoggingConfig holds log level, format and file rotation policy. The level
+// and rotation settings apply immediately when updated; the format only takes
+// effect on restart.
+type LoggingConfig struct {
+	Level       string `json:"level"`        // debug|info|warn|error (default "info")
+	Format      string `json:"format"`       // json|text (default "json")
+	MaxSizeMB   int    `json:"max_size_mb"`  // rotate log file after this many MB (default 10, <=0 = default)
+	MaxBackups  int    `json:"max_backups"`  // rotated files to keep (<=0 = default 3)
+	MaxAgeDays  int    `json:"max_age_days"` // retention in days for rotated files (<=0 = default 7)
+	Compress    *bool  `json:"compress"`     // gzip rotated log files (default true)
+	CapturedMax int    `json:"captured_max"` // in-memory log lines kept for the UI viewer (default 2000)
+}
+
+// LoggerConfig translates the persisted logging config into the logger
+// package's runtime config. A nil receiver yields defaults. A nil Compress
+// means the value was never configured (legacy config) and is treated as
+// false, matching the previous zero-value behavior.
+func (c *LoggingConfig) LoggerConfig() logger.Config {
+	if c == nil {
+		return logger.DefaultConfig()
+	}
+	return logger.Config{
+		Level:       c.Level,
+		Format:      c.Format,
+		MaxSizeMB:   c.MaxSizeMB,
+		MaxBackups:  c.MaxBackups,
+		MaxAgeDays:  c.MaxAgeDays,
+		Compress:    c.Compress != nil && *c.Compress,
+		CapturedMax: c.CapturedMax,
+	}
+}
+
 var folderTokenRE = regexp.MustCompile(`\{[a-z_][a-z0-9_:]*\}`)
 
 func intPtr(v int) *int { return &v }
+
+func boolPtr(v bool) *bool { return &v }
+
+// DefaultLogging returns a LoggingConfig populated with sensible defaults.
+func DefaultLogging() *LoggingConfig {
+	return &LoggingConfig{
+		Level:       "info",
+		Format:      "json",
+		MaxSizeMB:   10,
+		MaxBackups:  3,
+		MaxAgeDays:  7,
+		Compress:    boolPtr(true),
+		CapturedMax: 2000,
+	}
+}
 
 // Default library paths target the Docker image's mount points. Every
 // installation runs in Docker; local/command-line runs override these with
@@ -68,6 +118,7 @@ const (
 func DefaultConfig() Config {
 	return Config{
 		Sources:        make(map[string]json.RawMessage),
+		Logging:        DefaultLogging(),
 		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder:  []string{"soulseek", "deezer"},
 		AlbumSources:   []string{},
@@ -144,7 +195,32 @@ func (c Config) Validate() []string {
 		errs = append(errs, "auth.api_key: should be at least 8 characters")
 	}
 
+	// Logging.
+	lc := c.Logging
+	if lc == nil {
+		lc = DefaultLogging()
+	}
+	if lc.Level != "" && !validLogLevels[strings.ToLower(lc.Level)] {
+		errs = append(errs, fmt.Sprintf("logging.level: must be debug, info, warn, or error (got %q)", lc.Level))
+	}
+	if lc.Format != "" && strings.ToLower(lc.Format) != "json" && strings.ToLower(lc.Format) != "text" {
+		errs = append(errs, fmt.Sprintf("logging.format: must be json or text (got %q)", lc.Format))
+	}
+	if lc.MaxSizeMB < 1 {
+		errs = append(errs, "logging.max_size_mb: must be at least 1")
+	}
+	if lc.MaxBackups < 1 {
+		errs = append(errs, "logging.max_backups: must be at least 1")
+	}
+	if lc.MaxAgeDays < 1 {
+		errs = append(errs, "logging.max_age_days: must be at least 1")
+	}
+
 	return errs
+}
+
+var validLogLevels = map[string]bool{
+	"debug": true, "info": true, "warn": true, "warning": true, "error": true,
 }
 
 // Merge copies non-zero fields from partial into c, preserving original
@@ -204,6 +280,35 @@ func (c *Config) mergeFields(partial *Config) {
 	}
 	if partial.Auth.LocalBypassSubnets != nil {
 		c.Auth.LocalBypassSubnets = partial.Auth.LocalBypassSubnets
+	}
+
+	// Logging — merge field-wise when present so partial updates never zero out
+	// the retained settings. A nil pointer keeps the existing logging config.
+	if partial.Logging != nil {
+		if c.Logging == nil {
+			c.Logging = DefaultLogging()
+		}
+		if partial.Logging.Level != "" {
+			c.Logging.Level = partial.Logging.Level
+		}
+		if partial.Logging.Format != "" {
+			c.Logging.Format = partial.Logging.Format
+		}
+		if partial.Logging.MaxSizeMB > 0 {
+			c.Logging.MaxSizeMB = partial.Logging.MaxSizeMB
+		}
+		if partial.Logging.MaxBackups > 0 {
+			c.Logging.MaxBackups = partial.Logging.MaxBackups
+		}
+		if partial.Logging.MaxAgeDays > 0 {
+			c.Logging.MaxAgeDays = partial.Logging.MaxAgeDays
+		}
+		if partial.Logging.CapturedMax > 0 {
+			c.Logging.CapturedMax = partial.Logging.CapturedMax
+		}
+		if partial.Logging.Compress != nil {
+			c.Logging.Compress = partial.Logging.Compress
+		}
 	}
 
 	// Order/source arrays merge when present (non-nil), so an explicitly empty
@@ -282,6 +387,35 @@ func readConfigFile(path string) (Config, error) {
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	// A logging block may be absent (keep defaults) or partial (JSON zeroes
+	// omitted fields). Normalize every non-specified value to its default so a
+	// partial block can never silently drop e.g. compress=true or MaxSizeMB.
+	if cfg.Logging == nil {
+		cfg.Logging = DefaultLogging()
+	} else {
+		d := DefaultLogging()
+		if cfg.Logging.Level == "" {
+			cfg.Logging.Level = d.Level
+		}
+		if cfg.Logging.Format == "" {
+			cfg.Logging.Format = d.Format
+		}
+		if cfg.Logging.MaxSizeMB <= 0 {
+			cfg.Logging.MaxSizeMB = d.MaxSizeMB
+		}
+		if cfg.Logging.MaxBackups <= 0 {
+			cfg.Logging.MaxBackups = d.MaxBackups
+		}
+		if cfg.Logging.MaxAgeDays <= 0 {
+			cfg.Logging.MaxAgeDays = d.MaxAgeDays
+		}
+		if cfg.Logging.Compress == nil {
+			cfg.Logging.Compress = d.Compress
+		}
+		if cfg.Logging.CapturedMax <= 0 {
+			cfg.Logging.CapturedMax = d.CapturedMax
+		}
 	}
 	return cfg, nil
 }

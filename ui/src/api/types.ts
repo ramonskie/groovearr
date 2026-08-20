@@ -44,6 +44,32 @@ export interface AuthConfig {
   local_bypass_subnets?: string[];
 }
 
+export interface LoggingConfig {
+  level: string;
+  format: string;
+  max_size_mb: number;
+  max_backups: number;
+  max_age_days: number;
+  compress: boolean;
+  captured_max: number;
+}
+
+/** One captured log line as sent by GET /api/logs and streamed as "log_line" SSE events. */
+export interface LogEntry {
+  seq: number;
+  time: string;
+  level: string;
+  message: string;
+  attrs?: Record<string, unknown>;
+}
+
+/** Snapshot response for GET /api/logs. */
+export interface LogsResponse {
+  entries: LogEntry[];
+  path: string;
+  level: string;
+}
+
 export interface Config {
   sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
@@ -52,6 +78,7 @@ export interface Config {
   download_order?: string[];
   album_sources?: string[];
   download_client?: string;
+  logging?: LoggingConfig;
   setup_completed?: boolean;
 }
 
@@ -60,6 +87,7 @@ export interface ConfigUpdatePayload {
   sources?: Record<string, Record<string, unknown>>;
   library?: Partial<LibraryConfig>;
   auth?: Partial<AuthConfig>;
+  logging?: Partial<LoggingConfig>;
   metadata_order?: string[];
   download_order?: string[];
   album_sources?: string[];

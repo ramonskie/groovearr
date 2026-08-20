@@ -69,6 +69,27 @@ export function buildFormSchema(sources: SourceInfo[]) {
     // Track / album source routing + default download client
     album_sources: z.array(z.string()).optional(),
     download_client: z.string().optional(),
+
+    // Logging (Logs)
+    log_level: z.enum(["debug", "info", "warn", "error"]).optional(),
+    log_format: z.enum(["json", "text"]).optional(),
+    log_max_size_mb: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : Number(v)),
+      z.number().int().min(1, "Must be at least 1 MB").optional(),
+    ),
+    log_max_backups: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : Number(v)),
+      z.number().int().min(1, "Must be at least 1").optional(),
+    ),
+    log_max_age_days: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : Number(v)),
+      z.number().int().min(1, "Must be at least 1").optional(),
+    ),
+    log_compress: z.boolean().optional(),
+    log_captured_max: z.preprocess(
+      (v) => (v === "" || v === undefined ? undefined : Number(v)),
+      z.number().int().min(50, "Must be at least 50").optional(),
+    ),
   });
 }
 
@@ -103,6 +124,13 @@ export function buildDefaults(sources: SourceInfo[]) {
     download_order: [] as string[],
     album_sources: [] as string[],
     download_client: "",
+    log_level: "info" as const,
+    log_format: "json" as const,
+    log_max_size_mb: 10,
+    log_max_backups: 3,
+    log_max_age_days: 7,
+    log_compress: true,
+    log_captured_max: 2000,
   };
 }
 

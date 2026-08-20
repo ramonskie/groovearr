@@ -70,6 +70,15 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
         download_order: values.download_order,
         album_sources: values.album_sources,
         download_client: values.download_client,
+        logging: {
+          level: values.log_level ?? "info",
+          format: values.log_format ?? "json",
+          max_size_mb: values.log_max_size_mb ?? 10,
+          max_backups: values.log_max_backups ?? 3,
+          max_age_days: values.log_max_age_days ?? 7,
+          compress: values.log_compress ?? true,
+          captured_max: values.log_captured_max ?? 2000,
+        },
       });
     },
     [updateConfig, config, sourceList],

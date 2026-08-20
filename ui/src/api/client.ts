@@ -4,6 +4,7 @@ import type {
   ConfigUpdatePayload,
   UpdateConfigResponse,
   ConfigValidationError,
+  LogsResponse,
   SourceInfo,
   TestConnectionResponse,
   SearchRequest,
@@ -126,10 +127,19 @@ export function getConfig(): Promise<Config> {
 export function updateConfig(
   payload: ConfigUpdatePayload,
 ): Promise<UpdateConfigResponse> {
-  return request<UpdateConfigResponse>("/api/config", {
+  return request<UpdateConfigResponse>(`/api/config`, {
     method: "PUT",
+    headers: { "Content-Type": "application/json" },
     body: JSON.stringify(payload),
   });
+}
+
+export function getLogs(): Promise<LogsResponse> {
+  return request<LogsResponse>(`/api/logs`);
+}
+
+export function clearLogs(): Promise<{ status: string }> {
+  return request<{ status: string }>(`/api/logs`, { method: "DELETE" });
 }
 
 // ─── Setup ───────────────────────────────────────────────────────

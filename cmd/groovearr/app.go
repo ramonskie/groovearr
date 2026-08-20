@@ -42,6 +42,9 @@ import (
 // App holds all initialized application components.
 type App struct {
 	log      *slog.Logger
+	logBuff  *logger.Buffer
+	logRot   *logger.Rotator
+	closeLog func()
 	cfg      *config.Persistence
 	libStore *sqlite.Store
 
@@ -61,14 +64,25 @@ type App struct {
 
 // NewApp initializes all application components from the given config path.
 func NewApp(configPath string) (*App, error) {
-	log := logger.NewDefault()
-
-	// Load config.
+	// Load config first — log level/format/rotation settings live in it.
 	cfg, err := config.LoadOrCreate(configPath)
 	if err != nil {
-		log.Error("config init failed", "error", err, "component", "main")
+		slog.Error("config init failed", "error", err, "component", "main")
 		return nil, err
 	}
+
+	// Production logger: JSON/text to stderr AND a rotating file, with an
+	// in-memory capture buffer for the settings log viewer.
+	logDir := filepath.Join(filepath.Dir(configPath), "logs")
+	if err := os.MkdirAll(logDir, 0o755); err != nil {
+		slog.Warn("log dir mkdir failed", "path", logDir, "error", err, "component", "main")
+	}
+	logPath := filepath.Join(logDir, "groovearr.log")
+	lc := logger.DefaultConfig()
+	if lg := cfg.Get().Logging; lg != nil {
+		lc = lg.LoggerConfig()
+	}
+	log, logBuff, logRot, closeLog := logger.New(lc, logPath)
 	cfg.SetLogger(log)
 
 	// Library store (SQLite).
@@ -178,6 +192,28 @@ func NewApp(configPath string) (*App, error) {
 	sseHub.StartHeartbeat(bgCtx)
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, log)
 
+	// Bridge captured log lines to the SSE hub so the Log tab streams live.
+	go func() {
+		ch := logBuff.Subscribe()
+		defer logBuff.Unsubscribe(ch)
+		for {
+			select {
+			case <-bgCtx.Done():
+				return
+			case e := <-ch:
+				data, err := json.Marshal(e)
+				if err != nil {
+					continue
+				}
+				sseHub.Broadcast(sse.SSEEvent{
+					Type:      "log_line",
+					Data:      data,
+					Timestamp: time.Now(),
+				})
+			}
+		}
+	}()
+
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
 	enrichmentHandler.SetProviderOrder(metadataOrder)
@@ -232,7 +268,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch,
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logBuff, logRot, logPath,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
@@ -275,6 +311,8 @@ func NewApp(configPath string) (*App, error) {
 		"database", dbPath,
 		"download", currentCfg.Library.DownloadPath,
 		"library", currentCfg.Library.LibraryPath,
+		"log_file", logPath,
+		"log_level", logRot.Level(),
 		"addr", addr,
 		"component", "main",
 	)
@@ -303,6 +341,9 @@ func NewApp(configPath string) (*App, error) {
 
 	return &App{
 		log:               log,
+		logBuff:           logBuff,
+		logRot:            logRot,
+		closeLog:          closeLog,
 		cfg:               cfg,
 		libStore:          libStore,
 		monitor:           monitor,
@@ -336,9 +377,11 @@ func (app *App) Run() {
 	if err := app.srv.ListenAndServe(); err != nil {
 		app.log.Error("server failed", "error", err, "component", "main")
 		app.libStore.Close()
+		app.closeLog()
 		os.Exit(1)
 	}
 	app.libStore.Close()
+	app.closeLog()
 }
 
 // readRenamerConfig reads the folder/compilation templates and library root
