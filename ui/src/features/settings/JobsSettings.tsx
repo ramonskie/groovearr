@@ -34,10 +34,16 @@ export default function JobsSettings() {
   const merge = useMutation({
     mutationFn: (ids: { keep: number; remove: number }) =>
       mergeArtists(ids.keep, ids.remove),
-    onSuccess: () => {
-      toast.success(
-        "Artists merged — run Organize · Repair to move the files",
-      );
+    onSuccess: (res) => {
+      if (res.renamed && res.canonical_name) {
+        toast.success(
+          `Artists merged — renamed to "${res.canonical_name}". Run Organize · Repair to move the files`,
+        );
+      } else {
+        toast.success(
+          "Artists merged — run Organize · Repair to move the files",
+        );
+      }
       duplicatesQuery.refetch();
       queryClient.invalidateQueries({ queryKey: ["library"] });
     },
@@ -224,8 +230,9 @@ export default function JobsSettings() {
         <p className="text-sm text-slate-400">
           Artists whose names differ only by case (e.g. &quot;Acda en de
           Munnik&quot; vs &quot;Acda en De Munnik&quot;) are stored as
-          separate artists. Merging folds the duplicate's albums and tracks
-          into the first (largest) entry.
+          separate artists. The canonical spelling from the metadata providers
+          (when found) selects the keeper and is applied on merge; otherwise
+          the largest entry wins.
         </p>
 
         {groups.length === 0 ? (
@@ -241,6 +248,11 @@ export default function JobsSettings() {
               >
                 <p className="mb-1 text-xs font-medium text-slate-400">
                   {g.artists.length} artists match &quot;{g.name}&quot;
+                  {g.canonical_name && (
+                    <span className="ml-2 text-amber-400">
+                      canonical: {g.canonical_name}
+                    </span>
+                  )}
                 </p>
                 <div className="space-y-1">
                   {g.artists.map((a, idx) => (

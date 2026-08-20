@@ -12,12 +12,15 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/metadata"
+	"github.com/ramonskie/groovearr/internal/strutil"
 )
 
 // ─── Library handlers ────────────────────────────────────────────────
@@ -129,16 +132,230 @@ type duplicateArtistEntry struct {
 }
 
 // duplicateGroup is a set of artists whose names differ only by case (the
-// common "Acda en de Munnik" / "Acda en De Munnik" split). The first entry is
-// the canonical pick (most tracks, ties by name).
+// common "Acda en de Munnik" / "Acda en De Munnik" split). Canonical is the
+// authoritative provider spelling when known. The first entry is the
+// canonical pick (closest to the canonical spelling, then most tracks).
 type duplicateGroup struct {
-	Name    string                 `json:"name"`
-	Artists []duplicateArtistEntry `json:"artists"`
+	Name      string                 `json:"name"`
+	Canonical string                 `json:"canonical_name,omitempty"`
+	Artists   []duplicateArtistEntry `json:"artists"`
+}
+
+// artistNameCacheEntry is one cached canonical-name lookup. Empty canonical
+// with a nil error means the lookup genuinely found nothing; a non-nil error
+// is a transient provider failure. Each state has its own TTL.
+type artistNameCacheEntry struct {
+	canonical string
+	err       error
+	ts        time.Time
+}
+
+// inflightLookup coalesces concurrent lookups for the same key: the first
+// caller performs the work, the rest block on done and reuse its result.
+type inflightLookup struct {
+	done      chan struct{}
+	canonical string
+	err       error
+}
+
+// artistNameCache memoizes canonical-name lookups so the
+// duplicates listing and merge handler don't hammer the rate-limited metadata
+// providers on every render.
+type artistNameCache struct {
+	mu       sync.Mutex
+	entries  map[string]artistNameCacheEntry
+	inflight map[string]*inflightLookup
+}
+
+const (
+	artistNameCacheTTL = 24 * time.Hour // success
+	artistNameMissTTL  = time.Hour      // authoritative not-found
+	artistNameErrorTTL = time.Minute    // transient provider failure
+	// artistNameLookupTimeout must cover the MusicBrainz rate-limit queue (1
+	// req/sec): concurrent lookups wait their turn, so a batch of a few groups
+	// needs a few seconds. One-time cost — results are cached afterward.
+	artistNameLookupTimeout = 3 * time.Second
+)
+
+func newArtistNameCache() *artistNameCache {
+	return &artistNameCache{
+		entries:  map[string]artistNameCacheEntry{},
+		inflight: map[string]*inflightLookup{},
+	}
+}
+
+// artistNameEntryTTL returns how long a cached lookup stays fresh.
+func artistNameEntryTTL(e artistNameCacheEntry) time.Duration {
+	if e.canonical != "" {
+		return artistNameCacheTTL
+	}
+	if e.err != nil {
+		return artistNameErrorTTL
+	}
+	return artistNameMissTTL
+}
+
+// getOrDo returns the cached canonical for key or computes it via fn,
+// coalescing concurrent callers for the same key into a single lookup.
+// Errors are cached briefly so a transient provider outage doesn't trigger a
+// full re-lookup on every request, but recovers within a minute.
+func (c *artistNameCache) getOrDo(ctx context.Context, key string, fn func(context.Context) (string, error)) (string, error) {
+	now := time.Now()
+	c.mu.Lock()
+	if e, ok := c.entries[key]; ok {
+		if now.Sub(e.ts) <= artistNameEntryTTL(e) {
+			c.mu.Unlock()
+			return e.canonical, e.err
+		}
+		delete(c.entries, key)
+	}
+	if fl, ok := c.inflight[key]; ok {
+		c.mu.Unlock()
+		select {
+		case <-fl.done:
+			return fl.canonical, fl.err
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+	}
+	fl := &inflightLookup{done: make(chan struct{})}
+	c.inflight[key] = fl
+	c.mu.Unlock()
+
+	canonical, err := fn(ctx)
+
+	c.mu.Lock()
+	fl.canonical, fl.err = canonical, err
+	close(fl.done)
+	delete(c.inflight, key)
+	c.entries[key] = artistNameCacheEntry{canonical: canonical, err: err, ts: time.Now()}
+	c.mu.Unlock()
+	return canonical, err
+}
+
+// canonicalArtistName resolves the authoritative spelling for an artist via
+// the metadata providers, in configured provider order. Best-effort: failures
+// and timeouts fall back to the library's own casing. The cache is keyed by
+// the lowercased name (punctuation preserved, so "AC/DC" and "ACDC" never
+// share a lookup); the provider is queried with the real (spaced) name.
+func (s *Server) canonicalArtistName(ctx context.Context, name string) string {
+	if s.artistNames == nil {
+		return ""
+	}
+	cacheKey := strings.ToLower(name)
+	lookupCtx, cancel := context.WithTimeout(ctx, artistNameLookupTimeout)
+	defer cancel()
+	canonical, _ := s.artistNames.getOrDo(lookupCtx, cacheKey, func(lctx context.Context) (string, error) {
+		return s.lookupCanonicalArtist(lctx, name)
+	})
+	return canonical
+}
+
+// orderedMetadataProviders returns the metadata providers in configured order.
+// Falls back to registration order when the resolver isn't wired up.
+func (s *Server) orderedMetadataProviders() []metadata.Provider {
+	if s.metadataResolver != nil {
+		if ordered := s.metadataResolver.OrderedProviders(); len(ordered) > 0 {
+			return ordered
+		}
+	}
+	if s.mdRegistry == nil {
+		return nil
+	}
+	return s.mdRegistry.Available()
+}
+
+// discoveryCapableProviders returns the names of providers that are actually
+// discovery-capable (declared capability), so a metadata provider that merely
+// happens to implement the interface — e.g. free-mode Spotify — is skipped.
+func (s *Server) discoveryCapableProviders() map[string]bool {
+	set := map[string]bool{}
+	if s.discoveryReg == nil {
+		return set
+	}
+	for _, dp := range s.discoveryReg.Any() {
+		set[dp.Name()] = true
+	}
+	return set
+}
+
+// lookupCanonicalArtist asks each provider, in metadata order, for the
+// canonical spelling. Providers with a dedicated name lookup (MusicBrainz)
+// are used directly; discovery-capable providers (Deezer, Spotify, Tidal,
+// Discogs, Last.fm) contribute via SearchArtists. Returns the last provider
+// error when every provider fails, so callers can distinguish "not found"
+// (authoritative, cache long) from "couldn't reach a provider" (transient,
+// cache briefly).
+func (s *Server) lookupCanonicalArtist(ctx context.Context, name string) (string, error) {
+	var lastErr error
+	want := strutil.NormalizeName(name)
+	discCapable := s.discoveryCapableProviders()
+	for _, p := range s.orderedMetadataProviders() {
+		if anp, ok := p.(metadata.ArtistNameProvider); ok {
+			got, err := anp.CanonicalArtistName(ctx, name)
+			if err != nil {
+				lastErr = err
+				s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
+				continue
+			}
+			if got != "" {
+				return got, nil
+			}
+		}
+		if !discCapable[p.Name()] {
+			continue
+		}
+		dp, ok := p.(discovery.Provider)
+		if !ok {
+			continue
+		}
+		artists, err := dp.SearchArtists(ctx, name, 5)
+		if err != nil {
+			lastErr = err
+			s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
+			continue
+		}
+		for _, a := range artists {
+			if strutil.NormalizeName(a.Name) == want {
+				return a.Name, nil
+			}
+		}
+	}
+	if lastErr != nil {
+		return "", lastErr
+	}
+	return "", nil
+}
+
+// canonicalMatchScore rates how closely name matches the canonical spelling.
+// An exact match wins outright; otherwise each word that already matches the
+// canonical casing scores +1, so a mostly-correct variant outranks one that
+// capitalizes every particle.
+func canonicalMatchScore(name, canonical string) int {
+	if canonical == "" {
+		return 0
+	}
+	if name == canonical {
+		return len(strings.Fields(name)) + 1
+	}
+	nw, cw := strings.Fields(name), strings.Fields(canonical)
+	n := len(nw)
+	if len(cw) < n {
+		n = len(cw)
+	}
+	score := 0
+	for i := 0; i < n; i++ {
+		if nw[i] == cw[i] {
+			score++
+		}
+	}
+	return score
 }
 
 // handleLibraryArtistDuplicates lists artists that collide case-insensitively,
-// so the UI can offer one-click merges. Name groups are ordered by total
-// tracks so the first entry is the sensible merge target.
+// so the UI can offer one-click merges. Each group's first entry is the
+// sensible merge target: closest to the canonical provider spelling first,
+// then most tracks, then name.
 func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
@@ -159,6 +376,37 @@ func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Re
 	}
 
 	groups := []duplicateGroup{}
+	type groupResolution struct {
+		key     string
+		repName string // original-cased name, better for the provider query
+	}
+	var toResolve []groupResolution
+	for key, list := range byLower {
+		if len(list) < 2 {
+			continue
+		}
+		toResolve = append(toResolve, groupResolution{key: key, repName: list[0].Name})
+	}
+
+	// Resolve canonical spellings concurrently. The MusicBrainz client paces
+	// requests globally at 1 req/sec, so lookups queue up rather than burst;
+	// the per-lookup timeout covers that queue for a typical handful of groups.
+	// Cost is one-time — results are cached for 24h.
+	canonicalByKey := make(map[string]string, len(toResolve))
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, gr := range toResolve {
+		wg.Add(1)
+		go func(gr groupResolution) {
+			defer wg.Done()
+			canonical := s.canonicalArtistName(ctx, gr.repName)
+			mu.Lock()
+			canonicalByKey[gr.key] = canonical
+			mu.Unlock()
+		}(gr)
+	}
+	wg.Wait()
+
 	for key, list := range byLower {
 		if len(list) < 2 {
 			continue
@@ -168,13 +416,18 @@ func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Re
 			ts, _ := s.store.GetTracksByArtist(ctx, a.ID)
 			entries = append(entries, duplicateArtistEntry{ID: a.ID, Name: a.Name, Tracks: len(ts)})
 		}
+		canonical := canonicalByKey[key]
 		sort.SliceStable(entries, func(i, j int) bool {
+			si, sj := canonicalMatchScore(entries[i].Name, canonical), canonicalMatchScore(entries[j].Name, canonical)
+			if si != sj {
+				return si > sj
+			}
 			if entries[i].Tracks != entries[j].Tracks {
 				return entries[i].Tracks > entries[j].Tracks
 			}
 			return entries[i].Name < entries[j].Name
 		})
-		groups = append(groups, duplicateGroup{Name: key, Artists: entries})
+		groups = append(groups, duplicateGroup{Name: key, Canonical: canonical, Artists: entries})
 	}
 	sort.SliceStable(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 
@@ -205,7 +458,28 @@ func (s *Server) handleLibraryArtistMerge(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]bool{"merged": true})
+	// Adopt the canonical provider spelling so the surviving artist keeps
+	// the authoritative name, even when the local variant that won was the
+	// misspelled one. Only applied when a provider agrees it is the same artist.
+	renamed := false
+	canonical := ""
+	keep, err := s.store.GetArtist(r.Context(), keepID)
+	if err == nil && keep != nil {
+		canonical = s.canonicalArtistName(r.Context(), keep.Name)
+		if canonical != "" && canonical != keep.Name && normalizeKey(canonical) == normalizeKey(keep.Name) {
+			if err := s.store.RenameArtist(r.Context(), keepID, canonical); err != nil {
+				s.log.Warn("rename merged artist to canonical name failed",
+					"artist", keep.Name, "canonical", canonical, "error", err, "component", "api")
+			} else {
+				renamed = true
+			}
+		}
+	}
+	out := map[string]any{"merged": true, "renamed": renamed}
+	if renamed {
+		out["canonical_name"] = canonical
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // sqlDBProvider is satisfied by types that expose a *sql.DB (e.g. *sqlite.Store).

@@ -2,12 +2,15 @@ package download
 
 import (
 	"context"
+	"encoding/json"
 	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/plugin"
@@ -99,6 +102,60 @@ func (m *mockLibraryStore) SetArtistThumbURL(ctx context.Context, artistID int64
 		m.artist.ThumbURL = thumbURL
 	}
 	return nil
+}
+
+// mockDiscoveryProvider counts SearchArtists calls, standing in for a
+// discovery provider (Deezer, Spotify, etc.) that serves artist images.
+type mockDiscoveryProvider struct {
+	calls *int
+}
+
+var _ discovery.Provider = (*mockDiscoveryProvider)(nil)
+
+func (m *mockDiscoveryProvider) Name() string        { return "mockdisc" }
+func (m *mockDiscoveryProvider) DisplayName() string { return "mockdisc" }
+func (m *mockDiscoveryProvider) IsConfigured() bool  { return true }
+func (m *mockDiscoveryProvider) Connected() bool     { return true }
+func (m *mockDiscoveryProvider) CapabilityStatus() map[string]string {
+	return map[string]string{"discovery": "connected"}
+}
+func (m *mockDiscoveryProvider) CheckConnection(context.Context) error { return nil }
+func (m *mockDiscoveryProvider) SearchArtists(context.Context, string, int) ([]discovery.ArtistSummary, error) {
+	*m.calls++
+	return nil, nil
+}
+func (m *mockDiscoveryProvider) GetArtistAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	return nil, nil
+}
+func (m *mockDiscoveryProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
+	return nil, nil
+}
+func (m *mockDiscoveryProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	return nil, nil
+}
+
+type mockDiscoveryFactory struct {
+	calls *int
+}
+
+var _ plugin.PluginFactory = (*mockDiscoveryFactory)(nil)
+
+func (f *mockDiscoveryFactory) Name() string        { return "mockdisc" }
+func (f *mockDiscoveryFactory) DisplayName() string { return "mockdisc" }
+func (f *mockDiscoveryFactory) Capabilities() []string {
+	return []string{"discovery"}
+}
+func (f *mockDiscoveryFactory) Create(json.RawMessage, plugin.PluginResources) (plugin.BasePlugin, error) {
+	return &mockDiscoveryProvider{calls: f.calls}, nil
+}
+func (f *mockDiscoveryFactory) ValidateConfig(json.RawMessage) error { return nil }
+func (f *mockDiscoveryFactory) DefaultConfig() json.RawMessage       { return json.RawMessage("{}") }
+
+func newDiscoveryRegistryWithMock(calls *int) *discovery.Registry {
+	discReg := discovery.NewRegistry(plugin.NewRegistry())
+	_ = discReg.RegisterFactory(&mockDiscoveryFactory{calls: calls})
+	_ = discReg.Inner().Register(&mockDiscoveryProvider{calls: calls})
+	return discReg
 }
 
 func TestMetadataEnrichmentHandler_SkipNoLibraryTrack(t *testing.T) {
@@ -304,3 +361,77 @@ var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
 
 // Ensure mockMetadataProvider satisfies plugin.BasePlugin (embedded in metadata.Provider).
 var _ plugin.BasePlugin = (*mockMetadataProvider)(nil)
+
+func TestArtistImageSearchDedupedPerTTL(t *testing.T) {
+	root := t.TempDir()
+	trackPath := filepath.Join(root, "Artist", "Album", "01 - Track.flac")
+	if err := os.MkdirAll(filepath.Dir(trackPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := metadata.NewRegistry()
+	_ = reg.Register(&mockMetadataProvider{name: "mock", configured: true, connected: true})
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+
+	var discCalls int
+	handler := NewMetadataEnrichmentHandler(reg, newDiscoveryRegistryWithMock(&discCalls), store, testLogger())
+
+	// First import triggers the artist image search.
+	if err := handler.Handle(context.Background(), &Record{LibraryTrackID: 1}); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	// Second import of the same artist within the retry window must not
+	// re-hit the discovery provider.
+	if err := handler.Handle(context.Background(), &Record{LibraryTrackID: 1}); err != nil {
+		t.Fatalf("second Handle: %v", err)
+	}
+	if discCalls != 1 {
+		t.Errorf("SearchArtists called %d times, want 1 (TTL dedup)", discCalls)
+	}
+}
+
+func TestArtistImageSearchRetriesAfterTTL(t *testing.T) {
+	root := t.TempDir()
+	trackPath := filepath.Join(root, "Artist", "Album", "01 - Track.flac")
+	if err := os.MkdirAll(filepath.Dir(trackPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	reg := metadata.NewRegistry()
+	_ = reg.Register(&mockMetadataProvider{name: "mock", configured: true, connected: true})
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+
+	var discCalls int
+	handler := NewMetadataEnrichmentHandler(reg, newDiscoveryRegistryWithMock(&discCalls), store, testLogger())
+
+	if err := handler.Handle(context.Background(), &Record{LibraryTrackID: 1}); err != nil {
+		t.Fatalf("first Handle: %v", err)
+	}
+	if discCalls != 1 {
+		t.Fatalf("SearchArtists called %d times after first import, want 1", discCalls)
+	}
+
+	// Expire the retry window by back-dating the recorded attempt.
+	handler.imageMu.Lock()
+	handler.imageAttempted[1] = handler.imageAttempted[1].Add(-artistImageRetryTTL - time.Second)
+	handler.imageMu.Unlock()
+
+	if err := handler.Handle(context.Background(), &Record{LibraryTrackID: 1}); err != nil {
+		t.Fatalf("Handle after TTL: %v", err)
+	}
+	if discCalls != 2 {
+		t.Errorf("SearchArtists called %d times, want 2 after TTL expiry", discCalls)
+	}
+}

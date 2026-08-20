@@ -8,12 +8,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"strings"
 	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/strutil"
 )
 
 // ─── Discovery handlers ─────────────────────────────────────────────
@@ -518,27 +518,7 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 }
 
 // normalizeKey strips accents, lowercases, and removes non-alphanumeric for dedup.
-func normalizeKey(s string) string {
-	s = strings.ToLower(s)
-	// Simple accent removal for common Latin accents.
-	replacer := strings.NewReplacer(
-		"á", "a", "à", "a", "â", "a", "ä", "a", "ã", "a",
-		"é", "e", "è", "e", "ê", "e", "ë", "e",
-		"í", "i", "ì", "i", "î", "i", "ï", "i",
-		"ó", "o", "ò", "o", "ô", "o", "ö", "o", "õ", "o",
-		"ú", "u", "ù", "u", "û", "u", "ü", "u",
-		"ñ", "n", "ç", "c",
-	)
-	s = replacer.Replace(s)
-	// Remove remaining non-alphanumeric.
-	var b strings.Builder
-	for _, r := range s {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
-}
+func normalizeKey(s string) string { return strutil.NormalizeName(s) }
 
 func (s *Server) handleDiscoverArtistAlbums(w http.ResponseWriter, r *http.Request) {
 	artistID := r.PathValue("id")

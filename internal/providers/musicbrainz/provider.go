@@ -34,6 +34,7 @@ func NewClient(cfg MusicBrainzConfig, logger *slog.Logger) *Client {
 
 // Compile-time interface check.
 var _ metadata.Provider = (*Client)(nil)
+var _ metadata.ArtistNameProvider = (*Client)(nil)
 
 // ─── plugin.BasePlugin ─────────────────────────────────────────────────
 
@@ -102,6 +103,19 @@ func (c *Client) SearchCover(ctx context.Context, artist, album string) (*metada
 // artist images directly — returns nil, nil.
 func (c *Client) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
 	return nil, nil
+}
+
+// CanonicalArtistName resolves the canonical MusicBrainz spelling for an
+// artist name. Returns "" when MusicBrainz has no matching artist.
+func (c *Client) CanonicalArtistName(ctx context.Context, name string) (string, error) {
+	res, err := c.api.SearchArtist(ctx, name)
+	if err != nil {
+		return "", err
+	}
+	if res == nil {
+		return "", nil
+	}
+	return res.Name, nil
 }
 
 // SearchAlbum finds the album title for a track by searching MusicBrainz

@@ -255,8 +255,8 @@ export function getArtistDuplicates(): Promise<ArtistDuplicatesResponse> {
 export function mergeArtists(
   keepId: number,
   removeId: number,
-): Promise<{ merged: boolean }> {
-  return request<{ merged: boolean }>(
+): Promise<{ merged: boolean; renamed?: boolean; canonical_name?: string }> {
+  return request<{ merged: boolean; renamed?: boolean; canonical_name?: string }>(
     `/api/library/artists/${keepId}/merge`,
     {
       method: "POST",

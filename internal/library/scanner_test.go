@@ -628,7 +628,8 @@ func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumb
 	}
 	return nil
 }
-func (m *mockStore) MergeArtists(ctx context.Context, keepID, removeID int64) error { return nil }
+func (m *mockStore) MergeArtists(ctx context.Context, keepID, removeID int64) error      { return nil }
+func (m *mockStore) RenameArtist(ctx context.Context, artistID int64, name string) error { return nil }
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) {
 	key := fmt.Sprintf("%d:%s", a.ArtistID, a.Title)
 	if id, ok := m.albums[key]; ok {

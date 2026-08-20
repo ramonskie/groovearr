@@ -21,6 +21,9 @@ type Store interface {
 	// tracks and deleting the removed row. Used to collapse case-variant
 	// duplicate artists into one.
 	MergeArtists(ctx context.Context, keepID, removeID int64) error
+	// RenameArtist updates an artist's name, used to adopt the canonical
+	// MusicBrainz spelling for the survivor of a merge.
+	RenameArtist(ctx context.Context, artistID int64, name string) error
 
 	// Albums.
 	UpsertAlbum(ctx context.Context, album *domain.Album) (int64, error)

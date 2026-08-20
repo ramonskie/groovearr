@@ -12,6 +12,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/strutil"
 )
 
 const defaultBaseURL = "https://musicbrainz.org/ws/2"
@@ -240,6 +242,57 @@ func pickMostFrequent(counts map[string]int) string {
 	return best
 }
 
+// ArtistResult is a canonical artist found by MusicBrainz artist search.
+type ArtistResult struct {
+	MBID string
+	Name string
+}
+
+// SearchArtist finds the canonical MusicBrainz spelling for an artist name.
+// MusicBrainz orders results by relevance; this returns the first hit whose
+// normalized name matches the query (so case-only typos like "Acda en De
+// Munnik" resolve to the canonical "Acda en de Munnik"). Returns nil, nil
+// when nothing in the top results matches.
+func (c *APIClient) SearchArtist(ctx context.Context, name string) (*ArtistResult, error) {
+	if name == "" {
+		return nil, nil
+	}
+	query := fmt.Sprintf(`artist:"%s"`, escapeLucene(name))
+	data, err := c.apiGet(ctx, "/artist/", map[string]string{
+		"query": query,
+		"limit": "5",
+		"fmt":   "json",
+	})
+	if err != nil {
+		c.log.Error("musicbrainz search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil
+	}
+
+	var resp struct {
+		Count   int `json:"count"`
+		Artists []struct {
+			ID    string `json:"id"`
+			Name  string `json:"name"`
+			Score int    `json:"score"`
+		} `json:"artists"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.log.Error("musicbrainz unmarshal search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
+		return nil, err
+	}
+	want := strutil.NormalizeName(name)
+	for _, a := range resp.Artists {
+		if strutil.NormalizeName(a.Name) != want {
+			continue
+		}
+		return &ArtistResult{MBID: a.ID, Name: a.Name}, nil
+	}
+	return nil, nil
+}
+
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
 func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
 	data, err := c.apiGet(ctx, "/release/"+mbid, map[string]string{
@@ -438,13 +491,19 @@ func (c *APIClient) SearchReleasesByGroup(ctx context.Context, rgMBID string) ([
 // ─── Internal HTTP ─────────────────────────────────────────────────────
 
 func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]string) (json.RawMessage, error) {
-	// Rate limit with mutex for concurrent-safety.
+	// Rate limit with a proper token bucket: recompute the wait against the
+	// latest lastCall under the mutex, so concurrent callers queue up and are
+	// paced one minInterval apart instead of sleeping the same gap in parallel
+	// and bursting through the server-side limit.
 	c.mu.Lock()
-	elapsed := time.Since(c.lastCall)
-	if elapsed < c.minInterval {
+	for {
+		wait := c.minInterval - time.Since(c.lastCall)
+		if wait <= 0 {
+			break
+		}
 		c.mu.Unlock()
 		select {
-		case <-time.After(c.minInterval - elapsed):
+		case <-time.After(wait):
 		case <-ctx.Done():
 			return nil, ctx.Err()
 		}

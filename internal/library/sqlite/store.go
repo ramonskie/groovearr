@@ -394,6 +394,14 @@ func (s *Store) MergeArtists(ctx context.Context, keepID, removeID int64) error 
 	return tx.Commit()
 }
 
+// RenameArtist updates an artist's name, used to adopt the canonical
+// MusicBrainz spelling for the survivor of a merge.
+func (s *Store) RenameArtist(ctx context.Context, artistID int64, name string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE artists SET name=?, updated_at=? WHERE id=?`,
+		name, time.Now().UTC().Format(time.RFC3339), artistID)
+	return err
+}
+
 // mergeJSONMaps merges the JSON external_ids map from srcArtistID into the
 // artist row dstID (only adding keys keep doesn't already have), inside tx.
 func mergeJSONMaps(ctx context.Context, tx *sql.Tx, dstID int64, src map[string]string) error {

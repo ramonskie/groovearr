@@ -36,8 +36,8 @@ func (r *MetadataResolver) SetProviderOrder(order *ProviderOrder) {
 	r.providerOrder = order
 }
 
-// orderedProviders returns configured providers sorted by providerOrder.
-func (r *MetadataResolver) orderedProviders() []Provider {
+// OrderedProviders returns configured providers sorted by providerOrder.
+func (r *MetadataResolver) OrderedProviders() []Provider {
 	providers := r.registry.Available()
 	order := r.providerOrder.Current()
 	if len(order) == 0 {
@@ -87,7 +87,7 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 		return result, nil
 	}
 
-	providers := r.orderedProviders()
+	providers := r.OrderedProviders()
 
 	// Phase 1: find album name if missing.
 	// Spotify free mode returns comma-separated artist strings like

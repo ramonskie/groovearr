@@ -54,6 +54,7 @@ type Server struct {
 	log                 *slog.Logger
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
+	artistNames         *artistNameCache
 	bgCtx               context.Context
 	bgCancel            context.CancelFunc
 }
@@ -82,6 +83,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		log:                 logger,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
+		artistNames:         newArtistNameCache(),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)

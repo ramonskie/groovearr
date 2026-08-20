@@ -42,12 +42,16 @@ type MetadataEnrichmentHandler struct {
 	httpClient    *http.Client
 	tagger        *tagging.Tagger
 
-	enrichMu  sync.Mutex
-	enriching map[int64]chan struct{} // artistID → completion signal for dedup
-
-	bulkMu      sync.Mutex
-	bulkArtists map[int64]bool // bulk-job artists whose image was attempted this run
+	imageMu        sync.Mutex
+	imageAttempted map[int64]time.Time // artistID → last image attempt, TTL-gated
 }
+
+// artistImageRetryTTL bounds how often a given artist's image is searched on
+// the discovery providers (Deezer, Spotify, etc.) during routine imports, so
+// repeated imports of the same artist don't hammer the provider APIs. Explicit
+// bulk jobs reset the window via ResetBulk and therefore re-attempt each
+// artist every run.
+const artistImageRetryTTL = 24 * time.Hour
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
 // metadata providers and applies their results to the library.
@@ -59,14 +63,13 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *dis
 		logger = slog.Default()
 	}
 	return &MetadataEnrichmentHandler{
-		log:          logger,
-		registry:     registry,
-		discoveryReg: discoveryReg,
-		libStore:     libStore,
-		httpClient:   &http.Client{Timeout: 30 * time.Second},
-		tagger:       tagging.New(logger),
-		enriching:    make(map[int64]chan struct{}),
-		bulkArtists:  make(map[int64]bool),
+		log:            logger,
+		registry:       registry,
+		discoveryReg:   discoveryReg,
+		libStore:       libStore,
+		httpClient:     &http.Client{Timeout: 30 * time.Second},
+		tagger:         tagging.New(logger),
+		imageAttempted: make(map[int64]time.Time),
 	}
 }
 
@@ -85,12 +88,34 @@ func (h *MetadataEnrichmentHandler) EnrichLibraryTrack(ctx context.Context, trac
 	return h.enrichTrack(ctx, &Record{LibraryTrackID: trackID}, true)
 }
 
-// ResetBulk clears the per-run artist-image dedup state. Call once at the
-// start of each bulk enrichment job so artists are retried across runs.
+// ResetBulk clears the artist-image retry dedup state. Call once at the
+// start of each bulk enrichment job: a bulk run is an explicit full-library
+// refresh, so every artist is retried rather than waiting out the TTL.
 func (h *MetadataEnrichmentHandler) ResetBulk() {
-	h.bulkMu.Lock()
-	defer h.bulkMu.Unlock()
-	h.bulkArtists = make(map[int64]bool)
+	h.imageMu.Lock()
+	defer h.imageMu.Unlock()
+	h.imageAttempted = make(map[int64]time.Time)
+}
+
+// imageAttemptedRecently reports whether the artist's image was searched
+// within the retry window (read-only).
+func (h *MetadataEnrichmentHandler) imageAttemptedRecently(artistID int64, now time.Time) bool {
+	h.imageMu.Lock()
+	defer h.imageMu.Unlock()
+	last, ok := h.imageAttempted[artistID]
+	return ok && now.Sub(last) < artistImageRetryTTL
+}
+
+// markImageAttemptDue atomically checks the retry window and, when the
+// artist's image may be attempted now, records the attempt and returns true.
+func (h *MetadataEnrichmentHandler) markImageAttemptDue(artistID int64, now time.Time) bool {
+	h.imageMu.Lock()
+	defer h.imageMu.Unlock()
+	if last, ok := h.imageAttempted[artistID]; ok && now.Sub(last) < artistImageRetryTTL {
+		return false
+	}
+	h.imageAttempted[artistID] = now
+	return true
 }
 
 // orderedProviders returns configured providers sorted by providerOrder.
@@ -184,26 +209,23 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 
 	// Bulk mode: skip tracks whose metadata and cover are already complete —
 	// re-running the providers for them is pure waste. The artist image is
-	// handled separately (below): attempted at most once per artist per run,
-	// so a failed fetch doesn't re-trigger per-track metadata enrichment.
+	// handled separately (below): attempted at most once per artist per retry
+	// window, so a failed fetch doesn't re-trigger per-track metadata enrichment.
 	skipArtistImage := false
 	if bulk {
 		hasCover := library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath))
 		metadataComplete := track.ISRC != "" && len(track.ExternalIDs) > 0 &&
 			len(album.Genres) > 0 && album.ReleaseDate != "" && hasCover
 
-		h.bulkMu.Lock()
-		imageAttempted := h.bulkArtists[track.ArtistID]
-		if !imageAttempted {
-			h.bulkArtists[track.ArtistID] = true
-		}
-		h.bulkMu.Unlock()
-		skipArtistImage = imageAttempted
+		// Whether this artist's image was already attempted within the retry
+		// window; the shared gate below records the attempt.
+		skipArtistImage = h.imageAttemptedRecently(track.ArtistID, time.Now())
 
 		if metadataComplete {
 			// Metadata and cover present — only a missing artist portrait may
-			// remain, fetched once per artist per run.
-			if artist.ThumbURL == "" && !imageAttempted && h.discoveryReg != nil {
+			// remain, fetched at most once per artist per retry window.
+			if artist.ThumbURL == "" && !skipArtistImage && h.discoveryReg != nil &&
+				h.markImageAttemptDue(track.ArtistID, time.Now()) {
 				h.enrichArtistImage(ctx, artist, track)
 			}
 			return nil
@@ -251,8 +273,10 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 	}
 
 	// Enrich artist image from discovery providers (Deezer, Spotify, etc.).
-	// Always tries to refresh — existing wrong images get corrected on re-import.
-	if h.discoveryReg != nil && !skipArtistImage {
+	// Attempted at most once per artist per retry window so repeated imports
+	// of the same artist don't hammer the provider APIs; existing images are
+	// still refreshed when the window elapses.
+	if h.discoveryReg != nil && !skipArtistImage && h.markImageAttemptDue(track.ArtistID, time.Now()) {
 		h.enrichArtistImage(ctx, artist, track)
 	}
 
@@ -416,35 +440,10 @@ func (h *MetadataEnrichmentHandler) downloadArtistImage(ctx context.Context, art
 }
 
 // enrichArtistImage tries to find and download an artist image from discovery
-// providers (Deezer, Spotify, etc.). Runs after metadata enrichment on every
-// import so wrong/stale images are corrected on re-import.
-// Uses an in-memory dedup map so concurrent imports of the same artist only
-// call discovery APIs once — subsequent goroutines wait for the first to finish.
+// providers (Deezer, Spotify, etc.). Runs after metadata enrichment so wrong or
+// stale images get corrected on re-import. Callers gate this via the TTL-based
+// markImageAttemptDue, so it runs at most once per artist per retry window.
 func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artist *domain.Artist, track *domain.Track) {
-	// Acquire or wait: deduplicate concurrent enrichment of the same artist.
-	h.enrichMu.Lock()
-	if ch, ok := h.enriching[artist.ID]; ok {
-		h.enrichMu.Unlock()
-		<-ch
-		return
-	}
-	ch := make(chan struct{})
-	h.enriching[artist.ID] = ch
-	h.enrichMu.Unlock()
-
-	defer func() {
-		h.enrichMu.Lock()
-		delete(h.enriching, artist.ID)
-		h.enrichMu.Unlock()
-		close(ch)
-	}()
-
-	h.enrichArtistImageLocked(ctx, artist, track)
-}
-
-// enrichArtistImageLocked runs the actual discovery provider search and download.
-// Caller must hold the per-artist dedup slot via enrichArtistImage.
-func (h *MetadataEnrichmentHandler) enrichArtistImageLocked(ctx context.Context, artist *domain.Artist, track *domain.Track) {
 	providers := h.discoveryReg.Any()
 	if len(providers) == 0 {
 		return

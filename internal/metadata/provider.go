@@ -97,6 +97,18 @@ type ArtistMetadataProvider interface {
 	GetSimilarArtists(ctx context.Context, artist string) ([]string, error)
 }
 
+// ArtistNameProvider is an optional interface for providers that can resolve
+// the canonical spelling of an artist name (MusicBrainz, Deezer, Spotify,
+// Tidal, ...). Used to pick and rename the surviving artist when merging
+// case-only duplicates.
+type ArtistNameProvider interface {
+	Provider
+
+	// CanonicalArtistName returns the canonical spelling for name, or "" when
+	// the provider has no authoritative spelling for it.
+	CanonicalArtistName(ctx context.Context, name string) (string, error)
+}
+
 // LyricsProvider is an optional interface for providers that can fetch
 // song lyrics.
 type LyricsProvider interface {

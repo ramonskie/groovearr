@@ -6,6 +6,8 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sort"
+	"sync"
 	"testing"
 	"time"
 )
@@ -508,6 +510,141 @@ func releasesWithRG(pairs ...[]string) []releaseRef {
 		})
 	}
 	return refs
+}
+
+// ─── Artist canonical-name search ───────────────────────────────────────
+
+type artistSearchResp struct {
+	Count   int          `json:"count"`
+	Artists []artistResp `json:"artists"`
+}
+
+type artistResp struct {
+	ID    string `json:"id"`
+	Name  string `json:"name"`
+	Score int    `json:"score"`
+}
+
+func newArtistTestClient(t *testing.T, artists []artistResp) (*APIClient, func()) {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/artist/" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		resp := artistSearchResp{Count: len(artists), Artists: artists}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("mock encode error: %v", err)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	client := &APIClient{
+		cfg:         MusicBrainzConfig{},
+		httpClient:  srv.Client(),
+		userAgent:   "groovearr-test",
+		baseURL:     srv.URL,
+		log:         testLogger(),
+		minInterval: 0,
+	}
+	return client, srv.Close
+}
+
+func TestSearchArtist_CanonicalSpelling(t *testing.T) {
+	// MusicBrainz returns the canonical spelling; the case-mangled local name
+	// must resolve to it.
+	client, cleanup := newArtistTestClient(t, []artistResp{
+		{ID: "mbid-1", Name: "Acda en de Munnik", Score: 100},
+		{ID: "mbid-2", Name: "Acda en De Munnik", Score: 95},
+	})
+	defer cleanup()
+
+	res, err := client.SearchArtist(context.Background(), "Acda en De Munnik")
+	if err != nil {
+		t.Fatalf("SearchArtist error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected a match, got nil")
+	}
+	if res.Name != "Acda en de Munnik" || res.MBID != "mbid-1" {
+		t.Errorf("got %+v, want canonical 'Acda en de Munnik'", res)
+	}
+}
+
+func TestSearchArtist_NoMatch(t *testing.T) {
+	client, cleanup := newArtistTestClient(t, []artistResp{
+		{ID: "mbid-x", Name: "Some Other Artist", Score: 100},
+	})
+	defer cleanup()
+
+	res, err := client.SearchArtist(context.Background(), "Totally Different Name")
+	if err != nil {
+		t.Fatalf("SearchArtist error: %v", err)
+	}
+	if res != nil {
+		t.Errorf("expected nil for non-matching result, got %+v", res)
+	}
+}
+
+func TestSearchArtist_EmptyName(t *testing.T) {
+	client, cleanup := newArtistTestClient(t, nil)
+	defer cleanup()
+	res, err := client.SearchArtist(context.Background(), "")
+	if err != nil {
+		t.Fatalf("SearchArtist error: %v", err)
+	}
+	if res != nil {
+		t.Errorf("expected nil for empty name, got %+v", res)
+	}
+}
+
+func TestAPIClientRateLimitsConcurrentRequests(t *testing.T) {
+	// Record when requests arrive; concurrent callers must be paced one
+	// minInterval apart (token bucket), not burst through together.
+	var mu sync.Mutex
+	var arrivals []time.Time
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		arrivals = append(arrivals, time.Now())
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{"artists": []any{}})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	client := &APIClient{
+		cfg:         MusicBrainzConfig{},
+		httpClient:  srv.Client(),
+		userAgent:   "groovearr-test",
+		baseURL:     srv.URL,
+		log:         testLogger(),
+		minInterval: 50 * time.Millisecond,
+	}
+
+	var wg sync.WaitGroup
+	for i := 0; i < 5; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = client.SearchArtist(context.Background(), "Test Artist")
+		}()
+	}
+	wg.Wait()
+
+	mu.Lock()
+	times := append([]time.Time(nil), arrivals...)
+	mu.Unlock()
+	if len(times) != 5 {
+		t.Fatalf("expected 5 arrivals, got %d", len(times))
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i].Before(times[j]) })
+	// Allow 10% jitter — under -race the scheduler skews timing slightly.
+	// A burst (the regression this guards against) is microseconds, far below.
+	minGap := time.Duration(float64(client.minInterval) * 0.9)
+	for i := 1; i < len(times); i++ {
+		if d := times[i].Sub(times[i-1]); d < minGap {
+			t.Errorf("requests %d and %d arrived %v apart, want >= %v", i-1, i, d, minGap)
+		}
+	}
 }
 
 func itoa(n int) string {
