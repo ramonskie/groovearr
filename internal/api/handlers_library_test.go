@@ -264,9 +264,6 @@ func TestArtistDuplicatesAndMerge(t *testing.T) {
 	if len(g.Artists) != 2 {
 		t.Fatalf("expected 2 artists in group, got %d", len(g.Artists))
 	}
-	if g.Canonical != "Acda en de Munnik" {
-		t.Errorf("canonical_name = %q, want the scanned canonical", g.Canonical)
-	}
 	if g.Artists[0].ID != 1 || g.Artists[0].Tracks != 2 {
 		t.Errorf("first artist should be the canonical-matching, largest one (%+v)", g.Artists[0])
 	}
@@ -329,12 +326,9 @@ func TestArtistDuplicatesListingFromScan(t *testing.T) {
 		t.Fatalf("expected 2 scanned duplicate groups, got %d", len(body.Groups))
 	}
 	// Explicit keeper checks: correct casing wins even with fewer tracks.
-	want := map[string]struct {
-		id    int64
-		canon string
-	}{
-		"acda en de munnik": {id: 2, canon: "Acda en de Munnik"},
-		"danny de munk":     {id: 4, canon: "Danny de Munk"},
+	want := map[string]int64{
+		"acda en de munnik": 2,
+		"danny de munk":     4,
 	}
 	for _, g := range body.Groups {
 		if len(g.Artists) != 2 {
@@ -344,11 +338,8 @@ func TestArtistDuplicatesListingFromScan(t *testing.T) {
 		if !ok {
 			t.Fatalf("unexpected group %q", g.Name)
 		}
-		if g.Canonical != w.canon {
-			t.Errorf("canonical_name for %q = %q, want %q", g.Name, g.Canonical, w.canon)
-		}
-		if g.Artists[0].ID != w.id {
-			t.Errorf("keeper for %q = id %d (%s), want id %d (%s)", g.Name, g.Artists[0].ID, g.Artists[0].Name, w.id, w.canon)
+		if g.Artists[0].ID != w {
+			t.Errorf("suggestion for %q = id %d (%s), want id %d", g.Name, g.Artists[0].ID, g.Artists[0].Name, w)
 		}
 	}
 }

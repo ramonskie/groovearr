@@ -478,3 +478,100 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 		return nil
 	}
 }
+
+// organizeArtistRunner moves one artist's tracks into the configured folder
+// layout. Started automatically after an artist merge: the merged tracks still
+// sit under the removed artist's folders, and a canonical rename may have left
+// the keeper's own folder name stale, so every keeper track is re-validated and
+// moved when out of place. In-place tracks are no-ops.
+func (s *Server) organizeArtistRunner(artistID int64) jobs.Runner {
+	return func(ctx context.Context, report func(jobs.Report)) error {
+		cfg := s.cfg.Get()
+		root := cfg.Library.LibraryPath
+		if root == "" {
+			root = config.DefaultLibraryPath
+		}
+		// The report is scoped to one artist; use a distinct mode so the UI
+		// doesn't read the outcome as a full-library organize run.
+		rep := &organizeReport{Mode: "repair (artist)", RanAt: time.Now().UTC()}
+		var (
+			done, moved, inPlace, skipped, failed, errorEntries int
+		)
+		addEntry := func(trackID int64, from, to, reason string) {
+			if len(rep.Entries) < maxOrganizeReportEntries {
+				rep.Entries = append(rep.Entries, organizeEntry{TrackID: trackID, From: from, To: to, Reason: reason})
+			} else {
+				rep.Truncated = true
+			}
+		}
+		// Persist whatever was computed, even on a failure, so the UI never
+		// shows a stale report from a previous run.
+		setReport := func() {
+			rep.Summary = organizeSummary{Moved: moved, InPlace: inPlace, Skipped: skipped, Errors: failed}
+			s.setOrganizeReport(rep)
+		}
+		artist, err := s.store.GetArtist(ctx, artistID)
+		if err != nil || artist == nil {
+			setReport()
+			return err
+		}
+		tracks, err := s.store.GetTracksByArtist(ctx, artistID)
+		if err != nil {
+			setReport()
+			return err
+		}
+		total := len(tracks)
+		if total == 0 {
+			setReport()
+			return nil
+		}
+		org := library.NewOrganizer(cfg.Library.FolderTemplate, cfg.Library.CompilationTemplate, root, s.store, s.log)
+		for i := range tracks {
+			if ctx.Err() != nil {
+				setReport()
+				return ctx.Err()
+			}
+			album, err := s.store.GetAlbum(ctx, tracks[i].AlbumID)
+			if err != nil || album == nil {
+				failed++
+				if errorEntries < maxOrganizeErrorEntries {
+					errorEntries++
+					addEntry(tracks[i].ID, tracks[i].FilePath, "album lookup failed", "errors")
+				}
+				s.log.Warn("merge organize: album lookup failed", "track_id", tracks[i].ID, "error", err, "component", "jobs")
+				done++
+				report(jobs.Report{Done: done, Total: total, Message: tracks[i].Title})
+				continue
+			}
+			res, err := org.Organize(ctx, &tracks[i], artist.Name, album.Title, album.Year, string(album.AlbumType), false)
+			if err != nil {
+				failed++
+				if errorEntries < maxOrganizeErrorEntries {
+					errorEntries++
+					addEntry(tracks[i].ID, tracks[i].FilePath, err.Error(), "errors")
+				}
+				s.log.Warn("merge organize: track failed", "track_id", tracks[i].ID, "error", err, "component", "jobs")
+			} else {
+				switch {
+				case res.Moved:
+					moved++
+					addEntry(tracks[i].ID, res.From, res.To, "moved")
+				case res.Skipped == "in place":
+					inPlace++
+				case res.Skipped != "":
+					skipped++
+					addEntry(tracks[i].ID, res.From, res.To, res.Skipped)
+				}
+			}
+			done++
+			report(jobs.Report{Done: done, Total: total, Message: tracks[i].Title})
+		}
+		setReport()
+		report(jobs.Report{
+			Done:    total,
+			Total:   total,
+			Message: fmt.Sprintf("moved %d tracks for %s, %d in place, %d skipped, %d errors", moved, artist.Name, inPlace, skipped, failed),
+		})
+		return nil
+	}
+}

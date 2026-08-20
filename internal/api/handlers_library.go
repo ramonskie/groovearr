@@ -17,6 +17,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
 )
@@ -130,13 +131,12 @@ type duplicateArtistEntry struct {
 }
 
 // duplicateGroup is a set of artists whose names differ only by case (the
-// common "Acda en de Munnik" / "Acda en De Munnik" split). Canonical is the
-// authoritative provider spelling when known. The first entry is the
-// canonical pick (closest to the canonical spelling, then most tracks).
+// common "Acda en de Munnik" / "Acda en De Munnik" split). The first entry is
+// the suggested merge target (closest to the MusicBrainz spelling, then most
+// tracks).
 type duplicateGroup struct {
-	Name      string                 `json:"name"`
-	Canonical string                 `json:"canonical_name,omitempty"`
-	Artists   []duplicateArtistEntry `json:"artists"`
+	Name    string                 `json:"name"`
+	Artists []duplicateArtistEntry `json:"artists"`
 }
 
 // duplicateScanStore is the persisted cache of duplicate-group canonical names,
@@ -272,7 +272,7 @@ func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Re
 			}
 			return entries[i].Name < entries[j].Name
 		})
-		groups = append(groups, duplicateGroup{Name: key, Canonical: canonical, Artists: entries})
+		groups = append(groups, duplicateGroup{Name: key, Artists: entries})
 	}
 	sort.SliceStable(groups, func(i, j int) bool { return groups[i].Name < groups[j].Name })
 
@@ -340,6 +340,17 @@ func (s *Server) handleLibraryArtistMerge(w http.ResponseWriter, r *http.Request
 	out := map[string]any{"merged": true, "renamed": renamed}
 	if renamed {
 		out["canonical_name"] = canonical
+	}
+	// Complete the merge by moving the survivor's tracks into the configured
+	// folder layout (merged tracks sit under the removed artist's folders, and
+	// a canonical rename may have left the keeper's folder stale). Runs as a
+	// background job; skipped when another job is already running.
+	if s.jobs != nil {
+		if _, err := s.jobs.Start("organize", s.organizeArtistRunner(keepID)); err == nil {
+			out["organize_started"] = true
+		} else if !errors.Is(err, jobs.ErrBusy) {
+			s.log.Warn("start merge organize failed", "error", err, "component", "api")
+		}
 	}
 	writeJSON(w, http.StatusOK, out)
 }

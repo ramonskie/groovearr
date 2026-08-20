@@ -34,14 +34,15 @@ export default function JobsSettings() {
     mutationFn: (ids: { keep: number; remove: number }) =>
       mergeArtists(ids.keep, ids.remove),
     onSuccess: (res) => {
+      const moving = res.organize_started
+        ? "Moving files…"
+        : "Run Organize · Repair to move the files";
       if (res.renamed && res.canonical_name) {
         toast.success(
-          `Artists merged — renamed to "${res.canonical_name}". Run Organize · Repair to move the files`,
+          `Artists merged — renamed to "${res.canonical_name}". ${moving}`,
         );
       } else {
-        toast.success(
-          "Artists merged — run Organize · Repair to move the files",
-        );
+        toast.success(`Artists merged — ${moving}`);
       }
       duplicatesQuery.refetch();
       queryClient.invalidateQueries({ queryKey: ["library"] });
@@ -300,11 +301,6 @@ export default function JobsSettings() {
                 >
                   <p className="mb-1 text-xs font-medium text-slate-400">
                     {g.artists.length} artists match &quot;{g.name}&quot;
-                    {g.canonical_name && (
-                      <span className="ml-2 text-amber-400">
-                        canonical: {g.canonical_name}
-                      </span>
-                    )}
                   </p>
                   <div className="space-y-1">
                     {g.artists.map((a) => {

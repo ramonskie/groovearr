@@ -61,6 +61,49 @@ func (s *organizeRunnerStore) UpsertTrack(ctx context.Context, t *domain.Track) 
 	return t.ID, nil
 }
 
+func (s *organizeRunnerStore) GetArtist(ctx context.Context, id int64) (*domain.Artist, error) {
+	for i := range s.artists {
+		if s.artists[i].ID == id {
+			return &s.artists[i], nil
+		}
+	}
+	return nil, nil
+}
+
+func (s *organizeRunnerStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
+	var out []domain.Track
+	for _, albums := range s.albums {
+		for _, a := range albums {
+			if a.ArtistID == artistID {
+				out = append(out, s.tracks[a.ID]...)
+			}
+		}
+	}
+	return out, nil
+}
+
+func (s *organizeRunnerStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
+	for _, albums := range s.albums {
+		for _, a := range albums {
+			if a.ID == id {
+				cp := a
+				return &cp, nil
+			}
+		}
+	}
+	return nil, nil
+}
+
+// albumlessStore is organizeRunnerStore with GetAlbum stubbed to always miss,
+// exercising the runner's album-lookup failure path.
+type albumlessStore struct {
+	*organizeRunnerStore
+}
+
+func (*albumlessStore) GetAlbum(context.Context, int64) (*domain.Album, error) {
+	return nil, nil
+}
+
 func TestOrganizeRunnerDryRunAndRepair(t *testing.T) {
 	root := t.TempDir()
 	mk := func(rel string) string {
@@ -291,5 +334,98 @@ func TestDuplicatesRunnerNoDuplicates(t *testing.T) {
 	}
 	if len(store.scan) != 0 {
 		t.Errorf("expected empty scan for no duplicates, got %v", store.scan)
+	}
+}
+
+func TestOrganizeArtistRunnerMovesMergedTracks(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "Removed Artist", "Album (2020)", "01 - Track.flac")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldPath, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.LoadOrCreate(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Library.LibraryPath = root
+		c.Library.FolderTemplate = "{artist}/{album} ({year})/{track:02d} - {title}"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	store := &organizeRunnerStore{
+		artists: []domain.Artist{{ID: 1, Name: "Keep Artist"}},
+		albums:  map[int64][]domain.Album{1: {{ID: 11, Title: "Album", Year: 2020, ArtistID: 1}}},
+		tracks: map[int64][]domain.Track{
+			11: {{ID: 101, AlbumID: 11, Title: "Track", TrackNumber: 1, FilePath: oldPath}},
+		},
+	}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	if err := s.organizeArtistRunner(1)(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatalf("organizeArtistRunner: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Keep Artist", "Album (2020)", "01 - Track.flac")); err != nil {
+		t.Errorf("track not moved into keeper folder: %v", err)
+	}
+	if s.organizeReport == nil {
+		t.Fatal("expected merge organize report to be persisted")
+	}
+	if s.organizeReport.Mode != "repair (artist)" {
+		t.Errorf("report mode = %q, want artist-scoped repair", s.organizeReport.Mode)
+	}
+	if s.organizeReport.Summary.Moved != 1 || s.organizeReport.Summary.Errors != 0 {
+		t.Errorf("report summary = %+v, want moved 1 and no errors", s.organizeReport.Summary)
+	}
+}
+
+func TestOrganizeArtistRunnerAlbumMissing(t *testing.T) {
+	root := t.TempDir()
+	oldPath := filepath.Join(root, "Keep Artist", "Album (2020)", "01 - Track.flac")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(oldPath, []byte("audio"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.LoadOrCreate(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Library.LibraryPath = root
+		c.Library.FolderTemplate = "{artist}/{album} ({year})/{track:02d} - {title}"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// The track references an album that's gone missing (e.g. a merged album
+	// whose rows are still mid-write). The runner must count it as an error,
+	// persist a report, and keep going rather than crash.
+	store := &albumlessStore{organizeRunnerStore: &organizeRunnerStore{
+		artists: []domain.Artist{{ID: 1, Name: "Keep Artist"}},
+		albums:  map[int64][]domain.Album{11: {{ID: 11, Title: "Album", Year: 2020, ArtistID: 1}}},
+		tracks: map[int64][]domain.Track{
+			11: {{ID: 101, AlbumID: 11, Title: "Track", TrackNumber: 1, FilePath: oldPath}},
+		},
+	}}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	if err := s.organizeArtistRunner(1)(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatalf("organizeArtistRunner: %v", err)
+	}
+	if s.organizeReport == nil {
+		t.Fatal("expected merge organize report to be persisted so the UI doesn't show stale results")
+	}
+	if s.organizeReport.Summary.Errors != 1 {
+		t.Errorf("report errors = %d, want 1", s.organizeReport.Summary.Errors)
 	}
 }

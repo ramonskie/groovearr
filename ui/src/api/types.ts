@@ -546,7 +546,6 @@ export interface DuplicateArtistEntry {
 
 export interface DuplicateGroup {
   name: string;
-  canonical_name?: string;
   artists: DuplicateArtistEntry[];
 }
 
