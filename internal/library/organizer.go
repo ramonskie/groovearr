@@ -53,13 +53,31 @@ func NewOrganizer(folderTemplate, compilationTemplate, root string, store Store,
 // (e.g. "Various Artists") rather than a single artist's folder. Tracks under
 // such a directory belong to a VA album even when the DB AlbumType says
 // otherwise. Shared with the HTTP layer so image serving applies the same rule.
-func IsCompilationDir(artistDir string) bool {
-	base := strings.ToLower(filepath.Base(artistDir))
-	switch base {
-	case "va", "compilation", "compilations":
+// The "various..." prefix is a strong signal for directories.
+func IsCompilationDir(dir string) bool {
+	return isCompilationName(filepath.Base(dir), true)
+}
+
+// IsCompilationArtist reports whether an artist name represents a compilation
+// grouping ("Various Artists", "VA", ...) rather than a real performer. Such
+// artists are shown with their placeholder avatar instead of a portrait. Only
+// exact grouping names count — a real performer named "Various Grooves" is
+// not a grouping.
+func IsCompilationArtist(name string) bool {
+	return isCompilationName(name, false)
+}
+
+// isCompilationName matches a folder or artist name against the known
+// compilation-grouping names. allowVariousPrefix additionally treats any name
+// starting with "various" as a grouping (safe for directories, too aggressive
+// for stored artist names).
+func isCompilationName(base string, allowVariousPrefix bool) bool {
+	b := strings.ToLower(base)
+	switch b {
+	case "va", "compilation", "compilations", "various artists":
 		return true
 	}
-	return strings.EqualFold(base, "Various Artists") || strings.HasPrefix(base, "various")
+	return allowVariousPrefix && strings.HasPrefix(b, "various")
 }
 
 // Organize computes the folder-template path for track and, unless dryRun,
@@ -129,17 +147,18 @@ func (o *Organizer) Organize(ctx context.Context, track *domain.Track, artist, a
 		return res, nil
 	}
 
-	o.moveImages(track.FilePath, newPath)
+	movedImages := o.moveImages(track.FilePath, newPath)
 
 	oldPath := track.FilePath
 	track.FilePath = newPath
 	if _, err := o.store.UpsertTrack(ctx, track); err != nil {
-		// Roll the file back so disk and DB stay consistent. Otherwise the
-		// next organize run sees the target occupied ("target exists") and
-		// never fixes the path, and a scan re-imports the moved file as a
-		// duplicate track.
+		// Roll the file and any relocated images back so disk and DB stay
+		// consistent. Otherwise the next organize run sees the target occupied
+		// ("target exists") and never fixes the path, and a scan re-imports the
+		// moved file as a duplicate track.
 		track.FilePath = oldPath
 		o.moveFileBack(newPath, oldPath)
+		o.moveImagesBack(movedImages)
 		return res, fmt.Errorf("update track %d path: %w", track.ID, err)
 	}
 
@@ -169,57 +188,80 @@ func (o *Organizer) moveFileBack(newPath, oldPath string) {
 	}
 }
 
+// imageMove records a single relocated image so a failed DB update can roll it
+// back.
+type imageMove struct{ src, dst string }
+
 // moveImages relocates the album's cover and the artist's portrait to the
-// track's new location, and removes now-empty source directories. Best-effort:
-// failures are logged and never fail the organize.
-func (o *Organizer) moveImages(oldPath, newPath string) {
+// track's new location, removes now-empty source directories, and returns what
+// moved so the caller can undo it on rollback. Best-effort: failures are logged
+// and never fail the organize.
+func (o *Organizer) moveImages(oldPath, newPath string) []imageMove {
 	oldAlbum, newAlbum := AlbumDirFromTrack(oldPath), AlbumDirFromTrack(newPath)
 	oldArtist, newArtist := ArtistDirFromTrack(oldPath), ArtistDirFromTrack(newPath)
 	rootClean := filepath.Clean(o.root)
+	var moved []imageMove
 
 	if filepath.Clean(oldAlbum) != rootClean && filepath.Clean(oldAlbum) != filepath.Clean(newAlbum) {
 		for _, name := range CoverCandidates {
-			o.moveFileIfPresent(filepath.Join(oldAlbum, name), filepath.Join(newAlbum, name))
+			if m, ok := o.moveFileIfPresent(filepath.Join(oldAlbum, name), filepath.Join(newAlbum, name)); ok {
+				moved = append(moved, m)
+			}
 		}
 	}
-	// Artist portraits live one level up. Never move one out of the library
-	// root — a flat-layout track would otherwise drag a stray root artist.jpg
-	// into an unrelated artist folder.
-	if filepath.Clean(oldArtist) != rootClean && filepath.Clean(oldArtist) != filepath.Clean(newArtist) {
+	// Artist portraits live one level up. Never move one into or out of a
+	// compilation grouping — a flat-layout track would otherwise drag a stray
+	// root artist.jpg into an unrelated artist folder, and a compilation-typed
+	// album under a performer would strip the performer's portrait into the
+	// grouping folder (which never displays one).
+	if filepath.Clean(oldArtist) != rootClean && filepath.Clean(oldArtist) != filepath.Clean(newArtist) &&
+		!IsCompilationDir(oldArtist) && !IsCompilationDir(newArtist) {
 		for _, name := range ArtistImageNames {
-			o.moveFileIfPresent(filepath.Join(oldArtist, name), filepath.Join(newArtist, name))
+			if m, ok := o.moveFileIfPresent(filepath.Join(oldArtist, name), filepath.Join(newArtist, name)); ok {
+				moved = append(moved, m)
+			}
 		}
 	}
 
 	// Best-effort cleanup of now-empty source directories.
 	_ = os.Remove(oldAlbum)
 	_ = os.Remove(oldArtist)
+	return moved
+}
+
+// moveImagesBack restores images moved by moveImages, in reverse order.
+func (o *Organizer) moveImagesBack(moved []imageMove) {
+	for i := len(moved) - 1; i >= 0; i-- {
+		o.moveFileIfPresent(moved[i].dst, moved[i].src)
+	}
 }
 
 // moveFileIfPresent moves src to dst when src exists and dst does not, with a
-// cross-device copy+delete fallback.
-func (o *Organizer) moveFileIfPresent(src, dst string) {
+// cross-device copy+delete fallback. Returns the move when it happened.
+func (o *Organizer) moveFileIfPresent(src, dst string) (imageMove, bool) {
 	if _, err := os.Stat(src); err != nil {
-		return
+		return imageMove{}, false
 	}
 	if _, err := os.Stat(dst); err == nil {
-		return // never clobber an existing image
+		return imageMove{}, false // never clobber an existing image
 	}
 	if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 		o.log.Warn("organize: mkdir failed", "dst", dst, "error", err, "component", "organizer")
-		return
+		return imageMove{}, false
 	}
 	if err := os.Rename(src, dst); err != nil {
 		if strings.Contains(err.Error(), "cross-device") {
 			if copyErr := o.renamer.copyFile(src, dst); copyErr != nil {
 				o.log.Warn("organize: copy image failed", "src", src, "dst", dst, "error", copyErr, "component", "organizer")
-				return
+				return imageMove{}, false
 			}
 			os.Remove(src)
 		} else {
 			o.log.Warn("organize: move image failed", "src", src, "dst", dst, "error", err, "component", "organizer")
+			return imageMove{}, false
 		}
 	}
+	return imageMove{src: src, dst: dst}, true
 }
 
 // pathWithinRoot reports whether p is inside (or equal to) root.

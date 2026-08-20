@@ -121,7 +121,10 @@ func TestOrganizerDryRunReportsCollision(t *testing.T) {
 func TestOrganizerRollsBackOnDBError(t *testing.T) {
 	root := t.TempDir()
 	oldPath := flatTrack(root, "01 - Track.flac")
+	// A cover that would move with the track.
+	os.WriteFile(filepath.Join(filepath.Dir(oldPath), "cover.jpg"), []byte("cover"), 0o644)
 	target := filepath.Join(root, "Flat Artist", "Album (2020)", "01 - Track.flac")
+	targetCover := filepath.Join(root, "Flat Artist", "Album (2020)", "cover.jpg")
 
 	store := &mockStore{
 		artists:   map[string]int64{},
@@ -141,8 +144,51 @@ func TestOrganizerRollsBackOnDBError(t *testing.T) {
 	if _, err := os.Stat(target); err == nil {
 		t.Error("file still present at target after rollback")
 	}
+	// The relocated cover must be rolled back too — otherwise disk and DB
+	// diverge and the next run can never fix it.
+	if _, err := os.Stat(filepath.Join(filepath.Dir(oldPath), "cover.jpg")); err != nil {
+		t.Errorf("cover not rolled back to the original album dir: %v", err)
+	}
+	if _, err := os.Stat(targetCover); err == nil {
+		t.Error("cover still present at the target album dir after rollback")
+	}
 	if store.tracks[0].FilePath != oldPath {
 		t.Errorf("DB path = %q, want %q (unchanged)", store.tracks[0].FilePath, oldPath)
+	}
+}
+
+func TestOrganizerDoesNotMovePerformerPortraitIntoGrouping(t *testing.T) {
+	root := t.TempDir()
+	// An album typed "compilation" that currently sits under a real
+	// performer's folder. Organize routes it to the VA template; the
+	// performer's portrait must stay with the performer, not be dragged into
+	// the grouping folder (which never displays one).
+	artistDir := filepath.Join(root, "Performer")
+	albumDir := filepath.Join(artistDir, "Album")
+	os.MkdirAll(albumDir, 0o755)
+	oldPath := filepath.Join(albumDir, "01 - Track.flac")
+	os.WriteFile(oldPath, []byte("audio"), 0o644)
+	os.WriteFile(filepath.Join(artistDir, "artist.jpg"), []byte("portrait"), 0o644)
+
+	store := &mockStore{artists: map[string]int64{}, albums: map[string]int64{}, tracks: []domain.Track{
+		{ID: 1, Title: "Track", TrackNumber: 1, FilePath: oldPath},
+	}}
+	org := NewOrganizer("{artist}/{album} ({year})/{track:02d} - {title}", testCompilationTemplate, root, store, testLogger())
+
+	res, err := org.Organize(t.Context(), &store.tracks[0], "Performer", "Album", 2020, string(domain.AlbumTypeCompilation), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Moved {
+		t.Fatalf("expected move, got skipped=%q", res.Skipped)
+	}
+	// Moved under the VA grouping, but the performer's portrait stays put.
+	mustExist(t, filepath.Join(root, "Various Artists", "Album (2020)", "01. Performer - Track.flac"))
+	if _, err := os.Stat(filepath.Join(artistDir, "artist.jpg")); err != nil {
+		t.Errorf("performer portrait moved into the grouping folder: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, "Various Artists", "artist.jpg")); err == nil {
+		t.Error("performer portrait was copied into the grouping folder")
 	}
 }
 
