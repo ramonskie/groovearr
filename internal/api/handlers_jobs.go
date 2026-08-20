@@ -63,6 +63,11 @@ type organizeEntry struct {
 // dry-run can't exhaust memory; the summary always keeps the full counts.
 const maxOrganizeReportEntries = 20000
 
+// maxOrganizeErrorEntries caps how many error rows are persisted so a run with
+// many failing tracks doesn't crowd out the moved/would-move rows the report is
+// meant to surface.
+const maxOrganizeErrorEntries = 100
+
 // setOrganizeReport stores the report under the server mutex.
 func (s *Server) setOrganizeReport(rep *organizeReport) {
 	s.organizeMu.Lock()
@@ -289,7 +294,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 		}
 
 		var (
-			done, moved, wouldMove, inPlace, skipped, failed int
+			done, moved, wouldMove, inPlace, skipped, failed, errorEntries int
 		)
 		report(jobs.Report{Message: "Enumerating artists…"})
 
@@ -307,9 +312,16 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 				rep.Truncated = true
 			}
 		}
+		// Persist whatever was computed, even on a mid-run failure, so the UI
+		// never shows a stale previous report.
+		setReport := func() {
+			rep.Summary = organizeSummary{Moved: moved, WouldMove: wouldMove, InPlace: inPlace, Skipped: skipped, Errors: failed}
+			s.setOrganizeReport(rep)
+		}
 		for off := 0; ; off += 200 {
 			artists, err := s.store.ListArtists(ctx, off, 200)
 			if err != nil {
+				setReport()
 				return err
 			}
 			if len(artists) == 0 {
@@ -317,6 +329,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 			}
 			for _, a := range artists {
 				if ctx.Err() != nil {
+					setReport()
 					return ctx.Err()
 				}
 				albums, err := s.store.GetAlbumsByArtist(ctx, a.ID)
@@ -326,6 +339,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 				}
 				for _, al := range albums {
 					if ctx.Err() != nil {
+						setReport()
 						return ctx.Err()
 					}
 					ts, err := s.store.GetTracksByAlbum(ctx, al.ID)
@@ -337,6 +351,10 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 						res, err := org.Organize(ctx, &ts[i], a.Name, al.Title, al.Year, string(al.AlbumType), dryRun)
 						if err != nil {
 							failed++
+							if errorEntries < maxOrganizeErrorEntries {
+								errorEntries++
+								addEntry(ts[i].ID, ts[i].FilePath, "", "errors")
+							}
 							s.log.Warn("organize: track failed", "track_id", ts[i].ID, "error", err, "component", "jobs")
 							continue
 						}
@@ -360,11 +378,11 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 			}
 		}
 		if err := ctx.Err(); err != nil {
+			setReport()
 			return err
 		}
 
-		rep.Summary = organizeSummary{Moved: moved, WouldMove: wouldMove, InPlace: inPlace, Skipped: skipped, Errors: failed}
-		s.setOrganizeReport(rep)
+		setReport()
 
 		mode := "repair"
 		verb := "moved"
