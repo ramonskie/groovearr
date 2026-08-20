@@ -35,7 +35,9 @@ export default function JobsSettings() {
     mutationFn: (ids: { keep: number; remove: number }) =>
       mergeArtists(ids.keep, ids.remove),
     onSuccess: () => {
-      toast.success("Artists merged");
+      toast.success(
+        "Artists merged — run Organize · Repair to move the files",
+      );
       duplicatesQuery.refetch();
       queryClient.invalidateQueries({ queryKey: ["library"] });
     },

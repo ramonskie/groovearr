@@ -164,6 +164,35 @@ func TestOrganizeRunnerDryRunAndRepair(t *testing.T) {
 	}
 }
 
+func TestOrganizeRunnerEmptyLibraryPersistsReport(t *testing.T) {
+	cfg, err := config.LoadOrCreate(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Update(func(c *config.Config) error {
+		c.Library.LibraryPath = t.TempDir()
+		c.Library.FolderTemplate = "{artist}/{album} ({year})/{track:02d} - {title}"
+		return nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s := &Server{cfg: cfg, store: &organizeRunnerStore{}, log: testAPILogger()}
+
+	if err := s.organizeRunner(true)(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatal(err)
+	}
+	// An empty library must still replace any stale report, not leave it up.
+	if s.organizeReport == nil {
+		t.Fatal("empty library run did not persist a report")
+	}
+	if s.organizeReport.Mode != "dry run" {
+		t.Errorf("report mode = %q, want dry run", s.organizeReport.Mode)
+	}
+	if s.organizeReport.Summary.Errors != 0 {
+		t.Errorf("unexpected errors in empty run: %+v", s.organizeReport.Summary)
+	}
+}
+
 func hasReason(entries []organizeEntry, reason string) bool {
 	for _, e := range entries {
 		if e.Reason == reason {

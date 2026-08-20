@@ -290,6 +290,13 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 		}
 		total := len(tracks)
 		if total == 0 {
+			// Persist an empty report so the UI doesn't keep showing the
+			// previous run's stale result.
+			rep := &organizeReport{Mode: "repair", RanAt: time.Now().UTC()}
+			if dryRun {
+				rep.Mode = "dry run"
+			}
+			s.setOrganizeReport(rep)
 			return nil
 		}
 
@@ -334,6 +341,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 				}
 				albums, err := s.store.GetAlbumsByArtist(ctx, a.ID)
 				if err != nil {
+					failed++
 					s.log.Warn("organize: list albums failed", "artist_id", a.ID, "error", err, "component", "jobs")
 					continue
 				}
@@ -344,6 +352,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 					}
 					ts, err := s.store.GetTracksByAlbum(ctx, al.ID)
 					if err != nil {
+						failed++
 						s.log.Warn("organize: list tracks failed", "album_id", al.ID, "error", err, "component", "jobs")
 						continue
 					}
@@ -353,7 +362,7 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 							failed++
 							if errorEntries < maxOrganizeErrorEntries {
 								errorEntries++
-								addEntry(ts[i].ID, ts[i].FilePath, "", "errors")
+								addEntry(ts[i].ID, ts[i].FilePath, err.Error(), "errors")
 							}
 							s.log.Warn("organize: track failed", "track_id", ts[i].ID, "error", err, "component", "jobs")
 							continue
