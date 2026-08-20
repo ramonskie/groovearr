@@ -151,21 +151,25 @@ export default function JobsSettings() {
           >
             Organize · Repair
           </Button>
-          <Button
-            variant="danger"
-            onClick={() => cancel.mutate()}
-            disabled={!running}
-          >
-            Cancel
-          </Button>
         </div>
       </Card>
 
       {job && (
         <Card title={jobTitle}>
           <div className="flex items-center justify-between text-sm">
-            <span className="capitalize text-slate-300">{job.state}</span>
-            <span className="font-medium text-white">{pct}%</span>
+            <span className="flex items-center gap-2">
+              <span className="capitalize text-slate-300">{job.state}</span>
+              <span className="font-medium text-white">{pct}%</span>
+            </span>
+            {running && (
+              <Button
+                variant="danger"
+                size="sm"
+                onClick={() => cancel.mutate()}
+              >
+                Cancel
+              </Button>
+            )}
           </div>
 
           <div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-slate-800">
