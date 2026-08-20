@@ -69,7 +69,7 @@ func TestListIndexers(t *testing.T) {
 	// Serve indexers and tags endpoints on the same server.
 	// The torznabClient only uses baseURL, so all calls go to the test server.
 	ts.handlers["/api/v1/indexer"] = func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Query().Get("apikey") != "test-key" {
+		if r.Header.Get("X-Api-Key") != "test-key" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}

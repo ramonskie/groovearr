@@ -245,6 +245,16 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 	}
 
 	s.log.Info("download missing: queued", "count", queued, "component", "playlist")
+
+	// Rebuild the playlist folder once the queued downloads complete.
+	// syncPlaylistGuarded → SyncPlaylist waits for downloads to reach a
+	// terminal state, re-links newly imported tracks, then rebuilds the
+	// playlist folder. Without this, tracks downloaded for unmatched
+	// playlist entries never appear in the playlist folder.
+	if queued > 0 {
+		go s.syncPlaylistGuarded(playlistID)
+	}
+
 	return queued, nil
 }
 
