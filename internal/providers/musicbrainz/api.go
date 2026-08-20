@@ -244,7 +244,6 @@ func pickMostFrequent(counts map[string]int) string {
 
 // ArtistResult is a canonical artist found by MusicBrainz artist search.
 type ArtistResult struct {
-	MBID string
 	Name string
 }
 
@@ -288,7 +287,7 @@ func (c *APIClient) SearchArtist(ctx context.Context, name string) (*ArtistResul
 		if strutil.NormalizeName(a.Name) != want {
 			continue
 		}
-		return &ArtistResult{MBID: a.ID, Name: a.Name}, nil
+		return &ArtistResult{Name: a.Name}, nil
 	}
 	return nil, nil
 }

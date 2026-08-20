@@ -460,3 +460,59 @@ func TestStore_FirstAlbumID(t *testing.T) {
 		}
 	}
 }
+
+func TestStore_DuplicateScanCRUD(t *testing.T) {
+	store, err := New(t.TempDir()+"/test.db", testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// Nothing scanned yet.
+	if _, found, err := store.GetDuplicateCanonical(ctx, "danny de munk"); err != nil || found {
+		t.Fatalf("expected not-found for empty scan (found=%v, err=%v)", found, err)
+	}
+
+	// Upsert two groups.
+	if err := store.UpsertDuplicateCanonical(ctx, "danny de munk", "Danny de Munk"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpsertDuplicateCanonical(ctx, "acda en de munnik", "Acda en de Munnik"); err != nil {
+		t.Fatal(err)
+	}
+	// Upsert overwrites.
+	if err := store.UpsertDuplicateCanonical(ctx, "danny de munk", "Danny De Munk"); err != nil {
+		t.Fatal(err)
+	}
+
+	canon, found, err := store.GetDuplicateCanonical(ctx, "danny de munk")
+	if err != nil || !found || canon != "Danny De Munk" {
+		t.Fatalf("GetDuplicateCanonical = (%q, %v, %v), want overwritten value", canon, found, err)
+	}
+
+	all, err := store.ListDuplicateCanonicals(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 2 || all["acda en de munnik"] != "Acda en de Munnik" {
+		t.Fatalf("ListDuplicateCanonicals = %v, want 2 groups", all)
+	}
+
+	// Delete a single group.
+	if err := store.DeleteDuplicateCanonical(ctx, "danny de munk"); err != nil {
+		t.Fatal(err)
+	}
+	if _, found, _ := store.GetDuplicateCanonical(ctx, "danny de munk"); found {
+		t.Error("group should be deleted after DeleteDuplicateCanonical")
+	}
+
+	// Clear all.
+	if err := store.ClearDuplicateCanonicals(ctx); err != nil {
+		t.Fatal(err)
+	}
+	all, _ = store.ListDuplicateCanonicals(ctx)
+	if len(all) != 0 {
+		t.Errorf("expected empty scan after clear, got %d groups", len(all))
+	}
+}

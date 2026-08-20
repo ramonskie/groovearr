@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,6 +33,76 @@ func (s *Server) handleJobScan(w http.ResponseWriter, r *http.Request) {
 // handleJobEnrich starts a background metadata enrichment of the library.
 func (s *Server) handleJobEnrich(w http.ResponseWriter, r *http.Request) {
 	s.startJob(w, "enrich", s.enrichRunner)
+}
+
+// handleJobDuplicates starts a background duplicate-artist scan.
+func (s *Server) handleJobDuplicates(w http.ResponseWriter, r *http.Request) {
+	s.startJob(w, "duplicates", s.duplicatesRunner)
+}
+
+// duplicatesRunner scans the library for case-insensitive duplicate artists and
+// resolves each group's canonical provider spelling, persisting results to the
+// duplicate_scan cache. Lookups run sequentially so MusicBrainz's 1 req/sec
+// rate limit paces them naturally — no timeouts, no bursting. A cancelled or
+// failed run leaves whatever groups were already resolved in the cache.
+func (s *Server) duplicatesRunner(ctx context.Context, report func(jobs.Report)) error {
+	dss, ok := s.store.(duplicateScanStore)
+	if !ok {
+		return nil
+	}
+
+	byLower := map[string][]domain.Artist{}
+	for off := 0; ; off += 200 {
+		artists, err := s.store.ListArtists(ctx, off, 200)
+		if err != nil {
+			return err
+		}
+		if len(artists) == 0 {
+			break
+		}
+		for _, a := range artists {
+			key := strings.ToLower(a.Name)
+			byLower[key] = append(byLower[key], a)
+		}
+	}
+
+	type groupTarget struct {
+		key     string
+		repName string
+	}
+	var targets []groupTarget
+	for key, list := range byLower {
+		if len(list) < 2 {
+			continue
+		}
+		targets = append(targets, groupTarget{key: key, repName: list[0].Name})
+	}
+
+	if err := dss.ClearDuplicateCanonicals(ctx); err != nil {
+		return err
+	}
+	total := len(targets)
+	if total == 0 {
+		report(jobs.Report{Done: 0, Total: 1, Message: "no duplicate artists found"})
+		return nil
+	}
+
+	for i, t := range targets {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		canonical := s.canonicalArtistName(ctx, t.repName)
+		if err := dss.UpsertDuplicateCanonical(ctx, t.key, canonical); err != nil {
+			s.log.Warn("duplicates scan: persist failed", "group", t.key, "error", err, "component", "jobs")
+		}
+		report(jobs.Report{Done: i + 1, Total: total, Message: t.key})
+	}
+	report(jobs.Report{
+		Done:    total,
+		Total:   total,
+		Message: fmt.Sprintf("checked %d duplicate artist groups", total),
+	})
+	return nil
 }
 
 // organizeReport is the persisted result of the last organize job (dry run or

@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -5,6 +6,7 @@ import {
   useStartScanJob,
   useStartEnrichJob,
   useStartOrganizeJob,
+  useStartDuplicatesJob,
   useCancelJob,
 } from "../../hooks/use-job";
 import {
@@ -20,15 +22,12 @@ export default function JobsSettings() {
   const startScan = useStartScanJob();
   const startEnrich = useStartEnrichJob();
   const startOrganize = useStartOrganizeJob();
+  const startDuplicates = useStartDuplicatesJob();
   const cancel = useCancelJob();
 
   const reportQuery = useQuery({
     queryKey: ["organize", "report"],
     queryFn: getOrganizeReport,
-  });
-  const duplicatesQuery = useQuery({
-    queryKey: ["artists", "duplicates"],
-    queryFn: getArtistDuplicates,
   });
   const queryClient = useQueryClient();
   const merge = useMutation({
@@ -54,11 +53,46 @@ export default function JobsSettings() {
     },
   });
 
+  // The duplicates list is only fetched after a duplicate check has run; it
+  // reads the persisted scan, so no provider lookups happen on page load.
+  const [duplicatesEnabled, setDuplicatesEnabled] = useState(false);
+  const duplicatesQuery = useQuery({
+    queryKey: ["artists", "duplicates"],
+    queryFn: getArtistDuplicates,
+    enabled: duplicatesEnabled,
+  });
+
   const job = jobQuery.data;
   const running = job?.state === "running";
   const pct = Math.round(job?.progress ?? 0);
   const report = reportQuery.data;
   const groups = duplicatesQuery.data?.groups ?? [];
+
+  // Reveal the duplicates list once a duplicate check completes. Fires for
+  // fast completions (job finishes inside the POST round-trip, so no
+  // Reveal the duplicates list whenever a completed duplicate check is
+  // observed — covering slow jobs (running→completed), fast jobs that finish
+  // inside the POST round-trip (completed with no prior running observation),
+  // and a check that completed before this page loaded. Idempotent.
+  useEffect(() => {
+    if (job?.type === "duplicates" && job.state === "completed") {
+      setDuplicatesEnabled(true);
+    }
+  }, [job]);
+
+  // Per-group merge target, defaulting to the suggested (first) entry.
+  const [targets, setTargets] = useState<Record<string, number>>({});
+  useEffect(() => {
+    setTargets((prev) => {
+      const next = { ...prev };
+      for (const g of groups) {
+        if (next[g.name] == null && g.artists.length > 0) {
+          next[g.name] = g.artists[0].id;
+        }
+      }
+      return next;
+    });
+  }, [groups]);
 
   const runOrganize = (dryRun: boolean) => {
     if (!dryRun && !window.confirm("Run organize repair? This moves files on disk.")) {
@@ -72,7 +106,9 @@ export default function JobsSettings() {
       ? "Organize"
       : job?.type === "scan"
         ? "Scan"
-        : "Enrichment";
+        : job?.type === "duplicates"
+          ? "Duplicate Check"
+          : "Enrichment";
 
   return (
     <div className="space-y-4">
@@ -230,66 +266,92 @@ export default function JobsSettings() {
         <p className="text-sm text-slate-400">
           Artists whose names differ only by case (e.g. &quot;Acda en de
           Munnik&quot; vs &quot;Acda en De Munnik&quot;) are stored as
-          separate artists. The canonical spelling from the metadata providers
-          (when found) selects the keeper and is applied on merge; otherwise
-          the largest entry wins.
+          separate artists. Run a check to scan for them and resolve the
+          canonical provider spelling. Click a name to pick which artist keeps
+          its identity — the suggested one is pre-selected.
         </p>
 
-        {groups.length === 0 ? (
+        {!duplicatesEnabled ? (
+          <div className="mt-3">
+            <Button
+              variant="primary"
+              onClick={() => startDuplicates.mutate()}
+              disabled={running || startDuplicates.isPending}
+            >
+              Check for duplicates
+            </Button>
+          </div>
+        ) : groups.length === 0 ? (
           <p className="mt-3 text-sm text-slate-500">
             No case-insensitive duplicates found.
           </p>
         ) : (
           <div className="mt-3 space-y-2">
-            {groups.map((g) => (
-              <div
-                key={g.name}
-                className="rounded-lg border border-slate-800 p-3"
-              >
-                <p className="mb-1 text-xs font-medium text-slate-400">
-                  {g.artists.length} artists match &quot;{g.name}&quot;
-                  {g.canonical_name && (
-                    <span className="ml-2 text-amber-400">
-                      canonical: {g.canonical_name}
-                    </span>
-                  )}
-                </p>
-                <div className="space-y-1">
-                  {g.artists.map((a, idx) => (
-                    <div
-                      key={a.id}
-                      className="flex items-center justify-between gap-2 text-sm"
-                    >
-                      <span className="min-w-0 truncate text-slate-200">
-                        {a.name}{" "}
-                        <span className="text-xs text-slate-500">
-                          ({a.track_count} tracks)
-                        </span>
-                        {idx === 0 && (
-                          <span className="ml-1 text-xs text-emerald-400">
-                            keeper
-                          </span>
-                        )}
+            {groups.map((g) => {
+              const keepId = targets[g.name] ?? g.artists[0]?.id;
+              const targetName =
+                g.artists.find((a) => a.id === keepId)?.name ??
+                g.artists[0]?.name ??
+                "";
+              return (
+                <div
+                  key={g.name}
+                  className="rounded-lg border border-slate-800 p-3"
+                >
+                  <p className="mb-1 text-xs font-medium text-slate-400">
+                    {g.artists.length} artists match &quot;{g.name}&quot;
+                    {g.canonical_name && (
+                      <span className="ml-2 text-amber-400">
+                        canonical: {g.canonical_name}
                       </span>
-                      {idx > 0 && (
-                        <Button
-                          variant="primary"
-                          disabled={merge.isPending}
+                    )}
+                  </p>
+                  <div className="space-y-1">
+                    {g.artists.map((a) => {
+                      const selected = keepId === a.id;
+                      const suggested = a.id === g.artists[0].id;
+                      return (
+                        <div
+                          key={a.id}
                           onClick={() =>
-                            merge.mutate({
-                              keep: g.artists[0].id,
-                              remove: a.id,
-                            })
+                            setTargets((prev) => ({ ...prev, [g.name]: a.id }))
                           }
+                          className={`flex cursor-pointer items-center justify-between gap-2 rounded border px-2 py-1.5 text-sm transition-colors ${
+                            selected
+                              ? "border-emerald-500/60 bg-emerald-500/10"
+                              : "border-transparent hover:border-slate-700"
+                          }`}
                         >
-                          Merge into {g.artists[0].name}
-                        </Button>
-                      )}
-                    </div>
-                  ))}
+                          <span className="min-w-0 truncate text-slate-200">
+                            {a.name}{" "}
+                            <span className="text-xs text-slate-500">
+                              ({a.track_count} tracks)
+                            </span>
+                            {selected && (
+                              <span className="ml-1 text-xs text-emerald-400">
+                                {suggested ? "suggestion" : "selected"}
+                              </span>
+                            )}
+                          </span>
+                          {!selected && (
+                            <Button
+                              variant="primary"
+                              disabled={merge.isPending}
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                merge.mutate({ keep: keepId, remove: a.id });
+                              }}
+                            >
+                              Merge into {targetName}
+                            </Button>
+                          )}
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
-              </div>
-            ))}
+              );
+            })}
           </div>
         )}
       </Card>

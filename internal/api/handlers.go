@@ -54,7 +54,6 @@ type Server struct {
 	log                 *slog.Logger
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
-	artistNames         *artistNameCache
 	bgCtx               context.Context
 	bgCancel            context.CancelFunc
 }
@@ -83,7 +82,6 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		log:                 logger,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
-		artistNames:         newArtistNameCache(),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)
@@ -152,6 +150,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.HandleFunc("GET /api/jobs", s.handleGetJob)
 	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobScan)))
 	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, http.HandlerFunc(s.handleJobEnrich)))
+	mux.Handle("POST /api/jobs/duplicates", withRateLimit("duplicates", s.rateLimiter, http.HandlerFunc(s.handleJobDuplicates)))
 	mux.Handle("POST /api/jobs/organize", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobOrganize)))
 	mux.HandleFunc("GET /api/jobs/organize/report", s.handleOrganizeReport)
 	mux.HandleFunc("POST /api/jobs/cancel", s.handleJobCancel)

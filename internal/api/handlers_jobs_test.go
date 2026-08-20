@@ -14,6 +14,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
 // organizeRunnerStore is a minimal store for exercising organizeRunner: it
@@ -241,5 +242,54 @@ func TestOrganizeReportEndpoint(t *testing.T) {
 	}
 	if got.Mode != "dry run" || got.Summary.WouldMove != 2 || len(got.Entries) != 1 {
 		t.Errorf("unexpected report round-trip: %+v", got)
+	}
+}
+
+func TestDuplicatesRunnerPersistsCanonicals(t *testing.T) {
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Acda en De Munnik"},
+			{ID: 2, Name: "Acda en de Munnik"},
+			{ID: 3, Name: "Aaliyah"},
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 10}, {ID: 11}},
+			2: {{ID: 12}},
+		},
+	}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(&stubNameProvider{name: "musicbrainz", names: map[string]string{
+		"acdaendemunnik": "Acda en de Munnik",
+	}})
+	s := &Server{store: store, mdRegistry: reg, log: testAPILogger()}
+
+	var reports []jobs.Report
+	if err := s.duplicatesRunner(context.Background(), func(r jobs.Report) { reports = append(reports, r) }); err != nil {
+		t.Fatalf("duplicatesRunner: %v", err)
+	}
+
+	if len(store.scan) != 1 || store.scan["acda en de munnik"] != "Acda en de Munnik" {
+		t.Errorf("scan = %v, want only the duplicate group with the resolved canonical", store.scan)
+	}
+	if len(reports) == 0 {
+		t.Error("expected progress reports")
+	}
+}
+
+func TestDuplicatesRunnerNoDuplicates(t *testing.T) {
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Aaliyah"},
+			{ID: 2, Name: "Radiohead"},
+		},
+		scan: map[string]string{"stale group": "Stale"},
+	}
+	s := &Server{store: store, log: testAPILogger()}
+
+	if err := s.duplicatesRunner(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatalf("duplicatesRunner: %v", err)
+	}
+	if len(store.scan) != 0 {
+		t.Errorf("expected empty scan for no duplicates, got %v", store.scan)
 	}
 }

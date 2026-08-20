@@ -6,6 +6,7 @@ import {
   startScanJob,
   startEnrichJob,
   startOrganizeJob,
+  startDuplicatesJob,
   cancelJob,
 } from "../api/client";
 
@@ -49,12 +50,16 @@ export function useJobWatcher() {
       queryClient.invalidateQueries({ queryKey: ["library"] });
       // Organize writes its report only on completion — refetch it.
       queryClient.invalidateQueries({ queryKey: ["organize"] });
+      // A finished duplicate check refreshes the duplicates list.
+      queryClient.invalidateQueries({ queryKey: ["artists", "duplicates"] });
       if (state === "completed") {
         toast.success(
           job?.message ||
             (job?.type === "scan"
               ? "Library scan complete"
-              : "Library enrichment complete"),
+              : job?.type === "duplicates"
+                ? "Duplicate check complete"
+                : "Library enrichment complete"),
         );
       } else if (state === "failed") {
         toast.error(`Job failed: ${job?.error ?? "unknown error"}`);
@@ -145,6 +150,41 @@ export function useStartOrganizeJob() {
     onError: (err) => {
       toast.error(
         `Failed to start organize: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      );
+    },
+  });
+}
+
+/**
+ * Starts the duplicate-artist check job. The duplicates list is populated
+ * from the persisted scan once the job completes.
+ */
+export function useStartDuplicatesJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: startDuplicatesJob,
+    onSuccess: ({ job, started }) => {
+      queryClient.setQueryData(["jobs", "current"], job);
+      if (!started) return; // job already running
+      if (job.state === "running") {
+        toast.info("Duplicate check started");
+        return;
+      }
+      // Finished before the response returned — report the outcome here.
+      queryClient.invalidateQueries({ queryKey: ["artists", "duplicates"] });
+      if (job.state === "completed") {
+        toast.success(job.message || "Duplicate check complete");
+      } else if (job.state === "failed") {
+        toast.error(`Job failed: ${job.error ?? "unknown error"}`);
+      } else if (job.state === "cancelled") {
+        toast.info("Job cancelled");
+      }
+    },
+    onError: (err) => {
+      toast.error(
+        `Failed to start duplicate check: ${
           err instanceof Error ? err.message : "Unknown error"
         }`,
       );

@@ -244,6 +244,16 @@ func (s *Store) migrate() error {
 			discography_json   TEXT NOT NULL,
 			cached_at          TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+
+		// ── Duplicate artist scan ──
+		// group_key is the lowercased artist name; canonical_name is the
+		// authoritative provider spelling resolved by the background duplicates
+		// scan. Rows are invalidated on merge or replaced on the next scan.
+		`CREATE TABLE IF NOT EXISTS duplicate_scan (
+			group_key      TEXT PRIMARY KEY,
+			canonical_name TEXT NOT NULL,
+			scanned_at     TEXT NOT NULL DEFAULT (datetime('now'))
+		)`,
 	}
 
 	// Wrap schema init in a transaction so partial failures don't leave the
@@ -399,6 +409,61 @@ func (s *Store) MergeArtists(ctx context.Context, keepID, removeID int64) error 
 func (s *Store) RenameArtist(ctx context.Context, artistID int64, name string) error {
 	_, err := s.db.ExecContext(ctx, `UPDATE artists SET name=?, updated_at=? WHERE id=?`,
 		name, time.Now().UTC().Format(time.RFC3339), artistID)
+	return err
+}
+
+// GetDuplicateCanonical returns the scanned canonical name for a duplicate
+// group, and whether the group was scanned at all.
+func (s *Store) GetDuplicateCanonical(ctx context.Context, groupKey string) (string, bool, error) {
+	var canonical string
+	err := s.db.QueryRowContext(ctx, `SELECT canonical_name FROM duplicate_scan WHERE group_key=?`, groupKey).Scan(&canonical)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return canonical, true, nil
+}
+
+// ListDuplicateCanonicals returns all scanned duplicate groups and their
+// canonical names.
+func (s *Store) ListDuplicateCanonicals(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT group_key, canonical_name FROM duplicate_scan`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var key, canonical string
+		if err := rows.Scan(&key, &canonical); err != nil {
+			return nil, err
+		}
+		out[key] = canonical
+	}
+	return out, rows.Err()
+}
+
+// UpsertDuplicateCanonical stores the canonical name for a duplicate group.
+func (s *Store) UpsertDuplicateCanonical(ctx context.Context, groupKey, canonical string) error {
+	_, err := s.db.ExecContext(ctx, `INSERT INTO duplicate_scan (group_key, canonical_name) VALUES (?, ?)
+		ON CONFLICT(group_key) DO UPDATE SET canonical_name=excluded.canonical_name, scanned_at=datetime('now')`,
+		groupKey, canonical)
+	return err
+}
+
+// ClearDuplicateCanonicals removes all scanned entries, used at the start of a
+// new duplicates scan.
+func (s *Store) ClearDuplicateCanonicals(ctx context.Context) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM duplicate_scan`)
+	return err
+}
+
+// DeleteDuplicateCanonical removes a single group, used to invalidate a
+// duplicate entry once its artists have been merged.
+func (s *Store) DeleteDuplicateCanonical(ctx context.Context, groupKey string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM duplicate_scan WHERE group_key=?`, groupKey)
 	return err
 }
 

@@ -244,6 +244,10 @@ export function startOrganizeJob(dryRun: boolean): Promise<StartJobResponse> {
   });
 }
 
+export function startDuplicatesJob(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/jobs/duplicates", { method: "POST" });
+}
+
 export function getOrganizeReport(): Promise<OrganizeReport | null> {
   return request<OrganizeReport | null>("/api/jobs/organize/report");
 }

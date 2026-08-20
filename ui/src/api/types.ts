@@ -494,7 +494,7 @@ export interface Album {
 export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Job {
-  type: "scan" | "enrich" | "organize";
+  type: "scan" | "enrich" | "organize" | "duplicates";
   state: JobState;
   progress: number; // 0-100
   message?: string;

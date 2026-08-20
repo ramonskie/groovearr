@@ -3,7 +3,6 @@ package api
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -11,11 +10,9 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sync"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/config"
-	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
@@ -38,7 +35,10 @@ type stubLibraryStore struct {
 		id   int64
 		name string
 	}
+	scan map[string]string // duplicate_scan: group_key → canonical
 }
+
+var _ duplicateScanStore = (*stubLibraryStore)(nil)
 
 func (s *stubLibraryStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	if offset >= len(s.artists) {
@@ -74,6 +74,33 @@ func (s *stubLibraryStore) RenameArtist(ctx context.Context, artistID int64, nam
 		id   int64
 		name string
 	}{artistID, name})
+	return nil
+}
+
+func (s *stubLibraryStore) GetDuplicateCanonical(ctx context.Context, groupKey string) (string, bool, error) {
+	c, ok := s.scan[groupKey]
+	return c, ok, nil
+}
+func (s *stubLibraryStore) ListDuplicateCanonicals(ctx context.Context) (map[string]string, error) {
+	out := map[string]string{}
+	for k, v := range s.scan {
+		out[k] = v
+	}
+	return out, nil
+}
+func (s *stubLibraryStore) UpsertDuplicateCanonical(ctx context.Context, groupKey, canonical string) error {
+	if s.scan == nil {
+		s.scan = map[string]string{}
+	}
+	s.scan[groupKey] = canonical
+	return nil
+}
+func (s *stubLibraryStore) ClearDuplicateCanonicals(ctx context.Context) error {
+	s.scan = map[string]string{}
+	return nil
+}
+func (s *stubLibraryStore) DeleteDuplicateCanonical(ctx context.Context, groupKey string) error {
+	delete(s.scan, groupKey)
 	return nil
 }
 
@@ -119,69 +146,6 @@ func (p *stubNameProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*met
 func (p *stubNameProvider) CanonicalArtistName(_ context.Context, name string) (string, error) {
 	return p.names[normalizeKey(name)], nil
 }
-
-// stubDiscoveryNameProvider is a metadata provider that also implements
-// discovery.Provider, standing in for Deezer/Spotify/Tidal. SearchArtists
-// returns canned results keyed by query.
-type stubDiscoveryNameProvider struct {
-	name  string
-	names map[string][]discovery.ArtistSummary
-}
-
-var _ metadata.Provider = (*stubDiscoveryNameProvider)(nil)
-var _ discovery.Provider = (*stubDiscoveryNameProvider)(nil)
-
-func (p *stubDiscoveryNameProvider) Name() string              { return p.name }
-func (p *stubDiscoveryNameProvider) DisplayName() string       { return p.name }
-func (p *stubDiscoveryNameProvider) IsConfigured() bool        { return true }
-func (p *stubDiscoveryNameProvider) IsMetadataAvailable() bool { return true }
-func (p *stubDiscoveryNameProvider) CapabilityStatus() map[string]string {
-	return map[string]string{"metadata": "connected"}
-}
-func (p *stubDiscoveryNameProvider) CheckConnection(_ context.Context) error { return nil }
-func (p *stubDiscoveryNameProvider) Connected() bool                         { return true }
-func (p *stubDiscoveryNameProvider) SearchCover(_ context.Context, _, _ string) (*metadata.CoverResult, error) {
-	return nil, nil
-}
-func (p *stubDiscoveryNameProvider) SearchArtistImage(_ context.Context, _ string) (*metadata.ArtistImageResult, error) {
-	return nil, nil
-}
-func (p *stubDiscoveryNameProvider) SearchAlbum(_ context.Context, _, _ string) string { return "" }
-func (p *stubDiscoveryNameProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*metadata.TrackMetadata, error) {
-	return nil, nil
-}
-func (p *stubDiscoveryNameProvider) SearchArtists(_ context.Context, query string, _ int) ([]discovery.ArtistSummary, error) {
-	return p.names[normalizeKey(query)], nil
-}
-func (p *stubDiscoveryNameProvider) GetArtistAlbums(_ context.Context, _ string, _ int) ([]discovery.AlbumResult, error) {
-	return nil, nil
-}
-func (p *stubDiscoveryNameProvider) GetAlbumTracks(_ context.Context, _ string) ([]discovery.TrackInfo, error) {
-	return nil, nil
-}
-func (p *stubDiscoveryNameProvider) SearchAlbums(_ context.Context, _ string, _ int) ([]discovery.AlbumResult, error) {
-	return nil, nil
-}
-
-// stubDiscoveryFactory declares the discovery capability for a
-// stubDiscoveryNameProvider so discoveryReg.Any() includes it.
-type stubDiscoveryFactory struct {
-	name  string
-	names map[string][]discovery.ArtistSummary
-}
-
-var _ plugin.PluginFactory = (*stubDiscoveryFactory)(nil)
-
-func (f *stubDiscoveryFactory) Name() string        { return f.name }
-func (f *stubDiscoveryFactory) DisplayName() string { return f.name }
-func (f *stubDiscoveryFactory) Capabilities() []string {
-	return []string{"metadata", "discovery"}
-}
-func (f *stubDiscoveryFactory) Create(_ json.RawMessage, _ plugin.PluginResources) (plugin.BasePlugin, error) {
-	return &stubDiscoveryNameProvider{name: f.name, names: f.names}, nil
-}
-func (f *stubDiscoveryFactory) ValidateConfig(_ json.RawMessage) error { return nil }
-func (f *stubDiscoveryFactory) DefaultConfig() json.RawMessage         { return json.RawMessage("{}") }
 
 func TestArtistThumbURLTransform(t *testing.T) {
 	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
@@ -275,10 +239,12 @@ func TestArtistDuplicatesAndMerge(t *testing.T) {
 			1: {{ID: 10}, {ID: 11}},
 			2: {{ID: 12}},
 		},
+		scan: map[string]string{"acda en de munnik": "Acda en de Munnik"},
 	}
 	s := &Server{store: store, log: testAPILogger()}
 
-	// Duplicates listing: the two case-variants group together, largest first.
+	// Duplicates listing: the scanned case-variant group is shown, canonical
+	// first. Unscanned duplicates ("Aaliyah" has none here) are hidden.
 	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
 	rec := httptest.NewRecorder()
 	s.handleLibraryArtistDuplicates(rec, req)
@@ -298,8 +264,11 @@ func TestArtistDuplicatesAndMerge(t *testing.T) {
 	if len(g.Artists) != 2 {
 		t.Fatalf("expected 2 artists in group, got %d", len(g.Artists))
 	}
+	if g.Canonical != "Acda en de Munnik" {
+		t.Errorf("canonical_name = %q, want the scanned canonical", g.Canonical)
+	}
 	if g.Artists[0].ID != 1 || g.Artists[0].Tracks != 2 {
-		t.Errorf("canonical artist should be the largest (%+v)", g.Artists[0])
+		t.Errorf("first artist should be the canonical-matching, largest one (%+v)", g.Artists[0])
 	}
 
 	// Merge request folds artist 2 into artist 1.
@@ -313,19 +282,23 @@ func TestArtistDuplicatesAndMerge(t *testing.T) {
 	if len(store.merges) != 1 || store.merges[0] != [2]int64{1, 2} {
 		t.Errorf("merge not forwarded to store: %v", store.merges)
 	}
+	// The merge invalidates the scanned group.
+	if _, stillScanned := store.scan["acda en de munnik"]; stillScanned {
+		t.Errorf("duplicate scan entry not invalidated after merge")
+	}
 }
 
-func TestArtistDuplicatesPrefersCorrectCase(t *testing.T) {
-	// The larger entry is misspelled ("De", "De" capitalized); the smaller
-	// one follows the lowercase-particle convention. MusicBrainz returns the
-	// canonical spelling, so the correctly-cased entry must be the keeper.
+func TestArtistDuplicatesListingFromScan(t *testing.T) {
+	// The larger entry is misspelled; the canonical spelling comes from the
+	// persisted scan, so the correctly-cased entry is the suggestion even with
+	// fewer tracks. Groups not covered by a scan are hidden.
 	store := &stubLibraryStore{
 		artists: []domain.Artist{
 			{ID: 1, Name: "Acda en De Munnik"},
 			{ID: 2, Name: "Acda en de Munnik"},
 			{ID: 3, Name: "Danny De Munk"},
 			{ID: 4, Name: "Danny de Munk"},
-			{ID: 5, Name: "No Variants"},
+			{ID: 5, Name: "Scanned But No Variant"},
 		},
 		tracks: map[int64][]domain.Track{
 			1: {{ID: 11}, {ID: 12}, {ID: 13}, {ID: 14}, {ID: 15}},
@@ -333,13 +306,12 @@ func TestArtistDuplicatesPrefersCorrectCase(t *testing.T) {
 			3: {{ID: 31}, {ID: 32}, {ID: 33}},
 			4: {{ID: 41}},
 		},
+		scan: map[string]string{
+			"acda en de munnik": "Acda en de Munnik",
+			"danny de munk":     "Danny de Munk",
+		},
 	}
-	reg := metadata.NewRegistry()
-	_ = reg.Register(&stubNameProvider{names: map[string]string{
-		"acdaendemunnik": "Acda en de Munnik",
-		"dannydemunk":    "Danny de Munk",
-	}})
-	s := &Server{store: store, mdRegistry: reg, artistNames: newArtistNameCache(), log: testAPILogger()}
+	s := &Server{store: store, log: testAPILogger()}
 
 	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
 	rec := httptest.NewRecorder()
@@ -354,7 +326,7 @@ func TestArtistDuplicatesPrefersCorrectCase(t *testing.T) {
 		t.Fatalf("bad JSON: %v", err)
 	}
 	if len(body.Groups) != 2 {
-		t.Fatalf("expected 2 duplicate groups, got %d", len(body.Groups))
+		t.Fatalf("expected 2 scanned duplicate groups, got %d", len(body.Groups))
 	}
 	// Explicit keeper checks: correct casing wins even with fewer tracks.
 	want := map[string]struct {
@@ -381,9 +353,47 @@ func TestArtistDuplicatesPrefersCorrectCase(t *testing.T) {
 	}
 }
 
+func TestArtistDuplicatesHidesUnscannedGroups(t *testing.T) {
+	// Two case-variant groups exist, but only one was scanned — the other must
+	// not appear until the next scan.
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Danny De Munk"},
+			{ID: 2, Name: "Danny de Munk"},
+			{ID: 3, Name: "Acda en De Munnik"},
+			{ID: 4, Name: "Acda en de Munnik"},
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 11}, {ID: 12}, {ID: 13}},
+			2: {{ID: 21}},
+			3: {{ID: 31}, {ID: 32}},
+			4: {{ID: 41}},
+		},
+		scan: map[string]string{
+			"danny de munk": "Danny de Munk",
+			// "acda en de munnik" not scanned → must be hidden
+		},
+	}
+	s := &Server{store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryArtistDuplicates(rec, req)
+	var body struct {
+		Groups []duplicateGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(body.Groups) != 1 || body.Groups[0].Name != "danny de munk" {
+		t.Errorf("expected only the scanned group, got %+v", body.Groups)
+	}
+}
+
 func TestArtistMergeRenamesToCanonical(t *testing.T) {
-	// Keeper (id 1) is the misspelled, larger variant. MusicBrainz returns
-	// the canonical spelling, so the merge must rename the survivor to it.
+	// Keeper (id 1) is the misspelled, larger variant. The scan cache holds the
+	// canonical spelling, so the merge must rename the survivor to it and
+	// invalidate the group.
 	store := &stubLibraryStore{
 		artists: []domain.Artist{
 			{ID: 1, Name: "Acda en De Munnik"},
@@ -393,12 +403,9 @@ func TestArtistMergeRenamesToCanonical(t *testing.T) {
 			1: {{ID: 10}, {ID: 11}, {ID: 12}},
 			2: {{ID: 13}},
 		},
+		scan: map[string]string{"acda en de munnik": "Acda en de Munnik"},
 	}
-	reg := metadata.NewRegistry()
-	_ = reg.Register(&stubNameProvider{names: map[string]string{
-		"acdaendemunnik": "Acda en de Munnik",
-	}})
-	s := &Server{store: store, mdRegistry: reg, artistNames: newArtistNameCache(), log: testAPILogger()}
+	s := &Server{store: store, log: testAPILogger()}
 
 	req := httptest.NewRequest(http.MethodPost, "/api/library/artists/1/merge", strings.NewReader(`{"remove_id":2}`))
 	req.SetPathValue("artistID", "1")
@@ -413,6 +420,9 @@ func TestArtistMergeRenamesToCanonical(t *testing.T) {
 	if len(store.renames) != 1 || store.renames[0].id != 1 || store.renames[0].name != "Acda en de Munnik" {
 		t.Errorf("survivor not renamed to canonical spelling: %+v", store.renames)
 	}
+	if _, stillScanned := store.scan["acda en de munnik"]; stillScanned {
+		t.Errorf("duplicate scan entry not invalidated after merge")
+	}
 	var resp struct {
 		Merged  bool   `json:"merged"`
 		Renamed bool   `json:"renamed"`
@@ -423,92 +433,6 @@ func TestArtistMergeRenamesToCanonical(t *testing.T) {
 	}
 	if !resp.Merged || !resp.Renamed || resp.Canon != "Acda en de Munnik" {
 		t.Errorf("response = %+v, want merged+renamed true with canonical name", resp)
-	}
-}
-
-func TestArtistNameCacheCoalescesConcurrentLookups(t *testing.T) {
-	c := newArtistNameCache()
-	ctx := context.Background()
-	const key = "acdaendemunnik"
-
-	// Concurrent callers for the same key must share a single fn invocation.
-	const callers = 16
-	start := make(chan struct{})
-	calls := make(chan int, callers)
-	var wg sync.WaitGroup
-	results := make([]string, callers)
-	for i := 0; i < callers; i++ {
-		wg.Add(1)
-		go func(idx int) {
-			defer wg.Done()
-			<-start
-			got, _ := c.getOrDo(ctx, key, func(_ context.Context) (string, error) {
-				calls <- 1
-				return "Acda en de Munnik", nil
-			})
-			results[idx] = got
-		}(i)
-	}
-	close(start)
-	wg.Wait()
-	close(calls)
-
-	total := 0
-	for range calls {
-		total++
-	}
-	if total != 1 {
-		t.Errorf("fn invoked %d times, want 1 (single-flight)", total)
-	}
-	for i, r := range results {
-		if r != "Acda en de Munnik" {
-			t.Errorf("caller %d got %q, want canonical name", i, r)
-		}
-	}
-
-	// Subsequent call hits the cache — fn not invoked again.
-	got, _ := c.getOrDo(ctx, key, func(_ context.Context) (string, error) {
-		t.Error("fn must not run when cached")
-		return "", nil
-	})
-	if got != "Acda en de Munnik" {
-		t.Errorf("cached lookup = %q, want canonical name", got)
-	}
-}
-
-func TestArtistNameCacheCachesErrorsAndMisses(t *testing.T) {
-	ctx := context.Background()
-	const key = "acdaendemunnik"
-
-	// A transient provider error is cached briefly: an immediate retry must
-	// not re-invoke fn, and the error is surfaced again.
-	err := errors.New("musicbrainz rate limited")
-	c := newArtistNameCache()
-	if _, gotErr := c.getOrDo(ctx, key, func(_ context.Context) (string, error) {
-		return "", err
-	}); gotErr != err {
-		t.Fatalf("first lookup error = %v, want %v", gotErr, err)
-	}
-	if _, gotErr := c.getOrDo(ctx, key, func(_ context.Context) (string, error) {
-		t.Error("fn must not run while the error is cached")
-		return "", nil
-	}); gotErr != err {
-		t.Errorf("cached error = %v, want %v", gotErr, err)
-	}
-
-	// A genuine not-found is cached as a miss (fn not re-invoked).
-	const missKey = "no-such-artist"
-	c2 := newArtistNameCache()
-	if got, gotErr := c2.getOrDo(ctx, missKey, func(_ context.Context) (string, error) {
-		return "", nil
-	}); got != "" || gotErr != nil {
-		t.Fatalf("first miss = (%q, %v), want empty", got, gotErr)
-	}
-	if got, gotErr := c2.getOrDo(ctx, missKey, func(_ context.Context) (string, error) {
-		t.Error("fn must not run for a cached miss")
-		return "x", nil
-	}); got != "" || gotErr != nil {
-		t.Errorf("cached miss = (%q, %v), want empty", got, gotErr)
 	}
 }
 
@@ -590,182 +514,42 @@ func TestArtistImageServesFromArtistDir(t *testing.T) {
 	}
 }
 
-// artistOrderTestServer builds a Server with a "musicbrainz" ArtistNameProvider
-// and a "deezer" discovery-backed provider, wired to the given metadata order.
-func artistOrderTestServer(t *testing.T, order []string) (*Server, *stubLibraryStore) {
-	t.Helper()
-	store := &stubLibraryStore{
-		artists: []domain.Artist{
-			{ID: 1, Name: "Danny De Munk"},
-			{ID: 2, Name: "Danny de Munk"},
-		},
-		tracks: map[int64][]domain.Track{
-			1: {{ID: 11}, {ID: 12}, {ID: 13}},
-			2: {{ID: 21}},
-		},
-	}
+func TestLookupCanonicalArtistFromMusicBrainz(t *testing.T) {
+	// The MusicBrainz-style provider supplies the canonical spelling; a
+	// discovery-only provider is irrelevant to this path.
 	pluginReg := plugin.NewRegistry()
-	mb := &stubNameProvider{name: "musicbrainz", names: map[string]string{
+	_ = pluginReg.Register(&stubNameProvider{name: "musicbrainz", names: map[string]string{
 		"dannydemunk": "Danny de Munk",
-	}}
-	_ = pluginReg.Register(mb)
-	dz := &stubDiscoveryNameProvider{
-		name: "deezer",
-		names: map[string][]discovery.ArtistSummary{
-			"dannydemunk": {{Name: "Danny De Munk"}},
-		},
-	}
-	_ = pluginReg.Register(dz)
-	_ = pluginReg.RegisterFactory(&stubDiscoveryFactory{name: "deezer"})
-
-	reg := metadata.NewRegistryFrom(pluginReg)
-	discReg := discovery.NewRegistry(pluginReg)
-	resolver := metadata.NewMetadataResolver(reg, testAPILogger())
-	resolver.SetProviderOrder(metadata.NewProviderOrder(func() []string { return order }))
-
+	}})
 	s := &Server{
-		store:            store,
-		mdRegistry:       reg,
-		discoveryReg:     discReg,
-		metadataResolver: resolver,
-		artistNames:      newArtistNameCache(),
-		log:              testAPILogger(),
-	}
-	return s, store
-}
-
-func TestArtistDuplicatesUsesDiscoveryProviderForName(t *testing.T) {
-	// No MusicBrainz-style provider configured: the discovery-backed "deezer"
-	// provider supplies the canonical name via SearchArtists.
-	store := &stubLibraryStore{
-		artists: []domain.Artist{
-			{ID: 1, Name: "Danny De Munk"},
-			{ID: 2, Name: "Danny de Munk"},
-		},
-		tracks: map[int64][]domain.Track{
-			1: {{ID: 11}, {ID: 12}, {ID: 13}},
-			2: {{ID: 21}},
-		},
-	}
-	pluginReg := plugin.NewRegistry()
-	dz := &stubDiscoveryNameProvider{
-		name: "deezer",
-		names: map[string][]discovery.ArtistSummary{
-			"dannydemunk": {{Name: "Danny De Munk"}},
-		},
-	}
-	_ = pluginReg.Register(dz)
-	_ = pluginReg.RegisterFactory(&stubDiscoveryFactory{name: "deezer"})
-
-	s := &Server{
-		store:        store,
-		mdRegistry:   metadata.NewRegistryFrom(pluginReg),
-		discoveryReg: discovery.NewRegistry(pluginReg),
-		artistNames:  newArtistNameCache(),
-		log:          testAPILogger(),
+		mdRegistry: metadata.NewRegistryFrom(pluginReg),
+		log:        testAPILogger(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
-	rec := httptest.NewRecorder()
-	s.handleLibraryArtistDuplicates(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	got, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	if err != nil {
+		t.Fatalf("lookup error: %v", err)
 	}
-	var body struct {
-		Groups []duplicateGroup `json:"groups"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("bad JSON: %v", err)
-	}
-	if len(body.Groups) != 1 || len(body.Groups[0].Artists) != 2 {
-		t.Fatalf("expected 1 duplicate group with 2 artists, got %+v", body.Groups)
-	}
-	g := body.Groups[0]
-	if g.Canonical != "Danny De Munk" {
-		t.Errorf("canonical_name = %q, want %q (from discovery provider)", g.Canonical, "Danny De Munk")
-	}
-	if g.Artists[0].ID != 1 {
-		t.Errorf("keeper = id %d, want id 1 (largest, since canonical matches it)", g.Artists[0].ID)
+	if got != "Danny de Munk" {
+		t.Errorf("canonical = %q, want musicbrainz's 'Danny de Munk'", got)
 	}
 }
 
-func TestArtistDuplicatesPrefersMusicBrainz(t *testing.T) {
-	// "musicbrainz" returns the correctly-cased name; "deezer" (discovery)
-	// returns the misspelled one. MusicBrainz is the authority for casing, so
-	// its spelling wins regardless of the configured metadata order.
-	for _, order := range [][]string{
-		{"deezer", "musicbrainz"},
-		{"musicbrainz", "deezer"},
-	} {
-		s, _ := artistOrderTestServer(t, order)
-		req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
-		rec := httptest.NewRecorder()
-		s.handleLibraryArtistDuplicates(rec, req)
-		var body struct {
-			Groups []duplicateGroup `json:"groups"`
-		}
-		if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-			t.Fatalf("order %v: bad JSON: %v", order, err)
-		}
-		if len(body.Groups) != 1 {
-			t.Fatalf("order %v: expected 1 group, got %d", order, len(body.Groups))
-		}
-		if body.Groups[0].Canonical != "Danny de Munk" {
-			t.Errorf("order %v: canonical_name = %q, want musicbrainz's 'Danny de Munk'", order, body.Groups[0].Canonical)
-		}
-		if body.Groups[0].Artists[0].ID != 2 {
-			t.Errorf("order %v: keeper = id %d, want id 2 (canonical casing)", order, body.Groups[0].Artists[0].ID)
-		}
-	}
-}
-
-func TestArtistDuplicatesFallsBackToDiscoveryWhenMusicBrainzUnknown(t *testing.T) {
-	// MusicBrainz is authoritative but has no entry for this artist; the
-	// discovery-backed provider fills in the canonical spelling.
-	store := &stubLibraryStore{
-		artists: []domain.Artist{
-			{ID: 1, Name: "Danny De Munk"},
-			{ID: 2, Name: "Danny de Munk"},
-		},
-		tracks: map[int64][]domain.Track{
-			1: {{ID: 11}, {ID: 12}, {ID: 13}},
-			2: {{ID: 21}},
-		},
-	}
+func TestLookupCanonicalArtistUnknownReturnsEmpty(t *testing.T) {
+	// MusicBrainz has no entry for this artist — the lookup returns empty
+	// (no discovery fallback).
 	pluginReg := plugin.NewRegistry()
 	_ = pluginReg.Register(&stubNameProvider{name: "musicbrainz"}) // returns "" (unknown)
-	_ = pluginReg.Register(&stubDiscoveryNameProvider{
-		name: "deezer",
-		names: map[string][]discovery.ArtistSummary{
-			"dannydemunk": {{Name: "Danny De Munk"}},
-		},
-	})
-	_ = pluginReg.RegisterFactory(&stubDiscoveryFactory{name: "deezer"})
-
 	s := &Server{
-		store:        store,
-		mdRegistry:   metadata.NewRegistryFrom(pluginReg),
-		discoveryReg: discovery.NewRegistry(pluginReg),
-		artistNames:  newArtistNameCache(),
-		log:          testAPILogger(),
+		mdRegistry: metadata.NewRegistryFrom(pluginReg),
+		log:        testAPILogger(),
 	}
 
-	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
-	rec := httptest.NewRecorder()
-	s.handleLibraryArtistDuplicates(rec, req)
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d, want 200", rec.Code)
+	got, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	if err != nil {
+		t.Fatalf("lookup error: %v", err)
 	}
-	var body struct {
-		Groups []duplicateGroup `json:"groups"`
-	}
-	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-		t.Fatalf("bad JSON: %v", err)
-	}
-	if len(body.Groups) != 1 {
-		t.Fatalf("expected 1 group, got %d", len(body.Groups))
-	}
-	if body.Groups[0].Canonical != "Danny De Munk" {
-		t.Errorf("canonical_name = %q, want deezer's 'Danny De Munk' (fallback)", body.Groups[0].Canonical)
+	if got != "" {
+		t.Errorf("canonical = %q, want empty (unknown to MusicBrainz)", got)
 	}
 }

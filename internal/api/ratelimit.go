@@ -42,6 +42,7 @@ func defaultRateBuckets() []rateLimitBucket {
 		{name: "download", max: rateDownload, window: time.Minute},
 		{name: "scan", max: rateScan, window: time.Minute},
 		{name: "enrich", max: rateEnrich, window: time.Minute},
+		{name: "duplicates", max: rateScan, window: time.Minute},
 		{name: "login", max: rateLogin, window: time.Minute},
 	}
 }

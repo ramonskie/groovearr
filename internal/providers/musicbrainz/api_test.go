@@ -565,7 +565,7 @@ func TestSearchArtist_CanonicalSpelling(t *testing.T) {
 	if res == nil {
 		t.Fatal("expected a match, got nil")
 	}
-	if res.Name != "Acda en de Munnik" || res.MBID != "mbid-1" {
+	if res.Name != "Acda en de Munnik" {
 		t.Errorf("got %+v, want canonical 'Acda en de Munnik'", res)
 	}
 }
