@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
 import {
@@ -67,10 +67,14 @@ export default function JobsSettings() {
   const running = job?.state === "running";
   const pct = Math.round(job?.progress ?? 0);
   const report = reportQuery.data;
-  const groups = duplicatesQuery.data?.groups ?? [];
+  // Memoized so the reference is stable when no duplicates data is loaded
+  // (the `?? []` fallback would otherwise create a fresh array every render,
+  // causing the targets effect below to loop forever).
+  const groups = useMemo(
+    () => duplicatesQuery.data?.groups ?? [],
+    [duplicatesQuery.data],
+  );
 
-  // Reveal the duplicates list once a duplicate check completes. Fires for
-  // fast completions (job finishes inside the POST round-trip, so no
   // Reveal the duplicates list whenever a completed duplicate check is
   // observed — covering slow jobs (running→completed), fast jobs that finish
   // inside the POST round-trip (completed with no prior running observation),
@@ -86,12 +90,16 @@ export default function JobsSettings() {
   useEffect(() => {
     setTargets((prev) => {
       const next = { ...prev };
+      let changed = false;
       for (const g of groups) {
         if (next[g.name] == null && g.artists.length > 0) {
           next[g.name] = g.artists[0].id;
+          changed = true;
         }
       }
-      return next;
+      // Return prev unchanged when nothing new was added so React skips the
+      // re-render instead of looping.
+      return changed ? next : prev;
     });
   }, [groups]);
 
