@@ -93,6 +93,7 @@ export default function SettingsPage() {
           log_max_backups: config.logging?.max_backups ?? undefined,
           log_max_age_days: config.logging?.max_age_days ?? undefined,
           log_compress: config.logging?.compress ?? true,
+          log_access_log: config.logging?.access_log ?? false,
           log_captured_max: config.logging?.captured_max ?? 2000,
         },
         { keepDirtyValues: true },

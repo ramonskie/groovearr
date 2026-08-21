@@ -163,6 +163,18 @@ export default function LogsSettings() {
         </FormGroup>
 
         <FormGroup
+          label="Access Log"
+          htmlFor="log_access_log"
+          hint="Write one line per request to access.log (nginx-style), separate from the app log. Polling endpoints are always excluded. Takes effect on restart."
+          error={errors.log_access_log?.message}
+        >
+          <label className="flex items-center gap-2">
+            <input id="log_access_log" type="checkbox" {...register("log_access_log")} className="h-4 w-4 rounded border-slate-700 bg-slate-800 text-purple-500 focus:ring-purple-500" />
+            <span className="text-sm text-slate-300">Enable separate access log</span>
+          </label>
+        </FormGroup>
+
+        <FormGroup
           label="Captured Log Lines"
           htmlFor="log_captured_max"
           hint="How many recent log lines the viewer reads from the log file."

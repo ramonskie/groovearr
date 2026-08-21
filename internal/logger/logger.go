@@ -186,17 +186,7 @@ func New(cfg Config, filePath string) (l *Logger, rot *Rotator, closeFn func()) 
 		cfg.Format = v
 	}
 
-	rot = &Rotator{
-		lj: &lumberjack.Logger{
-			Filename:   filePath,
-			MaxSize:    cfg.MaxSizeMB,
-			MaxBackups: cfg.MaxBackups,
-			MaxAge:     cfg.MaxAgeDays,
-			Compress:   cfg.Compress,
-			LocalTime:  true,
-		},
-		lvl: new(slog.LevelVar),
-	}
+	rot = newRotator(cfg, filePath)
 	rot.SetLevel(cfg.Level)
 
 	// Write each serialized record to both docker stdout and the rotating file.
@@ -212,6 +202,33 @@ func New(cfg Config, filePath string) (l *Logger, rot *Rotator, closeFn func()) 
 
 	return slog.New(handler), rot, func() {
 		_ = rot.Close()
+	}
+}
+
+// NewAccessWriter returns a Rotator writing only to a rotating file, with no
+// stderr output. It backs the dedicated access log: per-request lines live in
+// their own file (nginx/Gitea style) so the app event log and docker logs stay
+// free of request noise. Rotation/retention follow the provided Config. The
+// returned closeFn flushes and closes the file.
+func NewAccessWriter(cfg Config, filePath string) (*Rotator, func()) {
+	cfg = applyDefaults(cfg)
+	rot := newRotator(cfg, filePath)
+	return rot, func() {
+		_ = rot.Close()
+	}
+}
+
+func newRotator(cfg Config, filePath string) *Rotator {
+	return &Rotator{
+		lj: &lumberjack.Logger{
+			Filename:   filePath,
+			MaxSize:    cfg.MaxSizeMB,
+			MaxBackups: cfg.MaxBackups,
+			MaxAge:     cfg.MaxAgeDays,
+			Compress:   cfg.Compress,
+			LocalTime:  true,
+		},
+		lvl: new(slog.LevelVar),
 	}
 }
 

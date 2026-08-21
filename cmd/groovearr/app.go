@@ -44,13 +44,14 @@ type App struct {
 	log      *slog.Logger
 	logRot   *logger.Rotator
 	closeLog func()
-	cfg      *config.Persistence
-	libStore *sqlite.Store
-
-	monitor  *download.MonitoringService
-	srv      *api.Server
-	bgCtx    context.Context
-	bgCancel context.CancelFunc
+	// closeAccessLog closes the optional access.log writer (nil when disabled).
+	closeAccessLog func()
+	cfg            *config.Persistence
+	libStore       *sqlite.Store
+	monitor        *download.MonitoringService
+	srv            *api.Server
+	bgCtx          context.Context
+	bgCancel       context.CancelFunc
 
 	// Fields needed for startup logging.
 	configPath        string
@@ -83,6 +84,16 @@ func NewApp(configPath string) (*App, error) {
 	}
 	log, logRot, closeLog := logger.New(lc, logPath)
 	cfg.SetLogger(log)
+
+	// Optional dedicated access log (nginx/Gitea style). Opt-in via
+	// logging.access_log; the toggle takes effect on restart. Request lines
+	// never touch the app event log or stderr (docker logs).
+	var accessLog *logger.Rotator
+	var closeAccessLog func()
+	accessLogPath := filepath.Join(logDir, "access.log")
+	if lg := cfg.Get().Logging; lg != nil && lg.AccessLog != nil && *lg.AccessLog {
+		accessLog, closeAccessLog = logger.NewAccessWriter(lc, accessLogPath)
+	}
 
 	// Route the package-level default slog logger through the app logger so
 	// components that use slog.Default() as a nil-logger fallback (jobs,
@@ -270,7 +281,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logRot, logPath,
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logRot, accessLog, logPath,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
@@ -318,6 +329,9 @@ func NewApp(configPath string) (*App, error) {
 		"addr", addr,
 		"component", "main",
 	)
+	if accessLog != nil {
+		log.Info("access log enabled", "path", accessLogPath, "component", "main")
+	}
 	for _, name := range registry.Names() {
 		if p := registry.Get(name); p != nil {
 			log.Info("source configured", "name", name, "display", p.DisplayName(), "component", "main")
@@ -345,6 +359,7 @@ func NewApp(configPath string) (*App, error) {
 		log:               log,
 		logRot:            logRot,
 		closeLog:          closeLog,
+		closeAccessLog:    closeAccessLog,
 		cfg:               cfg,
 		libStore:          libStore,
 		monitor:           monitor,
@@ -378,10 +393,16 @@ func (app *App) Run() {
 	if err := app.srv.ListenAndServe(); err != nil {
 		app.log.Error("server failed", "error", err, "component", "main")
 		app.libStore.Close()
+		if app.closeAccessLog != nil {
+			app.closeAccessLog()
+		}
 		app.closeLog()
 		os.Exit(1)
 	}
 	app.libStore.Close()
+	if app.closeAccessLog != nil {
+		app.closeAccessLog()
+	}
 	app.closeLog()
 }
 

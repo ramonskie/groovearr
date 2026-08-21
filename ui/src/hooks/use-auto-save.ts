@@ -77,6 +77,7 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
           max_backups: values.log_max_backups ?? 3,
           max_age_days: values.log_max_age_days ?? 7,
           compress: values.log_compress ?? true,
+          access_log: values.log_access_log ?? false,
           captured_max: values.log_captured_max ?? 2000,
         },
       });

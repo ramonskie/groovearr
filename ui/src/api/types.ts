@@ -51,6 +51,7 @@ export interface LoggingConfig {
   max_backups: number;
   max_age_days: number;
   compress: boolean;
+  access_log: boolean | null;
   captured_max: number;
 }
 

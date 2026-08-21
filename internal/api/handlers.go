@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"io/fs"
 	"log/slog"
 	"net/http"
@@ -55,6 +56,7 @@ type Server struct {
 	log                 *slog.Logger
 	logPath             string
 	logRotator          *logger.Rotator
+	accessLog           *logger.Rotator
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
 	bgCtx               context.Context
@@ -65,7 +67,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, logPath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -84,6 +86,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		qualityProfileStore: qualityProfileStore,
 		log:                 logger,
 		logRotator:          logRotator,
+		accessLog:           accessLog,
 		logPath:             logPath,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
@@ -207,7 +210,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 
 	s.httpSrv = &http.Server{
 		Addr:         addr,
-		Handler:      withLogging(s.log)(withRequestID(withCORS(s.withAuth(mux)))),
+		Handler:      withAccessLog(s.accessLog)(withRequestID(withCORS(s.withAuth(mux)))),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
@@ -234,31 +237,104 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 // ─── Middleware ──────────────────────────────────────────────────────
 
-func withLogging(logger *slog.Logger) func(http.Handler) http.Handler {
+// accessLogSkip lists endpoints polled on an interval (or probed) by the UI /
+// container runtime. Each request carries no signal — it is a heartbeat, not an
+// action — so they are excluded from the access log entirely, at every level.
+// accessLogSkip lists endpoints polled on an interval (or probed) by the UI /
+// container runtime. Each request carries no signal — it is a heartbeat, not an
+// action — so they are excluded from the access log entirely, at every level.
+// NOTE: these exact paths are GET-only today; path-only matching would also
+// skip a future route reusing one of them with a different method.
+var accessLogSkip = map[string]bool{
+	"/api/jobs":      true, // polled 1s while a background job runs
+	"/api/downloads": true, // polled 2s when SSE is disconnected
+	"/api/events":    true, // persistent SSE stream (connection heartbeat)
+	"/api/health":    true, // container/docker health probes
+}
+
+// skipAccessLog reports whether a request is a poll heartbeat rather than an
+// action, and should be excluded from the access log at every level.
+func skipAccessLog(r *http.Request) bool {
+	if accessLogSkip[r.URL.Path] {
+		return true
+	}
+	// Playlist detail is polled every 5s, but only for numeric IDs — the
+	// /api/playlists/sources* browse endpoints are user-triggered actions and
+	// must stay logged. PATCH/DELETE on the same path are actions too.
+	if r.Method == http.MethodGet {
+		if rest, ok := strings.CutPrefix(r.URL.Path, "/api/playlists/"); ok {
+			if _, err := strconv.Atoi(rest); err == nil {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// withAccessLog writes one structured line per request to the dedicated access
+// log (opt-in via logging.access_log). The app event log and stderr never see
+// request lines. Polling endpoints are skipped entirely. A nil access log
+// (feature disabled) is a no-op, so routing stays cheap when off.
+func withAccessLog(accessLog io.Writer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			wr := &responseWriter{ResponseWriter: w, status: http.StatusOK}
 			next.ServeHTTP(wr, r)
-			logger.Info("request",
-				"method", r.Method,
-				"path", r.URL.Path,
-				"status", wr.status,
-				"duration_ms", time.Since(start).Milliseconds(),
-				"component", "api",
-			)
+			if accessLog == nil || skipAccessLog(r) {
+				return
+			}
+			line, err := json.Marshal(map[string]any{
+				"time":        time.Now().UTC().Format(time.RFC3339Nano),
+				"remote_addr": clientAddr(r),
+				"method":      r.Method,
+				"path":        r.URL.Path,
+				"proto":       r.Proto,
+				"status":      wr.status,
+				"bytes":       wr.bytes,
+				"duration_ms": time.Since(start).Milliseconds(),
+				"referer":     r.Referer(),
+				"user_agent":  r.UserAgent(),
+			})
+			if err != nil {
+				return
+			}
+			_, _ = accessLog.Write(append(line, '\n'))
 		})
 	}
+}
+
+// clientAddr returns the real client address when the app sits behind a
+// reverse proxy (nginx-style X-Forwarded-For first hop), falling back to the
+// direct peer. XFF is client-suppliable — informational in the access log
+// only, never used for anything security-sensitive.
+func clientAddr(r *http.Request) string {
+	if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+		if i := strings.IndexByte(xff, ','); i >= 0 {
+			xff = xff[:i]
+		}
+		if xff = strings.TrimSpace(xff); xff != "" {
+			return xff
+		}
+	}
+	return r.RemoteAddr
 }
 
 type responseWriter struct {
 	http.ResponseWriter
 	status int
+	bytes  int
 }
 
 func (rw *responseWriter) WriteHeader(code int) {
 	rw.status = code
 	rw.ResponseWriter.WriteHeader(code)
+}
+
+func (rw *responseWriter) Write(b []byte) (int, error) {
+	n, err := rw.ResponseWriter.Write(b)
+	rw.bytes += n
+	return n, err
 }
 
 // Flush implements http.Flusher so SSE connections work through the logging middleware.
@@ -457,6 +533,9 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 	if s.logRotator != nil && updated.Logging != nil {
 		s.logRotator.SetLevel(updated.Logging.Level)
 		s.logRotator.SetConfig(updated.Logging.LoggerConfig())
+		if s.accessLog != nil {
+			s.accessLog.SetConfig(updated.Logging.LoggerConfig())
+		}
 		s.log.Info("logging reconfigured", "level", s.logRotator.Level(), "component", "api")
 	}
 }

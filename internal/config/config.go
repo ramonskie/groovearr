@@ -65,6 +65,11 @@ type LoggingConfig struct {
 	MaxAgeDays  int    `json:"max_age_days"` // retention in days for rotated files (<=0 = default 7)
 	Compress    *bool  `json:"compress"`     // gzip rotated log files (default true)
 	CapturedMax int    `json:"captured_max"` // log lines returned by the UI viewer (default 2000)
+	// AccessLog writes one structured line per request to logs/access.log,
+	// separate from the app event log (nginx/Gitea style). Polling endpoints
+	// are always excluded. Default false; takes effect on restart. Pointer so
+	// partial updates can distinguish "not sent" from "false".
+	AccessLog *bool `json:"access_log"`
 }
 
 // LoggerConfig translates the persisted logging config into the logger
@@ -101,6 +106,7 @@ func DefaultLogging() *LoggingConfig {
 		MaxAgeDays:  7,
 		Compress:    boolPtr(true),
 		CapturedMax: 2000,
+		AccessLog:   boolPtr(false),
 	}
 }
 
@@ -307,6 +313,9 @@ func (c *Config) mergeFields(partial *Config) {
 		}
 		if partial.Logging.Compress != nil {
 			c.Logging.Compress = partial.Logging.Compress
+		}
+		if partial.Logging.AccessLog != nil {
+			c.Logging.AccessLog = partial.Logging.AccessLog
 		}
 	}
 

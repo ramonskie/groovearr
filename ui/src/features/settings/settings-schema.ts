@@ -86,6 +86,7 @@ export function buildFormSchema(sources: SourceInfo[]) {
       z.number().int().min(1, "Must be at least 1").optional(),
     ),
     log_compress: z.boolean().optional(),
+    log_access_log: z.boolean().optional(),
     log_captured_max: z.preprocess(
       (v) => (v === "" || v === undefined ? undefined : Number(v)),
       z.number().int().min(50, "Must be at least 50").optional(),
@@ -130,6 +131,7 @@ export function buildDefaults(sources: SourceInfo[]) {
     log_max_backups: 3,
     log_max_age_days: 7,
     log_compress: true,
+    log_access_log: false,
     log_captured_max: 2000,
   };
 }
