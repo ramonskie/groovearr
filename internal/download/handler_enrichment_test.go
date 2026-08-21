@@ -3,6 +3,7 @@ package download
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"os"
@@ -362,6 +363,160 @@ var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
 // Ensure mockMetadataProvider satisfies plugin.BasePlugin (embedded in metadata.Provider).
 var _ plugin.BasePlugin = (*mockMetadataProvider)(nil)
 
+// blockingMetadataProvider blocks EnrichTrack until the context is cancelled,
+// standing in for a slow or rate-limited provider. When entered is set, it is
+// signaled once (non-blocking) as EnrichTrack starts, so tests can wait until
+// the provider is actually inside the block.
+type blockingMetadataProvider struct {
+	name       string
+	configured bool
+	connected  bool
+	entered    chan struct{}
+}
+
+func (m *blockingMetadataProvider) Name() string              { return m.name }
+func (m *blockingMetadataProvider) DisplayName() string       { return m.name }
+func (m *blockingMetadataProvider) IsConfigured() bool        { return m.configured }
+func (m *blockingMetadataProvider) IsMetadataAvailable() bool { return m.configured }
+func (m *blockingMetadataProvider) CapabilityStatus() map[string]string {
+	return map[string]string{"metadata": "connected"}
+}
+func (m *blockingMetadataProvider) CheckConnection(ctx context.Context) error { return nil }
+func (m *blockingMetadataProvider) Connected() bool                           { return m.connected }
+
+func (m *blockingMetadataProvider) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
+	return nil, nil
+}
+
+func (m *blockingMetadataProvider) SearchArtistImage(ctx context.Context, artist string) (*metadata.ArtistImageResult, error) {
+	return nil, nil
+}
+
+func (m *blockingMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) string {
+	return ""
+}
+
+func (m *blockingMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
+	if m.entered != nil {
+		select {
+		case m.entered <- struct{}{}:
+		default:
+		}
+	}
+	<-ctx.Done()
+	return nil, ctx.Err()
+}
+
+var _ metadata.Provider = (*blockingMetadataProvider)(nil)
+
+// TestBulkEnrichRespectsPerTrackTimeout verifies that the bulk enrichment
+// path bounds the provider pass with trackProviderTimeout: a slow provider
+// causes a DeadlineExceeded error while partial results found before the
+// deadline are still persisted.
+func TestBulkEnrichRespectsPerTrackTimeout(t *testing.T) {
+	orig := trackProviderTimeout
+	trackProviderTimeout = 50 * time.Millisecond
+	defer func() { trackProviderTimeout = orig }()
+
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	reg := metadata.NewRegistry()
+	fast := &mockMetadataProvider{
+		name:       "fast",
+		configured: true,
+		connected:  true,
+		trackMeta: &metadata.TrackMetadata{
+			ISRC: "US-ABC-12-00001",
+			ExternalIDs: map[string]string{
+				"spotify": "spotify-123",
+			},
+		},
+	}
+	reg.Register(fast)
+	reg.Register(&blockingMetadataProvider{name: "slow", configured: true, connected: true})
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+
+	err := handler.EnrichLibraryTrack(context.Background(), 1)
+	if err == nil {
+		t.Fatal("want deadline error, got nil")
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("want context.DeadlineExceeded, got %v", err)
+	}
+	// Partial data resolved before the deadline must be persisted.
+	if store.track.ISRC != "US-ABC-12-00001" {
+		t.Errorf("expected partial ISRC persisted before timeout, got %q", store.track.ISRC)
+	}
+}
+
+// TestDownloadPathUnboundedByTimeout verifies the per-download path
+// (bulk=false) is not affected by the bulk per-track deadline: a slow provider
+// just blocks, and Handle still returns nil.
+func TestDownloadPathUnboundedByTimeout(t *testing.T) {
+	orig := trackProviderTimeout
+	trackProviderTimeout = 20 * time.Millisecond
+	defer func() { trackProviderTimeout = orig }()
+
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	// Handle uses its own unbounded context; the test must not wait forever,
+	// so drive it with a context we cancel after the provider blocks briefly.
+	// The download path must NOT return at the bulk per-track deadline — it
+	// keeps blocking until the caller's context is cancelled.
+	reg := metadata.NewRegistry()
+	slow := &blockingMetadataProvider{name: "slow", configured: true, connected: true, entered: make(chan struct{})}
+	reg.Register(slow)
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.Handle(ctx, &Record{LibraryTrackID: 1})
+	}()
+
+	// Wait until the slow provider is actually inside its blocking call — this
+	// removes the scheduling window that made a fixed sleep flaky.
+	select {
+	case <-slow.entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("slow provider never entered EnrichTrack")
+	}
+
+	// Well past the bulk deadline, Handle must still be running: the download
+	// path is not bounded by trackProviderTimeout.
+	time.Sleep(3 * trackProviderTimeout)
+	select {
+	case err := <-done:
+		t.Fatalf("Handle returned before cancel (bulk deadline leaked into downloads): %v", err)
+	default:
+	}
+
+	cancel()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("Handle should swallow enrichment errors, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Handle did not return after context cancellation")
+	}
+}
+
 func TestArtistImageSearchDedupedPerTTL(t *testing.T) {
 	root := t.TempDir()
 	trackPath := filepath.Join(root, "Artist", "Album", "01 - Track.flac")
@@ -433,5 +588,43 @@ func TestArtistImageSearchRetriesAfterTTL(t *testing.T) {
 	}
 	if discCalls != 2 {
 		t.Errorf("SearchArtists called %d times, want 2 after TTL expiry", discCalls)
+	}
+}
+
+// TestBulkEnrichPropagatesCancellation verifies that a job-wide cancellation
+// mid-provider-pass is propagated from enrichTrack (rather than swallowed), so
+// the bulk runner can record the in-flight track as cancelled instead of
+// completed. The outcome is deterministic regardless of scheduling: the
+// provider aborts on ctx.Done, or the loop breaks on the cancelled context
+// before the first call.
+func TestBulkEnrichPropagatesCancellation(t *testing.T) {
+	reg := metadata.NewRegistry()
+	reg.Register(&blockingMetadataProvider{name: "slow", configured: true, connected: true})
+
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- handler.EnrichLibraryTrack(ctx, 1)
+	}()
+
+	time.Sleep(20 * time.Millisecond)
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("want context.Canceled propagated, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("EnrichLibraryTrack did not return after cancel")
 	}
 }

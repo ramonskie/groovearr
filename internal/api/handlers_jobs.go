@@ -248,14 +248,131 @@ func (s *Server) scanRunner(ctx context.Context, report func(jobs.Report)) error
 	return nil
 }
 
+// albumTrackGroup is one album's tracks, dispatched as a unit so concurrent
+// workers always enrich different albums (see enrichRunner).
+type albumTrackGroup struct {
+	AlbumID int64
+	Tracks  []*domain.Track
+}
+
+// groupTracksByAlbum partitions tracks into per-album groups preserving
+// first-seen (rowid) order. Same-album tracks stay together so a single
+// worker can own the album without an inter-worker semaphore.
+func groupTracksByAlbum(tracks []domain.Track) []albumTrackGroup {
+	var order []int64
+	byAlbum := make(map[int64][]*domain.Track)
+	for i := range tracks {
+		t := &tracks[i]
+		if _, ok := byAlbum[t.AlbumID]; !ok {
+			order = append(order, t.AlbumID)
+		}
+		byAlbum[t.AlbumID] = append(byAlbum[t.AlbumID], t)
+	}
+	groups := make([]albumTrackGroup, 0, len(order))
+	for _, id := range order {
+		groups = append(groups, albumTrackGroup{AlbumID: id, Tracks: byAlbum[id]})
+	}
+	return groups
+}
+
+// enrichOutcome describes how a single track finished in the bulk enrichment
+// job. Timeouts are reported separately so a slow provider pass is visible
+// instead of being lumped into generic failures.
+type enrichOutcome string
+
+const (
+	enrichOutcomeCompleted enrichOutcome = "completed"
+	enrichOutcomeFailed    enrichOutcome = "failed"
+	enrichOutcomeTimeout   enrichOutcome = "timeout"
+	enrichOutcomeCancelled enrichOutcome = "cancelled"
+)
+
+// enrichActivity is one per-track event from the enrichment job, kept in a
+// rolling buffer so the API/UI can show what the job is doing while it runs.
+type enrichActivity struct {
+	At         time.Time     `json:"at"`
+	TrackID    int64         `json:"track_id"`
+	AlbumID    int64         `json:"album_id"`
+	Title      string        `json:"title"`
+	Outcome    enrichOutcome `json:"outcome"`
+	DurationMs int64         `json:"duration_ms"`
+}
+
+// enrichActivityMax bounds the rolling buffer so a 33k-track job can't grow it
+// without limit.
+const enrichActivityMax = 500
+
+func (s *Server) resetEnrichActivity() {
+	s.enrichMu.Lock()
+	defer s.enrichMu.Unlock()
+	s.enrichActivity = s.enrichActivity[:0]
+}
+
+func (s *Server) recordEnrichActivity(a enrichActivity) {
+	s.enrichMu.Lock()
+	defer s.enrichMu.Unlock()
+	if len(s.enrichActivity) >= enrichActivityMax {
+		s.enrichActivity = append(s.enrichActivity[:0], s.enrichActivity[1:]...)
+	}
+	s.enrichActivity = append(s.enrichActivity, a)
+}
+
+// handleJobActivity returns the current job plus the recent per-track
+// enrichment activity so callers can watch the job's internal progress. The
+// buffer is populated only by the enrichment job; exposing it under a
+// scan/duplicates/organize job would mislead consumers into reading stale
+// enrich entries as the current job's progress. Entries are also scoped to the
+// current run via StartedAt: the buffer is reset asynchronously inside the
+// runner, so a poller in the startup window would otherwise see the previous
+// run's tail.
+func (s *Server) handleJobActivity(w http.ResponseWriter, r *http.Request) {
+	job := s.jobs.Current()
+	s.enrichMu.Lock()
+	activity := make([]enrichActivity, len(s.enrichActivity))
+	copy(activity, s.enrichActivity)
+	s.enrichMu.Unlock()
+	if job == nil || job.Type != "enrich" || job.StartedAt == nil {
+		activity = []enrichActivity{}
+	} else {
+		filtered := activity[:0]
+		for _, a := range activity {
+			if !a.At.Before(*job.StartedAt) {
+				filtered = append(filtered, a)
+			}
+		}
+		activity = filtered
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"job":      job,
+		"activity": activity,
+	})
+}
+
+// enrichOutcomeFor maps a per-track enrichment error to the activity outcome.
+// Deadline-exceeded tracks (per-track provider timeout) are reported as
+// timeouts rather than generic failures.
+func enrichOutcomeFor(err error) enrichOutcome {
+	switch {
+	case err == nil:
+		return enrichOutcomeCompleted
+	case errors.Is(err, context.DeadlineExceeded):
+		return enrichOutcomeTimeout
+	default:
+		return enrichOutcomeFailed
+	}
+}
+
 // enrichRunner runs metadata enrichment over every track in the library. The
 // handler skips already-enriched tracks and attempts each artist's image at
 // most once per run, so provider load stays proportional to what's missing.
 //
-// Tracks are enriched concurrently with a small worker pool: each provider
-// client rate-limits its own shared transport, so concurrency saturates those
-// limits instead of exceeding them — a strictly sequential run over tens of
-// thousands of tracks would otherwise take hours.
+// Tracks are enriched concurrently with a small worker pool. Tracks of the
+// same album are grouped and dispatched together: each worker owns one album
+// and enriches its tracks sequentially, which keeps the album-row
+// read-modify-write safe (a single writer per album) without an inter-worker
+// semaphore. This also prevents a convoy stall where every worker slots onto
+// one large album's tracks and blocks behind each other — when the cursor
+// lands on a big album, the other workers still pick up other albums.
 func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) error {
 	if s.enrichmentHandler == nil {
 		return nil
@@ -271,60 +388,66 @@ func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) err
 	}
 
 	s.enrichmentHandler.ResetBulk()
+	s.resetEnrichActivity()
 
 	const workers = 4
 	sem := make(chan struct{}, workers)
-	// Tracks of the same album are enriched sequentially: each enrichTrack does
-	// a read-modify-write on the album row, so concurrent workers would clobber
-	// each other's field updates. Different albums still run concurrently.
 	var (
-		wg         sync.WaitGroup
-		mu         sync.Mutex
-		albumSemMu sync.Mutex
-		albumSems  = make(map[int64]chan struct{})
-		failed     int
-		done       atomic.Int64
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		failed   int
+		timeouts int
+		done     atomic.Int64
 	)
-	albumSem := func(albumID int64) chan struct{} {
-		albumSemMu.Lock()
-		defer albumSemMu.Unlock()
-		s, ok := albumSems[albumID]
-		if !ok {
-			s = make(chan struct{}, 1)
-			albumSems[albumID] = s
-		}
-		return s
-	}
-	for i := range tracks {
+	for _, g := range groupTracksByAlbum(tracks) {
 		if ctx.Err() != nil {
 			break
 		}
-		t := &tracks[i]
 		sem <- struct{}{}
 		wg.Add(1)
-		go func(t *domain.Track) {
+		go func(g albumTrackGroup) {
 			defer func() { <-sem; wg.Done() }()
-			as := albumSem(t.AlbumID)
-			select {
-			case as <- struct{}{}:
-			case <-ctx.Done():
-				return
-			}
-			defer func() { <-as }()
-			if err := s.enrichmentHandler.EnrichLibraryTrack(ctx, t.ID); err != nil {
+			for _, t := range g.Tracks {
 				if ctx.Err() != nil {
-					// Cancelled mid-track (provider call aborted) — not a real
-					// failure; the job reports cancelled after wg.Wait.
 					return
 				}
-				mu.Lock()
-				failed++
-				mu.Unlock()
-				s.log.Warn("enrich track failed", "track_id", t.ID, "error", err, "component", "jobs")
+				start := time.Now()
+				s.log.Debug("enrich track start", "track_id", t.ID, "album_id", t.AlbumID, "component", "jobs")
+				err := s.enrichmentHandler.EnrichLibraryTrack(ctx, t.ID)
+				durMs := time.Since(start).Milliseconds()
+				outcome := enrichOutcomeFor(err)
+				switch {
+				case err != nil && ctx.Err() != nil:
+					// Job cancelled mid-track (provider call aborted). Record the
+					// interrupt so the in-flight track is visible, then stop.
+					outcome = enrichOutcomeCancelled
+				case err != nil:
+					mu.Lock()
+					if outcome == enrichOutcomeTimeout {
+						timeouts++
+					} else {
+						failed++
+					}
+					mu.Unlock()
+					s.log.Warn("enrich track failed", "track_id", t.ID, "album_id", t.AlbumID, "duration_ms", durMs, "outcome", outcome, "error", err, "component", "jobs")
+				default:
+					s.log.Debug("enrich track done", "track_id", t.ID, "album_id", t.AlbumID, "duration_ms", durMs, "component", "jobs")
+				}
+				s.recordEnrichActivity(enrichActivity{
+					At:         time.Now().UTC(),
+					TrackID:    t.ID,
+					AlbumID:    t.AlbumID,
+					Title:      t.Title,
+					Outcome:    outcome,
+					DurationMs: durMs,
+				})
+				if ctx.Err() != nil {
+					return
+				}
+				n := done.Add(1)
+				report(jobs.Report{Done: int(n), Total: total, Message: t.Title})
 			}
-			n := done.Add(1)
-			report(jobs.Report{Done: int(n), Total: total, Message: t.Title})
-		}(t)
+		}(g)
 	}
 	wg.Wait()
 	if err := ctx.Err(); err != nil {
@@ -332,11 +455,12 @@ func (s *Server) enrichRunner(ctx context.Context, report func(jobs.Report)) err
 	}
 
 	// Surface the outcome in the final progress message (shown once the job
-	// completes). Tracks already fully enriched are skipped inside the handler.
+	// completes). Tracks already fully enriched are skipped inside the handler;
+	// timeouts are reported separately from hard failures.
 	report(jobs.Report{
 		Done:    total,
 		Total:   total,
-		Message: fmt.Sprintf("processed %d tracks, %d errors", total, failed),
+		Message: fmt.Sprintf("processed %d tracks, %d errors, %d timeouts", total, failed, timeouts),
 	})
 	return nil
 }

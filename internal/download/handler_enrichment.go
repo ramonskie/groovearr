@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -52,6 +53,15 @@ type MetadataEnrichmentHandler struct {
 // bulk jobs reset the window via ResetBulk and therefore re-attempt each
 // artist every run.
 const artistImageRetryTTL = 24 * time.Hour
+
+// trackProviderTimeout bounds the per-track provider pass in a bulk
+// enrichment run. A track that no provider can fill (obscure release) would
+// otherwise walk every configured provider — including rate-limited MusicBrainz
+// and Discogs — for minutes. The deadline caps that while persistence below
+// still runs on the caller's context, so whatever was resolved before the
+// deadline is saved. Downloads (bulk=false) keep the unbounded loop. Exposed
+// as a var so tests can shrink it.
+var trackProviderTimeout = 2 * time.Minute
 
 // NewMetadataEnrichmentHandler creates a handler that queries all configured
 // metadata providers and applies their results to the library.
@@ -237,6 +247,17 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 		return nil
 	}
 
+	// Bulk enrichment: bound the provider pass per track so a slow or
+	// un-fillable track can't pin a worker slot for minutes. Persistence below
+	// still runs on the caller's context so partial results are saved even when
+	// the deadline fires.
+	provCtx := ctx
+	var provCancel context.CancelFunc
+	if bulk {
+		provCtx, provCancel = context.WithTimeout(ctx, trackProviderTimeout)
+		defer provCancel()
+	}
+
 	trackModified := false
 	albumModified := false
 
@@ -250,7 +271,13 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 	}
 
 	for _, p := range providers {
-		if tMod, aMod := h.enrichFromProvider(ctx, p, artist, album, track, record); tMod || aMod {
+		// Stop iterating once the per-track deadline (or a job cancellation)
+		// fires — calling further providers on an expired context only yields
+		// stale warn logs per provider.
+		if err := provCtx.Err(); err != nil {
+			break
+		}
+		if tMod, aMod := h.enrichFromProvider(provCtx, p, artist, album, track, record); tMod || aMod {
 			if tMod {
 				trackModified = true
 			}
@@ -268,16 +295,35 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 		if bulk && track.ISRC != "" && len(track.ExternalIDs) > 0 &&
 			len(album.Genres) > 0 && album.ReleaseDate != "" &&
 			library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath)) {
+			h.log.Debug("bulk enrichment complete", "provider", p.Name(), "track_id", track.ID, "album_id", album.ID, "component", "enrichment")
 			break
+		}
+	}
+
+	// Decide the timeout outcome right after the provider pass: the per-track
+	// deadline is about bounding provider work, not the fast persistence/tag
+	// tail below. A track whose providers finished just under the deadline must
+	// not be mislabeled as a timeout because the DB write or tag re-write
+	// crossed it.
+	timedOut := false
+	if bulk {
+		if err := provCtx.Err(); errors.Is(err, context.DeadlineExceeded) {
+			timedOut = true
 		}
 	}
 
 	// Enrich artist image from discovery providers (Deezer, Spotify, etc.).
 	// Attempted at most once per artist per retry window so repeated imports
 	// of the same artist don't hammer the provider APIs; existing images are
-	// still refreshed when the window elapses.
-	if h.discoveryReg != nil && !skipArtistImage && h.markImageAttemptDue(track.ArtistID, time.Now()) {
-		h.enrichArtistImage(ctx, artist, track)
+	// still refreshed when the window elapses. Skipped when the provider pass
+	// already timed out so a slow image fetch can't extend a dead track. The
+	// image shares the per-track deadline: a fetch cut by it is dropped for
+	// this run (no partial file is left behind) and retried on the next bulk
+	// run via ResetBulk. It does not turn a track whose provider pass
+	// completed into a timeout — the timeout outcome reflects the provider
+	// pass only.
+	if !timedOut && h.discoveryReg != nil && !skipArtistImage && h.markImageAttemptDue(track.ArtistID, time.Now()) {
+		h.enrichArtistImage(provCtx, artist, track)
 	}
 
 	// ── Sync thumb_url with on-disk cover (run once after all providers) ─
@@ -311,6 +357,18 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 		if err := h.tagger.WriteTags(track.FilePath, artist.Name, album.Title, track.Title, coverPath); err != nil {
 			h.log.Warn("re-tag failed", "file", track.FilePath, "error", err, "component", "enrichment")
 		}
+	}
+
+	// Report the captured timeout outcome (decided right after the provider
+	// pass, above). Partial results were persisted, so nothing is lost on
+	// timeout. A job-wide cancellation is not a timeout — propagate it so the
+	// runner records the in-flight track as cancelled rather than completed.
+	if timedOut {
+		h.log.Warn("enrich track timed out", "track_id", track.ID, "album_id", album.ID, "error", provCtx.Err(), "component", "enrichment")
+		return fmt.Errorf("track enrichment timed out: %w", provCtx.Err())
+	}
+	if err := ctx.Err(); err != nil {
+		return err
 	}
 
 	return nil

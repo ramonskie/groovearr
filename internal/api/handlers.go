@@ -52,6 +52,8 @@ type Server struct {
 	jobs                *jobs.Manager
 	organizeMu          sync.Mutex
 	organizeReport      *organizeReport
+	enrichMu            sync.Mutex
+	enrichActivity      []enrichActivity
 	httpSrv             *http.Server
 	log                 *slog.Logger
 	logPath             string
@@ -156,6 +158,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	// Background jobs. Scan/enrich are rate-limited per client IP: both walk
 	// the whole library and enrich additionally hits external metadata providers.
 	mux.HandleFunc("GET /api/jobs", s.handleGetJob)
+	mux.HandleFunc("GET /api/jobs/activity", s.handleJobActivity)
 	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobScan)))
 	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, http.HandlerFunc(s.handleJobEnrich)))
 	mux.Handle("POST /api/jobs/duplicates", withRateLimit("duplicates", s.rateLimiter, http.HandlerFunc(s.handleJobDuplicates)))
