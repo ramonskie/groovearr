@@ -20,9 +20,14 @@ import (
 // ─── Background jobs ────────────────────────────────────────────────
 
 // handleGetJob returns the current (or last) background job, or null when none
-// has run yet.
+// has run yet. Falls back to the persisted snapshot restored at boot so an
+// interrupted job stays visible after a restart.
 func (s *Server) handleGetJob(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.jobs.Current())
+	job := s.jobs.Current()
+	if job == nil {
+		job = s.bootJob
+	}
+	writeJSON(w, http.StatusOK, job)
 }
 
 // handleJobScan starts a background library scan.
@@ -173,9 +178,52 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 
 // startJob starts a job, returning {job, started}. When a job is already
 // running the current job is returned with started=false (idempotent) so the
-// client can tell "started by this request" from "already running".
+// client can tell "started by this request" from "already running". The job's
+// lifecycle is persisted to disk so an interrupted run is visible after a
+// restart (see restoreInterruptedJob).
 func (s *Server) startJob(w http.ResponseWriter, jobType string, runner jobs.Runner) {
-	job, err := s.jobs.Start(jobType, runner)
+	// Wrap the runner to persist the job lifecycle. The running snapshot is
+	// written at entry — before the runner runs — so the persist order is
+	// deterministic (running → terminal). Persisting it after Start returns
+	// would race with fast runners whose terminal write lands first, leaving
+	// job.json stuck at "running" for a finished job.
+	//
+	// The terminal progress is read from the manager's snapshot (Current)
+	// rather than captured in the report closure: enrichRunner reports from
+	// multiple worker goroutines, so capturing into a shared variable would be
+	// a data race.
+	wrapped := func(ctx context.Context, report func(jobs.Report)) error {
+		now := time.Now().UTC()
+		s.saveJobState(&jobs.Job{Type: jobType, State: jobs.StateRunning, StartedAt: &now})
+
+		err := runner(ctx, report)
+
+		state := jobs.StateCompleted
+		switch {
+		case err == nil:
+			state = jobs.StateCompleted
+		case errors.Is(err, context.Canceled):
+			state = jobs.StateCancelled
+		default:
+			state = jobs.StateFailed
+		}
+		term := &jobs.Job{Type: jobType, State: state, FinishedAt: &now}
+		if cur := s.jobs.Current(); cur != nil {
+			term.StartedAt = cur.StartedAt
+			term.Message = cur.Message
+			term.Done = cur.Done
+			term.Total = cur.Total
+		} else {
+			term.StartedAt = &now
+		}
+		if state == jobs.StateFailed {
+			term.Error = err.Error()
+		}
+		s.saveJobState(term)
+		return err
+	}
+
+	job, err := s.jobs.Start(jobType, wrapped)
 	if err != nil {
 		if errors.Is(err, jobs.ErrBusy) {
 			writeJSON(w, http.StatusOK, map[string]any{"job": s.jobs.Current(), "started": false})
@@ -187,12 +235,68 @@ func (s *Server) startJob(w http.ResponseWriter, jobType string, runner jobs.Run
 	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "started": true})
 }
 
+// organizeDivergencePossible reports whether a killed organize run left a
+// moved-but-DB-stale track path behind. The trigger is the in-memory boot
+// snapshot: job.json is overwritten by the current job's own running write the
+// moment it starts, so it can never still describe the interrupted organize by
+// the time the scan runs. restoreInterruptedJob marks a killed organize as
+// interrupted at boot and keeps it in bootJob for the process lifetime.
+func (s *Server) organizeDivergencePossible() bool {
+	if s.divergenceRepairDone {
+		return false
+	}
+	last := s.bootJob
+	return last != nil && last.Type == "organize" && last.State == jobs.StateInterrupted
+}
+
+// markDivergenceRepairDone disarms the reconcile after one completed full pass.
+// A single pass over the whole track list resolves (or fails to find) every
+// diverged path, so later scans/organizes in this process don't keep paying
+// for the one interrupted organize.
+func (s *Server) markDivergenceRepairDone() {
+	s.divergenceRepairDone = true
+}
+
+// reconcileDivergedPaths runs the moved-but-DB-stale repair when a killed
+// organize left the trigger armed. Returns the number repaired.
+func (s *Server) reconcileDivergedPaths(ctx context.Context, report func(jobs.Report), cfg config.Config) (int, error) {
+	root := cfg.Library.LibraryPath
+	if root == "" {
+		root = config.DefaultLibraryPath
+	}
+	org := library.NewOrganizer(cfg.Library.FolderTemplate, cfg.Library.CompilationTemplate, root, s.store, s.log)
+	report(jobs.Report{Message: "Reconciling moved tracks…"})
+	n, err := org.RepairDivergedPaths(ctx, nil)
+	if err == nil {
+		s.markDivergenceRepairDone()
+		if n > 0 {
+			s.log.Info("reconciled diverged track paths", "count", n, "component", "jobs")
+		}
+	}
+	return n, err
+}
+
 // scanRunner scans all configured library paths, reporting per-file progress.
 func (s *Server) scanRunner(ctx context.Context, report func(jobs.Report)) error {
 	cfg := s.cfg.Get()
 	paths := []string{cfg.Library.LibraryPath}
 	if paths[0] == "" {
 		paths[0] = config.DefaultLibraryPath
+	}
+
+	// Reconcile DB paths an interrupted organize run left behind (file moved,
+	// DB not updated). Only runs when a killed organize armed the trigger, so a
+	// normal scan pays nothing. Run before the walk so moved files aren't
+	// re-imported as duplicate tracks.
+	if s.organizeDivergencePossible() {
+		if n, err := s.reconcileDivergedPaths(ctx, report, cfg); err != nil {
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			s.log.Warn("reconcile diverged paths failed", "error", err, "component", "jobs")
+		} else if n > 0 {
+			report(jobs.Report{Message: fmt.Sprintf("Reconciled %d moved track paths", n)})
+		}
 	}
 
 	// Pre-count for progress estimation. Cancellable; reports a message so the
@@ -477,6 +581,21 @@ func (s *Server) organizeRunner(dryRun bool) jobs.Runner {
 			root = config.DefaultLibraryPath
 		}
 		org := library.NewOrganizer(cfg.Library.FolderTemplate, cfg.Library.CompilationTemplate, root, s.store, s.log)
+
+		// Heal a killed organize's moved-but-DB-stale paths before re-running,
+		// so tracks orphaned by the kill aren't re-imported as duplicates and
+		// don't show up as "target exists" skips below. Repair mutates the DB,
+		// so it runs only in repair mode, never dry-run.
+		if !dryRun && s.organizeDivergencePossible() {
+			if n, err := s.reconcileDivergedPaths(ctx, report, cfg); err != nil {
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				s.log.Warn("reconcile diverged paths failed", "error", err, "component", "jobs")
+			} else if n > 0 {
+				report(jobs.Report{Message: fmt.Sprintf("Reconciled %d moved track paths", n)})
+			}
+		}
 
 		// Pre-count for progress estimation.
 		tracks, err := s.store.ListTracksWithQuality(ctx)

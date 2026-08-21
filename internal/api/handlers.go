@@ -34,42 +34,46 @@ import (
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg                 *config.Persistence
-	registry            *download.Registry
-	mdRegistry          *metadata.Registry
-	metadataResolver    *metadata.MetadataResolver
-	enrichmentHandler   *download.MetadataEnrichmentHandler
-	orchestrator        *download.Orchestrator
-	discoveryReg        *discovery.Registry
-	store               library.Store
-	scanner             *library.Scanner
-	downloadSvc         *download.Service
-	eventBus            events.IEventAggregator
-	sseHub              *sse.SSEHub
-	matcher             *matching.Engine
-	playlistSvc         *playlist.Service
-	qualityProfileStore quality.ProfileStore
-	jobs                *jobs.Manager
-	organizeMu          sync.Mutex
-	organizeReport      *organizeReport
-	enrichMu            sync.Mutex
-	enrichActivity      []enrichActivity
-	httpSrv             *http.Server
-	log                 *slog.Logger
-	logPath             string
-	logRotator          *logger.Rotator
-	accessLog           *logger.Rotator
-	rateLimiter         *ipRateLimiter
-	sessions            *sessionStore
-	bgCtx               context.Context
-	bgCancel            context.CancelFunc
+	cfg                  *config.Persistence
+	registry             *download.Registry
+	mdRegistry           *metadata.Registry
+	metadataResolver     *metadata.MetadataResolver
+	enrichmentHandler    *download.MetadataEnrichmentHandler
+	orchestrator         *download.Orchestrator
+	discoveryReg         *discovery.Registry
+	store                library.Store
+	scanner              *library.Scanner
+	downloadSvc          *download.Service
+	eventBus             events.IEventAggregator
+	sseHub               *sse.SSEHub
+	matcher              *matching.Engine
+	playlistSvc          *playlist.Service
+	qualityProfileStore  quality.ProfileStore
+	jobs                 *jobs.Manager
+	organizeMu           sync.Mutex
+	organizeReport       *organizeReport
+	enrichMu             sync.Mutex
+	enrichActivity       []enrichActivity
+	jobStatePath         string
+	jobStateMu           sync.Mutex
+	bootJob              *jobs.Job
+	divergenceRepairDone bool
+	httpSrv              *http.Server
+	log                  *slog.Logger
+	logPath              string
+	logRotator           *logger.Rotator
+	accessLog            *logger.Rotator
+	rateLimiter          *ipRateLimiter
+	sessions             *sessionStore
+	bgCtx                context.Context
+	bgCancel             context.CancelFunc
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -90,11 +94,13 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		logRotator:          logRotator,
 		accessLog:           accessLog,
 		logPath:             logPath,
+		jobStatePath:        jobStatePath,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)
+	s.restoreInterruptedJob()
 
 	mux := http.NewServeMux()
 
@@ -229,10 +235,12 @@ func (s *Server) ListenAndServe() error {
 
 // Shutdown gracefully stops the server. The background job context is
 // cancelled first; Shutdown blocks until any running job stops so the store
-// is not closed underneath an in-flight scan/enrich.
+// is not closed underneath an in-flight scan/enrich. SSE client streams are
+// then closed so the HTTP shutdown is not blocked by long-lived connections.
 func (s *Server) Shutdown(ctx context.Context) error {
 	s.bgCancel()
 	s.jobs.Shutdown()
+	s.sseHub.Shutdown()
 	s.rateLimiter.Shutdown()
 	s.sessions.Shutdown()
 	return s.httpSrv.Shutdown(ctx)

@@ -100,6 +100,21 @@ func (h *SSEHub) ClientCount() int {
 	return len(h.clients)
 }
 
+// Shutdown closes every client channel, unblocking active SSE streams so the
+// HTTP server can shut down cleanly (Go's http.Server.Shutdown waits for
+// active connections, and a streaming SSE connection is active until its
+// handler returns). Idempotent and safe with concurrent Broadcast: the hub
+// lock serializes the map access, and ServeHTTP treats a closed channel as
+// disconnect (same as Unregister).
+func (h *SSEHub) Shutdown() {
+	h.mu.Lock()
+	for id, ch := range h.clients {
+		delete(h.clients, id)
+		close(ch)
+	}
+	h.mu.Unlock()
+}
+
 // StartHeartbeat launches a background goroutine that sends keepalive events
 // to all connected clients every heartbeatInterval. The goroutine exits when
 // ctx is cancelled.

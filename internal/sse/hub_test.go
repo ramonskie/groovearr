@@ -798,3 +798,36 @@ func TestServeHTTPNonFlusher(t *testing.T) {
 		t.Errorf("status = %d, want 500", resp.StatusCode)
 	}
 }
+
+func TestShutdownClosesClients(t *testing.T) {
+	hub := NewSSEHub(testLogger())
+	ch := make(chan SSEEvent, 1)
+	id := hub.Register(ch)
+	if hub.ClientCount() != 1 {
+		t.Fatalf("ClientCount = %d, want 1", hub.ClientCount())
+	}
+
+	hub.Shutdown()
+
+	if hub.ClientCount() != 0 {
+		t.Fatalf("ClientCount after Shutdown = %d, want 0", hub.ClientCount())
+	}
+	// The client channel must be closed so ServeHTTP's read loop exits.
+	select {
+	case _, ok := <-ch:
+		if ok {
+			t.Fatal("client channel still open after Shutdown")
+		}
+	default:
+		t.Fatal("client channel not closed by Shutdown")
+	}
+	// Unregister after Shutdown must not panic (double-close safety).
+	hub.Unregister(id)
+}
+
+func TestShutdownIdempotent(t *testing.T) {
+	hub := NewSSEHub(testLogger())
+	hub.Register(make(chan SSEEvent, 1))
+	hub.Shutdown()
+	hub.Shutdown()
+}

@@ -23,6 +23,9 @@ const (
 	StateCompleted State = "completed"
 	StateFailed    State = "failed"
 	StateCancelled State = "cancelled"
+	// StateInterrupted marks a job that was running when the process died
+	// (container kill). Produced at boot from the persisted job state.
+	StateInterrupted State = "interrupted"
 )
 
 // ErrBusy is returned when trying to start a job while one is already running.

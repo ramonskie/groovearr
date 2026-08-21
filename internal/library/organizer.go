@@ -3,7 +3,9 @@ package library
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -269,4 +271,83 @@ func pathWithinRoot(p, root string) bool {
 	cleanRoot := filepath.Clean(root)
 	clean := filepath.Clean(p)
 	return clean == cleanRoot || strings.HasPrefix(clean, cleanRoot+string(os.PathSeparator))
+}
+
+// RepairDivergedPaths reconciles tracks whose DB path no longer exists but
+// whose organized target does. That divergence is the window left by a kill
+// (container stop) between the file move and the DB path update during an
+// organize run; without this the next scan re-imports the moved file as a
+// duplicate track. Adoption is guarded by file size when the DB knows it.
+// Returns the number of repaired tracks.
+func (o *Organizer) RepairDivergedPaths(ctx context.Context, onRepair func(trackID int64, from, to string)) (int, error) {
+	tracks, err := o.store.ListTracksWithQuality(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("list tracks: %w", err)
+	}
+
+	repaired := 0
+	for i := range tracks {
+		if err := ctx.Err(); err != nil {
+			return repaired, err
+		}
+		t := &tracks[i]
+		if t.FilePath == "" || !pathWithinRoot(t.FilePath, o.root) {
+			continue
+		}
+		if _, err := os.Stat(t.FilePath); err == nil {
+			continue // DB path is still valid
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			continue // can't read the path (e.g. permission) — don't guess
+		}
+
+		// DB path is gone. Compute where an organize run would have moved it.
+		artist, err := o.store.GetArtist(ctx, t.ArtistID)
+		if err != nil || artist == nil || artist.Name == "" {
+			continue
+		}
+		album, err := o.store.GetAlbum(ctx, t.AlbumID)
+		if err != nil || album == nil || album.Title == "" {
+			continue
+		}
+		compilation := strings.EqualFold(string(album.AlbumType), string(domain.AlbumTypeCompilation)) || IsCompilationDir(ArtistDirFromTrack(t.FilePath))
+		target := o.renamer.target(t.FilePath, FileMeta{
+			Artist:   artist.Name,
+			Album:    album.Title,
+			Title:    t.Title,
+			Year:     album.Year,
+			TrackNum: t.TrackNumber,
+			DiscNum:  t.DiscNumber,
+		}, compilation)
+		if target == "" || target == t.FilePath {
+			continue
+		}
+		info, err := os.Stat(target)
+		if err != nil {
+			continue // nothing at the organized target — nothing to adopt
+		}
+		if !info.Mode().IsRegular() {
+			continue // never adopt a directory or other non-regular file
+		}
+		// Size guard. Tracks imported via the download path can carry
+		// FileSize 0 (caller-built Track without a stat); for those, adoption
+		// is by path alone. The target is computed from the track's own
+		// artist/album/title, so a different file sitting exactly there is
+		// unlikely — accepted as the cost of healing size-unknown tracks.
+		if t.FileSize > 0 && info.Size() != t.FileSize {
+			continue // size mismatch — a different file; don't adopt blindly
+		}
+
+		oldPath := t.FilePath
+		t.FilePath = target
+		if _, err := o.store.UpsertTrack(ctx, t); err != nil {
+			o.log.Warn("repair: update track path failed", "track_id", t.ID, "from", oldPath, "to", target, "error", err, "component", "organizer")
+			continue
+		}
+		repaired++
+		o.log.Info("repair: adopted organized target", "track_id", t.ID, "from", oldPath, "to", target, "component", "organizer")
+		if onRepair != nil {
+			onRepair(t.ID, oldPath, target)
+		}
+	}
+	return repaired, nil
 }

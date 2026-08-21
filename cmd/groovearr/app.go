@@ -105,6 +105,7 @@ func NewApp(configPath string) (*App, error) {
 
 	// Library store (SQLite).
 	dbPath := filepath.Join(filepath.Dir(configPath), "library.db")
+	jobStatePath := filepath.Join(filepath.Dir(configPath), "job.json")
 	libStore, err := sqlite.New(dbPath, log)
 	if err != nil {
 		log.Error("library db init failed", "error", err, "component", "main")
@@ -281,7 +282,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logRot, accessLog, logPath,
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logRot, accessLog, logPath, jobStatePath,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
@@ -386,8 +387,16 @@ func (app *App) Run() {
 		app.bgCancel()
 		app.log.Info("monitoring service shutting down", "component", "main")
 		app.monitor.Shutdown()
+		// Bound the HTTP shutdown so a stuck connection (e.g. an SSE client
+		// that ignores the closed stream) can't outlive Docker's SIGTERM grace
+		// window and end in SIGKILL. Note: jobs.Shutdown has its own 10s cap
+		// before this runs, so a runner that ignores cancellation can still
+		// stretch total shutdown to ~15s — the bound covers the common
+		// (connection-hang) case, not a hung runner.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
 		app.log.Info("server stopped", "component", "main")
-		app.srv.Shutdown(context.Background())
+		app.srv.Shutdown(shutdownCtx)
 	}()
 
 	if err := app.srv.ListenAndServe(); err != nil {
