@@ -42,7 +42,6 @@ import (
 // App holds all initialized application components.
 type App struct {
 	log      *slog.Logger
-	logBuff  *logger.Buffer
 	logRot   *logger.Rotator
 	closeLog func()
 	cfg      *config.Persistence
@@ -82,8 +81,16 @@ func NewApp(configPath string) (*App, error) {
 	if lg := cfg.Get().Logging; lg != nil {
 		lc = lg.LoggerConfig()
 	}
-	log, logBuff, logRot, closeLog := logger.New(lc, logPath)
+	log, logRot, closeLog := logger.New(lc, logPath)
 	cfg.SetLogger(log)
+
+	// Route the package-level default slog logger through the app logger so
+	// components that use slog.Default() as a nil-logger fallback (jobs,
+	// events, tagging, playlist, config persist) write structured, level-gated
+	// output to the same stderr/file targets instead of raw text to stderr.
+	// Note this is a process-wide global: any later SetDefault call (or a
+	// second App in one process) inherits/overrides it.
+	slog.SetDefault(log)
 
 	// Library store (SQLite).
 	dbPath := filepath.Join(filepath.Dir(configPath), "library.db")
@@ -192,27 +199,22 @@ func NewApp(configPath string) (*App, error) {
 	sseHub.StartHeartbeat(bgCtx)
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, log)
 
-	// Bridge captured log lines to the SSE hub so the Log tab streams live.
-	go func() {
-		ch := logBuff.Subscribe()
-		defer logBuff.Unsubscribe(ch)
-		for {
-			select {
-			case <-bgCtx.Done():
-				return
-			case e := <-ch:
-				data, err := json.Marshal(e)
-				if err != nil {
-					continue
-				}
-				sseHub.Broadcast(sse.SSEEvent{
-					Type:      "log_line",
-					Data:      data,
-					Timestamp: time.Now(),
-				})
-			}
+	// Bridge new log file lines to the SSE hub so the Log tab streams live.
+	// The file is the source of truth: history comes from GET /api/logs
+	// (ReadTail), and this tailer only broadcasts new lines as they are
+	// written.
+	logTailer := logger.NewTailer(logPath, func(e logger.Entry) {
+		data, err := json.Marshal(e)
+		if err != nil {
+			return
 		}
-	}()
+		sseHub.Broadcast(sse.SSEEvent{
+			Type:      "log_line",
+			Data:      data,
+			Timestamp: time.Now(),
+		})
+	})
+	logTailer.Start(bgCtx)
 
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
@@ -268,7 +270,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logBuff, logRot, logPath,
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, logRot, logPath,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
@@ -341,7 +343,6 @@ func NewApp(configPath string) (*App, error) {
 
 	return &App{
 		log:               log,
-		logBuff:           logBuff,
 		logRot:            logRot,
 		closeLog:          closeLog,
 		cfg:               cfg,

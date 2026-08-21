@@ -2,13 +2,13 @@
 // constructors for production (JSON) and development (text) output.
 //
 // Logs are written to both stderr (for docker logs) and a rotating file
-// (rotation/cleanup/compression handled by lumberjack). Every structured
-// entry is also captured into an in-memory ring buffer so the settings UI
-// can render a live log viewer.
+// (rotation/cleanup/compression handled by lumberjack). The on-disk file is
+// the source of truth for the settings UI log viewer: the API reads its tail
+// for history and a Tailer follows it for live updates.
 //
 // Usage:
 //
-//	log, buff, rot, closeFn := logger.New(logger.DefaultConfig(), "/config/logs/groovearr.log")
+//	log, rot, closeFn := logger.New(logger.DefaultConfig(), "/config/logs/groovearr.log")
 //	defer closeFn()
 //	log.Info("server started", "port", 8080)
 //	rot.SetLevel("debug") // change level at runtime
@@ -27,8 +27,7 @@ import (
 // Logger is a type alias for slog.Logger so callers don't need to import slog.
 type Logger = slog.Logger
 
-// Config controls the logger's level, output format, file rotation policy and
-// in-memory capture size.
+// Config controls the logger's level, output format and file rotation policy.
 type Config struct {
 	// Level filters emitted records (debug|info|warn|error). Default "info".
 	Level string
@@ -48,21 +47,17 @@ type Config struct {
 	MaxAgeDays int
 	// Compress gzips rotated log files. Default true.
 	Compress bool
-	// CapturedMax is the number of entries kept in the in-memory buffer for
-	// the UI log viewer. Default 2000.
-	CapturedMax int
 }
 
 // DefaultConfig returns sensible production logging defaults.
 func DefaultConfig() Config {
 	return Config{
-		Level:       "info",
-		Format:      "json",
-		MaxSizeMB:   10,
-		MaxBackups:  3,
-		MaxAgeDays:  7,
-		Compress:    true,
-		CapturedMax: 2000,
+		Level:      "info",
+		Format:     "json",
+		MaxSizeMB:  10,
+		MaxBackups: 3,
+		MaxAgeDays: 7,
+		Compress:   true,
 	}
 }
 
@@ -175,12 +170,12 @@ func (r *Rotator) Close() error {
 }
 
 // New constructs the production logger: records are serialized (JSON by
-// default) to stderr AND the rotating file at filePath, and every structured
-// entry is captured into an in-memory ring buffer for the UI.
+// default) to stderr AND the rotating file at filePath. The on-disk file is
+// the source of truth for the settings UI log viewer.
 //
 // LOG_LEVEL and LOG_FORMAT environment variables override the provided config
 // (legacy behavior). The returned closeFn flushes and closes the log file.
-func New(cfg Config, filePath string) (l *Logger, buff *Buffer, rot *Rotator, closeFn func()) {
+func New(cfg Config, filePath string) (l *Logger, rot *Rotator, closeFn func()) {
 	cfg = applyDefaults(cfg)
 
 	// Legacy env overrides.
@@ -204,8 +199,6 @@ func New(cfg Config, filePath string) (l *Logger, buff *Buffer, rot *Rotator, cl
 	}
 	rot.SetLevel(cfg.Level)
 
-	buff = NewBuffer(cfg.CapturedMax)
-
 	// Write each serialized record to both docker stdout and the rotating file.
 	out := io.MultiWriter(os.Stderr, rot)
 
@@ -217,12 +210,7 @@ func New(cfg Config, filePath string) (l *Logger, buff *Buffer, rot *Rotator, cl
 		handler = slog.NewJSONHandler(out, opts)
 	}
 
-	capture := &captureHandler{
-		inner: handler,
-		buff:  buff,
-	}
-
-	return slog.New(capture), buff, rot, func() {
+	return slog.New(handler), rot, func() {
 		_ = rot.Close()
 	}
 }
@@ -251,9 +239,6 @@ func applyDefaults(cfg Config) Config {
 	}
 	if cfg.MaxAgeDays <= 0 {
 		cfg.MaxAgeDays = d.MaxAgeDays
-	}
-	if cfg.CapturedMax <= 0 {
-		cfg.CapturedMax = d.CapturedMax
 	}
 	return cfg
 }

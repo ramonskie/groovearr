@@ -54,9 +54,8 @@ export interface LoggingConfig {
   captured_max: number;
 }
 
-/** One captured log line as sent by GET /api/logs and streamed as "log_line" SSE events. */
+/** One log line as sent by GET /api/logs and streamed as "log_line" SSE events. */
 export interface LogEntry {
-  seq: number;
   time: string;
   level: string;
   message: string;

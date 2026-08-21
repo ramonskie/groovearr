@@ -138,10 +138,6 @@ export function getLogs(): Promise<LogsResponse> {
   return request<LogsResponse>(`/api/logs`);
 }
 
-export function clearLogs(): Promise<{ status: string }> {
-  return request<{ status: string }>(`/api/logs`, { method: "DELETE" });
-}
-
 // ─── Setup ───────────────────────────────────────────────────────
 
 export interface SetupStatus {

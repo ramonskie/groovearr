@@ -1,16 +1,33 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
-import { clearLogs, getLogs } from "../api/client";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { getLogs } from "../api/client";
 import type { LogEntry } from "../api/types";
 
 /**
  * Live log stream for the Logs settings tab.
  *
- * Seeds entries from the GET /api/logs snapshot, then appends new lines as
- * "log_line" SSE events. Entries carry a monotonic `seq` (increasing forever,
- * even after a buffer clear) so the snapshot and the live stream never
- * duplicate and never skip.
+ * The on-disk log file is the single source of truth. History comes from the
+ * GET /api/logs snapshot (file tail); new lines are appended as "log_line"
+ * SSE events pushed by a file tailer. Since the snapshot and the stream can
+ * briefly overlap (a line written between the snapshot read and the SSE
+ * connect arrives via both), entries are deduplicated by content key
+ * (time|level|message). No server-side sequence number exists anymore.
  */
+/**
+ * Content identity for dedup. JSON lines carry nanosecond timestamps and
+ * structured attrs, so time|level|message|attrs uniquely identifies a line.
+ * Text-format lines have millisecond precision and no attrs; identical
+ * messages in the same millisecond can still share a key (accepted — the
+ * viewer's dedup only guards the snapshot/live overlap window).
+ */
+export function logEntryKey(e: LogEntry): string {
+  return `${e.time}|${e.level}|${e.message}|${JSON.stringify(e.attrs ?? {})}`;
+}
+
+function byTime(a: LogEntry, b: LogEntry): number {
+  return new Date(a.time).getTime() - new Date(b.time).getTime();
+}
+
 export function useLogStream(limit = 500) {
   const queryClient = useQueryClient();
 
@@ -22,31 +39,31 @@ export function useLogStream(limit = 500) {
 
   const [entries, setEntries] = useState<LogEntry[]>([]);
   const [connected, setConnected] = useState(false);
-  const maxSeqRef = useRef(0);
   const limitRef = useRef(limit);
+  const seenRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     limitRef.current = limit;
   }, [limit]);
 
-  // Seed from the snapshot, merging with anything already streamed so a
-  // refetch (window focus, invalidation) never rolls the view back. Both the
-  // snapshot and the stream are sequences keyed by the monotonic `seq`, so
-  // union + sort is exact — no duplicates, no gaps.
+  // Seed from the file-tail snapshot. Refetching (window focus, invalidation)
+  // merges by content key and sorts by time so the view never rolls back,
+  // duplicates, or reorders entries. `limit` is a dependency so changing
+  // log_captured_max re-slices the visible window live.
   useEffect(() => {
     if (!snapshot) return;
     const snap = snapshot.entries ?? [];
-    if (snap.length > 0) {
-      maxSeqRef.current = Math.max(maxSeqRef.current, snap[snap.length - 1].seq);
-    }
+    if (snap.length === 0) return;
     setEntries((prev) => {
-      const bySeq = new Map<number, LogEntry>(prev.map((e) => [e.seq, e]));
-      for (const e of snap) bySeq.set(e.seq, e);
-      return [...bySeq.values()]
-        .sort((a, b) => a.seq - b.seq)
-        .slice(-limitRef.current);
+      const byKey = new Map<string, LogEntry>(prev.map((e) => [logEntryKey(e), e]));
+      for (const e of snap) byKey.set(logEntryKey(e), e);
+      const merged = [...byKey.values()].sort(byTime).slice(-limitRef.current);
+      // Rebuild the dedup set from the merged view to keep it bounded; the
+      // live stream keeps growing it, so this also resets the counter.
+      seenRef.current = new Set(merged.map(logEntryKey));
+      return merged;
     });
-  }, [snapshot]);
+  }, [snapshot, limit]);
 
   useEffect(() => {
     let url = "/api/events";
@@ -64,11 +81,19 @@ export function useLogStream(limit = 500) {
     es.addEventListener("log_line", (e: MessageEvent) => {
       try {
         const entry = JSON.parse(e.data) as LogEntry;
-        if (typeof entry.seq !== "number" || entry.seq <= maxSeqRef.current) {
-          return;
-        }
-        maxSeqRef.current = entry.seq;
-        setEntries((prev) => [...prev, entry].slice(-limitRef.current));
+        if (!entry || typeof entry.message !== "string") return;
+        const k = logEntryKey(entry);
+        if (seenRef.current.has(k)) return;
+        seenRef.current.add(k);
+        setEntries((prev) => {
+          const next = [...prev, entry].slice(-limitRef.current);
+          // Bound the dedup set: once it exceeds the visible window by a
+          // margin, rebuild it from what the view actually keeps.
+          if (seenRef.current.size > limitRef.current * 2) {
+            seenRef.current = new Set(next.map(logEntryKey));
+          }
+          return next;
+        });
       } catch {
         // Malformed event — ignore.
       }
@@ -77,24 +102,17 @@ export function useLogStream(limit = 500) {
     return () => es.close();
   }, []);
 
-  const clear = useMutation({
-    mutationFn: clearLogs,
-    onSuccess: () => {
-      setEntries([]);
-      queryClient.invalidateQueries({ queryKey: ["logs"] });
-    },
-  });
-
   const refresh = () => queryClient.invalidateQueries({ queryKey: ["logs"] });
+
+  const path = useMemo(() => snapshot?.path ?? "", [snapshot]);
+  const level = useMemo(() => snapshot?.level ?? "", [snapshot]);
 
   return {
     entries,
     connected,
     isLoading,
-    clear: clear.mutate,
-    clearPending: clear.isPending,
     refresh,
-    path: snapshot?.path ?? "",
-    level: snapshot?.level ?? "",
+    path,
+    level,
   };
 }

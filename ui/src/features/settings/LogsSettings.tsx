@@ -2,7 +2,7 @@ import { useFormContext } from "react-hook-form";
 import Card from "../../components/Card";
 import FormGroup from "../../components/FormGroup";
 import Spinner from "../../components/Spinner";
-import { useLogStream } from "../../hooks/use-logs";
+import { useLogStream, logEntryKey } from "../../hooks/use-logs";
 import type { SettingsFormValues } from "./settings-schema";
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -23,32 +23,29 @@ function formatTime(iso: string): string {
 export default function LogsSettings() {
   const {
     register,
+    watch,
     formState: { errors },
   } = useFormContext<SettingsFormValues>();
 
-  const { entries, connected, isLoading, clear, clearPending, path } = useLogStream();
+  // The viewer shows up to log_captured_max lines (default 2000 in config,
+  // capped by the form to >= 50). Keep the visible window in sync so the
+  // setting has a real effect on both the snapshot and the live stream.
+  const capturedMax = watch("log_captured_max");
+  const limit = capturedMax && capturedMax > 0 ? capturedMax : 500;
+
+  const { entries, connected, isLoading, path } = useLogStream(limit);
 
   return (
     <div>
       <Card
         title="Live Logs"
         actions={
-          <>
-            <span
-              className={`text-xs ${connected ? "text-emerald-400" : "text-slate-400"}`}
-              title={connected ? "Connected to live log stream" : "Live stream disconnected"}
-            >
-              {connected ? "● Live" : "○ Paused"}
-            </span>
-            <button
-              type="button"
-              onClick={() => clear()}
-              disabled={clearPending || entries.length === 0}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              {clearPending ? "Clearing…" : "Clear buffer"}
-            </button>
-          </>
+          <span
+            className={`text-xs ${connected ? "text-emerald-400" : "text-slate-400"}`}
+            title={connected ? "Connected to live log stream" : "Live stream disconnected"}
+          >
+            {connected ? "● Live" : "○ Paused"}
+          </span>
         }
       >
         <p className="mb-2 font-mono text-xs text-slate-500" title="On-disk log file (rotated)">
@@ -64,7 +61,7 @@ export default function LogsSettings() {
               <p className="text-slate-600">No captured log lines yet.</p>
             ) : (
               entries.map((e) => (
-                <div key={e.seq} className="flex gap-2 py-0.5">
+                <div key={logEntryKey(e)} className="flex gap-2 py-0.5">
                   <span className="shrink-0 text-slate-600">{formatTime(e.time)}</span>
                   <span
                     className={`w-14 shrink-0 font-bold ${LEVEL_COLORS[e.level] ?? "text-slate-400"}`}
@@ -168,7 +165,7 @@ export default function LogsSettings() {
         <FormGroup
           label="Captured Log Lines"
           htmlFor="log_captured_max"
-          hint="How many recent log lines are kept in memory for this viewer. Takes effect on restart."
+          hint="How many recent log lines the viewer reads from the log file."
           error={errors.log_captured_max?.message}
         >
           <input

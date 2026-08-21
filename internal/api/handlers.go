@@ -53,9 +53,8 @@ type Server struct {
 	organizeReport      *organizeReport
 	httpSrv             *http.Server
 	log                 *slog.Logger
-	logBuffer           *logger.Buffer
-	logRotator          *logger.Rotator
 	logPath             string
+	logRotator          *logger.Rotator
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
 	bgCtx               context.Context
@@ -66,7 +65,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logBuffer *logger.Buffer, logRotator *logger.Rotator, logPath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, logPath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -84,7 +83,6 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		playlistSvc:         playlistSvc,
 		qualityProfileStore: qualityProfileStore,
 		log:                 logger,
-		logBuffer:           logBuffer,
 		logRotator:          logRotator,
 		logPath:             logPath,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
@@ -195,10 +193,9 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	// SSE endpoint for real-time download progress.
 	mux.HandleFunc("GET /api/events", s.handleEvents)
 
-	// Logs — snapshot / clear the in-memory log buffer backing the settings
-	// Log tab. Live log lines are streamed over GET /api/events as "log_line".
+	// Logs — snapshot of the on-disk log file backing the settings Log tab.
+	// Live log lines are streamed over GET /api/events as "log_line".
 	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
-	mux.HandleFunc("DELETE /api/logs", s.handleClearLogs)
 
 	// Debug endpoint — full download state for troubleshooting.
 	mux.HandleFunc("GET /api/debug/download/{id}", s.handleDebugDownload)

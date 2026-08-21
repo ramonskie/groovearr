@@ -64,7 +64,7 @@ type LoggingConfig struct {
 	MaxBackups  int    `json:"max_backups"`  // rotated files to keep (<=0 = default 3)
 	MaxAgeDays  int    `json:"max_age_days"` // retention in days for rotated files (<=0 = default 7)
 	Compress    *bool  `json:"compress"`     // gzip rotated log files (default true)
-	CapturedMax int    `json:"captured_max"` // in-memory log lines kept for the UI viewer (default 2000)
+	CapturedMax int    `json:"captured_max"` // log lines returned by the UI viewer (default 2000)
 }
 
 // LoggerConfig translates the persisted logging config into the logger
@@ -76,13 +76,12 @@ func (c *LoggingConfig) LoggerConfig() logger.Config {
 		return logger.DefaultConfig()
 	}
 	return logger.Config{
-		Level:       c.Level,
-		Format:      c.Format,
-		MaxSizeMB:   c.MaxSizeMB,
-		MaxBackups:  c.MaxBackups,
-		MaxAgeDays:  c.MaxAgeDays,
-		Compress:    c.Compress != nil && *c.Compress,
-		CapturedMax: c.CapturedMax,
+		Level:      c.Level,
+		Format:     c.Format,
+		MaxSizeMB:  c.MaxSizeMB,
+		MaxBackups: c.MaxBackups,
+		MaxAgeDays: c.MaxAgeDays,
+		Compress:   c.Compress != nil && *c.Compress,
 	}
 }
 

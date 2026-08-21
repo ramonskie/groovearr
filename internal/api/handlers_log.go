@@ -6,18 +6,28 @@ import (
 	"github.com/ramonskie/groovearr/internal/logger"
 )
 
-// handleGetLogs returns the current in-memory log buffer snapshot along with
-// the on-disk log file path and the live log level. Live log lines are
-// streamed separately over GET /api/events as "log_line" events.
+// handleGetLogs returns the tail of the on-disk log file (the same lines
+// docker logs surfaces) plus the file path and live log level. Live log lines
+// are streamed separately over GET /api/events as "log_line" events by a file
+// tailer in the app.
 func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 	level := ""
 	if s.logRotator != nil {
 		level = s.logRotator.Level()
 	}
 
+	limit := 500
+	if s.cfg != nil && s.cfg.Get().Logging != nil && s.cfg.Get().Logging.CapturedMax > 0 {
+		limit = s.cfg.Get().Logging.CapturedMax
+	}
+
 	entries := []logger.Entry{}
-	if s.logBuffer != nil {
-		entries = s.logBuffer.Snapshot()
+	if s.logPath != "" {
+		if e, err := logger.ReadTail(s.logPath, limit); err == nil {
+			entries = e
+		} else {
+			s.log.Warn("read log tail failed", "path", s.logPath, "error", err, "component", "api")
+		}
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -25,13 +35,4 @@ func (s *Server) handleGetLogs(w http.ResponseWriter, r *http.Request) {
 		"path":    s.logPath,
 		"level":   level,
 	})
-}
-
-// handleClearLogs empties the in-memory log buffer. On-disk log files (and
-// their rotation history) are left untouched.
-func (s *Server) handleClearLogs(w http.ResponseWriter, r *http.Request) {
-	if s.logBuffer != nil {
-		s.logBuffer.Clear()
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"status": "cleared"})
 }
