@@ -11,69 +11,54 @@ import (
 	"time"
 )
 
-// Entry is a structured log record exposed to the UI. It is produced either
-// by parsing a line from the on-disk log file (ReadTail) or by following the
-// file as it grows (Tailer). No sequence number is tracked: the file is the
-// single source of truth, and the UI deduplicates by content.
+// Entry is one log line exposed to the UI. Raw is the untouched line exactly
+// as it appears in the log file — the viewer renders it verbatim. Time and
+// Level are parsed only as metadata for ordering and color coding; they never
+// replace the raw content.
 type Entry struct {
-	Time    time.Time      `json:"time"`
-	Level   string         `json:"level"`
-	Message string         `json:"message"`
-	Attrs   map[string]any `json:"attrs,omitempty"`
+	Time  time.Time `json:"time"`
+	Level string    `json:"level"`
+	Raw   string    `json:"raw"`
 }
 
-// parseLine decodes one line of the log file into an Entry. Lines written by
-// the slog JSON handler are parsed structurally; slog text lines (time=,
-// level=, msg= tokens) are parsed the same way; anything else is kept
-// verbatim as an INFO entry so no log content is ever dropped.
+// parseLine extracts time/level metadata from one log file line and keeps the
+// line verbatim in Raw. Lines written by the slog JSON handler or TextHandler
+// are recognized; anything else is kept as an INFO entry so no log content is
+// ever dropped or transformed.
 func parseLine(line string) Entry {
-	if e, ok := parseJSONLine(line); ok {
+	if e, ok := parseJSONMeta(line); ok {
 		return e
 	}
-	if e, ok := parseTextLine(line); ok {
+	if e, ok := parseTextMeta(line); ok {
 		return e
 	}
-	return Entry{Level: "INFO", Message: line}
+	return Entry{Level: "INFO", Raw: line}
 }
 
-// parseJSONLine decodes one slog JSON handler line.
-func parseJSONLine(line string) (Entry, bool) {
-	var raw map[string]any
+// parseJSONMeta reads time/level from one slog JSON handler line.
+func parseJSONMeta(line string) (Entry, bool) {
+	var raw struct {
+		Time  string `json:"time"`
+		Level string `json:"level"`
+	}
 	if err := json.Unmarshal([]byte(line), &raw); err != nil {
 		return Entry{}, false
 	}
-
-	e := Entry{Level: "INFO"}
-	if s, ok := raw["msg"].(string); ok {
-		e.Message = s
+	e := Entry{Level: "INFO", Raw: line}
+	if raw.Level != "" {
+		e.Level = raw.Level
 	}
-	if s, ok := raw["level"].(string); ok && s != "" {
-		e.Level = s
-	}
-	if s, ok := raw["time"].(string); ok {
-		if t, err := time.Parse(time.RFC3339Nano, s); err == nil {
-			e.Time = t
-		}
-	}
-	if len(raw) > 3 {
-		attrs := make(map[string]any, len(raw)-3)
-		for k, v := range raw {
-			if k == "msg" || k == "level" || k == "time" {
-				continue
-			}
-			attrs[k] = v
-		}
-		if len(attrs) > 0 {
-			e.Attrs = attrs
-		}
+	if t, err := time.Parse(time.RFC3339Nano, raw.Time); err == nil {
+		e.Time = t
 	}
 	return e, true
 }
 
-// parseTextLine decodes one slog TextHandler line (time=... level=... msg=...).
-// Values are space-separated key=value tokens; quoted values are unquoted.
-func parseTextLine(line string) (Entry, bool) {
-	e := Entry{Level: "INFO"}
+// parseTextMeta reads time/level from one slog TextHandler line (time=...,
+// level=... tokens). Values are space-separated key=value tokens; quoted
+// values are unquoted.
+func parseTextMeta(line string) (Entry, bool) {
+	e := Entry{Level: "INFO", Raw: line}
 	found := false
 
 	for pos := 0; pos < len(line); {
@@ -128,16 +113,17 @@ func parseTextLine(line string) (Entry, bool) {
 			val = line[start:pos]
 		}
 
-		found = true
 		switch key {
 		case "time":
 			if t, err := time.Parse(time.RFC3339Nano, val); err == nil {
 				e.Time = t
+				found = true
 			}
 		case "level":
-			e.Level = val
-		case "msg":
-			e.Message = val
+			if val != "" {
+				e.Level = val
+				found = true
+			}
 		}
 	}
 	if !found {

@@ -53,12 +53,13 @@ func TestRotatorSetConfigDefaults(t *testing.T) {
 
 func TestParseTextLine(t *testing.T) {
 	line := `time=2026-08-21T10:00:00.000+02:00 level=WARN msg="hello world" k=v`
-	e, ok := parseTextLine(line)
+	e, ok := parseTextMeta(line)
 	if !ok {
 		t.Fatalf("expected text line to parse")
 	}
-	if e.Message != "hello world" {
-		t.Fatalf("expected message %q, got %q", "hello world", e.Message)
+	// Raw is preserved verbatim — the viewer must show exactly the file line.
+	if e.Raw != line {
+		t.Fatalf("expected raw line preserved, got %q", e.Raw)
 	}
 	if e.Level != "WARN" {
 		t.Fatalf("expected level WARN, got %s", e.Level)
@@ -67,14 +68,14 @@ func TestParseTextLine(t *testing.T) {
 		t.Fatalf("expected parsed time, got zero")
 	}
 
-	// Bare unquoted msg value.
-	e, ok = parseTextLine(`time=2026-08-21T10:00:00Z level=INFO msg=single`)
-	if !ok || e.Message != "single" || e.Level != "INFO" {
+	// Bare unquoted level token.
+	e, ok = parseTextMeta(`time=2026-08-21T10:00:00Z level=INFO msg=single`)
+	if !ok || e.Level != "INFO" || e.Raw == "" {
 		t.Fatalf("unexpected bare-token parse: %+v ok=%v", e, ok)
 	}
 
 	// Non-token garbage must not parse.
-	if _, ok := parseTextLine("just a plain line"); ok {
+	if _, ok := parseTextMeta("just a plain line"); ok {
 		t.Fatalf("plain text should not parse as a token line")
 	}
 }
@@ -99,17 +100,18 @@ func TestReadTailParsesJSONLines(t *testing.T) {
 	if len(entries) != 3 {
 		t.Fatalf("expected 3 entries, got %d", len(entries))
 	}
-	if entries[0].Message != "one" || entries[0].Level != "INFO" {
-		t.Fatalf("unexpected first entry: %+v", entries[0])
+	// Raw content is the exact file line — no reconstruction.
+	if entries[0].Raw != lines[0] {
+		t.Fatalf("expected raw line preserved, got %q", entries[0].Raw)
 	}
-	if entries[0].Attrs["k"] != "v" {
-		t.Fatalf("json attrs not parsed: %+v", entries[0].Attrs)
+	if entries[0].Level != "INFO" {
+		t.Fatalf("unexpected first level: %+v", entries[0])
 	}
-	if entries[1].Message != "two" || entries[1].Level != "ERROR" {
-		t.Fatalf("unexpected second entry: %+v", entries[1])
+	if entries[1].Level != "ERROR" {
+		t.Fatalf("unexpected second level: %+v", entries[1])
 	}
 	// Non-JSON line is kept verbatim, not dropped.
-	if entries[2].Message != "raw text line" || entries[2].Level != "INFO" {
+	if entries[2].Raw != "raw text line" || entries[2].Level != "INFO" {
 		t.Fatalf("expected raw fallback entry, got %+v", entries[2])
 	}
 }
@@ -168,7 +170,7 @@ func TestTailerEmitsNewLines(t *testing.T) {
 	var got []string
 	tr := NewTailer(path, func(e Entry) {
 		mu.Lock()
-		got = append(got, e.Message)
+		got = append(got, e.Raw)
 		mu.Unlock()
 	})
 	tr.interval = 10 * time.Millisecond
@@ -201,8 +203,8 @@ func TestTailerEmitsNewLines(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 2 || got[0] != "new1" || got[1] != "new2" {
-		t.Fatalf("expected new lines new1,new2 in order, got %v", got)
+	if len(got) != 2 || got[0] != `{"time":"2026-08-21T10:00:01Z","level":"INFO","msg":"new1"}` || got[1] != `{"time":"2026-08-21T10:00:02Z","level":"WARN","msg":"new2"}` {
+		t.Fatalf("expected new lines in order, got %v", got)
 	}
 }
 
@@ -217,7 +219,7 @@ func TestTailerDrainsOldFileOnRotation(t *testing.T) {
 	var got []string
 	tr := NewTailer(path, func(e Entry) {
 		mu.Lock()
-		got = append(got, e.Message)
+		got = append(got, e.Raw)
 		mu.Unlock()
 	})
 	tr.interval = 10 * time.Millisecond
@@ -258,7 +260,7 @@ func TestTailerDrainsOldFileOnRotation(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 2 || got[0] != "drained-before-rotation" || got[1] != "fresh-file" {
+	if len(got) != 2 || got[0] != `{"time":"2026-08-21T10:00:00Z","level":"INFO","msg":"drained-before-rotation"}` || got[1] != `{"time":"2026-08-21T10:00:00Z","level":"INFO","msg":"fresh-file"}` {
 		t.Fatalf("expected drained + fresh lines in order, got %v", got)
 	}
 }
@@ -274,7 +276,7 @@ func TestTailerReopensAfterRotation(t *testing.T) {
 	var got []string
 	tr := NewTailer(path, func(e Entry) {
 		mu.Lock()
-		got = append(got, e.Message)
+		got = append(got, e.Raw)
 		mu.Unlock()
 	})
 	tr.interval = 10 * time.Millisecond
@@ -306,7 +308,7 @@ func TestTailerReopensAfterRotation(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if len(got) != 1 || got[0] != "after-rotation" {
+	if len(got) != 1 || got[0] != `{"time":"2026-08-21T10:00:00Z","level":"INFO","msg":"after-rotation"}` {
 		t.Fatalf("expected post-rotation line emitted, got %v", got)
 	}
 }

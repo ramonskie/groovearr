@@ -68,7 +68,7 @@ export default function LogsSettings() {
                   >
                     {e.level}
                   </span>
-                  <span className="break-all text-slate-200">{e.message}</span>
+                  <span className="break-all text-slate-200">{e.raw}</span>
                 </div>
               ))
             )}

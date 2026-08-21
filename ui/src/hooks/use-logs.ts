@@ -10,18 +10,17 @@ import type { LogEntry } from "../api/types";
  * GET /api/logs snapshot (file tail); new lines are appended as "log_line"
  * SSE events pushed by a file tailer. Since the snapshot and the stream can
  * briefly overlap (a line written between the snapshot read and the SSE
- * connect arrives via both), entries are deduplicated by content key
- * (time|level|message). No server-side sequence number exists anymore.
- */
-/**
- * Content identity for dedup. JSON lines carry nanosecond timestamps and
- * structured attrs, so time|level|message|attrs uniquely identifies a line.
- * Text-format lines have millisecond precision and no attrs; identical
- * messages in the same millisecond can still share a key (accepted — the
- * viewer's dedup only guards the snapshot/live overlap window).
+ * connect arrives via both), entries are deduplicated by their raw line.
+ * No server-side sequence number exists anymore.
+ *
+ * The raw line is unique for JSON logs (nanosecond timestamps). slog text
+ * format has millisecond precision, so two byte-identical lines within the
+ * same millisecond can still share a key and one is dropped — accepted, the
+ * same window the previous content-key dedup had, and only reachable with
+ * log_format=text.
  */
 export function logEntryKey(e: LogEntry): string {
-  return `${e.time}|${e.level}|${e.message}|${JSON.stringify(e.attrs ?? {})}`;
+  return e.raw;
 }
 
 function byTime(a: LogEntry, b: LogEntry): number {
@@ -81,7 +80,7 @@ export function useLogStream(limit = 500) {
     es.addEventListener("log_line", (e: MessageEvent) => {
       try {
         const entry = JSON.parse(e.data) as LogEntry;
-        if (!entry || typeof entry.message !== "string") return;
+        if (!entry || typeof entry.raw !== "string" || entry.raw === "") return;
         const k = logEntryKey(entry);
         if (seenRef.current.has(k)) return;
         seenRef.current.add(k);

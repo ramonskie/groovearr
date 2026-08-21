@@ -54,12 +54,12 @@ export interface LoggingConfig {
   captured_max: number;
 }
 
-/** One log line as sent by GET /api/logs and streamed as "log_line" SSE events. */
+/** One log line as sent by GET /api/logs and streamed as "log_line" SSE events.
+ * raw is the untouched line exactly as it appears in the log file. */
 export interface LogEntry {
   time: string;
   level: string;
-  message: string;
-  attrs?: Record<string, unknown>;
+  raw: string;
 }
 
 /** Snapshot response for GET /api/logs. */
