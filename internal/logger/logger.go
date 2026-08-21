@@ -79,6 +79,9 @@ type Rotator struct {
 // stderr (docker logs) down with a broken/unwritable file. slog ignores
 // handler write errors anyway, so swallowing only affects file-side logging.
 func (r *Rotator) Write(p []byte) (int, error) {
+	if r == nil {
+		return len(p), nil
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.lj == nil {

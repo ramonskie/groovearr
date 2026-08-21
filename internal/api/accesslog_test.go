@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/ramonskie/groovearr/internal/logger"
 )
 
 func TestWithAccessLog(t *testing.T) {
@@ -20,6 +22,20 @@ func TestWithAccessLog(t *testing.T) {
 		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
 		if rec.Code != http.StatusCreated {
 			t.Fatalf("disabled middleware must still serve the handler, got %d", rec.Code)
+		}
+	})
+
+	// Regression: a disabled access log is stored as a typed-nil
+	// *logger.Rotator. Converting it to io.Writer yields a non-nil interface
+	// wrapping a nil pointer — the middleware's `accessLog == nil` guard must
+	// not let that reach Write, which would panic on the nil receiver.
+	t.Run("typed-nil rotator is a no-op", func(t *testing.T) {
+		var rot *logger.Rotator
+		h := withAccessLog(rot)(ok)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/config", nil))
+		if rec.Code != http.StatusCreated {
+			t.Fatalf("typed-nil middleware must still serve the handler, got %d", rec.Code)
 		}
 	})
 

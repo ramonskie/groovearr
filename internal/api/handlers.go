@@ -217,9 +217,17 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		register(mux)
 	}
 
+	// Pass plain nil (not a typed-nil *Rotator) when the access log is
+	// disabled: an interface wrapping a typed-nil pointer is non-nil, so the
+	// middleware's `accessLog == nil` guard wouldn't catch it and Write would
+	// panic on the nil receiver.
+	var accessLogWriter io.Writer
+	if s.accessLog != nil {
+		accessLogWriter = s.accessLog
+	}
 	s.httpSrv = &http.Server{
 		Addr:         addr,
-		Handler:      withAccessLog(s.accessLog)(withRequestID(withCORS(s.withAuth(mux)))),
+		Handler:      withAccessLog(accessLogWriter)(withRequestID(withCORS(s.withAuth(mux)))),
 		ReadTimeout:  10 * time.Second,
 		WriteTimeout: 30 * time.Second,
 		IdleTimeout:  120 * time.Second,
