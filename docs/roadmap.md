@@ -250,6 +250,7 @@ Deployment, security, and operational concerns.
 | B22 | Code Quality | 🟢 Low | **main.go growing linearly with features.** Each new plugin adds ~5 lines. At 10+ plugins becomes unwieldy. Consider `App` struct with builder pattern. |
 | B23 | Download | 🟢 Low | **No download retention policy.** Terminal records accumulate forever. Add configurable retention (auto-clean records older than N days). |
 | B24 | Settings / Providers | 🟡 Medium | **Provider connection badges not persisted.** After testing a connection, the badge shows "Connected" but reverts to "Configured" when returning to the settings page or restarting the app. Connection state is transient (in-memory only). Should persist last-known status or re-test on page load. |
+| B34 | Library / Jobs | 🟡 Medium | **Enrichment job convoy stalls.** `enrichRunner` dispatches 4 workers but `albumSem` serializes same-album tracks, and `ListTracksWithQuality` returns tracks in rowid order (no ORDER BY) so same-album tracks are contiguous. When the cursor lands on a large album with incomplete metadata, all 4 worker slots fill with that album's tracks → 1 active + 3 waiting → the job appears frozen for minutes at a time then creeps forward. Fix options: per-track enrichment context deadline (e.g. 2 min) and/or distinct-album dispatch so concurrent workers always enrich different albums (`internal/api/handlers_jobs.go`, `internal/download/handler_enrichment.go`). |
 
 ### Immediate Next Steps
 
