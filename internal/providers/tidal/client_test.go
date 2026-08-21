@@ -8,19 +8,17 @@ import (
 	"testing"
 	"time"
 
-	"github.com/binozo/go-tiddl"
 	"github.com/ramonskie/groovearr/internal/download"
 )
 
 // newTestClient builds a tidal Client with an isolated download dir.
-// The tiddl client is constructed offline — no network calls.
+// The client is constructed offline — no network calls.
 func newTestClient(t *testing.T, cfg TidalConfig) *Client {
 	t.Helper()
 	c, err := NewClient(cfg, t.TempDir(), nil)
 	if err != nil {
 		t.Fatalf("NewClient failed: %v", err)
 	}
-	t.Cleanup(func() { c.tiddlClient.Close() })
 	return c
 }
 
@@ -283,43 +281,43 @@ func TestWriteStreamCancelledRemovesFile(t *testing.T) {
 
 // ─── Quality selection ──────────────────────────────────────────────────
 
-func TestCfgQualityToTiddl(t *testing.T) {
+func TestQualityFromConfig(t *testing.T) {
 	tests := []struct {
 		in   string
-		want tiddl.AudioQuality
+		want AudioQuality
 	}{
-		{"LOSSLESS", tiddl.Lossless},
-		{"HIGH", tiddl.High},
-		{"LOW", tiddl.Low},
-		{"", tiddl.Lossless},
-		{"WEIRD", tiddl.Lossless},
+		{"LOSSLESS", Lossless},
+		{"HIGH", High},
+		{"LOW", Low},
+		{"", Lossless},
+		{"WEIRD", Lossless},
 	}
 	for _, tt := range tests {
-		if got := cfgQualityToTiddl(tt.in); got != tt.want {
-			t.Errorf("cfgQualityToTiddl(%q) = %v, want %v", tt.in, got, tt.want)
+		if got := qualityFromConfig(tt.in); got != tt.want {
+			t.Errorf("qualityFromConfig(%q) = %v, want %v", tt.in, got, tt.want)
 		}
 	}
 }
 
 func TestSelectQuality(t *testing.T) {
 	// Desired quality available → keep desired.
-	if got := selectQuality(tiddl.Lossless, tiddl.HiResLossless); got != tiddl.Lossless {
+	if got := selectQuality(Lossless, HiResLossless); got != Lossless {
 		t.Errorf("selectQuality(Lossless, HiRes) = %v, want Lossless", got)
 	}
 	// Desired quality unavailable → fall back to available.
-	if got := selectQuality(tiddl.Lossless, tiddl.High); got != tiddl.High {
+	if got := selectQuality(Lossless, High); got != High {
 		t.Errorf("selectQuality(Lossless, High) = %v, want High", got)
 	}
 }
 
-func TestQualityLevel(t *testing.T) {
-	if qualityLevel(tiddl.Low) >= qualityLevel(tiddl.High) {
+func TestQualityPrecedence(t *testing.T) {
+	if qualityPrecedence(Low) >= qualityPrecedence(High) {
 		t.Error("Low should rank below High")
 	}
-	if qualityLevel(tiddl.High) >= qualityLevel(tiddl.Lossless) {
+	if qualityPrecedence(High) >= qualityPrecedence(Lossless) {
 		t.Error("High should rank below Lossless")
 	}
-	if qualityLevel(tiddl.Lossless) >= qualityLevel(tiddl.HiResLossless) {
+	if qualityPrecedence(Lossless) >= qualityPrecedence(HiResLossless) {
 		t.Error("Lossless should rank below HiResLossless")
 	}
 }

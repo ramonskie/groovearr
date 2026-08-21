@@ -32,7 +32,8 @@
       "country_code": "US",
       "quality": "LOSSLESS",
       "access_token": "",
-      "refresh_token": ""
+      "refresh_token": "",
+      "expires_at": 0
     },
     "musicbrainz": {
       "email": "you@example.com"

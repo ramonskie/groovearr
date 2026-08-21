@@ -1,6 +1,6 @@
 // Package tidal implements the Tidal music streaming plugin.
 // It provides download, metadata enrichment, discovery/browse, and playlist import
-// via Tidal's REST API (apiClient) and the go-tiddl library for auth + streaming.
+// via Tidal's REST API (apiClient) and a native client for auth + streaming.
 package tidal
 
 import (
@@ -25,43 +25,53 @@ import (
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/sanitize"
-
-	"github.com/binozo/go-tiddl"
-	"golang.org/x/oauth2"
 )
 
 // Compile-time interface checks.
 var (
-	_ plugin.BasePlugin             = (*Client)(nil)
-	_ download.Plugin               = (*Client)(nil)
-	_ download.MonitoredProvider    = (*Client)(nil)
-	_ metadata.Provider             = (*Client)(nil)
-	_ discovery.Provider            = (*Client)(nil)
-	_ discovery.TopTrackProvider    = (*Client)(nil)
+	_ plugin.BasePlugin               = (*Client)(nil)
+	_ download.Plugin                 = (*Client)(nil)
+	_ download.MonitoredProvider      = (*Client)(nil)
+	_ metadata.Provider               = (*Client)(nil)
+	_ discovery.Provider              = (*Client)(nil)
+	_ discovery.TopTrackProvider      = (*Client)(nil)
 	_ playlist.PlaylistSourceProvider = (*Client)(nil)
 )
 
 // ─── Client ─────────────────────────────────────────────────────────────
 
 // Client is the top-level Tidal plugin, satisfying all capability interfaces.
-// It wraps a go-tiddl client for auth/streaming and an apiClient for search/metadata.
+// It owns its OAuth2 token lifecycle natively (auth.go) and wraps an apiClient
+// (search/metadata/playlists, api.go) plus a streamClient (track metadata,
+// stream manifests, downloads, session — stream.go).
 type Client struct {
 	cfg    TidalConfig
 	dlPath string
 	log    *slog.Logger
 
-	tiddlClient *tiddl.Client
-	api         *apiClient
+	// token holds the native OAuth2 token state. Seeded from cfg at
+	// construction; updated on device-auth completion and token refresh.
+	token tidalToken
+	// api provides search/metadata/playlist access (api.go).
+	api *apiClient
+	// streams provides track metadata, stream manifests, downloads, and
+	// session access, wrapping api so it reuses the shared bearer token.
+	streams *streamClient
 
 	connected bool
-	mu        sync.RWMutex // protects connected and download state
+	mu        sync.RWMutex // protects connected, token, cfg, and download state
 
-	// tokenPersist is called after a token refresh to persist the new token to config.
-	// Set by the OAuth handler after plugin initialization.
-	tokenPersist func(accessToken, refreshToken string)
+	// refreshMu serializes token refreshes so concurrent operations never
+	// race the token endpoint (which would also break refresh-token rotation).
+	refreshMu sync.Mutex
+
+	// tokenPersist is called after a token refresh to persist the new token
+	// (including its expiry) to config. Set by the OAuth handler after plugin
+	// initialization.
+	tokenPersist func(accessToken, refreshToken string, expiresAt time.Time)
 
 	// Pending device authorization flow — preserved between StartDeviceAuth and CompleteDeviceAuth.
-	pendingAuth   *tiddl.AuthRequest
+	pendingAuth   *AuthRequest
 	pendingAuthMu sync.Mutex
 
 	// Per-download tracking.
@@ -82,73 +92,29 @@ func NewClient(cfg TidalConfig, downloadPath string, logger *slog.Logger) (*Clie
 		logger = slog.New(slog.DiscardHandler)
 	}
 
-	// Build go-tiddl client with optional custom credentials.
-	tiddlOpts := []tiddl.Option{
-		tiddl.WithCountryCode(cfg.CountryCode),
-		tiddl.WithLogger(logger),
-	}
-	// Note: we intentionally do NOT pass custom client_id/client_secret to go-tiddl.
-	// go-tiddl uses Tidal's public web player credentials (hardcoded) which support
-	// the device code OAuth flow. User-provided Developer Portal apps typically
-	// don't support device code grant type and would fail during OAuth.
-	tc, err := tiddl.NewClient(tiddlOpts...)
-	if err != nil {
-		return nil, fmt.Errorf("tidal: failed to create tiddl client: %w", err)
-	}
-
-	// If an access token is already configured, inject it into the tiddl client.
-	if cfg.AccessToken != "" {
-		tok := &oauth2.Token{
-			AccessToken:  cfg.AccessToken,
-			RefreshToken: cfg.RefreshToken,
-			TokenType:    "Bearer",
-		}
-		// Use WithAuthToken to enable auto-refresh.
-		if cfg.RefreshToken != "" {
-			tc.SetToken(tok)
-		} else {
-			// Static token without refresh capability.
-			tc2, err := tiddl.NewClient(
-				tiddl.WithCountryCode(cfg.CountryCode),
-				tiddl.WithLogger(logger),
-				tiddl.WithAuth(cfg.AccessToken),
-			)
-			if err != nil {
-				tc.Close()
-				return nil, fmt.Errorf("tidal: failed to create tiddl client with auth: %w", err)
-			}
-			tc.Close()
-			tc = tc2
-		}
-	}
-
 	// Create the REST API client.
 	api := newAPIClient(cfg)
 
 	c := &Client{
-		cfg:         cfg,
-		dlPath:      downloadPath,
-		log:         logger,
-		tiddlClient: tc,
+		cfg:    cfg,
+		dlPath: downloadPath,
+		log:    logger,
+		token: tidalToken{
+			AccessToken:  cfg.AccessToken,
+			RefreshToken: cfg.RefreshToken,
+			// Seed the expiry from the persisted config (unix seconds). A zero
+			// value maps to the zero time, which IsTokenExpired treats as
+			// expired, forcing the first request to refresh via the stored
+			// refresh token — mirroring the previous x/oauth2 seeding behavior
+			// for refresh-capable clients.
+			ExpiresAt: expiryFromConfig(cfg.ExpiresAt),
+		},
 		api:         api,
+		streams:     newStreamClient(api),
 		downloads:   make(map[string]*download.Record),
 		cancelFuncs: make(map[string]context.CancelFunc),
 	}
 	c.playlistAdapter = &playlistSourceAdapter{client: c}
-
-	// Register token persistence callback so refreshed tokens update in-memory
-	// config and the apiClient. Config file persistence is handled via tokenPersist
-	// which is wired by main.go and the OAuth handler.
-	tc.SetTokenChanged(func(tok *oauth2.Token) {
-		c.mu.Lock()
-		c.cfg.AccessToken = tok.AccessToken
-		c.cfg.RefreshToken = tok.RefreshToken
-		c.api.SetToken(tok.AccessToken)
-		if c.tokenPersist != nil {
-			c.tokenPersist(tok.AccessToken, tok.RefreshToken)
-		}
-		c.mu.Unlock()
-	})
 
 	return c, nil
 }
@@ -159,8 +125,8 @@ func (c *Client) Name() string        { return pluginName }
 func (c *Client) DisplayName() string { return displayName }
 
 // SetTokenPersistCallback registers a function called after token refresh
-// to persist the new token to config. Called by OAuth handlers.
-func (c *Client) SetTokenPersistCallback(fn func(accessToken, refreshToken string)) {
+// to persist the new token (and its expiry) to config. Called by OAuth handlers.
+func (c *Client) SetTokenPersistCallback(fn func(accessToken, refreshToken string, expiresAt time.Time)) {
 	c.mu.Lock()
 	c.tokenPersist = fn
 	c.mu.Unlock()
@@ -182,13 +148,13 @@ func (c *Client) Connected() bool {
 
 // CheckConnection verifies the Tidal session by calling /v1/sessions.
 func (c *Client) CheckConnection(ctx context.Context) error {
-	c.mu.RLock()
-	hasToken := c.cfg.AccessToken != ""
-	c.mu.RUnlock()
-	if !hasToken {
-		return fmt.Errorf("tidal: access token not configured")
+	if err := c.ensureValidToken(ctx); err != nil {
+		c.mu.Lock()
+		c.connected = false
+		c.mu.Unlock()
+		return err
 	}
-	session, err := c.tiddlClient.GetSession(ctx)
+	session, err := c.streams.GetSession(ctx)
 	if err != nil {
 		c.mu.Lock()
 		c.connected = false
@@ -456,15 +422,23 @@ func (c *Client) downloadSync(ctx context.Context, downloadID, trackID, displayN
 		return
 	}
 
-	// Parse track ID as uint64 for go-tiddl.
+	// Parse track ID as uint64 for the stream client.
 	trackIDUint, err := strconv.ParseUint(trackID, 10, 64)
 	if err != nil {
 		c.setError(downloadID, fmt.Sprintf("invalid track ID: %s", trackID))
 		return
 	}
 
-	// Fetch track metadata via go-tiddl.
-	track, err := c.tiddlClient.GetTrack(ctx, trackIDUint)
+	// Refresh the access token if it is expired or absent (refresh-capable
+	// clients only; static-token clients pass through unchanged).
+	if err := c.ensureValidToken(ctx); err != nil {
+		c.log.Warn("token refresh failed", "downloadID", downloadID, "error", err, "component", "tidal")
+		c.setError(downloadID, fmt.Sprintf("failed to refresh token: %v", err))
+		return
+	}
+
+	// Fetch track metadata.
+	track, err := c.streams.GetTrack(ctx, trackIDUint)
 	if err != nil {
 		c.log.Warn("get track metadata failed", "downloadID", downloadID, "error", err, "component", "tidal")
 		c.setError(downloadID, fmt.Sprintf("failed to get track metadata: %v", err))
@@ -486,22 +460,25 @@ func (c *Client) downloadSync(ctx context.Context, downloadID, trackID, displayN
 		return
 	}
 
-	// Determine quality: map cfg.Quality to tiddl.AudioQuality, fall back if not available.
-	desiredQuality := cfgQualityToTiddl(c.cfg.Quality)
+	// Determine quality: map cfg.Quality to native AudioQuality, fall back if not available.
+	c.mu.RLock()
+	qualityStr := c.cfg.Quality
+	c.mu.RUnlock()
+	desiredQuality := qualityFromConfig(qualityStr)
 	actualQuality := selectQuality(desiredQuality, track.BestQuality())
 
 	c.log.Info("download starting", "downloadID", downloadID, "quality", actualQuality, "displayName", displayName, "component", "tidal")
 
 	// Get stream manifest and download URL.
-	stream, err := c.tiddlClient.GetTrackStream(ctx, trackIDUint, actualQuality, false)
+	stream, err := c.streams.GetTrackStream(ctx, trackIDUint, actualQuality)
 	if err != nil {
 		c.log.Warn("get track stream failed", "downloadID", downloadID, "error", err, "component", "tidal")
 		c.setError(downloadID, fmt.Sprintf("failed to get stream: %v", err))
 		return
 	}
 
-	// Download audio data via go-tiddl's concurrent segment reader.
-	reader, err := c.tiddlClient.DownloadTrackStream(ctx, stream)
+	// Download audio data via the concurrent segment reader.
+	reader, err := c.streams.DownloadTrackStream(ctx, stream)
 	if err != nil {
 		c.log.Warn("download track stream failed", "downloadID", downloadID, "error", err, "component", "tidal")
 		c.setError(downloadID, fmt.Sprintf("failed to download stream: %v", err))
@@ -511,7 +488,7 @@ func (c *Client) downloadSync(ctx context.Context, downloadID, trackID, displayN
 
 	// Determine file extension.
 	ext := ".m4a"
-	if actualQuality == tiddl.Lossless || actualQuality == tiddl.HiResLossless {
+	if actualQuality == Lossless || actualQuality == HiResLossless {
 		ext = ".flac"
 	}
 
@@ -598,42 +575,26 @@ func (c *Client) writeStream(ctx context.Context, downloadID string, reader io.R
 
 // ─── Quality Selection ──────────────────────────────────────────────────
 
-// cfgQualityToTiddl maps a TidalConfig quality string to a tiddl AudioQuality.
-func cfgQualityToTiddl(q string) tiddl.AudioQuality {
+// qualityFromConfig maps a TidalConfig quality string to a native AudioQuality.
+func qualityFromConfig(q string) AudioQuality {
 	switch q {
 	case "LOSSLESS":
-		return tiddl.Lossless
+		return Lossless
 	case "HIGH":
-		return tiddl.High
+		return High
 	case "LOW":
-		return tiddl.Low
+		return Low
 	default:
-		return tiddl.Lossless
+		return Lossless
 	}
 }
 
 // selectQuality returns the best available quality not exceeding the desired one.
-func selectQuality(desired, available tiddl.AudioQuality) tiddl.AudioQuality {
-	if qualityLevel(desired) <= qualityLevel(available) {
+func selectQuality(desired, available AudioQuality) AudioQuality {
+	if qualityPrecedence(desired) <= qualityPrecedence(available) {
 		return desired
 	}
 	return available
-}
-
-// qualityLevel returns a numeric precedence for quality comparison.
-func qualityLevel(q tiddl.AudioQuality) int {
-	switch q {
-	case tiddl.Low:
-		return 0
-	case tiddl.High:
-		return 1
-	case tiddl.Lossless:
-		return 2
-	case tiddl.HiResLossless:
-		return 3
-	default:
-		return 0
-	}
 }
 
 // ─── metadata.Provider ──────────────────────────────────────────────────
@@ -882,9 +843,10 @@ func (c *Client) PlaylistSource() playlist.Source {
 // ─── OAuth Device Flow ──────────────────────────────────────────────────
 
 // tidalDefaultClientID is Tidal's public web player client ID, used for the
-// device code OAuth flow. Extracted from go-tiddl's built-in credentials.
-// User-provided Developer Portal apps typically don't support the device code
-// grant type, so we always use the web player's well-known client.
+// device code OAuth flow. Extracted from the upstream client's built-in
+// credentials. User-provided Developer Portal apps typically don't support
+// the device code grant type, so we always use the web player's well-known
+// client.
 const tidalDefaultClientID = "4N3n6Q1x95LL5K7p"
 const tidalDefaultClientSecret = "oKOXfJW371cX6xaZ0PyhgGNBdNLlBZd4AKKYougMjik="
 
@@ -919,21 +881,24 @@ func (c *Client) StartDeviceAuth(ctx context.Context) (userCode string, verifica
 		return "", "", "", time.Time{}, fmt.Errorf("tidal: device auth HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var authReq tiddl.AuthRequest
+	var authReq AuthRequest
 	if err := json.NewDecoder(resp.Body).Decode(&authReq); err != nil {
 		return "", "", "", time.Time{}, fmt.Errorf("tidal: decode device auth response: %w", err)
 	}
+	// The device_authorization response carries expiresIn seconds; convert to
+	// an absolute deadline so CompleteDeviceAuth and handlers can validate it.
+	authReq.Expires = time.Now().Add(time.Duration(authReq.ExpiresIn) * time.Second)
 
 	c.pendingAuthMu.Lock()
 	c.pendingAuth = &authReq
 	c.pendingAuthMu.Unlock()
 
-	return authReq.UserCode, authReq.VerificationUriComplete.String(), authReq.DeviceCode, authReq.Expires, nil
+	return authReq.UserCode, authReq.VerificationURIComplete, authReq.DeviceCode, authReq.Expires, nil
 }
 
 // CompleteDeviceAuth completes the device authorization after the user has approved.
-// It exchanges the device code for tokens directly (bypassing go-tiddl's oauth2 HTTP client)
-// then calls SetToken on the tiddl client so subsequent API calls are authenticated.
+// It exchanges the device code for tokens directly and stores the result
+// natively (in-memory token state, apiClient, config persistence via tokenPersist).
 func (c *Client) CompleteDeviceAuth(ctx context.Context) error {
 	c.pendingAuthMu.Lock()
 	req := c.pendingAuth
@@ -981,25 +946,19 @@ func (c *Client) CompleteDeviceAuth(ctx context.Context) error {
 		return fmt.Errorf("tidal: token endpoint HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
-	var authResult tiddl.AuthResult
+	var authResult AuthResult
 	if err := json.Unmarshal(body, &authResult); err != nil {
 		return fmt.Errorf("tidal: decode token response: %w", err)
 	}
+	if authResult.AccessToken == "" {
+		return fmt.Errorf("tidal: token response missing access_token")
+	}
 
-	// Feed the token into go-tiddl for subsequent authenticated API calls.
-	c.tiddlClient.SetToken(authResult.Token)
-
-	// Persist token callback so future refreshes update the config.
-	c.tiddlClient.SetTokenChanged(func(tok *oauth2.Token) {
-		c.mu.Lock()
-		c.cfg.AccessToken = tok.AccessToken
-		c.cfg.RefreshToken = tok.RefreshToken
-		c.api.SetToken(tok.AccessToken)
-		if c.tokenPersist != nil {
-			c.tokenPersist(tok.AccessToken, tok.RefreshToken)
-		}
-		c.mu.Unlock()
-	})
+	// Store the token natively through the shared write path (also used by
+	// refresh) so the apiClient, in-memory config, and tokenPersist all stay
+	// in sync — subtask 04 extends expiry persistence in that one place.
+	c.storeToken(authResult.AccessToken, authResult.RefreshToken,
+		time.Now().Add(time.Duration(authResult.ExpiresIn)*time.Second))
 
 	c.mu.Lock()
 	c.connected = true
@@ -1017,16 +976,104 @@ func (c *Client) CompleteDeviceAuth(ctx context.Context) error {
 // ─── Session Token ──────────────────────────────────────────────────────
 
 // GetTokenJSON returns the current OAuth2 token as JSON for config persistence.
+// The wire shape keeps the historical oauth2.Token field names
+// (access_token/refresh_token/expiry) so existing handlers keep reading it;
+// auth.go's tidalToken is the canonical in-memory form and gains expires_at
+// persistence in subtask 04.
 func (c *Client) GetTokenJSON() (json.RawMessage, error) {
-	tok, err := c.tiddlClient.Token()
-	if err != nil {
-		return nil, err
+	c.mu.RLock()
+	tok := c.token
+	c.mu.RUnlock()
+
+	payload := struct {
+		AccessToken  string    `json:"access_token"`
+		RefreshToken string    `json:"refresh_token"`
+		Expiry       time.Time `json:"expiry"`
+	}{
+		AccessToken:  tok.AccessToken,
+		RefreshToken: tok.RefreshToken,
+		Expiry:       tok.ExpiresAt,
 	}
-	data, err := json.Marshal(tok)
+	data, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
 	return json.RawMessage(data), nil
+}
+
+// ─── Token Lifecycle ────────────────────────────────────────────────────
+
+// ensureValidToken refreshes the access token when it is expired or absent,
+// provided a refresh token is available. Static-token clients (no refresh
+// token) pass through unchanged — matching the previous WithAuth behavior.
+// It is called before authenticated session/stream work, mirroring the
+// transparent refresh the upstream client used to perform on its token source.
+func (c *Client) ensureValidToken(ctx context.Context) error {
+	c.refreshMu.Lock()
+	defer c.refreshMu.Unlock()
+
+	// Re-check under the refresh lock: a concurrent caller may have already
+	// refreshed while this goroutine waited.
+	c.mu.RLock()
+	tok := c.token
+	c.mu.RUnlock()
+
+	if !IsTokenExpired(tok.ExpiresAt) && tok.AccessToken != "" {
+		return nil
+	}
+	if tok.RefreshToken == "" {
+		if tok.AccessToken == "" {
+			return fmt.Errorf("tidal: access token not configured")
+		}
+		// Static token without refresh capability — use as-is.
+		return nil
+	}
+
+	// The token was issued by Tidal's public web player client (device flow),
+	// so refresh must use those same credentials; user-supplied Developer
+	// Portal credentials do not own device-flow tokens.
+	accessToken, newRefreshToken, expiresIn, err := refreshAccessToken(ctx, tok.RefreshToken,
+		tidalDefaultClientID, tidalDefaultClientSecret, c.log)
+	if err != nil {
+		return fmt.Errorf("tidal: token refresh failed: %w", err)
+	}
+	// Tidal may rotate the refresh token on refresh; use the rotated one when
+	// provided so the persisted token stays valid across rotations.
+	if newRefreshToken == "" {
+		newRefreshToken = tok.RefreshToken
+	}
+	c.storeToken(accessToken, newRefreshToken,
+		time.Now().Add(time.Duration(expiresIn)*time.Second))
+	return nil
+}
+
+// storeToken is the single write path for a newly obtained token: it updates
+// the in-memory token state, the apiClient bearer token, the in-memory config
+// mirror, and (via tokenPersist) the persisted config. Both the device-auth
+// completion and the refresh path funnel through here; the persist callback
+// receives the expiry so handlers can write expires_at back to config.
+func (c *Client) storeToken(accessToken, refreshToken string, expiresAt time.Time) {
+	c.mu.Lock()
+	c.token = tidalToken{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		ExpiresAt:    expiresAt,
+	}
+	c.cfg.AccessToken = accessToken
+	c.cfg.RefreshToken = refreshToken
+	if expiresAt.IsZero() {
+		c.cfg.ExpiresAt = 0
+	} else {
+		c.cfg.ExpiresAt = expiresAt.Unix()
+	}
+	c.api.SetToken(accessToken)
+	persist := c.tokenPersist
+	c.mu.Unlock()
+
+	// Persist outside the lock: the callback performs config file I/O.
+	if persist != nil {
+		persist(accessToken, refreshToken, expiresAt)
+	}
 }
 
 // ─── Internal Helpers ───────────────────────────────────────────────────

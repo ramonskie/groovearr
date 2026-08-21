@@ -13,6 +13,7 @@ import (
 type TidalConfig struct {
 	AccessToken  string `json:"access_token"`  // auto-masked (contains "token")
 	RefreshToken string `json:"refresh_token"` // auto-masked (contains "token")
+	ExpiresAt    int64  `json:"expires_at"`    // token expiry, unix seconds (0 = unknown; internal)
 	ClientID     string `json:"client_id"`     // auto-masked (contains "id" suffix)
 	ClientSecret string `json:"client_secret"` // auto-masked (contains "secret")
 	CountryCode  string `json:"country_code"`  // ISO 3166-1 alpha-2
@@ -64,7 +65,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Tidal configuration as JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"access_token":"","refresh_token":"","client_id":"","client_secret":"","country_code":"US","quality":"LOSSLESS","user_id":0}`)
+	return json.RawMessage(`{"access_token":"","refresh_token":"","expires_at":0,"client_id":"","client_secret":"","country_code":"US","quality":"LOSSLESS","user_id":0}`)
 }
 
 // ConfigSchema returns the UI form fields for Tidal settings.

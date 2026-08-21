@@ -1,7 +1,8 @@
 // Package tidal implements the Tidal metadata API client.
-// This client covers search, album, artist, and playlist endpoints NOT handled by go-tiddl.
-// Auth (device code), track metadata (GetTrack), stream URL (GetTrackStream),
-// and download (DownloadTrackStream) are handled by the go-tiddl library.
+// This client covers search, album, artist, and playlist endpoints.
+// Auth (device code) is handled natively in client.go/auth.go; track metadata
+// (GetTrack), stream URL (GetTrackStream), and download (DownloadTrackStream)
+// live in stream.go.
 //
 // API Base URLs:
 //   - v1: https://api.tidal.com/v1/  (search, artists, albums, tracks, playlists)
@@ -27,7 +28,7 @@ import (
 
 // apiClient is the low-level HTTP client for Tidal's REST API v1 and v2.
 // It handles search, album, artist, and playlist endpoints.
-// Auth (device code) and track/stream/download are handled by go-tiddl in client.go.
+// Auth (device code) is handled in client.go; track/stream/download in stream.go.
 
 const (
 	v1BaseURL = "https://api.tidal.com/v1"
@@ -39,7 +40,7 @@ const (
 // ─── apiClient ──────────────────────────────────────────────────────────
 
 // apiClient provides access to Tidal's metadata API (search, albums, artists, playlists).
-// Auth and track/stream endpoints are handled by the go-tiddl library.
+// Auth (device code) is handled in client.go; track/stream endpoints in stream.go.
 type apiClient struct {
 	httpClient  *http.Client
 	v1BaseURL   string

@@ -181,7 +181,6 @@ func TestFactoryCreateWithValidConfig(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create with valid config failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
 	if client == nil {
 		t.Fatal("Create returned nil client")
 	}

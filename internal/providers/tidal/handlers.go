@@ -50,29 +50,41 @@ func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, registry *
 	// Wire token persistence on startup so refreshed tokens survive restarts.
 	if tp := registry.Get("tidal"); tp != nil {
 		if tc, ok := tp.(*Client); ok {
-			tc.SetTokenPersistCallback(func(accessToken, refreshToken string) {
-				if err := cfg.Update(func(c *config.Config) error {
-					raw, ok := c.Sources["tidal"]
-					if !ok {
-						return nil
-					}
-					var tcfg TidalConfig
-					if err := json.Unmarshal(raw, &tcfg); err != nil {
-						return err
-					}
-					tcfg.AccessToken = accessToken
-					tcfg.RefreshToken = refreshToken
-					b, err := json.Marshal(tcfg)
-					if err != nil {
-						return err
-					}
-					c.Sources["tidal"] = b
-					return nil
-				}); err != nil {
-					logger.Error("tidal token persist failed", "error", err, "component", "tidal_oauth")
-				}
+			tc.SetTokenPersistCallback(func(accessToken, refreshToken string, expiresAt time.Time) {
+				persistTidalToken(cfg, logger, accessToken, refreshToken, expiresAt)
 			})
 		}
+	}
+}
+
+// persistTidalToken writes access/refresh tokens and the token expiry back to
+// the persisted Tidal config. Shared by both token-persist callback
+// registrations (startup and post-device-auth rebuild).
+func persistTidalToken(cfg *config.Persistence, logger *slog.Logger, accessToken, refreshToken string, expiresAt time.Time) {
+	if err := cfg.Update(func(c *config.Config) error {
+		raw, ok := c.Sources["tidal"]
+		if !ok {
+			return nil
+		}
+		var tc TidalConfig
+		if err := json.Unmarshal(raw, &tc); err != nil {
+			return err
+		}
+		tc.AccessToken = accessToken
+		tc.RefreshToken = refreshToken
+		if expiresAt.IsZero() {
+			tc.ExpiresAt = 0
+		} else {
+			tc.ExpiresAt = expiresAt.Unix()
+		}
+		b, err := json.Marshal(tc)
+		if err != nil {
+			return err
+		}
+		c.Sources["tidal"] = b
+		return nil
+	}); err != nil {
+		logger.Error("tidal token persist failed", "error", err, "component", "tidal_oauth")
 	}
 }
 
@@ -201,8 +213,8 @@ func handleTidalPoll(cfg *config.Persistence, registry *plugin.Registry, logger 
 
 		// Extract access and refresh token from the oauth2.Token.
 		var tok struct {
-			AccessToken  string `json:"access_token"`
-			RefreshToken string `json:"refresh_token"`
+			AccessToken  string    `json:"access_token"`
+			RefreshToken string    `json:"refresh_token"`
 			Expiry       time.Time `json:"expiry"`
 		}
 		if err := json.Unmarshal(tokJSON, &tok); err != nil {
@@ -212,6 +224,11 @@ func handleTidalPoll(cfg *config.Persistence, registry *plugin.Registry, logger 
 
 		tidalCfg.AccessToken = tok.AccessToken
 		tidalCfg.RefreshToken = tok.RefreshToken
+		if tok.Expiry.IsZero() {
+			tidalCfg.ExpiresAt = 0
+		} else {
+			tidalCfg.ExpiresAt = tok.Expiry.Unix()
+		}
 
 		newRaw, err := json.Marshal(tidalCfg)
 		if err != nil {
@@ -244,27 +261,8 @@ func handleTidalPoll(cfg *config.Persistence, registry *plugin.Registry, logger 
 		// Wire token persistence on the rebuilt client so future refreshes save to config.
 		if tp := registry.Get("tidal"); tp != nil {
 			if tc, ok := tp.(*Client); ok {
-				tc.SetTokenPersistCallback(func(accessToken, refreshToken string) {
-					if err := cfg.Update(func(c *config.Config) error {
-						raw, ok := c.Sources["tidal"]
-						if !ok {
-							return nil
-						}
-						var tc TidalConfig
-						if err := json.Unmarshal(raw, &tc); err != nil {
-							return err
-						}
-						tc.AccessToken = accessToken
-						tc.RefreshToken = refreshToken
-						b, err := json.Marshal(tc)
-						if err != nil {
-							return err
-						}
-						c.Sources["tidal"] = b
-						return nil
-					}); err != nil {
-						logger.Error("tidal token persist failed", "error", err, "component", "tidal_oauth")
-					}
+				tc.SetTokenPersistCallback(func(accessToken, refreshToken string, expiresAt time.Time) {
+					persistTidalToken(cfg, logger, accessToken, refreshToken, expiresAt)
 				})
 			}
 		}

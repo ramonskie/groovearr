@@ -20,8 +20,6 @@ func TestPlaylistSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	if ps == nil {
 		t.Fatal("PlaylistSource returned nil")
@@ -35,8 +33,6 @@ func TestPlaylistSourceName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	if ps.Name() != "tidal" {
 		t.Errorf("Name() = %q, want tidal", ps.Name())
@@ -50,8 +46,6 @@ func TestPlaylistSourceDisplayName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	if ps.DisplayName() != "Tidal" {
 		t.Errorf("DisplayName() = %q, want Tidal", ps.DisplayName())
@@ -65,8 +59,6 @@ func TestPlaylistSourceIsConfiguredWithoutToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	if ps.IsConfigured() {
 		t.Error("IsConfigured should be false when access_token is empty")
@@ -80,8 +72,6 @@ func TestPlaylistSourceIsConfiguredWithToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	if !ps.IsConfigured() {
 		t.Error("IsConfigured should be true when access_token is set")
@@ -95,8 +85,6 @@ func TestGetUserPlaylistsUnconfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	playlists, err := ps.GetUserPlaylists(context.Background())
 	if err != nil {
@@ -114,8 +102,6 @@ func TestGetPlaylistTracksUnconfigured(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	ps := client.(*Client).PlaylistSource()
 	tracks, name, err := ps.GetPlaylistTracks(context.Background(), "some-uuid")
 	if err != nil {
@@ -138,8 +124,6 @@ func TestClientPlaylistSourceReturnsAdapter(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	var _ playlist.Source = client.(*Client).PlaylistSource()
 }
 
@@ -152,8 +136,6 @@ func TestClientName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	if client.Name() != "tidal" {
 		t.Errorf("Name() = %q, want tidal", client.Name())
 	}
@@ -170,7 +152,6 @@ func TestClientIsConfigured(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
-		defer client.(*Client).tiddlClient.Close()
 		if client.IsConfigured() {
 			t.Error("IsConfigured should be false")
 		}
@@ -182,7 +163,6 @@ func TestClientIsConfigured(t *testing.T) {
 		if err != nil {
 			t.Fatalf("Create failed: %v", err)
 		}
-		defer client.(*Client).tiddlClient.Close()
 		if !client.IsConfigured() {
 			t.Error("IsConfigured should be true")
 		}
@@ -196,8 +176,6 @@ func TestClientCapabilityStatus(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	status := client.CapabilityStatus()
 	for _, cap := range []string{"download", "playlist", "discovery", "metadata"} {
 		if _, ok := status[cap]; !ok {
@@ -232,8 +210,6 @@ func TestClientConnected(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	if client.Connected() {
 		t.Error("Connected should be false before CheckConnection succeeds")
 	}
@@ -246,8 +222,6 @@ func TestClientCheckConnectionNoToken(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create failed: %v", err)
 	}
-	defer client.(*Client).tiddlClient.Close()
-
 	err = client.CheckConnection(context.Background())
 	if err == nil {
 		t.Error("CheckConnection should fail without access token")
