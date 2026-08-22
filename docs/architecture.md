@@ -3,6 +3,19 @@
 > Go rewrite of SoulSync. Self-hosted music download manager.
 > Go 1.26, stdlib `net/http`, `modernc.org/sqlite` (CGo-free), vanilla JS SPA embedded via `go:embed`.
 
+## Flow Charts
+
+Code-verified mermaid flow charts for the core components. These are the
+source of truth for component behavior (see `docs/flows/README.md` for known
+drift fixed during verification):
+
+- [Download State Machine](flows/download-state-machine.md)
+- [Monitoring Service](flows/monitoring-service.md)
+- [Import Handler Chain](flows/import-handler-chain.md)
+- [Album Import Handler](flows/album-import-handler.md)
+- [Metadata Enrichment](flows/metadata-enrichment.md)
+- [Queue-Time Resolution](flows/queue-time-resolution.md)
+
 ## High-Level Component Diagram
 
 ```
@@ -40,12 +53,12 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
    track matching                                     │
    version awareness
 
-   metadata.Registry          metadata.MetadataResolver
-   │ provider lookup          │ queue-time enrichment
-   │ configurable order       │ primaryArtist fallback
-   ├─ musicbrainz.Client      │ album + cover lookup
-   ├─ deezer.DownloadClient   │
-   └─ coverartarchive.Client
+   metadata.Registry          metadata.MetadataResolver    metadata.ProviderCooldown
+   │ provider lookup          │ queue-time enrichment      │ shared app-wide, keyed
+   │ configurable order       │ primaryArtist fallback     │ by provider name
+   ├─ musicbrainz.Client      │ album + cover lookup       │ 429/503 → ErrRateLimited
+   ├─ deezer.DownloadClient   │                            │ MarkAfter honors Retry-After
+   └─ coverartarchive.Client  │                            │ (2–10 min window)
 ```
 
 ## Package Map
@@ -57,7 +70,7 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/config` | JSON config load/validate/persist (thread-safe) | `Config`, `Persistence` |
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Download lifecycle, album provider contract, import pipeline, monitoring | `Record`, `MonitoredProvider`, `DownloadClient`, `AlbumProvider`, `AlbumImportHandler`, import handler chain, `CompletedDownloadService`, `MonitoringService` |
-| `internal/metadata` | Metadata provider interface + resolver + registry | `Provider`, `MetadataResolver`, `Registry`, `CoverResult`, `TrackMetadata` |
+| `internal/metadata` | Metadata provider interface + resolver + registry + app-wide rate-limit cooldown | `Provider`, `MetadataResolver`, `Registry`, `ProviderCooldown`, `RateLimitError`, `CoverResult`, `TrackMetadata` |
 | `internal/providers/musicbrainz` | MusicBrainz metadata provider (recording search, release lookup, release-group batch search) | `Client` (implements `metadata.Provider`) |
 | `internal/providers/coverartarchive` | Cover Art Archive (MBID-based cover lookup) | `Client` (implements `metadata.Provider`) |
 | `internal/providers/deezer` | Deezer plugin — download (ARL) + metadata (public API) | `DownloadClient` (implements `download.Plugin` + `metadata.Provider`), `Client` (API) |
@@ -95,28 +108,26 @@ Artist ──1:N──> Album ──1:N──> Track
 
 ### Downloads (SQLite: `downloads`, `download_events`)
 
+Lifecycle states (see [Download State Machine](flows/download-state-machine.md)):
+
 ```
-DownloadRecord          DownloadState (lifecycle)
-  id                    queued → downloading → importPending
-  source_name                     → importing → imported
-  filename                        └─ failed / ignored
-  state                
-  progress (0-100)     Album-specific fields:
-  size/transferred       album_tracks (ExpectedTrack[])
-  speed                  album_type ("Album" | "Compilation" | ...)
-  file_path              download_client (e.g. "qbittorrent")
-  error                  imported_track_ids ([]int64)
-  metadata              folder_path (raw download directory)
-  playlist_id           magnet_uri (torrent download URL — legacy field name)
-                       provider_id (plugin-managed download ID, e.g. qBittorrent hash)
-                       album_mbid (MusicBrainz release MBID, synced to library)
+DownloadRecord
+  id                    Terminal states: imported, failed, ignored
+  source_name           Retryable: failed, failedPending
+  filename
+  state                 Album-specific fields:
+  progress (0-100)       album_tracks (ExpectedTrack[])
+  size/transferred       album_type ("Album" | "Compilation" | ...)
+  speed                  download_client (e.g. "qbittorrent")
+  file_path              imported_track_ids ([]int64)
+  error                  folder_path (raw download directory)
+  metadata              magnet_uri (torrent download URL — legacy field name)
+  playlist_id           provider_id (plugin-managed download ID, e.g. qBittorrent hash)
+                         album_mbid (MusicBrainz release MBID, synced to library)
 
-                       DownloadEvent
-                         id, download_id
-                         type, payload, timestamp
-
-                       Terminal states:
-                       imported, failed, ignored
+                        DownloadEvent
+                          id, download_id
+                          type, payload, timestamp
 ```
 
 ### Playlists (SQLite: `playlists`, `playlist_tracks`)
@@ -148,147 +159,36 @@ SearchResult          TrackResult           AlbumResult
 
 ## Download Pipeline
 
-### State Machine
+The full lifecycle is documented as mermaid flow charts — see the
+[Download State Machine](flows/download-state-machine.md) (8 states, all
+transitions) and the [Monitoring Service](flows/monitoring-service.md)
+(1s poll loop, dispatch, retry, pending-source resolution, orphan sync).
 
-```
-                         ┌──────────┐
-                         │  queued  │
-                         └────┬─────┘
-                              │
-                    ┌─────────┼─────────┐
-                    │                   │
-          ┌─────────▼────────┐  ┌───────▼──────────┐
-          │   TRACK PIPE     │  │   ALBUM PIPE     │
-          │                  │  │                  │
-          │ Deezer, Soulseek,│  │ Prowlarr →       │
-          │ Tidal, …         │  │ qBittorrent      │
-          └────────┬─────────┘  └───────┬──────────┘
-                   │                    │
-                   │ MonitoredProvider  │  ┌────────────────────┐
-                   │ .StartDownload()   │  │ search (pre-queue) │
-                   │                    │  │                    │
-                   │                    │  │ Orchestrator       │
-                   │                    │  │ .SearchAlbums()    │
-                   │                    │  │   → Prowlarr       │
-                   │                    │  │   → Torznab API    │
-                   │                    │  │   → RuTracker      │
-                   │                    │  │        │           │
-                   │                    │  │ pick best release  │
-                   │                    │  │        │           │
-                   │                    │  │ MusicBrainz        │
-                   │                    │  │ .ResolveTracks()   │
-                   │                    │  │   → tracklist      │
-                   │                    │  │        │           │
-                   │                    │  │ QueueAlbum()       │
-                   │                    │  └────────┬───────────┘
-                   │                    │           │
-                   │                    │  ┌────────▼───────────┐
-                   │                    │  │ DownloadClient     │
-                   │                    ├──► qBittorrent        │
-                   │                    │  │ .Add(url)          │
-                   │                    │  │   → fetch .torrent │
-                   │                    │  │   → upload bytes   │
-                   │                    │  │   → seeding        │
-                   │                    │  └────────┬───────────┘
-                   │                    │           │
-                   └────────────────────┴───────────┘
-                                        │
-                                        │ done
-                               ┌────────▼───────────┐
-                               │   importPending    │
-                               └────────┬───────────┘
-                                        │
-                               ┌────────▼──────┐
-                               │   importing   │
-                               └────────┬──────┘
-                                        │
-                        ┌───────────────┴───────────────┐
-                        │ record.IsAlbum()?             │
-                        │                               │
-                   ┌────▼────┐                     ┌────▼────┐
-                   │  ALBUM  │                     │  TRACK  │
-                   │ Handler │                     │  direct │
-                   │         │                     │         │
-                   │ scan    │                     │         │
-                   │ match   │                     │         │
-                   │ files   │                     │         │
-                   └────┬────┘                     └────┬────┘
-                        │                               │
-                        │ synthetic Records             │  original Record
-                        └────────────┬──────────────────┘
-                                     │
-                                ┌────▼─────────────────────────┐
-                                │  IMPORT HANDLER CHAIN         │
-                                │  (shared — track + album)     │
-                                │                               │
-                                │  1. FileRenamer               │
-                                │  2. CoverArt                  │
-                                │  3. TagWriter                 │
-                                │  4. LibraryImporter           │
-                                │  5. MetadataEnrichment        │
-                                │  6. PlaylistLinker            │
-                                │  7. SSENotifier               │
-                                └────┬─────────────────────────┘
-                                     │
-                          ┌──────────┴───────────┐
-                     ┌────▼────┐            ┌────▼────┐
-                     │  failed │            │imported │
-                     └────┬────┘            └─────────┘
-                          │ retry
-                          └──→ queued
-```
+Two pipes feed the state machine:
 
-> **Track pipe**: individual tracks queued via `DownloadService.Queue()`. Any plugin implementing
-> `MonitoredProvider` (Deezer, Soulseek, future Tidal) handles the download lifecycle. One Record
-> per file enters the import chain directly.
->
-> **Album pipe**: when `album_sources` is configured, `Orchestrator.SearchAlbums()` queries
-> Prowlarr's Torznab API (backed by RuTracker indexers), picks the best release by seeders,
-> and queues via `QueueAlbum()`. The monitor dispatches to `qBittorrent.Add(url)` which
-> fetches the `.torrent` and uploads raw bytes. When the torrent completes, `AlbumImportHandler`:
-> 1. Scans the downloaded folder and counts files
-> 2. Resolves tracks **post-download**: calls `TrackResolver(fileCount, torrentTitle)` →
->    `MusicBrainz.SearchReleasesByGroup(rgid)` (one API call for all releases with track counts)
->    → `pickBestMatchingRelease` (closest file count, word-overlap tiebreaker with torrent title)
-> 3. Matches files to resolved tracks, creates synthetic per-track Records
-> 4. Feeds Records through the **same import chain** as the track pipe
-> 5. Deletes synthetic Records after chain completes (they never appear in downloads list)
-> 6. Updates `album_discovery_cache` with actual library tracks so UI shows correct release
->
-> Cover art, artist images, ISRC, playlist linking, and SSE apply identically to both.
->
-> When `album_sources` is empty or returns no results, the system falls back to the track pipe.
+- **Track pipe**: individual tracks queued via `DownloadService.Queue()`. Any plugin
+  implementing `MonitoredProvider` (Deezer, Soulseek, future Tidal) handles the
+  download lifecycle via `StartDownload()`. One Record per file enters the import
+  chain directly.
+- **Album pipe**: when `album_sources` is configured, `Orchestrator.SearchAlbums()`
+  queries Prowlarr's Torznab API (backed by RuTracker indexers), picks the best
+  release by seeders, and queues via `QueueAlbum()`. The monitor dispatches to the
+  configured `DownloadClient` (qBittorrent) via `AddDownload()`. When the torrent
+  completes, the [Album Import Handler](flows/album-import-handler.md) scans the
+  folder, resolves tracks **post-download** (using the actual file count), matches
+  files to tracks, and feeds synthetic per-track Records through the
+  [shared import chain](flows/import-handler-chain.md).
+- **Retry**: `MonitoringService.scanRetry()` re-queues failed + `failedPending`
+  records with exponential backoff `2→4→8→16→32→60 min` (±20% jitter), up to
+  `MaxRetries=5`. Before re-queueing it searches all providers for an alternative
+  source (`Orchestrator.FindBestMatch`).
 
 ### Event Flow
 
-```
-DownloadService.Queue() / QueueAlbum()
-  └─ Publish(TopicDownloadQueued, record)
-
-MonitoringService.tick() (1s poll loop)
-  ├─ startQueuedDownloads() → TransitionState(queued→downloading)
-  │   ├─ Track: MonitoredProvider.StartDownload()
-  │   └─ Album: DownloadClient.Add()
-  │   └─ Publish(TopicDownloadStateChanged, record)
-  ├─ pollActiveDownloads() → GetStatus / GetProgress per active download
-  │   └─ Publish(TopicDownloadProgress, record)             // per tick
-  ├─ handleProviderState() → on provider-reported completion
-  │   │  Accepts StateImported (Deezer/Soulseek) or StateImportPending (qBittorrent)
-  │   └─ Publish(TopicDownloadCompleted, record)            // download done
-  └─ failRecord() → on error
-      └─ Publish(TopicDownloadFailed, record)
-
-CompletedDownloadService (subscribes to TopicDownloadCompleted)
-  ├─ Publish(TopicImportStarted, record)          // importing
-  ├─ Album: AlbumImportHandler scans folder → feeds per-track Records through chain
-  ├─ Track: original Record enters chain directly
-  ├─ Handler chain executes (7 handlers, shared by both paths)
-  ├─ Publish(TopicImportCompleted, record)        // success
-  └─ Publish(TopicImportFailed, record)           // failure
-
-SSENotifier (subscribes to state/progress/completed/failed)
-  └─ SSEHub.Broadcast(event) → all connected SSE clients
-```
+See [Monitoring Service](flows/monitoring-service.md) for the download lifecycle
+events (queue → state change → progress → completed/failed) and
+[Import Handler Chain](flows/import-handler-chain.md) for the import events
+(started → completed/failed).
 
 ### Topics
 
@@ -395,7 +295,7 @@ type TrackResolver func(ctx context.Context, sourceName, artist, album string, f
 type DownloadClient interface {
     plugin.BasePlugin
 
-    Add(ctx context.Context, url string) (providerID string, err error)
+    AddDownload(ctx context.Context, uri, category, savepath string) (providerID string, err error)
     GetStatus(ctx context.Context, providerID string) (*Record, error)
     GetProgress(ctx context.Context, providerID string) (*Progress, error)
     Cancel(ctx context.Context, providerID string, remove bool) error
@@ -404,7 +304,7 @@ type DownloadClient interface {
 }
 ```
 
-Album downloads flow: `Orchestrator.SearchAlbums()` → user picks release → `DownloadService.QueueAlbum()` → `MonitoringService` dispatches to `DownloadClient.Add()` → client downloads torrent → files land in staging → `AlbumImportHandler` scans folder, matches files → feeds per-track Records through standard import chain.
+Album downloads flow: `Orchestrator.SearchAlbums()` → user picks release → `DownloadService.QueueAlbum()` → `MonitoringService` dispatches to `DownloadClient.AddDownload(uri, "music", savePath)` → client downloads torrent → files land in staging → `AlbumImportHandler` scans folder, matches files → feeds per-track Records through standard import chain.
 
 ### Adding a Plugin
 
@@ -430,48 +330,28 @@ type Source interface {
 ### Queue-Time Resolution
 
 Before a download is queued, `MetadataResolver.EnrichMetadata()` queries configured
-providers in priority order (`metadata_order` config):
-
-```
-EnrichMetadata(artist, title, album, year)
-  │
-  ├─ Phase 1: Album lookup (if album empty)
-  │   └─ For each provider in order:
-  │       ├─ SearchAlbum(full artist, title) → found? Done.
-  │       └─ SearchAlbum(primary artist, title) → comma fallback
-  │
-  ├─ Phase 2: Cover art lookup (if album found)
-  │   └─ For each provider in order:
-  │       ├─ SearchCover(full artist, album) → found? Done.
-  │       └─ SearchCover(primary artist, album) → comma fallback
-  │
-  └─ Returns TrackMetadata{Album, CoverURL}
-```
+providers in priority order (`metadata_order` config). It resolves a missing album
+name, then finds cover art — see the
+[Queue-Time Resolution](flows/queue-time-resolution.md) flow chart. It is
+**best-effort**: errors are logged, empty fields are left empty, and the queue
+pipeline is never blocked.
 
 ### Post-Import Enrichment
 
 After the library album/track exists, `MetadataEnrichmentHandler` (step 5) runs identically
 for both single-track and album downloads. Album tracks go through the same handler chain —
 `AlbumImportHandler` creates synthetic per-track Records and feeds them into the chain,
-so all enrichment applies uniformly:
+so all enrichment applies uniformly. The provider loop (album title → cover art → track
+enrichment → artist image → re-tag) is documented in the
+[Metadata Enrichment](flows/metadata-enrichment.md) flow chart.
 
-```
-For each configured provider:
-  ├─ Album title resolution (if album.Title empty)
-  │   └─ SearchAlbum(artist, track title) → update album title
-  ├─ Cover art download (once per album — subsequent tracks skip existing cover.jpg)
-  │   ├─ SearchCover(artist, album) → download cover.jpg
-  │   └─ SearchCoverByMBID(mbid) → CAA lookup
-  ├─ ThumbURL sync (if cover.jpg exists on disk)
-  │   └─ Set album.thumb_url = "cover.jpg"
-  ├─ Artist image download (once per artist — deduplicated across concurrent imports)
-  │   └─ SearchArtists(name, 1) → download artist.jpg to artist directory
-  ├─ Track enrichment
-  │   └─ EnrichTrack → ISRC, genres, release date, label, external IDs
-  └─ Re-tag file with updated metadata
-  ├─ Album MBID sync (album downloads only)
-  │   └─ Set album.ExternalIDs["musicbrainz_release"] = record.AlbumMBID
-```
+Rate limiting during enrichment (bulk jobs): when a provider returns
+`metadata.ErrRateLimited` (429, or 503 for MusicBrainz/Discogs/CAA), the handler marks it
+cooling down via the shared `ProviderCooldown` and moves to the next provider — subsequent
+tracks in the job skip the throttled provider until the cooldown expires. The per-download
+path (single track, `bulk=false`) is intentionally NOT gated: it tries every provider in
+order, so a cooldown observed during a bulk job never blocks an individual download. A
+bulk job start clears cooldowns (`ResetBulk`) so every provider is re-attempted fresh.
 
 ### Album MBID Sync
 
@@ -488,6 +368,49 @@ Configurable via `metadata_order` in config.json:
 ```
 
 Deezer first (fast, 50 req/5s, better album resolution). Falls through to MusicBrainz (1 req/s, deep catalog). CoverArtArchive last (MBID-based only). Unlisted providers go to end.
+
+### Rate Limiting & Provider Cooldown
+
+Every provider client paces itself under its known limit (`minInterval` / token bucket),
+but a burst or rolling window can still trip the upstream. When it does, providers surface a
+shared sentinel instead of blocking:
+
+- **`metadata.ErrRateLimited`** — sentinel all providers return on 429 (or 503 where that
+  is the throttle signal: MusicBrainz, Discogs, Cover Art Archive). Callers match with
+  `errors.Is`.
+- **`metadata.RateLimitError`** — structured form wrapping the sentinel, carrying the
+  server's `Retry-After` when the provider read it. `errors.Is(err, ErrRateLimited)` still
+  matches. Providers that send the header (Spotify always, Discogs/Tidal sometimes) get it
+  honored; header-less providers (MusicBrainz, Last.fm, Deezer) fall back to the default.
+
+**Shared cooldown.** One `metadata.ProviderCooldown` instance is created in `app.go` and
+wired into both the API server and the enrichment handler, so a rate limit observed by any
+consumer cools the provider app-wide for a short window instead of hammering it repeatedly:
+
+```
+MarkAfter(name, retryAfter):
+  d = max(retryAfter, ProviderRateLimitCooldown=2min)   // floor: never re-hit immediately
+  d = min(d, maxRateLimitCooldown=10min)                // ceiling: never park a provider
+```
+
+A provider is never permanently abandoned — only deactivation (config) removes it from the
+rotation; every cooldown expires and re-attempts.
+
+**Consumer behavior:**
+
+| Consumer | On ErrRateLimited |
+|---|---|
+| Bulk enrichment | mark cooling down → skip provider for subsequent tracks in the job → next provider |
+| Per-download enrichment | NOT gated — tries every provider (isolation) |
+| Discover search | pre-filters cooling-down providers; all-cooled → HTTP 503 |
+| Album discovery | skips cooling-down providers, marks on error, moves on |
+| Duplicate scan (MB only) | pause honoring Retry-After (5–10s) → retry group once → empty canonical fallback |
+| Download monitor | separate system — DB queue + jittered exponential backoff (2→60 min) |
+
+**Spotify fail-fast.** `handleRateLimit` retries short `Retry-After` values (≤5s) with a
+context-aware sleep (job cancellation / per-track deadline aborts the wait immediately). A
+long Retry-After fails fast with `ErrRateLimited` rather than blocking a worker for minutes —
+this is the fix for the enrichment convoy stall.
 
 ### MusicBrainz Release-Group Batch Lookup
 
@@ -590,17 +513,25 @@ The UI queries cache by `album_id`, preferring `'library'` rows over `'deezer'`.
 
 ## Cancel Flow
 
-`DownloadService.Cancel(downloadID)` delegates cancellation to the appropriate
-download provider:
+`DownloadService.Cancel(downloadID)` transitions the record to the `ignored`
+state **before** cancelling the provider (prevents `checkCancellations` from
+issuing a duplicate cancel on the next tick), then cancels at the provider
+level for both album and track downloads:
 
 ```go
-func (svc *Service) Cancel(ctx context.Context, downloadID string) error {
-    record := store.Get(downloadID)
-    dc := svc.registry.Client(record.DownloadClient) // e.g. "qbittorrent"
-    if err := dc.Cancel(ctx, record.ProviderID, false); err != nil {
+func (s *Service) Cancel(ctx context.Context, id string) error {
+    // ...
+    if record.State.Terminal() {
+        return nil // already terminal — idempotent
+    }
+    record.State = StateIgnored          // update state FIRST
+    if err := s.store.Update(ctx, record); err != nil {
         return err
     }
-    // ... state transition to failed
+    s.cancelDownloadClient(ctx, record)  // album: DownloadClient.Cancel
+    s.cancelTrackProvider(ctx, record)   // track: MonitoredProvider.Cancel
+    s.bus.Publish(ctx, events.TopicDownloadStateChanged, record)
+    return nil
 }
 ```
 
@@ -608,6 +539,10 @@ func (svc *Service) Cancel(ctx context.Context, downloadID string) error {
 stored on `DownloadRecord` at queue-time and persisted to SQLite. This avoids
 re-inventing provider ID resolution or keeping an in-memory mapping. Each `DownloadClient`
 accepts its own IDs natively — no translation layer needed.
+
+> **Cancel → `ignored` (not `failed`).** `ignored` is terminal and not retryable —
+> a cancelled download is never re-queued by `scanRetry()`. See
+> [Download State Machine](flows/download-state-machine.md).
 
 ## Technology Stack
 

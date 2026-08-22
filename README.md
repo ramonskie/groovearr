@@ -130,7 +130,7 @@ internal/
   sanitize/             Filename sanitization
   sse/                  Server-Sent Events hub + notifier
   tagging/              Audio metadata tag writing
-docs/                   Architecture, API, setup, roadmap
+docs/                   Architecture, flow charts, API, setup, plugins
 ui/                     React SPA (Vite)
 ```
 
@@ -140,7 +140,6 @@ ui/                     React SPA (Vite)
 - [Architecture](docs/architecture.md) — component diagram, data flows, event system, domain model
 - [API Reference](docs/api.md) — REST endpoints with request/response schemas
 - [Development Guide](docs/development.md) — build system, code patterns, adding plugins
-- [Roadmap](docs/roadmap.md) — feature tiers and planning
 
 ## License
 
