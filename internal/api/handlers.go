@@ -39,6 +39,7 @@ type Server struct {
 	mdRegistry           *metadata.Registry
 	metadataResolver     *metadata.MetadataResolver
 	enrichmentHandler    *download.MetadataEnrichmentHandler
+	providerCooldown     *metadata.ProviderCooldown
 	orchestrator         *download.Orchestrator
 	discoveryReg         *discovery.Registry
 	store                library.Store
@@ -80,6 +81,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		mdRegistry:          mdRegistry,
 		metadataResolver:    metadataResolver,
 		enrichmentHandler:   enrichmentHandler,
+		providerCooldown:    metadata.NewProviderCooldown(),
 		orchestrator:        orchestrator,
 		discoveryReg:        discoveryReg,
 		store:               store,
@@ -233,6 +235,17 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		IdleTimeout:  120 * time.Second,
 	}
 	return s
+}
+
+// SetProviderCooldown replaces the default (self-contained) cooldown with a
+// shared app-wide instance, so a rate limit observed by album discovery or
+// discover search also cools the provider for enrichment. Pass nil to keep the
+// default.
+func (s *Server) SetProviderCooldown(c *metadata.ProviderCooldown) {
+	if c == nil {
+		return
+	}
+	s.providerCooldown = c
 }
 
 // ListenAndServe starts the HTTP server (blocking).

@@ -13,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
@@ -280,6 +281,11 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// Discogs throttles via 429 (and can serve 503 while throttling) — both
+		// trip the rate-limit sentinel. Honor Retry-After when present.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			return nil, metadata.NewRateLimitError("discogs", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), fmt.Sprintf("API HTTP %d", resp.StatusCode))
+		}
 		// Try to extract error message.
 		var errResp struct {
 			Message string `json:"message"`

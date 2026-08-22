@@ -229,7 +229,9 @@ func NewApp(configPath string) (*App, error) {
 	logTailer.Start(bgCtx)
 
 	// Import handler chain.
+	providerCooldown := metadata.NewProviderCooldown()
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
+	enrichmentHandler.SetProviderCooldown(providerCooldown)
 	enrichmentHandler.SetProviderOrder(metadataOrder)
 
 	importChain := []download.ImportHandler{
@@ -318,6 +320,7 @@ func NewApp(configPath string) (*App, error) {
 			})
 		},
 	)
+	srv.SetProviderCooldown(providerCooldown)
 
 	// Startup logging.
 	log.Info("groovearr starting",

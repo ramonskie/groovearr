@@ -7,7 +7,11 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"sync/atomic"
 	"testing"
+	"time"
+
+	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
 // testClientWithRefresh builds a SpotifyClient whose authTransport uses the
@@ -234,6 +238,111 @@ func TestClient429ExceedsMaxRetries(t *testing.T) {
 	// max429Retries = 3 → 1 initial + 3 retries = 4 calls total
 	if callCount != 4 {
 		t.Errorf("call count = %d, want 4 (1 initial + 3 retries)", callCount)
+	}
+}
+
+// ─── 429 retry aborts when the request context is cancelled ──────────
+
+// TestClient429RetryRespectsContext is the regression test for the enrichment
+// job convoy stall: handleRateLimit used a bare time.Sleep(retryAfter), which
+// never observes the request context, so a 429 with a long Retry-After pinned
+// a job worker past its per-track deadline with no way to abort. The wait must
+// be context-aware: cancelling the context mid-sleep returns context.Canceled
+// promptly instead of sleeping to completion.
+func TestClient429RetryRespectsContext(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		// Retry-After within the transient window (≤ maxTransientRetryAfter) so
+		// the request actually enters the retry sleep; cancelling must abort it.
+		w.Header().Set("Retry-After", "5")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	cfg := &SpotifyConfig{Mode: "free"}
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	req, _ := http.NewRequestWithContext(ctx, http.MethodGet, server.URL, nil)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := client.Do(req)
+		done <- err
+	}()
+
+	// Wait until the request reaches the server (the 429 arrives and the retry
+	// sleep starts), then cancel. Polling instead of a fixed sleep avoids a
+	// scheduling-delay flake where cancel fires before the goroutine issues the
+	// request — the test would then assert calls==0, not the real behavior.
+	deadline := time.Now().Add(2 * time.Second)
+	for calls.Load() == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("request never reached server")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	// Give the handler a moment to finish recording the call before cancelling.
+	time.Sleep(10 * time.Millisecond)
+	start := time.Now()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Errorf("error = %v, want context.Canceled", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client.Do did not return after context cancellation (retry sleep ignored ctx)")
+	}
+
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("cancellation took %v, want prompt return", elapsed)
+	}
+	// Only the initial 429 request should have been made — no retry after cancel.
+	if got := calls.Load(); got != 1 {
+		t.Errorf("server calls = %d, want 1 (no retry after cancel)", got)
+	}
+}
+
+// ─── 429 with long Retry-After fails fast as ErrRateLimited ─────────
+
+// TestClient429LongRetryAfterFailsFast covers the fail-fast design: a 429 with
+// a Retry-After beyond the transient window must return metadata.ErrRateLimited
+// immediately instead of sleeping for minutes, so the enrichment job can mark
+// the provider cooling down and move to the next one.
+func TestClient429LongRetryAfterFailsFast(t *testing.T) {
+	var calls atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Retry-After", "3600")
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+
+	cfg := &SpotifyConfig{Mode: "free"}
+	client := NewClient(cfg, slog.New(slog.DiscardHandler))
+
+	req, _ := http.NewRequest(http.MethodGet, server.URL, nil)
+	start := time.Now()
+	_, err := client.Do(req)
+	elapsed := time.Since(start)
+
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want metadata.ErrRateLimited", err)
+	}
+	var rl *metadata.RateLimitError
+	if !errors.As(err, &rl) || rl.RetryAfter < time.Hour {
+		t.Errorf("error should carry RetryAfter ≈ 1h via RateLimitError, got %v", err)
+	}
+	if elapsed > time.Second {
+		t.Errorf("fail-fast took %v, want immediate", elapsed)
+	}
+	// No retries for a long backoff.
+	if got := calls.Load(); got != 1 {
+		t.Errorf("server calls = %d, want 1 (no retry for long Retry-After)", got)
 	}
 }
 

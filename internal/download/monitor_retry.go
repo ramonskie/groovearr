@@ -2,6 +2,7 @@ package download
 
 import (
 	"context"
+	"math/rand/v2"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/events"
@@ -70,11 +71,10 @@ func (m *MonitoringService) scanRetry() {
 
 		// Increment retry count and set exponential backoff.
 		// First retry: 2 min, then 4, 8, 16, 32, capped at 60 min.
+		// Jittered ±20% so a batch of records that failed together doesn't
+		// re-hit every provider in lockstep (thundering herd → convoy).
 		rec.RetryCount++
-		backoffMin := 1 << rec.RetryCount // 2, 4, 8, 16, 32
-		if backoffMin > 60 {
-			backoffMin = 60
-		}
+		backoffMin := jitterBackoff(1<<rec.RetryCount, 60) // 2, 4, 8, 16, 32, 60 (±20%)
 		rec.RetryAfter = time.Now().UTC().Add(time.Duration(backoffMin) * time.Minute).Format(time.RFC3339)
 
 		// Reset to queued — the main loop will pick it up with the (potentially
@@ -318,4 +318,31 @@ func (m *MonitoringService) resolvePendingSources(ctx context.Context) {
 	if resolved > 0 {
 		m.log.Info("resolvePendingSources: done", "resolved", resolved, "component", "monitor")
 	}
+}
+
+// jitterBackoff adds ±20% uniform jitter to an exponential backoff in minutes,
+// keeping the result ≥ 1 and ≤ cap. When the base backoff exceeds the cap, the
+// jitter is applied to the capped value (within [cap−20%, cap]) so the spread
+// survives the cap — otherwise every over-cap value would collapse to exactly
+// cap and the records would re-hit providers in lockstep right where the cap
+// is most likely to be reached.
+func jitterBackoff(minutes, cap int) int {
+	if minutes <= 0 {
+		return 1
+	}
+	if minutes > cap {
+		minutes = cap
+	}
+	delta := minutes / 5 // 20%
+	if delta == 0 {
+		delta = 1
+	}
+	j := rand.IntN(2*delta+1) - delta // [-delta, +delta]
+	if jittered := minutes + j; jittered >= 1 {
+		if jittered > cap {
+			return cap
+		}
+		return jittered
+	}
+	return 1
 }

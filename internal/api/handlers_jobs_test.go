@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -320,6 +321,123 @@ func TestDuplicatesRunnerPersistsCanonicals(t *testing.T) {
 	}
 	if len(reports) == 0 {
 		t.Error("expected progress reports")
+	}
+}
+
+// TestPauseForRateLimitHonorsRetryAfter verifies the pause uses the server's
+// Retry-After (when the error carries one) instead of the default, and caps it
+// at maxRateLimitPause.
+func TestPauseForRateLimitHonorsRetryAfter(t *testing.T) {
+	origPause := defaultRateLimitPause
+	defaultRateLimitPause = 5 * time.Millisecond
+	defer func() { defaultRateLimitPause = origPause }()
+
+	s := &Server{log: testAPILogger()}
+
+	t.Run("honors retry-after", func(t *testing.T) {
+		// Retry-After well above the 5ms default, below the 10s cap.
+		err := metadata.NewRateLimitError("musicbrainz", 50*time.Millisecond, "HTTP 503")
+		start := time.Now()
+		if !s.pauseForRateLimit(context.Background(), err) {
+			t.Fatal("pauseForRateLimit returned false with live context")
+		}
+		if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
+			t.Errorf("pause = %v, want ~50ms honoring retry-after", elapsed)
+		}
+	})
+
+	t.Run("caps pathological retry-after", func(t *testing.T) {
+		// 24h Retry-After must be capped at maxRateLimitPause (10s). We can't
+		// sleep 10s in a test, so shrink the cap too.
+		origMax := maxRateLimitPause
+		maxRateLimitPause = 20 * time.Millisecond
+		defer func() { maxRateLimitPause = origMax }()
+
+		err := metadata.NewRateLimitError("musicbrainz", 24*time.Hour, "HTTP 503")
+		start := time.Now()
+		if !s.pauseForRateLimit(context.Background(), err) {
+			t.Fatal("pauseForRateLimit returned false with live context")
+		}
+		if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
+			t.Errorf("pause = %v, want capped at maxRateLimitPause", elapsed)
+		}
+	})
+}
+
+// TestDuplicatesRunnerPausesOnRateLimit verifies the Option-B behavior: when
+// the canonical-name lookup (MusicBrainz) is rate-limited, the scan pauses
+// ctx-aware and retries the group once so every group still gets a genuine
+// attempt instead of storing an empty canonical.
+func TestDuplicatesRunnerPausesOnRateLimit(t *testing.T) {
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Acda en De Munnik"},
+			{ID: 2, Name: "Acda en de Munnik"},
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 10}, {ID: 11}},
+			2: {{ID: 12}},
+		},
+	}
+	reg := metadata.NewRegistry()
+	// First lookup fails with a rate-limit error; the retry succeeds.
+	_ = reg.Register(&stubNameProvider{
+		name: "musicbrainz",
+		names: map[string]string{
+			"acdaendemunnik": "Acda en de Munnik",
+		},
+		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		fails: 1,
+	})
+	// Shorten the pause so the test doesn't sleep 5s.
+	origPause := defaultRateLimitPause
+	defaultRateLimitPause = 5 * time.Millisecond
+	defer func() { defaultRateLimitPause = origPause }()
+
+	s := &Server{store: store, mdRegistry: reg, log: testAPILogger()}
+
+	if err := s.duplicatesRunner(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatalf("duplicatesRunner: %v", err)
+	}
+
+	// The rate-limited group must still be resolved via the retry.
+	if store.scan["acda en de munnik"] != "Acda en de Munnik" {
+		t.Errorf("scan = %v, want the canonical resolved after pause+retry", store.scan)
+	}
+}
+
+// TestDuplicatesRunnerRateLimitStaysEmptyOnPersistentLimit verifies that a
+// persistently rate-limited provider leaves the group's canonical empty
+// (falls back to library casing) rather than failing the whole scan.
+func TestDuplicatesRunnerRateLimitStaysEmptyOnPersistentLimit(t *testing.T) {
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Acda en De Munnik"},
+			{ID: 2, Name: "Acda en de Munnik"},
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 10}, {ID: 11}},
+			2: {{ID: 12}},
+		},
+	}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(&stubNameProvider{
+		name:  "musicbrainz",
+		names: map[string]string{},
+		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		fails: 100, // never recovers during this scan
+	})
+	origPause := defaultRateLimitPause
+	defaultRateLimitPause = time.Millisecond
+	defer func() { defaultRateLimitPause = origPause }()
+
+	s := &Server{store: store, mdRegistry: reg, log: testAPILogger()}
+
+	if err := s.duplicatesRunner(context.Background(), func(jobs.Report) {}); err != nil {
+		t.Fatalf("duplicatesRunner: %v", err)
+	}
+	if _, ok := store.scan["acda en de munnik"]; !ok {
+		t.Errorf("expected the group to be persisted with an empty canonical fallback, got %v", store.scan)
 	}
 }
 

@@ -10,10 +10,71 @@ package metadata
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"strconv"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
+
+// ErrRateLimited is returned by providers when the downstream API is
+// rate-limiting (HTTP 429) and the caller should move on rather than block.
+// Enrichment treats it as "mark this provider cooling down, try the next
+// one" instead of a hard failure.
+var ErrRateLimited = errors.New("provider rate limited")
+
+// RateLimitError is the structured form of ErrRateLimited. Providers that can
+// read the server's Retry-After header wrap the sentinel in this type so
+// callers can honor the server's requested backoff (via errors.As) instead of
+// applying a fixed cooldown. errors.Is(err, ErrRateLimited) still matches.
+type RateLimitError struct {
+	RetryAfter time.Duration // server-requested backoff; 0 when unknown
+	err        error         // wrapped sentinel (and provider detail)
+}
+
+// Error implements error.
+func (e *RateLimitError) Error() string { return e.err.Error() }
+
+// Unwrap exposes the wrapped sentinel so errors.Is matches ErrRateLimited.
+func (e *RateLimitError) Unwrap() error { return e.err }
+
+// NewRateLimitError wraps the sentinel with the provider's message and an
+// optional server-requested backoff (0 when the header was absent). The
+// sentinel already reads "provider rate limited", so the message carries only
+// the provider and detail to avoid a duplicated phrase in logs.
+func NewRateLimitError(provider string, retryAfter time.Duration, detail string) error {
+	msg := provider
+	if detail != "" {
+		msg += ": " + detail
+	}
+	if retryAfter > 0 {
+		msg += fmt.Sprintf(" (retry after %s)", retryAfter)
+	}
+	return &RateLimitError{RetryAfter: retryAfter, err: fmt.Errorf("%w: %s", ErrRateLimited, msg)}
+}
+
+// ParseRetryAfterHeader parses a Retry-After header value: either seconds or
+// an HTTP-date. Returns 0 when the header is absent or unparseable so callers
+// fall back to the default cooldown.
+func ParseRetryAfterHeader(value string) time.Duration {
+	if value == "" {
+		return 0
+	}
+	if sec, err := strconv.Atoi(value); err == nil {
+		if sec < 0 {
+			return 0
+		}
+		return time.Duration(sec) * time.Second
+	}
+	if t, err := time.Parse(time.RFC1123, value); err == nil {
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+	}
+	return 0
+}
 
 // Provider extends plugin.BasePlugin with metadata-specific methods.
 // Every metadata provider must implement this. Sources include Cover Art Archive,

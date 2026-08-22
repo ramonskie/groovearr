@@ -23,6 +23,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
 
@@ -636,7 +637,7 @@ func (c *apiClient) doRequest(ctx context.Context, method, urlStr string, params
 					return nil, ctx.Err()
 				}
 			}
-			lastErr = fmt.Errorf("tidal rate limited (429) after %d retries", attempt+1)
+			lastErr = metadata.NewRateLimitError("tidal", retryAfter, fmt.Sprintf("HTTP 429 after %d retries", attempt+1))
 			continue
 		}
 

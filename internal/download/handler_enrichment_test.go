@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"os"
@@ -28,6 +29,8 @@ type mockMetadataProvider struct {
 	trackMeta  *metadata.TrackMetadata
 	configured bool
 	connected  bool
+	enrichErr  error
+	calls      *int
 }
 
 func (m *mockMetadataProvider) Name() string              { return m.name }
@@ -57,6 +60,12 @@ func (m *mockMetadataProvider) SearchAlbum(ctx context.Context, artist, title st
 }
 
 func (m *mockMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
+	if m.calls != nil {
+		*m.calls++
+	}
+	if m.enrichErr != nil {
+		return nil, m.enrichErr
+	}
 	return m.trackMeta, nil
 }
 
@@ -626,5 +635,177 @@ func TestBulkEnrichPropagatesCancellation(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("EnrichLibraryTrack did not return after cancel")
+	}
+}
+
+// TestBulkEnrichSkipsRateLimitedProvider verifies the cooldown design: when a
+// provider returns metadata.ErrRateLimited mid-run, it is marked cooling down
+// and subsequent tracks skip it, while the next provider is still consulted.
+func TestBulkEnrichSkipsRateLimitedProvider(t *testing.T) {
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	reg := metadata.NewRegistry()
+	rlCalls := 0
+	rl := &mockMetadataProvider{
+		name:       "ratelimited",
+		configured: true,
+		connected:  true,
+		enrichErr:  fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		calls:      &rlCalls,
+	}
+	backupCalls := 0
+	backup := &mockMetadataProvider{
+		name:       "backup",
+		configured: true,
+		connected:  true,
+		trackMeta: &metadata.TrackMetadata{
+			ISRC: "US-ABC-12-99999",
+		},
+		calls: &backupCalls,
+	}
+	reg.Register(rl)     // first in order — hits the rate limit first
+	reg.Register(backup) // fallback — must still be consulted
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+	handler.ResetBulk()
+
+	// First track: the rate-limited provider is consulted once (returns
+	// ErrRateLimited → marked cooling down), then the backup fills ISRC.
+	if err := handler.EnrichLibraryTrack(context.Background(), 1); err != nil {
+		t.Fatalf("first track: unexpected error: %v", err)
+	}
+	if store.track.ISRC != "US-ABC-12-99999" {
+		t.Fatalf("expected backup ISRC after rate limit, got %q", store.track.ISRC)
+	}
+	if rlCalls != 1 {
+		t.Errorf("rate-limited provider calls = %d, want 1 (first track)", rlCalls)
+	}
+	if backupCalls != 1 {
+		t.Errorf("backup provider calls = %d, want 1 (first track)", backupCalls)
+	}
+
+	// Second track (new store state): the rate-limited provider must be
+	// skipped entirely; only the backup is consulted.
+	store.track = &domain.Track{ID: 2, ArtistID: 1, AlbumID: 1, FilePath: trackPath}
+	if err := handler.EnrichLibraryTrack(context.Background(), 2); err != nil {
+		t.Fatalf("second track: unexpected error: %v", err)
+	}
+	if rlCalls != 1 {
+		t.Errorf("rate-limited provider calls = %d, want 1 (must be skipped on 2nd track)", rlCalls)
+	}
+	if backupCalls != 2 {
+		t.Errorf("backup provider calls = %d, want 2 (still consulted on 2nd track)", backupCalls)
+	}
+}
+
+// TestBulkEnrichResetBulkClearsRateLimitCooldown verifies that ResetBulk
+// clears the per-provider cooldown so a fresh run re-attempts a provider that
+// was rate-limited in a previous run.
+func TestBulkEnrichResetBulkClearsRateLimitCooldown(t *testing.T) {
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	reg := metadata.NewRegistry()
+	rlCalls := 0
+	rl := &mockMetadataProvider{
+		name:       "ratelimited",
+		configured: true,
+		connected:  true,
+		enrichErr:  fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		calls:      &rlCalls,
+	}
+	backupCalls := 0
+	backup := &mockMetadataProvider{
+		name:       "backup",
+		configured: true,
+		connected:  true,
+		trackMeta:  &metadata.TrackMetadata{ISRC: "US-ABC-12-88888"},
+		calls:      &backupCalls,
+	}
+	reg.Register(rl)
+	reg.Register(backup)
+
+	newStore := func() *mockLibraryStore {
+		return &mockLibraryStore{
+			track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+			artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+			album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+			tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+		}
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, newStore(), testLogger())
+	handler.ResetBulk()
+
+	if err := handler.EnrichLibraryTrack(context.Background(), 1); err != nil {
+		t.Fatalf("first run: unexpected error: %v", err)
+	}
+	if rlCalls != 1 {
+		t.Fatalf("rate-limited provider calls = %d, want 1 before reset", rlCalls)
+	}
+
+	// Simulate the next bulk job: ResetBulk clears the cooldown, so the
+	// provider is re-attempted.
+	handler.ResetBulk()
+	if err := handler.EnrichLibraryTrack(context.Background(), 1); err != nil {
+		t.Fatalf("second run: unexpected error: %v", err)
+	}
+	if rlCalls != 2 {
+		t.Errorf("rate-limited provider calls = %d, want 2 (ResetBulk cleared cooldown)", rlCalls)
+	}
+}
+
+// TestDownloadPathNotGatedByRateLimitCooldown verifies the per-download path
+// (Handle, bulk=false) is NOT affected by the rate-limit cooldown: it
+// intentionally tries every provider on every track, so a provider that
+// rate-limited during a bulk run must still be consulted.
+func TestDownloadPathNotGatedByRateLimitCooldown(t *testing.T) {
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	reg := metadata.NewRegistry()
+	rlCalls := 0
+	rl := &mockMetadataProvider{
+		name:       "ratelimited",
+		configured: true,
+		connected:  true,
+		enrichErr:  fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		calls:      &rlCalls,
+	}
+	backupCalls := 0
+	backup := &mockMetadataProvider{
+		name:       "backup",
+		configured: true,
+		connected:  true,
+		trackMeta:  &metadata.TrackMetadata{ISRC: "US-ABC-12-77777"},
+		calls:      &backupCalls,
+	}
+	reg.Register(rl)
+	reg.Register(backup)
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		album:  &domain.Album{ID: 1, Title: "Test Album", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+	// No ResetBulk: simulate steady-state downloads, not a fresh bulk job.
+
+	// Two downloads in a row. The rate-limited provider must be consulted on
+	// BOTH — the per-download path is never cooldown-gated.
+	for i := 0; i < 2; i++ {
+		if err := handler.Handle(context.Background(), &Record{LibraryTrackID: 1, FilePath: trackPath}); err != nil {
+			t.Fatalf("download %d: unexpected error: %v", i+1, err)
+		}
+	}
+	if rlCalls != 2 {
+		t.Errorf("rate-limited provider calls = %d, want 2 (download path must not be gated)", rlCalls)
+	}
+	if backupCalls != 2 {
+		t.Errorf("backup provider calls = %d, want 2", backupCalls)
 	}
 }

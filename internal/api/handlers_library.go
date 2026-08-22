@@ -158,12 +158,32 @@ func (s *Server) canonicalArtistName(ctx context.Context, name string) string {
 	return canonical
 }
 
+// noteProviderRateLimit marks a provider as cooling down when the error is a
+// rate-limit response. Shared by discover search and album discovery so a
+// throttled provider is skipped app-wide for a short window. When the server
+// supplied a Retry-After (via metadata.RateLimitError), the cooldown honors it.
+func (s *Server) noteProviderRateLimit(providerName string, err error) {
+	if err != nil && errors.Is(err, metadata.ErrRateLimited) {
+		var rl *metadata.RateLimitError
+		var retryAfter time.Duration
+		if errors.As(err, &rl) {
+			retryAfter = rl.RetryAfter
+		}
+		s.providerCooldown.MarkAfter(providerName, retryAfter)
+		s.log.Warn("provider rate limited, cooling down", "provider", providerName, "error", err, "component", "api")
+	}
+}
+
 // lookupCanonicalArtist resolves the canonical spelling for an artist using
-// MusicBrainz (providers with a dedicated name lookup). Returns the last
-// provider error when every provider fails, so callers can distinguish "not
-// found" (authoritative) from "couldn't reach a provider" (transient).
+// providers with a dedicated name lookup (currently MusicBrainz). Returns the
+// last provider error when every provider fails, so callers can distinguish
+// "not found" (authoritative) from "couldn't reach a provider" (transient).
+// A rate-limit error is preferred over a generic failure: it is the actionable
+// signal — callers (e.g. the duplicates scan) pause and retry on it, and a
+// later provider's unrelated error would otherwise mask a throttled source.
 func (s *Server) lookupCanonicalArtist(ctx context.Context, name string) (string, error) {
 	var lastErr error
+	var rateLimitedErr error
 	if s.mdRegistry == nil {
 		return "", nil
 	}
@@ -174,13 +194,20 @@ func (s *Server) lookupCanonicalArtist(ctx context.Context, name string) (string
 		}
 		got, err := anp.CanonicalArtistName(ctx, name)
 		if err != nil {
-			lastErr = err
 			s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
+			if errors.Is(err, metadata.ErrRateLimited) {
+				rateLimitedErr = err
+			} else {
+				lastErr = err
+			}
 			continue
 		}
 		if got != "" {
 			return got, nil
 		}
+	}
+	if rateLimitedErr != nil {
+		return "", rateLimitedErr
 	}
 	if lastErr != nil {
 		return "", lastErr
@@ -451,8 +478,17 @@ func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Requ
 		providers := s.discoveryReg.Any()
 		query := artist.Name + " " + album.Title
 		for _, p := range providers {
+			// Skip a provider that recently rate-limited us — move on to the
+			// next one instead of re-hitting a throttled API per album.
+			if s.providerCooldown.CoolingDown(p.Name()) {
+				continue
+			}
 			albums, serr := p.SearchAlbums(ctx, query, 5)
-			if serr != nil || len(albums) == 0 {
+			if serr != nil {
+				s.noteProviderRateLimit(p.Name(), serr)
+				continue
+			}
+			if len(albums) == 0 {
 				continue
 			}
 			// Find the album that best matches our artist + title.
@@ -729,8 +765,16 @@ func getLibraryAlbumDiscoveryData(ctx context.Context, s *Server, albumID int64,
 	providers := s.discoveryReg.Any()
 	query := artistName + " " + albumTitle
 	for _, p := range providers {
+		// Skip a provider that recently rate-limited us.
+		if s.providerCooldown.CoolingDown(p.Name()) {
+			continue
+		}
 		albums, serr := p.SearchAlbums(ctx, query, 5)
-		if serr != nil || len(albums) == 0 {
+		if serr != nil {
+			s.noteProviderRateLimit(p.Name(), serr)
+			continue
+		}
+		if len(albums) == 0 {
 			continue
 		}
 		var matched *discovery.AlbumResult

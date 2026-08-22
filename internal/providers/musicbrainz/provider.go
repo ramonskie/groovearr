@@ -59,7 +59,7 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 		c.connected = false
 		c.mu.Unlock()
 		c.log.Error("musicbrainz check connection failed", "error", err, "component", "musicbrainz")
-		if errors.Is(err, ErrRateLimited) {
+		if errors.Is(err, metadata.ErrRateLimited) {
 			return fmt.Errorf("musicbrainz: rate limited: %w", err)
 		}
 		return fmt.Errorf("musicbrainz: connectivity check failed: %w", err)

@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
@@ -269,6 +270,11 @@ func (c *Client) apiGet(ctx context.Context, params map[string]string) (json.Raw
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		// 429 is used by Last.fm for its rate limits. Honor the server's
+		// Retry-After when present; the cooldown fallback covers absence.
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, metadata.NewRateLimitError("lastfm", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "API HTTP 429")
+		}
 		c.log.Error("lastfm api non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "lastfm_api")
 		return nil, fmt.Errorf("lastfm API HTTP %d: %s", resp.StatusCode, string(body))
 	}

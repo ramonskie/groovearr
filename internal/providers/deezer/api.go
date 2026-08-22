@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/quality"
 )
 
@@ -91,6 +92,7 @@ type Client struct {
 	cfg         DeezerConfig
 	httpClient  *http.Client
 	accessToken string
+	baseURL     string
 	log         *slog.Logger
 
 	// Rate limiting.
@@ -104,6 +106,7 @@ func New(cfg DeezerConfig, logger *slog.Logger) *Client {
 		cfg:         cfg,
 		httpClient:  &http.Client{Timeout: 15 * time.Second},
 		accessToken: cfg.AccessToken,
+		baseURL:     baseURL,
 		log:         logger,
 		minInterval: time.Second, // Deezer soft limit: ~50 req/5s
 	}
@@ -369,7 +372,7 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 	}
 	c.lastCall = time.Now()
 
-	u, err := url.Parse(baseURL + "/" + strings.TrimLeft(endpoint, "/"))
+	u, err := url.Parse(c.baseURL + "/" + strings.TrimLeft(endpoint, "/"))
 	if err != nil {
 		c.log.Error("deezer api URL parse failed", "error", err, "endpoint", endpoint, "component", "deezer_api")
 		return nil, err
@@ -405,6 +408,9 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusTooManyRequests {
+			return nil, metadata.NewRateLimitError("deezer", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "API HTTP 429")
+		}
 		c.log.Error("deezer api non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "deezer_api")
 		return nil, fmt.Errorf("deezer API HTTP %d: %s", resp.StatusCode, string(body))
 	}

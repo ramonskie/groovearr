@@ -2,12 +2,15 @@ package tidal
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
 // newTestAPI creates an apiClient wired to a test HTTP server. Base URLs point
@@ -351,6 +354,9 @@ func TestDoRequest429ExhaustsRetries(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "429") {
 		t.Errorf("error = %q, want 429 mention", err)
+	}
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want metadata.ErrRateLimited sentinel", err)
 	}
 	if attempts != 3 {
 		t.Errorf("attempts = %d, want 3", attempts)

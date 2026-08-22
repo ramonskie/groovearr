@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
@@ -39,6 +40,7 @@ type ReleaseImages struct {
 // Rate limited to 5 req/s to be polite to the archive.
 type apiClient struct {
 	httpClient *http.Client
+	baseURL    string
 	log        *slog.Logger
 }
 
@@ -48,7 +50,8 @@ func newAPIClient(log *slog.Logger) *apiClient {
 			Timeout:   15 * time.Second,
 			Transport: ratelimit.NewRateLimitedTransport(http.DefaultTransport, caaRate),
 		},
-		log: log,
+		baseURL: baseURL,
+		log:     log,
 	}
 }
 
@@ -72,7 +75,7 @@ func (c *apiClient) GetReleaseImages(ctx context.Context, mbid string) (*Release
 // ─── Internal HTTP ─────────────────────────────────────────────────────
 
 func (c *apiClient) apiGet(ctx context.Context, path string) (json.RawMessage, error) {
-	u, err := url.Parse(baseURL)
+	u, err := url.Parse(c.baseURL)
 	if err != nil {
 		if c.log != nil {
 			c.log.Error("coverartarchive URL parse failed", "error", err, "component", "caa_api")
@@ -103,6 +106,13 @@ func (c *apiClient) apiGet(ctx context.Context, path string) (json.RawMessage, e
 		return nil, nil
 	}
 	if resp.StatusCode != http.StatusOK {
+		// CAA (Internet Archive) throttles with 429 and can serve 503 while
+		// temporarily offline — both trip the shared rate-limit sentinel so
+		// enrichment cools this provider down instead of blocking on it. Honor
+		// Retry-After when the server supplies it.
+		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
+			return nil, metadata.NewRateLimitError("coverartarchive", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), fmt.Sprintf("HTTP %d", resp.StatusCode))
+		}
 		body, err := io.ReadAll(resp.Body)
 		if err != nil {
 			if c.log != nil {

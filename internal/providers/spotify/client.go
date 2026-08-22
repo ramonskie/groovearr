@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/ratelimit"
 )
 
@@ -25,6 +26,15 @@ const (
 
 	spotifyAPIRate    = 10 // Web API req/s
 	spotifyOEmbedRate = 5  // oembed URL unfurling req/s
+
+	// maxTransientRetryAfter bounds how long a single 429 retry sleeps.
+	// Retry-After values at or below this (a momentary spike) are retried with
+	// a ctx-aware wait; larger values mean the API wants a real backoff and the
+	// request fails fast with metadata.ErrRateLimited so callers (e.g. the
+	// enrichment job) can move on to another provider instead of blocking a
+	// worker. Combined with the ctx-aware wait below, a rate-limited call can
+	// never pin a job worker past its per-track deadline.
+	maxTransientRetryAfter = 5 * time.Second
 )
 
 // SpotifyClient wraps an http.Client with Spotify authentication and rate-limit handling.
@@ -150,14 +160,33 @@ func (t *authTransport) handleUnauthorized(resp *http.Response, originalReq *htt
 	return t.transport.RoundTrip(retryReq)
 }
 
-// handleRateLimit retries the request up to max429Retries times, sleeping
-// according to the Retry-After header before each retry.
+// handleRateLimit retries the request up to max429Retries times for short
+// backoffs (Retry-After ≤ maxTransientRetryAfter). The sleep is
+// context-aware: a cancelled request context (job cancellation, per-track
+// deadline, client timeout) aborts the wait immediately.
+//
+// A long Retry-After (the API wants a real backoff) is NOT retried: the
+// request fails fast with metadata.ErrRateLimited so callers such as the
+// enrichment job can mark this provider cooling down and move on to the next
+// one instead of blocking a worker for minutes.
 func (t *authTransport) handleRateLimit(resp *http.Response, originalReq *http.Request) (*http.Response, error) {
-	for retries := 0; retries < max429Retries; retries++ {
-		retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
-		resp.Body.Close()
+	retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
+	resp.Body.Close()
 
-		time.Sleep(retryAfter)
+	if retryAfter > maxTransientRetryAfter {
+		return nil, metadata.NewRateLimitError("spotify", retryAfter, "")
+	}
+
+	for retries := 0; retries < max429Retries; retries++ {
+		// Abort before sleeping if the request is already done — no point
+		// paying a retry wait for a call nobody is listening for.
+		if err := originalReq.Context().Err(); err != nil {
+			return nil, err
+		}
+
+		if err := sleepContext(originalReq.Context(), retryAfter); err != nil {
+			return nil, err
+		}
 
 		retryReq := cloneRequest(originalReq)
 		t.setHeaders(retryReq)
@@ -174,10 +203,39 @@ func (t *authTransport) handleRateLimit(resp *http.Response, originalReq *http.R
 		if resp.StatusCode != http.StatusTooManyRequests {
 			return resp, nil
 		}
+
+		// Server still rate-limited after a short backoff — surface it rather
+		// than sleeping through another transient window blindly.
+		if retries < max429Retries-1 {
+			retryAfter = parseRetryAfter(resp.Header.Get("Retry-After"))
+			resp.Body.Close()
+			if retryAfter > maxTransientRetryAfter {
+				return nil, metadata.NewRateLimitError("spotify", retryAfter, "")
+			}
+		}
 	}
 
+	// Exhausted retries — capture the final response's Retry-After (when set)
+	// so callers honor the server's requested backoff instead of the default.
+	finalAfter := metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After"))
 	resp.Body.Close()
-	return nil, fmt.Errorf("spotify: rate limit exceeded after %d retries", max429Retries)
+	return nil, metadata.NewRateLimitError("spotify", finalAfter, fmt.Sprintf("rate limit exceeded after %d retries", max429Retries))
+}
+
+// sleepContext sleeps for d, aborting as soon as ctx is done. d is assumed to
+// be at most maxTransientRetryAfter (the caller enforces that). time.Sleep
+// must not be used here: it never observes the context, so http.Client.Do
+// would keep blocking even after the request context and the client's own
+// Timeout both fire.
+func sleepContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────

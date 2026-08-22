@@ -15,6 +15,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
+	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
 // ─── Background jobs ────────────────────────────────────────────────
@@ -96,7 +97,25 @@ func (s *Server) duplicatesRunner(ctx context.Context, report func(jobs.Report))
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		canonical := s.canonicalArtistName(ctx, t.repName)
+		canonical, err := s.lookupCanonicalArtist(ctx, t.repName)
+		if err != nil {
+			// MusicBrainz (the sole canonical-name source) is rate-limited.
+			// Pause ctx-aware so it can recover, then retry this group once so
+			// every group still gets a genuine lookup attempt.
+			if errors.Is(err, metadata.ErrRateLimited) {
+				s.log.Warn("duplicates scan: canonical lookup rate limited, pausing then retrying",
+					"group", t.key, "error", err, "component", "jobs")
+				if !s.pauseForRateLimit(ctx, err) {
+					return ctx.Err()
+				}
+				canonical, err = s.lookupCanonicalArtist(ctx, t.repName)
+				if err != nil && errors.Is(err, metadata.ErrRateLimited) {
+					s.log.Warn("duplicates scan: canonical lookup still rate limited after pause",
+						"group", t.key, "error", err, "component", "jobs")
+					canonical = ""
+				}
+			}
+		}
 		if err := dss.UpsertDuplicateCanonical(ctx, t.key, canonical); err != nil {
 			s.log.Warn("duplicates scan: persist failed", "group", t.key, "error", err, "component", "jobs")
 		}
@@ -255,6 +274,40 @@ func (s *Server) organizeDivergencePossible() bool {
 // for the one interrupted organize.
 func (s *Server) markDivergenceRepairDone() {
 	s.divergenceRepairDone = true
+}
+
+// maxRateLimitPause caps how long the duplicates scan sleeps after a
+// rate-limit response. MusicBrainz's 1 req/s limit self-corrects in a couple
+// of seconds; a larger Retry-After shouldn't stall the whole scan. Var so
+// tests can shrink it.
+var maxRateLimitPause = 10 * time.Second
+
+// defaultRateLimitPause is how long to sleep after a rate-limit response
+// before retrying. Var so tests can shrink it.
+var defaultRateLimitPause = 5 * time.Second
+
+// pauseForRateLimit sleeps after a rate-limit response so the throttled API
+// can recover, honoring the request context (job cancellation aborts the
+// pause). When the error carries a server-requested Retry-After, the pause
+// honors it (bounded by maxRateLimitPause); otherwise the default is used.
+// Returns false when the context was cancelled.
+func (s *Server) pauseForRateLimit(ctx context.Context, err error) bool {
+	d := defaultRateLimitPause
+	var rl *metadata.RateLimitError
+	if errors.As(err, &rl) && rl.RetryAfter > d {
+		d = rl.RetryAfter
+	}
+	if d > maxRateLimitPause {
+		d = maxRateLimitPause
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
 }
 
 // reconcileDivergedPaths runs the moved-but-DB-stale repair when a killed

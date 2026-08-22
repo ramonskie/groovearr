@@ -3,6 +3,7 @@ package musicbrainz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
 func testLogger() *slog.Logger {
@@ -327,6 +330,9 @@ func TestSearchRecording_HTTP503(t *testing.T) {
 	_, err := client.SearchRecording(context.Background(), "Artist", "Title")
 	if err == nil {
 		t.Fatal("expected error for 503, got nil")
+	}
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want metadata.ErrRateLimited sentinel", err)
 	}
 }
 

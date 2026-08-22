@@ -3,6 +3,8 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -10,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/config"
@@ -109,6 +112,9 @@ func (s *stubLibraryStore) DeleteDuplicateCanonical(ctx context.Context, groupKe
 type stubNameProvider struct {
 	name  string // registry name (default "stubmb")
 	names map[string]string
+	err   error        // optional: return this error from CanonicalArtistName
+	fails int          // return err for the first `fails` calls, then succeed
+	left  atomic.Int32 // remaining failures (runtime)
 }
 
 var _ metadata.Provider = (*stubNameProvider)(nil)
@@ -144,6 +150,14 @@ func (p *stubNameProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*met
 	return nil, nil
 }
 func (p *stubNameProvider) CanonicalArtistName(_ context.Context, name string) (string, error) {
+	if p.err != nil {
+		// First `fails` calls return the error, then succeed (simulates a
+		// transient rate limit that recovers).
+		if p.left.Load() < int32(p.fails) {
+			p.left.Add(1)
+			return "", p.err
+		}
+	}
 	return p.names[normalizeKey(name)], nil
 }
 
@@ -542,5 +556,36 @@ func TestLookupCanonicalArtistUnknownReturnsEmpty(t *testing.T) {
 	}
 	if got != "" {
 		t.Errorf("canonical = %q, want empty (unknown to MusicBrainz)", got)
+	}
+}
+
+// TestLookupCanonicalArtistPrefersRateLimit tests that a rate-limit error is
+// returned even when a later provider fails with a generic error. The
+// duplicates scan pauses-and-retries on ErrRateLimited; if the generic error
+// masked it, a throttled MusicBrainz would never get its pause-and-retry.
+func TestLookupCanonicalArtistPrefersRateLimit(t *testing.T) {
+	pluginReg := plugin.NewRegistry()
+	// First provider rate-limits; second fails generically (e.g. timeout).
+	_ = pluginReg.Register(&stubNameProvider{
+		name:  "musicbrainz",
+		err:   metadata.NewRateLimitError("musicbrainz", 0, "HTTP 503"),
+		fails: 1,
+	})
+	_ = pluginReg.Register(&stubNameProvider{
+		name:  "other",
+		err:   fmt.Errorf("network timeout"),
+		fails: 1,
+	})
+	s := &Server{
+		mdRegistry: metadata.NewRegistryFrom(pluginReg),
+		log:        testAPILogger(),
+	}
+
+	_, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	if err == nil {
+		t.Fatal("expected an error")
+	}
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want rate-limit error to win over the generic failure", err)
 	}
 }

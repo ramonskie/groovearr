@@ -3,6 +3,7 @@ package discogs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -171,6 +172,24 @@ func TestPlugin_SearchArtists_Empty(t *testing.T) {
 	}
 	if len(artists) != 0 {
 		t.Errorf("expected 0 artists, got %d", len(artists))
+	}
+}
+
+// TestPlugin_SearchArtists_RateLimited asserts a 429 from Discogs surfaces the
+// shared metadata.ErrRateLimited sentinel so enrichment can cool it down.
+func TestPlugin_SearchArtists_RateLimited(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	p, cleanup := newTestPlugin(t, handler)
+	defer cleanup()
+
+	_, err := p.SearchArtists(context.Background(), "Daft Punk", 10)
+	if err == nil {
+		t.Fatal("expected error for 429, got nil")
+	}
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want metadata.ErrRateLimited sentinel", err)
 	}
 }
 

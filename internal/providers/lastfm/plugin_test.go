@@ -3,6 +3,7 @@ package lastfm
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
@@ -270,6 +271,23 @@ func TestPlugin_SearchArtists(t *testing.T) {
 	// Artist without MBID should fall back to Name as ProviderID.
 	if artists[1].ProviderID != "NoMBID Artist" {
 		t.Errorf("ProviderID = %q, want NoMBID Artist (name fallback)", artists[1].ProviderID)
+	}
+}
+
+// TestPlugin_SearchArtists_RateLimited asserts a 429 from Last.fm surfaces the
+// shared metadata.ErrRateLimited sentinel so enrichment can cool it down.
+func TestPlugin_SearchArtists_RateLimited(t *testing.T) {
+	p, cleanup := newTestPlugin(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	defer cleanup()
+
+	_, err := p.SearchArtists(context.Background(), "Daft Punk", 10)
+	if err == nil {
+		t.Fatal("expected error for 429, got nil")
+	}
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v, want metadata.ErrRateLimited sentinel", err)
 	}
 }
 

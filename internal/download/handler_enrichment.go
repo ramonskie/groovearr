@@ -45,6 +45,14 @@ type MetadataEnrichmentHandler struct {
 
 	imageMu        sync.Mutex
 	imageAttempted map[int64]time.Time // artistID → last image attempt, TTL-gated
+
+	// providerCooldown is the shared per-provider rate-limit cooldown. When a
+	// provider returns metadata.ErrRateLimited (e.g. a 429 with a long
+	// Retry-After), it is skipped for ProviderRateLimitCooldown so the
+	// enrichment loop moves on to the next provider instead of hammering a
+	// throttled API on every track. Cleared each bulk run via ResetBulk so a
+	// fresh job re-attempts everyone.
+	providerCooldown *metadata.ProviderCooldown
 }
 
 // artistImageRetryTTL bounds how often a given artist's image is searched on
@@ -73,13 +81,14 @@ func NewMetadataEnrichmentHandler(registry *metadata.Registry, discoveryReg *dis
 		logger = slog.Default()
 	}
 	return &MetadataEnrichmentHandler{
-		log:            logger,
-		registry:       registry,
-		discoveryReg:   discoveryReg,
-		libStore:       libStore,
-		httpClient:     &http.Client{Timeout: 30 * time.Second},
-		tagger:         tagging.New(logger),
-		imageAttempted: make(map[int64]time.Time),
+		log:              logger,
+		registry:         registry,
+		discoveryReg:     discoveryReg,
+		libStore:         libStore,
+		httpClient:       &http.Client{Timeout: 30 * time.Second},
+		tagger:           tagging.New(logger),
+		imageAttempted:   make(map[int64]time.Time),
+		providerCooldown: metadata.NewProviderCooldown(),
 	}
 }
 
@@ -90,6 +99,17 @@ func (h *MetadataEnrichmentHandler) SetProviderOrder(order *metadata.ProviderOrd
 	h.providerOrder = order
 }
 
+// SetProviderCooldown replaces the default (self-contained) cooldown with a
+// shared app-wide instance, so a rate limit observed by enrichment also cools
+// the provider for album discovery and discover search. Pass nil to keep the
+// default.
+func (h *MetadataEnrichmentHandler) SetProviderCooldown(c *metadata.ProviderCooldown) {
+	if c == nil {
+		return
+	}
+	h.providerCooldown = c
+}
+
 // EnrichLibraryTrack runs the full metadata enrichment for an existing library
 // track, without a download record. Used by the background enrichment job to
 // enrich a scanned library. Missing metadata fields are filled in; existing
@@ -98,13 +118,72 @@ func (h *MetadataEnrichmentHandler) EnrichLibraryTrack(ctx context.Context, trac
 	return h.enrichTrack(ctx, &Record{LibraryTrackID: trackID}, true)
 }
 
-// ResetBulk clears the artist-image retry dedup state. Call once at the
-// start of each bulk enrichment job: a bulk run is an explicit full-library
-// refresh, so every artist is retried rather than waiting out the TTL.
+// ResetBulk clears the artist-image retry dedup state and the per-provider
+// rate-limit cooldown. Call once at the start of each bulk enrichment job: a
+// bulk run is an explicit full-library refresh, so every artist is retried
+// rather than waiting out the TTL, and every provider is re-attempted rather
+// than staying in cooldown from a previous run.
+//
+// Note: the cooldown is shared app-wide (enrichment + discover search + album
+// discovery), so this also clears cooldown marks the API layer set moments
+// earlier. That is intentional — a fresh bulk job re-attempts everyone; if a
+// provider is still throttled it is re-marked on the first 429 and the cost is
+// a single extra request.
 func (h *MetadataEnrichmentHandler) ResetBulk() {
 	h.imageMu.Lock()
-	defer h.imageMu.Unlock()
 	h.imageAttempted = make(map[int64]time.Time)
+	h.imageMu.Unlock()
+	h.providerCooldown.Reset()
+}
+
+// providerCoolingDown reports whether the named provider is currently skipped
+// due to a recent rate-limit response.
+func (h *MetadataEnrichmentHandler) providerCoolingDown(name string) bool {
+	return h.providerCooldown.CoolingDown(name)
+}
+
+// markProviderRateLimited puts the named provider in cooldown so subsequent
+// tracks in this job skip it and move on to the next provider. When the
+// server supplied a Retry-After (via metadata.RateLimitError), the cooldown
+// honors it — capped so one bad header can't park the provider for the rest
+// of the job.
+func (h *MetadataEnrichmentHandler) markProviderRateLimited(name string, retryAfter time.Duration) {
+	h.providerCooldown.MarkAfter(name, retryAfter)
+}
+
+// noteProviderError inspects a provider call error. Rate-limit errors put the
+// provider in cooldown, log the cooling-down event, and return true so the
+// caller can abort the current provider's remaining work; all other errors
+// return false and are handled by the caller as before.
+func (h *MetadataEnrichmentHandler) noteProviderError(p metadata.Provider, err error) bool {
+	if err == nil || !errors.Is(err, metadata.ErrRateLimited) {
+		return false
+	}
+	h.markProviderRateLimited(p.Name(), retryAfterOf(err))
+	h.log.Warn("provider rate limited, cooling down", "provider", p.Name(), "error", err, "component", "enrichment")
+	return true
+}
+
+// noteDiscoveryError is the discovery-path variant of noteProviderError.
+// Discovery providers only expose a name, but the cooldown map is keyed by
+// provider name, so the same skip applies to both metadata and discovery uses.
+func (h *MetadataEnrichmentHandler) noteDiscoveryError(p discovery.Provider, err error) bool {
+	if err == nil || !errors.Is(err, metadata.ErrRateLimited) {
+		return false
+	}
+	h.markProviderRateLimited(p.Name(), retryAfterOf(err))
+	h.log.Warn("discovery provider rate limited, cooling down", "provider", p.Name(), "error", err, "component", "enrichment")
+	return true
+}
+
+// retryAfterOf extracts the server-requested backoff from a rate-limit error.
+// Returns 0 for plain sentinels or errors without Retry-After info.
+func retryAfterOf(err error) time.Duration {
+	var rl *metadata.RateLimitError
+	if errors.As(err, &rl) {
+		return rl.RetryAfter
+	}
+	return 0
 }
 
 // imageAttemptedRecently reports whether the artist's image was searched
@@ -236,7 +315,7 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 			// remain, fetched at most once per artist per retry window.
 			if artist.ThumbURL == "" && !skipArtistImage && h.discoveryReg != nil &&
 				h.markImageAttemptDue(track.ArtistID, time.Now()) {
-				h.enrichArtistImage(ctx, artist, track)
+				h.enrichArtistImage(ctx, artist, track, true)
 			}
 			return nil
 		}
@@ -277,7 +356,16 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 		if err := provCtx.Err(); err != nil {
 			break
 		}
-		if tMod, aMod := h.enrichFromProvider(provCtx, p, artist, album, track, record); tMod || aMod {
+		// Bulk job only: skip a provider that recently rate-limited us — move on
+		// to the next one instead of hammering a throttled API on every track.
+		// The cooldown is set inside enrichFromProvider when it sees
+		// metadata.ErrRateLimited. The per-download path intentionally runs
+		// every provider (bulk=false), so it is never gated here.
+		if bulk && h.providerCoolingDown(p.Name()) {
+			h.log.Debug("provider cooling down, skipping", "provider", p.Name(), "track_id", track.ID, "album_id", album.ID, "component", "enrichment")
+			continue
+		}
+		if tMod, aMod := h.enrichFromProvider(provCtx, p, artist, album, track, record, bulk); tMod || aMod {
 			if tMod {
 				trackModified = true
 			}
@@ -323,7 +411,7 @@ func (h *MetadataEnrichmentHandler) enrichTrack(ctx context.Context, record *Rec
 	// completed into a timeout — the timeout outcome reflects the provider
 	// pass only.
 	if !timedOut && h.discoveryReg != nil && !skipArtistImage && h.markImageAttemptDue(track.ArtistID, time.Now()) {
-		h.enrichArtistImage(provCtx, artist, track)
+		h.enrichArtistImage(provCtx, artist, track, bulk)
 	}
 
 	// ── Sync thumb_url with on-disk cover (run once after all providers) ─
@@ -501,7 +589,9 @@ func (h *MetadataEnrichmentHandler) downloadArtistImage(ctx context.Context, art
 // providers (Deezer, Spotify, etc.). Runs after metadata enrichment so wrong or
 // stale images get corrected on re-import. Callers gate this via the TTL-based
 // markImageAttemptDue, so it runs at most once per artist per retry window.
-func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artist *domain.Artist, track *domain.Track) {
+// The per-provider rate-limit cooldown is only applied in bulk mode (bulk=true);
+// the per-download path tries every discovery provider every time.
+func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artist *domain.Artist, track *domain.Track, bulk bool) {
 	providers := h.discoveryReg.Any()
 	if len(providers) == 0 {
 		return
@@ -514,8 +604,17 @@ func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artis
 
 	for _, tryName := range namesToTry {
 		for _, p := range providers {
+			// Bulk job only: skip a discovery provider that recently
+			// rate-limited us — try the next one instead of hammering a
+			// throttled API.
+			if bulk && h.providerCoolingDown(p.Name()) {
+				continue
+			}
 			results, err := p.SearchArtists(ctx, tryName, 1)
 			if err != nil {
+				if bulk {
+					h.noteDiscoveryError(p, err)
+				}
 				h.log.Debug("discovery artist search failed",
 					"provider", p.Name(), "artist", tryName, "error", err, "component", "enrichment")
 				continue
@@ -548,7 +647,9 @@ var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
 
 // enrichFromProvider runs album title resolution, cover art download, and track
 // metadata enrichment for a single provider. Returns whether track or album was
-// modified so the caller can persist changes.
+// modified so the caller can persist changes. Rate-limit responses are only
+// recorded as cooldowns in bulk mode (bulk=true): the per-download path
+// intentionally tries every provider for every track.
 func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	ctx context.Context,
 	p metadata.Provider,
@@ -556,6 +657,7 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	album *domain.Album,
 	track *domain.Track,
 	record *Record,
+	bulk bool,
 ) (trackModified, albumModified bool) {
 	// Album title resolution (when missing).
 	// Try full artist first, then primary artist fallback for comma-separated
@@ -578,10 +680,18 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 		return // can't search for cover without an album name
 	}
 	if !library.HasCoverFile(library.AlbumDirFromTrack(track.FilePath)) {
-		if cover, err := p.SearchCover(ctx, artist.Name, album.Title); err == nil && cover != nil {
+		cover, err := p.SearchCover(ctx, artist.Name, album.Title)
+		if bulk && h.noteProviderError(p, err) {
+			return // rate limited — stop using this provider for this track
+		}
+		if err == nil && cover != nil {
 			h.downloadCoverIfMissing(ctx, album, cover)
 		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
-			if cover2, err2 := p.SearchCover(ctx, primary, album.Title); err2 == nil && cover2 != nil {
+			cover2, err2 := p.SearchCover(ctx, primary, album.Title)
+			if bulk && h.noteProviderError(p, err2) {
+				return
+			}
+			if err2 == nil && cover2 != nil {
 				h.downloadCoverIfMissing(ctx, album, cover2)
 			}
 		}
@@ -598,6 +708,8 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 			if mbid != "" {
 				if cover, err := caa.SearchCoverByMBID(ctx, mbid); err == nil && cover != nil {
 					h.downloadCoverIfMissing(ctx, album, cover)
+				} else if bulk && h.noteProviderError(p, err) {
+					return
 				}
 			}
 		}
@@ -606,6 +718,9 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	// Track enrichment.
 	meta, err := p.EnrichTrack(ctx, track)
 	if err != nil {
+		if bulk && h.noteProviderError(p, err) {
+			return // rate limited — helper logged the cooldown
+		}
 		h.log.Warn("enrich track error", "provider", p.Name(), "error", err, "component", "enrichment")
 		return
 	}

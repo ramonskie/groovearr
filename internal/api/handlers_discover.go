@@ -54,13 +54,39 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 	if len(providers) == 0 {
 		providers = s.discoveryReg.Any() // fallback: use any configured provider
 	}
+	// Drop providers still in rate-limit cooldown — they would just fail again.
+	// Track whether any were dropped so the empty result is explainable.
+	cooledDown := false
+	if len(providers) > 0 {
+		active := providers[:0]
+		for _, p := range providers {
+			if s.providerCooldown.CoolingDown(p.Name()) {
+				cooledDown = true
+				continue
+			}
+			active = append(active, p)
+		}
+		providers = active
+	}
 	if len(providers) == 0 {
-		s.log.Warn("discover search: no discovery providers found",
-			"component", "discover")
-		writeJSON(w, http.StatusOK, map[string]any{
-			"artists": []discovery.ArtistSummary{},
-			"albums":  []discovery.AlbumResult{},
-		})
+		if cooledDown {
+			// 503 (not 429): the client isn't throttled — the upstream
+			// providers are. 429 would read as "slow down" to the caller.
+			s.log.Warn("discover search: all providers cooling down",
+				"component", "discover")
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{
+				"error":   "all discovery providers are rate-limited, retry shortly",
+				"artists": []discovery.ArtistSummary{},
+				"albums":  []discovery.AlbumResult{},
+			})
+		} else {
+			s.log.Warn("discover search: no discovery providers found",
+				"component", "discover")
+			writeJSON(w, http.StatusOK, map[string]any{
+				"artists": []discovery.ArtistSummary{},
+				"albums":  []discovery.AlbumResult{},
+			})
+		}
 		return
 	}
 
@@ -86,6 +112,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 			if searchType == "" || searchType == "artist" {
 				a, err := provider.SearchArtists(ctx, q, 10)
 				if err != nil {
+					s.noteProviderRateLimit(provider.Name(), err)
 					s.log.Warn("discover search artists error",
 						"provider", provider.Name(), "error", err, "component", "discover")
 					results[idx].err = err
@@ -95,6 +122,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 			if searchType == "" || searchType == "album" {
 				a, err := provider.SearchAlbums(ctx, q, 10)
 				if err != nil {
+					s.noteProviderRateLimit(provider.Name(), err)
 					s.log.Warn("discover search albums error",
 						"provider", provider.Name(), "error", err, "component", "discover")
 					if results[idx].err == nil {

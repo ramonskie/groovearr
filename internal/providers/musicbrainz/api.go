@@ -3,7 +3,6 @@ package musicbrainz
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,13 +12,11 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/strutil"
 )
 
 const defaultBaseURL = "https://musicbrainz.org/ws/2"
-
-// ErrRateLimited is returned when MusicBrainz responds with HTTP 503.
-var ErrRateLimited = errors.New("musicbrainz: rate limited")
 
 // ─── Public types ──────────────────────────────────────────────────────
 
@@ -549,8 +546,10 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 		return nil, nil // not found is not an error
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
+		// MusicBrainz signals rate limiting with 503 (not 429). Honor
+		// Retry-After when present; the cooldown fallback covers absence.
 		c.log.Warn("musicbrainz rate limited", "path", path, "component", "musicbrainz_api")
-		return nil, ErrRateLimited
+		return nil, metadata.NewRateLimitError("musicbrainz", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "HTTP 503")
 	}
 	if resp.StatusCode != http.StatusOK {
 		c.log.Error("musicbrainz non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "musicbrainz_api")
