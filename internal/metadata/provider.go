@@ -40,6 +40,12 @@ func (e *RateLimitError) Error() string { return e.err.Error() }
 // Unwrap exposes the wrapped sentinel so errors.Is matches ErrRateLimited.
 func (e *RateLimitError) Unwrap() error { return e.err }
 
+// RateLimitBackoff returns the server-requested backoff (0 when unknown).
+// Exposes the RetryAfter field through a method so packages that cannot import
+// metadata (e.g. plugin) can detect a rate-limit error via interface
+// assertion and honor the same backoff.
+func (e *RateLimitError) RateLimitBackoff() time.Duration { return e.RetryAfter }
+
 // NewRateLimitError wraps the sentinel with the provider's message and an
 // optional server-requested backoff (0 when the header was absent). The
 // sentinel already reads "provider rate limited", so the message carries only
