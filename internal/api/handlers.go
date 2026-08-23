@@ -135,6 +135,8 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 
 	// API routes.
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	mux.HandleFunc("GET /api/rate-limits", s.handleRateLimits)
+	mux.HandleFunc("DELETE /api/rate-limits/{provider}", s.handleClearRateLimit)
 	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
 	mux.Handle("POST /api/login", withRateLimit("login", s.rateLimiter, http.HandlerFunc(s.handleLogin)))
 	mux.HandleFunc("POST /api/logout", s.handleLogout)
@@ -417,6 +419,32 @@ func withCORS(next http.Handler) http.Handler {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// handleRateLimits reports active provider cooldowns and recent rate-limit
+// events for observability (debug endpoint).
+func (s *Server) handleRateLimits(w http.ResponseWriter, r *http.Request) {
+	cooldowns, events := s.providerCooldown.Status()
+	writeJSON(w, http.StatusOK, map[string]any{
+		"cooldowns": cooldowns,
+		"events":    events,
+	})
+}
+
+// handleClearRateLimit removes a provider's cooldown manually (escape hatch
+// for a provider parked by a long or malformed Retry-After).
+func (s *Server) handleClearRateLimit(w http.ResponseWriter, r *http.Request) {
+	provider := r.PathValue("provider")
+	if provider == "" {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "provider required"})
+		return
+	}
+	removed := s.providerCooldown.Clear(provider)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status":   "ok",
+		"provider": provider,
+		"removed":  removed,
+	})
 }
 
 // handleSetupStatus reports whether the first-run setup wizard should be shown.
