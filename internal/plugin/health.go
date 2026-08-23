@@ -3,6 +3,7 @@ package plugin
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -24,6 +25,33 @@ type metadataAvailable interface {
 	IsMetadataAvailable() bool
 }
 
+// CooldownSource reports whether a named provider is currently cooling down
+// from a rate-limit response, and lets callers re-mark it. Implemented by
+// *metadata.ProviderCooldown; declared here as an interface so plugin does not
+// import metadata (metadata imports plugin for BasePlugin).
+type CooldownSource interface {
+	CoolingDown(name string) bool
+	MarkAfter(name string, retryAfter time.Duration)
+}
+
+// rateLimitedBackoffer is implemented by errors that carry a server-requested
+// backoff (e.g. *metadata.RateLimitError). Declared as an interface so plugin
+// can detect a rate-limit error without importing metadata.
+type rateLimitedBackoffer interface {
+	RateLimitBackoff() time.Duration
+}
+
+// rateLimitBackoffOf returns the server-requested backoff for a rate-limit
+// error, or nil when err is not a rate-limit error.
+func rateLimitBackoffOf(err error) *time.Duration {
+	var rl rateLimitedBackoffer
+	if errors.As(err, &rl) {
+		d := rl.RateLimitBackoff()
+		return &d
+	}
+	return nil
+}
+
 // HealthChecker periodically verifies plugin connectivity by calling
 // CheckConnection on each registered plugin. Results are reported via
 // the plugin's Connected() method (which providers implement as an
@@ -32,6 +60,12 @@ type HealthChecker struct {
 	registry *Registry
 	log      *slog.Logger
 	interval time.Duration
+
+	// cooldown is the shared provider rate-limit bucket. When set, a provider
+	// currently cooling down is not probed: re-probing a throttled API would
+	// go around the server-requested backoff and can re-arm a longer 429.
+	// The previous status is kept so the provider isn't shown as disconnected.
+	cooldown CooldownSource
 
 	mu     sync.RWMutex
 	status map[string]HealthStatus // latest result per plugin
@@ -60,6 +94,14 @@ func (h *HealthChecker) Start(ctx context.Context) {
 // Shutdown stops the background health check loop.
 func (h *HealthChecker) Shutdown() {
 	// Cancellation handled via the context passed to Start.
+}
+
+// SetProviderCooldown wires the shared provider rate-limit cooldown so the
+// periodic probe skips providers currently cooling down. Pass nil to disable.
+func (h *HealthChecker) SetProviderCooldown(c CooldownSource) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.cooldown = c
 }
 
 // CheckNow runs a health check on all registered plugins immediately.
@@ -127,9 +169,50 @@ func (h *HealthChecker) checkOne(ctx context.Context, p BasePlugin) {
 		return
 	}
 
+	h.mu.RLock()
+	cooldown := h.cooldown
+	h.mu.RUnlock()
+
+	// Respect the shared provider rate-limit cooldown: a provider that
+	// recently rate-limited must not be probed — re-probing it would go
+	// around the server-requested backoff and can re-arm a longer 429.
+	// Skip the probe and keep the previous status.
+	if cooldown != nil && cooldown.CoolingDown(p.Name()) {
+		h.log.Debug("health check skipped: provider cooling down",
+			"plugin", p.Name(),
+			"component", "health",
+		)
+		return
+	}
+
 	start := time.Now()
 	err := p.CheckConnection(ctx)
 	elapsed := time.Since(start)
+
+	// A probe that returns a rate-limit error re-marks the shared cooldown so
+	// the next probe is skipped instead of re-arming a longer backoff. A 429 is
+	// evidence the API is reachable — record it as connected (with the backoff
+	// noted) rather than keeping a stale disconnected status for the whole
+	// cooldown.
+	if cooldown != nil {
+		if ra := rateLimitBackoffOf(err); ra != nil {
+			cooldown.MarkAfter(p.Name(), *ra)
+			h.log.Warn("health probe rate limited, re-marking cooldown",
+				"plugin", p.Name(),
+				"retry_after", *ra,
+				"component", "health",
+			)
+			h.mu.Lock()
+			h.status[p.Name()] = HealthStatus{
+				Name:      p.Name(),
+				Connected: true,
+				Error:     "rate limited (retry after " + ra.String() + ")",
+				CheckedAt: time.Now(),
+			}
+			h.mu.Unlock()
+			return
+		}
+	}
 
 	hs := HealthStatus{
 		Name:      p.Name(),

@@ -50,8 +50,8 @@ type MetadataEnrichmentHandler struct {
 	// provider returns metadata.ErrRateLimited (e.g. a 429 with a long
 	// Retry-After), it is skipped for ProviderRateLimitCooldown so the
 	// enrichment loop moves on to the next provider instead of hammering a
-	// throttled API on every track. Cleared each bulk run via ResetBulk so a
-	// fresh job re-attempts everyone.
+	// throttled API on every track. Shared app-wide and never wiped between
+	// runs — a fresh bulk job must not go around a server-requested backoff.
 	providerCooldown *metadata.ProviderCooldown
 }
 
@@ -118,22 +118,21 @@ func (h *MetadataEnrichmentHandler) EnrichLibraryTrack(ctx context.Context, trac
 	return h.enrichTrack(ctx, &Record{LibraryTrackID: trackID}, true)
 }
 
-// ResetBulk clears the artist-image retry dedup state and the per-provider
-// rate-limit cooldown. Call once at the start of each bulk enrichment job: a
-// bulk run is an explicit full-library refresh, so every artist is retried
-// rather than waiting out the TTL, and every provider is re-attempted rather
-// than staying in cooldown from a previous run.
+// ResetBulk clears the artist-image retry dedup state. Call once at the
+// start of each bulk enrichment job: a bulk run is an explicit full-library
+// refresh, so every artist's image is retried rather than waiting out the
+// TTL.
 //
-// Note: the cooldown is shared app-wide (enrichment + discover search + album
-// discovery), so this also clears cooldown marks the API layer set moments
-// earlier. That is intentional — a fresh bulk job re-attempts everyone; if a
-// provider is still throttled it is re-marked on the first 429 and the cost is
-// a single extra request.
+// The per-provider rate-limit cooldown is intentionally NOT cleared here. It
+// is a single shared app-wide bucket (enrichment + discover search + album
+// discovery + health checks): wiping it on every run would go around the
+// server-requested backoff and re-arm a longer Retry-After on the first 429
+// of the new run. A provider still in cooldown is skipped until its backoff
+// expires; if it returns another 429 it is simply re-marked.
 func (h *MetadataEnrichmentHandler) ResetBulk() {
 	h.imageMu.Lock()
+	defer h.imageMu.Unlock()
 	h.imageAttempted = make(map[int64]time.Time)
-	h.imageMu.Unlock()
-	h.providerCooldown.Reset()
 }
 
 // providerCoolingDown reports whether the named provider is currently skipped

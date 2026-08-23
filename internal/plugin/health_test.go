@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 type stubPlugin struct {
@@ -28,6 +29,39 @@ func (s *stubPlugin) CheckConnection(context.Context) error {
 }
 func (s *stubPlugin) Connected() bool                     { return s.checkErr == nil }
 func (s *stubPlugin) CapabilityStatus() map[string]string { return nil }
+
+// stubCooldown is a minimal CooldownSource for tests.
+type stubCooldown struct {
+	cooling []string
+	marked  map[string]time.Duration
+}
+
+func (c *stubCooldown) CoolingDown(name string) bool {
+	for _, n := range c.cooling {
+		if n == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *stubCooldown) MarkAfter(name string, retryAfter time.Duration) {
+	if c.marked == nil {
+		c.marked = make(map[string]time.Duration)
+	}
+	c.marked[name] = retryAfter
+	// Model ProviderCooldown semantics: a mark puts the provider in cooldown.
+	if !c.CoolingDown(name) {
+		c.cooling = append(c.cooling, name)
+	}
+}
+
+// stubRateLimitedError implements rateLimitedBackoffer for tests.
+type stubRateLimitedError struct{ backoff time.Duration }
+
+func (e *stubRateLimitedError) Error() string             { return "provider rate limited: stub" }
+func (e *stubRateLimitedError) Unwrap() error             { return errors.New("provider rate limited") }
+func (e *stubRateLimitedError) RateLimitBackoff() time.Duration { return e.backoff }
 
 func newStub(name string, configured, metaAvailable bool) *stubPlugin {
 	return &stubPlugin{name: name, configured: configured, metaAvailable: metaAvailable, enabled: true}
@@ -101,5 +135,129 @@ func TestHealthCheckerSkipsDisabledPlugins(t *testing.T) {
 	h.CheckNow(context.Background())
 	if p.checks.Load() != 0 {
 		t.Errorf("disabled plugin checks = %d, want 0", p.checks.Load())
+	}
+}
+
+// TestHealthCheckerCooldownSkipsOnlyCooledProviders verifies the shared
+// rate-limit cooldown is honored: a provider cooling down is not probed (so a
+// 429 backoff is not re-armed), while non-cooled providers still are.
+func TestHealthCheckerCooldownSkipsOnlyCooledProviders(t *testing.T) {
+	cooled := newStub("cooled", true, false)
+	normal := newStub("normal", true, false)
+
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	h.SetProviderCooldown(&stubCooldown{cooling: []string{"cooled"}})
+	for _, p := range []*stubPlugin{cooled, normal} {
+		if err := h.registry.Register(p); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+
+	h.CheckNow(context.Background())
+
+	if cooled.checks.Load() != 0 {
+		t.Errorf("cooled plugin checks = %d, want 0 (must skip probe)", cooled.checks.Load())
+	}
+	if normal.checks.Load() != 1 {
+		t.Errorf("normal plugin checks = %d, want 1", normal.checks.Load())
+	}
+	// Skipped probe must not write a status entry — the previous status is kept.
+	if st := h.StatusOf("cooled"); st != nil {
+		t.Errorf("skipped probe should not set status, got %+v", st)
+	}
+}
+
+// TestHealthCheckerNilCooldownProbesAll verifies a nil cooldown (not wired)
+// leaves the probe behavior unchanged.
+func TestHealthCheckerNilCooldownProbesAll(t *testing.T) {
+	p := newStub("nocd", true, false)
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	if err := h.registry.Register(p); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h.CheckNow(context.Background())
+	if p.checks.Load() != 1 {
+		t.Errorf("plugin checks = %d, want 1 (nil cooldown must not skip)", p.checks.Load())
+	}
+}
+
+// TestHealthCheckerCooldownKeepsLastStatus verifies the "keep last status"
+// contract: after a successful probe, a provider entering cooldown has its
+// next probe skipped and the previous status preserved.
+func TestHealthCheckerCooldownKeepsLastStatus(t *testing.T) {
+	p := newStub("cooled", true, false)
+	cd := &stubCooldown{}
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	h.SetProviderCooldown(cd)
+	if err := h.registry.Register(p); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	// First probe succeeds and records a connected status.
+	h.CheckNow(context.Background())
+	if p.checks.Load() != 1 {
+		t.Fatalf("plugin checks = %d, want 1 after first probe", p.checks.Load())
+	}
+	if st := h.StatusOf("cooled"); st == nil || !st.Connected {
+		t.Fatalf("expected connected status after first probe, got %+v", st)
+	}
+
+	// Provider enters cooldown: next probe is skipped, old status kept.
+	cd.cooling = []string{"cooled"}
+	h.CheckNow(context.Background())
+	if p.checks.Load() != 1 {
+		t.Errorf("plugin checks = %d, want 1 (probe skipped during cooldown)", p.checks.Load())
+	}
+	if st := h.StatusOf("cooled"); st == nil || !st.Connected {
+		t.Errorf("previous status must be kept during cooldown, got %+v", st)
+	}
+}
+
+// TestHealthCheckerRateLimitRemarksCooldown verifies a probe returning a
+// rate-limit error re-marks the shared cooldown so the next probe is skipped
+// instead of re-arming a longer backoff.
+func TestHealthCheckerRateLimitRemarksCooldown(t *testing.T) {
+	p := newStub("rl", true, false)
+	p.checkErr = &stubRateLimitedError{backoff: 7 * time.Minute}
+	cd := &stubCooldown{}
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	h.SetProviderCooldown(cd)
+	if err := h.registry.Register(p); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h.CheckNow(context.Background())
+	if got := cd.marked["rl"]; got != 7*time.Minute {
+		t.Errorf("cooldown mark = %v, want 7m", got)
+	}
+	// A rate-limited probe is reachable (it answered 429) — it is recorded as
+	// connected, not disconnected.
+	st := h.StatusOf("rl")
+	if st == nil || !st.Connected {
+		t.Fatalf("rate-limited probe should record connected status, got %+v", st)
+	}
+
+	// Provider is now cooling down — the next probe is skipped.
+	h.CheckNow(context.Background())
+	if p.checks.Load() != 1 {
+		t.Errorf("plugin checks = %d, want 1 (second probe skipped)", p.checks.Load())
+	}
+}
+
+// TestHealthCheckerNonRateLimitErrorDoesNotMark verifies a probe failure that
+// is not a rate-limit error leaves the cooldown untouched.
+func TestHealthCheckerNonRateLimitErrorDoesNotMark(t *testing.T) {
+	p := newStub("down", true, false)
+	p.checkErr = errors.New("unreachable")
+	cd := &stubCooldown{}
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	h.SetProviderCooldown(cd)
+	if err := h.registry.Register(p); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+
+	h.CheckNow(context.Background())
+	if _, ok := cd.marked["down"]; ok {
+		t.Errorf("non-rate-limit failure must not mark cooldown, got %v", cd.marked)
 	}
 }

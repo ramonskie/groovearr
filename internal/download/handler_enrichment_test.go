@@ -704,10 +704,11 @@ func TestBulkEnrichSkipsRateLimitedProvider(t *testing.T) {
 	}
 }
 
-// TestBulkEnrichResetBulkClearsRateLimitCooldown verifies that ResetBulk
-// clears the per-provider cooldown so a fresh run re-attempts a provider that
-// was rate-limited in a previous run.
-func TestBulkEnrichResetBulkClearsRateLimitCooldown(t *testing.T) {
+// TestBulkEnrichResetBulkPreservesRateLimitCooldown verifies that ResetBulk
+// does NOT clear the per-provider cooldown: a provider rate-limited in a
+// previous run stays cooling down across bulk runs, so the app honors the
+// server's backoff instead of re-hammering a throttled API on each run.
+func TestBulkEnrichResetBulkPreservesRateLimitCooldown(t *testing.T) {
 	trackPath := filepath.Join(t.TempDir(), "test.mp3")
 
 	reg := metadata.NewRegistry()
@@ -748,14 +749,17 @@ func TestBulkEnrichResetBulkClearsRateLimitCooldown(t *testing.T) {
 		t.Fatalf("rate-limited provider calls = %d, want 1 before reset", rlCalls)
 	}
 
-	// Simulate the next bulk job: ResetBulk clears the cooldown, so the
-	// provider is re-attempted.
+	// Simulate the next bulk job: ResetBulk must NOT clear the cooldown, so
+	// the rate-limited provider stays skipped and only the backup is called.
 	handler.ResetBulk()
 	if err := handler.EnrichLibraryTrack(context.Background(), 1); err != nil {
 		t.Fatalf("second run: unexpected error: %v", err)
 	}
-	if rlCalls != 2 {
-		t.Errorf("rate-limited provider calls = %d, want 2 (ResetBulk cleared cooldown)", rlCalls)
+	if rlCalls != 1 {
+		t.Errorf("rate-limited provider calls = %d, want 1 (ResetBulk must not clear cooldown)", rlCalls)
+	}
+	if backupCalls != 2 {
+		t.Errorf("backup provider calls = %d, want 2 (still consulted on 2nd run)", backupCalls)
 	}
 }
 

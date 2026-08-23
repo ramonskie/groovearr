@@ -23,6 +23,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
 	"github.com/ramonskie/groovearr/internal/logger"
 	"github.com/ramonskie/groovearr/internal/metadata"
+	mdsqlite "github.com/ramonskie/groovearr/internal/metadata/sqlite"
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	coverartarchive "github.com/ramonskie/groovearr/internal/providers/coverartarchive"
@@ -118,6 +119,14 @@ func NewApp(configPath string) (*App, error) {
 	// Download store (SQLite — shares the library db connection).
 	dlStore := dlsqlite.New(libStore.DB(), log)
 
+	// Metadata rate-limit store (SQLite — persists cooldowns + events so a
+	// long server-requested backoff survives a restart).
+	mdRateStore, err := mdsqlite.NewStore(libStore.DB(), log)
+	if err != nil {
+		log.Warn("metadata rate-limit store init failed (cooldowns won't persist)", "error", err, "component", "main")
+		mdRateStore = nil
+	}
+
 	// Plugin registry.
 	pluginReg := plugin.NewRegistry()
 
@@ -172,8 +181,22 @@ func NewApp(configPath string) (*App, error) {
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
 	metadataResolver.SetProviderOrder(metadataOrder)
 
+	// Single shared provider rate-limit cooldown — one bucket for the whole
+	// app. A 429 observed by enrichment, discover search or album discovery
+	// parks the provider for everyone until the server-requested backoff
+	// expires. The health checker consumes the same bucket — it skips
+	// cooling-down providers and re-marks it when its own probe is
+	// rate-limited — so it never probes a throttled API. Marks persist to the
+	// SQLite store so a long backoff survives a restart.
+	providerCooldown := metadata.NewProviderCooldown()
+	if mdRateStore != nil {
+		providerCooldown.SetStore(mdRateStore)
+		providerCooldown.Restore()
+	}
+
 	// Plugin health checker.
 	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, log)
+	healthChecker.SetProviderCooldown(providerCooldown)
 	healthChecker.Start(context.Background())
 
 	// Event bus.
@@ -229,7 +252,6 @@ func NewApp(configPath string) (*App, error) {
 	logTailer.Start(bgCtx)
 
 	// Import handler chain.
-	providerCooldown := metadata.NewProviderCooldown()
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
 	enrichmentHandler.SetProviderCooldown(providerCooldown)
 	enrichmentHandler.SetProviderOrder(metadataOrder)
