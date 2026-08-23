@@ -24,7 +24,7 @@ const (
 	userAgent      = "groovearr/1.0"
 	defaultTimeout = 30 * time.Second
 
-	spotifyAPIRate    = 10 // Web API req/s
+	spotifyAPIRate    = 2  // Web API req/s — SoulSync paces ~2.85/s in production; stay under it
 	spotifyOEmbedRate = 5  // oembed URL unfurling req/s
 
 	// maxTransientRetryAfter bounds how long a single 429 retry sleeps.

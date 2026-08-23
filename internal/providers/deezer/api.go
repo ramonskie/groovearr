@@ -411,6 +411,16 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return nil, metadata.NewRateLimitError("deezer", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "API HTTP 429")
 		}
+		// Some gateways return a non-200 (e.g. 403) carrying the same quota
+		// JSON error body — surface quota codes before the generic error.
+		var errBody struct {
+			Error struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if json.Unmarshal(body, &errBody) == nil && (errBody.Error.Code == 4 || errBody.Error.Code == 700) {
+			return nil, metadata.NewRateLimitError("deezer", 0, fmt.Sprintf("API quota error code %d on HTTP %d", errBody.Error.Code, resp.StatusCode))
+		}
 		c.log.Error("deezer api non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "deezer_api")
 		return nil, fmt.Errorf("deezer API HTTP %d: %s", resp.StatusCode, string(body))
 	}
@@ -418,15 +428,25 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 	// Check for API-level errors.
 	var errResp struct {
 		Error struct {
+			Code    int    `json:"code"`
 			Type    string `json:"type"`
 			Message string `json:"message"`
 		} `json:"error"`
 	}
-	if json.Unmarshal(body, &errResp) == nil && errResp.Error.Message != "" {
-		if errResp.Error.Type == "DataException" {
-			return nil, fmt.Errorf("deezer: not found")
+	// Deezer signals quota/rate-limit errors via JSON error codes (not always
+	// HTTP 429): code 4 = "You have reached the limit of requests", 700 =
+	// quota exceeded. Check the code first — it must map to ErrRateLimited
+	// even when the message is empty.
+	if json.Unmarshal(body, &errResp) == nil {
+		if errResp.Error.Code == 4 || errResp.Error.Code == 700 {
+			return nil, metadata.NewRateLimitError("deezer", 0, fmt.Sprintf("API quota error code %d: %s", errResp.Error.Code, errResp.Error.Message))
 		}
-		return nil, fmt.Errorf("deezer API error (%s): %s", errResp.Error.Type, errResp.Error.Message)
+		if errResp.Error.Message != "" {
+			if errResp.Error.Type == "DataException" {
+				return nil, fmt.Errorf("deezer: not found")
+			}
+			return nil, fmt.Errorf("deezer API error (%s): %s", errResp.Error.Type, errResp.Error.Message)
+		}
 	}
 
 	return json.RawMessage(body), nil

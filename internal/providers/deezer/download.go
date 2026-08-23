@@ -36,9 +36,12 @@ const downloadPluginName = "deezer"
 const downloadDisplayName = "Deezer"
 
 // Outgoing rate limits — requests per second to Deezer APIs.
+// Deezer's quota is per IP address: 50 requests per 5 seconds (10 req/s).
+// SoulSync paces Deezer at 1 req/s in production; rates stay well under the
+// cap so a server-hosted deployment never trips it.
 const (
-	deezerGatewayRate  = 10 // auth, playlist, search metadata
-	deezerDownloadRate = 30 // file transfers (higher throughput)
+	deezerGatewayRate  = 1 // auth, playlist, search metadata
+	deezerDownloadRate = 1 // file transfers — same per-IP quota applies
 )
 
 // Deezer internal API endpoints.

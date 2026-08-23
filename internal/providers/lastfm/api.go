@@ -18,8 +18,10 @@ import (
 
 const lastfmBaseURL = "https://ws.audioscrobbler.com/2.0/"
 
-// Last.fm API rate limit: 3 req/s (conservative — no published limit).
-const lastfmAPIRate = 3.0
+// Last.fm API rate limit: 1 req/s. Last.fm publishes no numeric limit but
+// warns that "continuously making several calls per second" can lead to
+// account suspension — 1 req/s stays safely under that.
+const lastfmAPIRate = 1.0
 
 // ArtistResult represents a Last.fm artist search result.
 type ArtistResult struct {
