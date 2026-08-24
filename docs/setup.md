@@ -137,6 +137,45 @@ Open **http://localhost:8008** → **Settings → Download Sources**.
 
 Everything auto-saves.
 
+### Download path layout & protection
+
+Each download provider stages its files in its **own directory**, separate from the
+library and from each other. Do **not** point a provider's download path at the
+general `library.download_path` root itself, and do **not** nest one provider's
+directory inside another's — use sibling directories:
+
+```
+/downloads                     ← library.download_path (root)
+├── slskd/                     ← Soulseek download_path   (e.g. /downloads/slskd)
+└── qbittorrent/               ← qBittorrent download_path (e.g. /downloads/qbittorrent)
+/music                         ← library.library_path (the only directory scanned)
+```
+
+Guidelines:
+
+- **Soulseek** (`Settings → Download Sources → Soulseek`): set `download_path` to a
+  dedicated folder, e.g. `/downloads/slskd`. If you share the slskd instance with
+  other applications, keep its shared directory out of Groovearr's download root —
+  Groovearr must never import files it did not download.
+- **qBittorrent** (`Settings → Download Sources → qBittorrent`): set `download_path`
+  to a dedicated folder, e.g. `/downloads/qbittorrent`.
+- **Tidal / Deezer** (when configured) use the general download root; keep that root
+  exclusively for Groovearr downloads.
+
+Groovearr has a **protection layer** that makes these rules safe by construction:
+
+- Library scans (Settings → Jobs → Scan, and playlist syncs) only ever walk the
+  library path. They **refuse** to enter the download root or any provider
+  `download_path` — a scan pointed at a staging directory is rejected with an error
+  instead of importing its contents.
+- Downloads are imported into the library exclusively by the download pipeline,
+  one file at a time, from the file that was actually downloaded. Playlists link
+  tracks that already exist in the library and queue the rest through the download
+  pipeline; they never scan the filesystem.
+- If a sweep ever did slip multi-artist entries into the library (e.g. "2Pac feat.
+  Anthony Hamilton" as its own artist), run **Settings → Jobs → Artist Cleanup** to
+  merge them back into the primary artist ("2Pac").
+
 ---
 
 ## 6. Verify
