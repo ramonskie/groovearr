@@ -79,8 +79,8 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Name:        "download_path",
 			Type:        "text",
 			Label:       "Download Path",
-			Hint:        "Override the global download path for qBittorrent downloads. Leave empty to use library.download_path.",
-			Placeholder: "./downloads",
+			Hint:        "Override the global download path for qBittorrent downloads. Use a dedicated sibling directory (e.g. /downloads/qbittorrent), NOT the general download root — the library never scans here and files outside this path are not imported. Leave empty to use library.download_path.",
+			Placeholder: "/downloads/qbittorrent",
 		},
 		{
 			Name:        "qbt_download_root",

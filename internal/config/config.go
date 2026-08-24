@@ -110,6 +110,21 @@ func DefaultLogging() *LoggingConfig {
 	}
 }
 
+// PathIsUnder reports whether path is equal to or under root. Both are
+// cleaned first, and the comparison is case-insensitive: macOS and many
+// container volume mounts are case-insensitive, so a scan root spelled
+// "/Downloads/music" must still be recognized as under a protected
+// "/downloads". The prefix comparison is boundary-checked so a sibling
+// sharing a prefix ("/downloads2" vs "/downloads") is not a match.
+func PathIsUnder(path, root string) bool {
+	p := strings.ToLower(filepath.Clean(path))
+	r := strings.ToLower(filepath.Clean(root))
+	if p == r {
+		return true
+	}
+	return strings.HasPrefix(p, r+string(filepath.Separator))
+}
+
 // Default library paths target the Docker image's mount points. Every
 // installation runs in Docker; local/command-line runs override these with
 // GROOVEARR_* env vars before the config file is first created.
@@ -178,6 +193,23 @@ func (c Config) Validate() []string {
 	}
 	if c.Library.LibraryPath != "" && strings.Contains(c.Library.LibraryPath, "\x00") {
 		errs = append(errs, "library.library_path: contains null bytes")
+	}
+	// Layout: the library path must not overlap any download staging directory
+	// in either direction — a library inside a staging dir, or a staging dir
+	// nested under the library, would sweep downloaded files into the library
+	// on the next scan. The scan job refuses such a layout at runtime; this
+	// flags it at save/load time so the settings UI shows the problem early.
+	if c.Library.LibraryPath != "" {
+		for _, p := range ProviderDownloadPaths(&c) {
+			if p == "" {
+				continue
+			}
+			if PathIsUnder(c.Library.LibraryPath, p) {
+				errs = append(errs, fmt.Sprintf("library.library_path (%q) must not be inside download directory %q: the library scanner refuses to walk download staging directories", c.Library.LibraryPath, p))
+			} else if PathIsUnder(p, c.Library.LibraryPath) {
+				errs = append(errs, fmt.Sprintf("download directory %q must not be inside library.library_path (%q): downloaded files would be swept into the library on the next scan", p, c.Library.LibraryPath))
+			}
+		}
 	}
 	if c.Library.PlaylistAutoSyncMins != nil && *c.Library.PlaylistAutoSyncMins > 0 && *c.Library.PlaylistAutoSyncMins < 5 {
 		errs = append(errs, "library.playlist_auto_sync_mins: minimum 5 minutes (or 0 to disable)")
@@ -620,4 +652,31 @@ func contractPaths(cur *LibraryConfig, prev LibraryConfig) {
 			cur.PlaylistPath = prev.PlaylistPath
 		}
 	}
+}
+
+// ProviderDownloadPaths returns every directory the library scanner must
+// refuse to walk: the global library download root plus the download_path of
+// every configured provider that sets one. Collected generically from the
+// sources map, so soulseek, qbittorrent, and any future provider with a
+// download_path setting are covered automatically.
+func ProviderDownloadPaths(c *Config) []string {
+	var roots []string
+	if c == nil {
+		return roots
+	}
+	if c.Library.DownloadPath != "" {
+		roots = append(roots, c.Library.DownloadPath)
+	}
+	for _, raw := range c.Sources {
+		var partial struct {
+			DownloadPath string `json:"download_path"`
+		}
+		if err := json.Unmarshal(raw, &partial); err != nil {
+			continue
+		}
+		if partial.DownloadPath != "" {
+			roots = append(roots, partial.DownloadPath)
+		}
+	}
+	return roots
 }

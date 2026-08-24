@@ -79,8 +79,8 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Name:        "download_path",
 			Type:        "text",
 			Label:       "Download Path",
-			Hint:        "Groovearr-visible path where slskd downloads appear. Override only when the slskd volume is mounted at a non-default location in groovearr. Leave empty to use library.download_path.",
-			Placeholder: "/downloads",
+			Hint:        "Groovearr-visible path where slskd downloads appear. Use a dedicated sibling directory (e.g. /downloads/slskd), NOT the general download root — the library never scans here and files outside this path are not imported. Leave empty to use library.download_path.",
+			Placeholder: "/downloads/slskd",
 		},
 		{
 			Name:        "slskd_download_path",
