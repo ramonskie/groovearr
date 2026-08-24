@@ -82,5 +82,5 @@ func (s *Server) restoreInterruptedJob() {
 		j.FinishedAt = &now
 		s.saveJobState(j)
 	}
-	s.bootJob = j
+	s.runners.SetBootJob(j)
 }

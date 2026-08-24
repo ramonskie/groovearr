@@ -34,40 +34,35 @@ import (
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg                  *config.Persistence
-	registry             *download.Registry
-	mdRegistry           *metadata.Registry
-	metadataResolver     *metadata.MetadataResolver
-	enrichmentHandler    *download.MetadataEnrichmentHandler
-	providerCooldown     *metadata.ProviderCooldown
-	orchestrator         *download.Orchestrator
-	discoveryReg         *discovery.Registry
-	store                library.Store
-	scanner              *library.Scanner
-	downloadSvc          *download.Service
-	eventBus             events.IEventAggregator
-	sseHub               *sse.SSEHub
-	matcher              *matching.Engine
-	playlistSvc          *playlist.Service
-	qualityProfileStore  quality.ProfileStore
-	jobs                 *jobs.Manager
-	organizeMu           sync.Mutex
-	organizeReport       *organizeReport
-	enrichMu             sync.Mutex
-	enrichActivity       []enrichActivity
-	jobStatePath         string
-	jobStateMu           sync.Mutex
-	bootJob              *jobs.Job
-	divergenceRepairDone bool
-	httpSrv              *http.Server
-	log                  *slog.Logger
-	logPath              string
-	logRotator           *logger.Rotator
-	accessLog            *logger.Rotator
-	rateLimiter          *ipRateLimiter
-	sessions             *sessionStore
-	bgCtx                context.Context
-	bgCancel             context.CancelFunc
+	cfg                 *config.Persistence
+	registry            *download.Registry
+	mdRegistry          *metadata.Registry
+	metadataResolver    *metadata.MetadataResolver
+	enrichmentHandler   *download.MetadataEnrichmentHandler
+	providerCooldown    *metadata.ProviderCooldown
+	orchestrator        *download.Orchestrator
+	discoveryReg        *discovery.Registry
+	store               library.Store
+	scanner             *library.Scanner
+	downloadSvc         *download.Service
+	eventBus            events.IEventAggregator
+	sseHub              *sse.SSEHub
+	matcher             *matching.Engine
+	playlistSvc         *playlist.Service
+	qualityProfileStore quality.ProfileStore
+	jobs                *jobs.Manager
+	runners             *jobs.Runners
+	jobStatePath        string
+	jobStateMu          sync.Mutex
+	httpSrv             *http.Server
+	log                 *slog.Logger
+	logPath             string
+	logRotator          *logger.Rotator
+	accessLog           *logger.Rotator
+	rateLimiter         *ipRateLimiter
+	sessions            *sessionStore
+	bgCtx               context.Context
+	bgCancel            context.CancelFunc
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
@@ -102,6 +97,14 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)
+	s.runners = jobs.NewRunners(jobs.RunnerDeps{
+		Log:        logger,
+		Store:      store,
+		Config:     func() config.Config { return cfg.Get() },
+		Scanner:    scanner,
+		Enrichment: enrichmentHandler,
+		Metadata:   mdRegistry,
+	})
 	s.restoreInterruptedJob()
 
 	mux := http.NewServeMux()

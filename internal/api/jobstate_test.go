@@ -22,7 +22,7 @@ func jobStateTestLogger() *slog.Logger {
 
 func TestJobStateRoundTrip(t *testing.T) {
 	path := filepath.Join(t.TempDir(), jobStateFileName)
-	s := &Server{jobStatePath: path, log: jobStateTestLogger()}
+	s := &Server{jobStatePath: path, log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
 	s.saveJobState(&jobs.Job{Type: "enrich", State: jobs.StateRunning, Done: 2, Total: 100})
 	got := s.loadJobState()
 	if got == nil || got.Type != "enrich" || got.State != jobs.StateRunning || got.Done != 2 || got.Total != 100 {
@@ -32,17 +32,17 @@ func TestJobStateRoundTrip(t *testing.T) {
 
 func TestRestoreInterruptedJobMarksRunning(t *testing.T) {
 	path := filepath.Join(t.TempDir(), jobStateFileName)
-	s := &Server{jobStatePath: path, log: jobStateTestLogger()}
+	s := &Server{jobStatePath: path, log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
 	s.saveJobState(&jobs.Job{Type: "scan", State: jobs.StateRunning})
 
 	s.restoreInterruptedJob()
-	if s.bootJob == nil {
+	if s.runners.BootJob() == nil {
 		t.Fatal("bootJob not set")
 	}
-	if s.bootJob.State != jobs.StateInterrupted {
-		t.Fatalf("state = %q, want interrupted", s.bootJob.State)
+	if s.runners.BootJob().State != jobs.StateInterrupted {
+		t.Fatalf("state = %q, want interrupted", s.runners.BootJob().State)
 	}
-	if s.bootJob.FinishedAt == nil {
+	if s.runners.BootJob().FinishedAt == nil {
 		t.Error("interrupted job missing FinishedAt")
 	}
 	// The persisted file must reflect the interrupted state too.
@@ -54,30 +54,31 @@ func TestRestoreInterruptedJobMarksRunning(t *testing.T) {
 
 func TestRestoreInterruptedJobKeepsTerminal(t *testing.T) {
 	path := filepath.Join(t.TempDir(), jobStateFileName)
-	s := &Server{jobStatePath: path, log: jobStateTestLogger()}
+	s := &Server{jobStatePath: path, log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
 	s.saveJobState(&jobs.Job{Type: "organize", State: jobs.StateCompleted, Done: 5, Total: 5})
 
 	s.restoreInterruptedJob()
-	if s.bootJob == nil || s.bootJob.State != jobs.StateCompleted || s.bootJob.Done != 5 {
-		t.Fatalf("terminal state must be kept intact, got %+v", s.bootJob)
+	if s.runners.BootJob() == nil || s.runners.BootJob().State != jobs.StateCompleted || s.runners.BootJob().Done != 5 {
+		t.Fatalf("terminal state must be kept intact, got %+v", s.runners.BootJob())
 	}
 }
 
 func TestRestoreInterruptedJobAbsentFile(t *testing.T) {
-	s := &Server{jobStatePath: filepath.Join(t.TempDir(), jobStateFileName), log: jobStateTestLogger()}
+	s := &Server{jobStatePath: filepath.Join(t.TempDir(), jobStateFileName), log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
 	s.restoreInterruptedJob()
-	if s.bootJob != nil {
-		t.Fatalf("bootJob should be nil with no persisted state, got %+v", s.bootJob)
+	if s.runners.BootJob() != nil {
+		t.Fatalf("bootJob should be nil with no persisted state, got %+v", s.runners.BootJob())
 	}
 }
 
 func TestHandleGetJobFallsBackToBootJob(t *testing.T) {
 	logger := jobStateTestLogger()
 	s := &Server{
-		jobs: jobs.NewManager(sse.NewSSEHub(logger), context.Background(), logger),
-		log:  logger,
+		jobs:    jobs.NewManager(sse.NewSSEHub(logger), context.Background(), logger),
+		log:     logger,
+		runners: jobs.NewRunners(jobs.RunnerDeps{Log: logger}),
 	}
-	s.bootJob = &jobs.Job{Type: "enrich", State: jobs.StateInterrupted, Done: 3, Total: 100}
+	s.runners.SetBootJob(&jobs.Job{Type: "enrich", State: jobs.StateInterrupted, Done: 3, Total: 100})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/jobs", nil)
 	rec := httptest.NewRecorder()
@@ -191,9 +192,9 @@ func TestOrganizeDivergencePossible(t *testing.T) {
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			s := &Server{log: jobStateTestLogger()}
-			s.bootJob = c.job
-			if got := s.organizeDivergencePossible(); got != c.want {
+			s := &Server{log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
+			s.runners.SetBootJob(c.job)
+			if got := s.runners.OrganizeDivergencePossible(); got != c.want {
 				t.Fatalf("organizeDivergencePossible() = %v, want %v", got, c.want)
 			}
 		})
@@ -211,12 +212,13 @@ func TestOrganizeDivergencePossibleSurvivesJobStart(t *testing.T) {
 		jobs:         jobs.NewManager(sse.NewSSEHub(logger), context.Background(), logger),
 		log:          logger,
 		jobStatePath: filepath.Join(t.TempDir(), jobStateFileName),
+		runners:      jobs.NewRunners(jobs.RunnerDeps{Log: logger}),
 	}
 
 	// Simulate boot with a killed organize on disk.
 	s.saveJobState(&jobs.Job{Type: "organize", State: jobs.StateRunning})
 	s.restoreInterruptedJob()
-	if !s.organizeDivergencePossible() {
+	if !s.runners.OrganizeDivergencePossible() {
 		t.Fatal("organizeDivergencePossible() = false right after boot restore")
 	}
 
@@ -226,7 +228,7 @@ func TestOrganizeDivergencePossibleSurvivesJobStart(t *testing.T) {
 		return nil
 	})
 	waitJobState(t, s, jobs.StateCompleted)
-	if !s.organizeDivergencePossible() {
+	if !s.runners.OrganizeDivergencePossible() {
 		t.Fatal("organizeDivergencePossible() = false after a scan ran (trigger lost)")
 	}
 }
@@ -259,13 +261,13 @@ func TestStartJobPersistsTerminalForFastRunner(t *testing.T) {
 }
 
 func TestOrganizeDivergenceDisarmedAfterRepair(t *testing.T) {
-	s := &Server{log: jobStateTestLogger()}
-	s.bootJob = &jobs.Job{Type: "organize", State: jobs.StateInterrupted}
-	if !s.organizeDivergencePossible() {
+	s := &Server{log: jobStateTestLogger(), runners: jobs.NewRunners(jobs.RunnerDeps{Log: jobStateTestLogger()})}
+	s.runners.SetBootJob(&jobs.Job{Type: "organize", State: jobs.StateInterrupted})
+	if !s.runners.OrganizeDivergencePossible() {
 		t.Fatal("trigger should be armed after a killed-organize boot")
 	}
-	s.markDivergenceRepairDone()
-	if s.organizeDivergencePossible() {
+	s.runners.MarkDivergenceRepairDone()
+	if s.runners.OrganizeDivergencePossible() {
 		t.Fatal("trigger should be disarmed after one completed repair pass")
 	}
 }

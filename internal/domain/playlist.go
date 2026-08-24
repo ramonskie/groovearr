@@ -4,8 +4,8 @@ package domain
 type SyncMode string
 
 const (
-	SyncModeMirror  SyncMode = "mirror"  // delete local files when removed from upstream
-	SyncModeAppend  SyncMode = "append"  // keep local files even if removed from upstream
+	SyncModeMirror SyncMode = "mirror" // delete local files when removed from upstream
+	SyncModeAppend SyncMode = "append" // keep local files even if removed from upstream
 )
 
 // Playlist represents an imported playlist from a music source.
