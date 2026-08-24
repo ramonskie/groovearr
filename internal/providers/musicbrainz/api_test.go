@@ -576,6 +576,81 @@ func TestSearchArtist_CanonicalSpelling(t *testing.T) {
 	}
 }
 
+func TestSearchArtist_AccentedCanonical(t *testing.T) {
+	// The local library may hold a de-accented variant ("Tiesto") while the
+	// authoritative MusicBrainz spelling keeps the accent ("Tiësto"). The
+	// match key (strutil.NormalizeName) folds both to "tiesto", so the query
+	// must resolve to the accented canonical spelling — the whole point of the
+	// unicode-variant duplicate grouping.
+	client, cleanup := newArtistTestClient(t, []artistResp{
+		{ID: "mbid-1", Name: "Tiësto", Score: 100},
+		{ID: "mbid-2", Name: "Tiesto", Score: 90},
+	})
+	defer cleanup()
+
+	res, err := client.SearchArtist(context.Background(), "Tiesto")
+	if err != nil {
+		t.Fatalf("SearchArtist error: %v", err)
+	}
+	if res == nil {
+		t.Fatal("expected a match, got nil")
+	}
+	if res.Name != "Tiësto" {
+		t.Errorf("got %+v, want canonical 'Tiësto' (accented)", res)
+	}
+
+	// The reverse direction must also work: query the accented variant, resolve
+	// to the same canonical.
+	res, err = client.SearchArtist(context.Background(), "Tiësto")
+	if err != nil {
+		t.Fatalf("SearchArtist error: %v", err)
+	}
+	if res == nil || res.Name != "Tiësto" {
+		t.Errorf("accented query: got %+v, want 'Tiësto'", res)
+	}
+}
+
+func TestCanonicalArtistName_Accented(t *testing.T) {
+	// End-to-end through the provider wrapper: the duplicates job calls
+	// CanonicalArtistName with the group representative (possibly de-accented)
+	// and must receive the authoritative accented spelling back.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/artist/" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		resp := artistSearchResp{Count: 1, Artists: []artistResp{
+			{ID: "mbid-1", Name: "René Froger", Score: 100},
+		}}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("mock encode error: %v", err)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+
+	client := &Client{
+		cfg: MusicBrainzConfig{},
+		api: &APIClient{
+			cfg:         MusicBrainzConfig{},
+			httpClient:  srv.Client(),
+			userAgent:   "groovearr-test",
+			baseURL:     srv.URL,
+			log:         testLogger(),
+			minInterval: 0,
+		},
+		log: testLogger(),
+	}
+
+	got, err := client.CanonicalArtistName(context.Background(), "Rene Froger")
+	if err != nil {
+		t.Fatalf("CanonicalArtistName error: %v", err)
+	}
+	if got != "René Froger" {
+		t.Errorf("CanonicalArtistName(\"Rene Froger\") = %q, want \"René Froger\" (accented canonical)", got)
+	}
+}
+
 func TestSearchArtist_NoMatch(t *testing.T) {
 	client, cleanup := newArtistTestClient(t, []artistResp{
 		{ID: "mbid-x", Name: "Some Other Artist", Score: 100},

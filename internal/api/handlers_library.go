@@ -139,22 +139,12 @@ type duplicateGroup struct {
 	Artists []duplicateArtistEntry `json:"artists"`
 }
 
-// duplicateScanStore is the persisted cache of duplicate-group canonical names,
-// populated by the background duplicates job.
-type duplicateScanStore interface {
-	GetDuplicateCanonical(ctx context.Context, groupKey string) (string, bool, error)
-	ListDuplicateCanonicals(ctx context.Context) (map[string]string, error)
-	UpsertDuplicateCanonical(ctx context.Context, groupKey, canonical string) error
-	ClearDuplicateCanonicals(ctx context.Context) error
-	DeleteDuplicateCanonical(ctx context.Context, groupKey string) error
-}
-
 // canonicalArtistName resolves the authoritative spelling for an artist via
 // MusicBrainz. Best-effort: failures fall back to the library's own casing.
 // Callers bound the context (the scan job runs sequentially against
 // MusicBrainz's rate limit; the merge handler wraps a short timeout).
 func (s *Server) canonicalArtistName(ctx context.Context, name string) string {
-	canonical, _ := s.lookupCanonicalArtist(ctx, name)
+	canonical, _ := s.runners.LookupCanonicalArtist(ctx, name)
 	return canonical
 }
 
@@ -172,47 +162,6 @@ func (s *Server) noteProviderRateLimit(providerName string, err error) {
 		s.providerCooldown.MarkAfter(providerName, retryAfter)
 		s.log.Warn("provider rate limited, cooling down", "provider", providerName, "error", err, "component", "api")
 	}
-}
-
-// lookupCanonicalArtist resolves the canonical spelling for an artist using
-// providers with a dedicated name lookup (currently MusicBrainz). Returns the
-// last provider error when every provider fails, so callers can distinguish
-// "not found" (authoritative) from "couldn't reach a provider" (transient).
-// A rate-limit error is preferred over a generic failure: it is the actionable
-// signal — callers (e.g. the duplicates scan) pause and retry on it, and a
-// later provider's unrelated error would otherwise mask a throttled source.
-func (s *Server) lookupCanonicalArtist(ctx context.Context, name string) (string, error) {
-	var lastErr error
-	var rateLimitedErr error
-	if s.mdRegistry == nil {
-		return "", nil
-	}
-	for _, p := range s.mdRegistry.Available() {
-		anp, ok := p.(metadata.ArtistNameProvider)
-		if !ok {
-			continue
-		}
-		got, err := anp.CanonicalArtistName(ctx, name)
-		if err != nil {
-			s.log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "api")
-			if errors.Is(err, metadata.ErrRateLimited) {
-				rateLimitedErr = err
-			} else {
-				lastErr = err
-			}
-			continue
-		}
-		if got != "" {
-			return got, nil
-		}
-	}
-	if rateLimitedErr != nil {
-		return "", rateLimitedErr
-	}
-	if lastErr != nil {
-		return "", lastErr
-	}
-	return "", nil
 }
 
 // canonicalMatchScore rates how closely name matches the canonical spelling.
@@ -248,7 +197,7 @@ func canonicalMatchScore(name, canonical string) int {
 func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 
-	dss, ok := s.store.(duplicateScanStore)
+	dss, ok := s.store.(jobs.DuplicateScanStore)
 	if !ok {
 		writeJSON(w, http.StatusOK, map[string]any{"groups": []duplicateGroup{}})
 		return
@@ -270,7 +219,11 @@ func (s *Server) handleLibraryArtistDuplicates(w http.ResponseWriter, r *http.Re
 			break
 		}
 		for _, a := range artists {
-			key := strings.ToLower(a.Name)
+			// Group with the same normalized key the duplicates job writes to
+			// duplicate_scan (spelling variants AND feat-marked rows fold to
+			// their identity artist), so the groups surface here exactly as the
+			// job grouped them.
+			key := library.NormalizeArtistKey(library.IdentityArtistName(a.Name))
 			byLower[key] = append(byLower[key], a)
 		}
 	}
@@ -340,8 +293,8 @@ func (s *Server) handleLibraryArtistMerge(w http.ResponseWriter, r *http.Request
 	canonical := ""
 	keep, err := s.store.GetArtist(r.Context(), keepID)
 	if err == nil && keep != nil {
-		if dss, ok := s.store.(duplicateScanStore); ok {
-			key := strings.ToLower(keep.Name)
+		if dss, ok := s.store.(jobs.DuplicateScanStore); ok {
+			key := library.NormalizeArtistKey(library.IdentityArtistName(keep.Name))
 			if c, found, derr := dss.GetDuplicateCanonical(r.Context(), key); derr == nil && found {
 				canonical = c
 			}
@@ -373,7 +326,7 @@ func (s *Server) handleLibraryArtistMerge(w http.ResponseWriter, r *http.Request
 	// a canonical rename may have left the keeper's folder stale). Runs as a
 	// background job; skipped when another job is already running.
 	if s.jobs != nil {
-		if _, err := s.jobs.Start("organize", s.organizeArtistRunner(keepID)); err == nil {
+		if _, err := s.jobs.Start("organize", s.runners.OrganizeArtist(keepID)); err == nil {
 			out["organize_started"] = true
 		} else if !errors.Is(err, jobs.ErrBusy) {
 			s.log.Warn("start merge organize failed", "error", err, "component", "api")

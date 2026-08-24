@@ -17,6 +17,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/plugin"
@@ -41,7 +42,7 @@ type stubLibraryStore struct {
 	scan map[string]string // duplicate_scan: group_key → canonical
 }
 
-var _ duplicateScanStore = (*stubLibraryStore)(nil)
+var _ jobs.DuplicateScanStore = (*stubLibraryStore)(nil)
 
 func (s *stubLibraryStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	if offset >= len(s.artists) {
@@ -530,8 +531,9 @@ func TestLookupCanonicalArtistFromMusicBrainz(t *testing.T) {
 		mdRegistry: metadata.NewRegistryFrom(pluginReg),
 		log:        testAPILogger(),
 	}
+	s.runners = jobs.NewRunners(jobs.RunnerDeps{Log: testAPILogger(), Metadata: s.mdRegistry})
 
-	got, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	got, err := s.runners.LookupCanonicalArtist(context.Background(), "Danny De Munk")
 	if err != nil {
 		t.Fatalf("lookup error: %v", err)
 	}
@@ -549,8 +551,9 @@ func TestLookupCanonicalArtistUnknownReturnsEmpty(t *testing.T) {
 		mdRegistry: metadata.NewRegistryFrom(pluginReg),
 		log:        testAPILogger(),
 	}
+	s.runners = jobs.NewRunners(jobs.RunnerDeps{Log: testAPILogger(), Metadata: s.mdRegistry})
 
-	got, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	got, err := s.runners.LookupCanonicalArtist(context.Background(), "Danny De Munk")
 	if err != nil {
 		t.Fatalf("lookup error: %v", err)
 	}
@@ -580,12 +583,134 @@ func TestLookupCanonicalArtistPrefersRateLimit(t *testing.T) {
 		mdRegistry: metadata.NewRegistryFrom(pluginReg),
 		log:        testAPILogger(),
 	}
+	s.runners = jobs.NewRunners(jobs.RunnerDeps{Log: testAPILogger(), Metadata: s.mdRegistry})
 
-	_, err := s.lookupCanonicalArtist(context.Background(), "Danny De Munk")
+	_, err := s.runners.LookupCanonicalArtist(context.Background(), "Danny De Munk")
 	if err == nil {
 		t.Fatal("expected an error")
 	}
 	if !errors.Is(err, metadata.ErrRateLimited) {
 		t.Errorf("error = %v, want rate-limit error to win over the generic failure", err)
+	}
+}
+
+func TestArtistDuplicatesUnicodeVariantsGrouped(t *testing.T) {
+	// The duplicates job persists groups keyed by NormalizeArtistKey; the
+	// listing must group by the same key so Tiësto/Tiesto (and other unicode
+	// variants) surface together and merge works end to end.
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "Tiësto"},
+			{ID: 2, Name: "Tiesto"},
+			{ID: 3, Name: "Ne-Yo"},
+			{ID: 4, Name: "Ne‐Yo"}, // U+2010 hyphen
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 10}, {ID: 11}},
+			2: {{ID: 12}},
+			3: {{ID: 13}},
+			4: {{ID: 14}},
+		},
+		scan: map[string]string{
+			"tiesto": "Tiësto",
+			"ne-yo":  "Ne-Yo",
+		},
+	}
+	s := &Server{store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryArtistDuplicates(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Groups []duplicateGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(body.Groups) != 2 {
+		t.Fatalf("expected 2 unicode-variant groups, got %d: %+v", len(body.Groups), body.Groups)
+	}
+	for _, g := range body.Groups {
+		if len(g.Artists) != 2 {
+			t.Errorf("group %q should contain both variants, got %+v", g.Name, g.Artists)
+		}
+		if g.Artists[0].ID != 1 && g.Artists[0].ID != 3 {
+			t.Errorf("group %q first artist = id %d (%s), want the canonical-matching one",
+				g.Name, g.Artists[0].ID, g.Artists[0].Name)
+		}
+	}
+
+	// Merge accented keeper: cache lookup uses the same normalized key.
+	req = httptest.NewRequest(http.MethodPost, "/api/library/artists/1/merge", strings.NewReader(`{"remove_id":2}`))
+	req.SetPathValue("artistID", "1")
+	rec = httptest.NewRecorder()
+	s.handleLibraryArtistMerge(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if _, stillScanned := store.scan["tiesto"]; stillScanned {
+		t.Errorf("duplicate scan entry not invalidated after unicode-group merge")
+	}
+	// Keeper (id 1) is already the canonical spelling "Tiësto", so no rename.
+	if len(store.renames) != 0 {
+		t.Errorf("keeper already canonical, unexpected renames = %+v", store.renames)
+	}
+}
+
+func TestArtistDuplicatesFeatMarkedGroupedWithPrimary(t *testing.T) {
+	// The duplicates job writes duplicate_scan keys via
+	// NormalizeArtistKey(IdentityArtistName(name)); the listing must use the
+	// same key so "2Pac feat. X" groups with "2Pac" and the merge flow heals
+	// the pre-guard split discography.
+	store := &stubLibraryStore{
+		artists: []domain.Artist{
+			{ID: 1, Name: "2Pac"},
+			{ID: 2, Name: "2Pac feat. Anthony Hamilton"},
+			{ID: 3, Name: "Simon & Garfunkel"}, // real band, no group
+		},
+		tracks: map[int64][]domain.Track{
+			1: {{ID: 10}, {ID: 11}},
+			2: {{ID: 12}},
+			3: {{ID: 13}},
+		},
+		scan: map[string]string{"2pac": "2Pac"},
+	}
+	s := &Server{store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/duplicates", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryArtistDuplicates(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var body struct {
+		Groups []duplicateGroup `json:"groups"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(body.Groups) != 1 {
+		t.Fatalf("expected 1 feat group, got %d: %+v", len(body.Groups), body.Groups)
+	}
+	if len(body.Groups[0].Artists) != 2 {
+		t.Errorf("feat group should contain 2Pac + the feat row, got %+v", body.Groups[0].Artists)
+	}
+
+	// Merge through the same key: merge the feat row into 2Pac.
+	req = httptest.NewRequest(http.MethodPost, "/api/library/artists/1/merge", strings.NewReader(`{"remove_id":2}`))
+	req.SetPathValue("artistID", "1")
+	rec = httptest.NewRecorder()
+	s.handleLibraryArtistMerge(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("merge status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if _, stillScanned := store.scan["2pac"]; stillScanned {
+		t.Errorf("duplicate scan entry not invalidated after feat-group merge")
+	}
+	if len(store.merges) != 1 || store.merges[0] != [2]int64{1, 2} {
+		t.Errorf("merge not forwarded to store: %v", store.merges)
 	}
 }

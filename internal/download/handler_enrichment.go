@@ -597,7 +597,7 @@ func (h *MetadataEnrichmentHandler) enrichArtistImage(ctx context.Context, artis
 	}
 
 	namesToTry := []string{artist.Name}
-	if primary := primaryArtist(artist.Name); primary != "" && primary != artist.Name {
+	if primary := library.PrimaryArtistName(artist.Name); primary != "" && primary != artist.Name {
 		namesToTry = append(namesToTry, primary)
 	}
 
@@ -665,7 +665,7 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 		if found := p.SearchAlbum(ctx, artist.Name, track.Title); found != "" {
 			album.Title = found
 			albumModified = true
-		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+		} else if primary := library.PrimaryArtistName(artist.Name); primary != artist.Name {
 			if found := p.SearchAlbum(ctx, primary, track.Title); found != "" {
 				album.Title = found
 				albumModified = true
@@ -685,7 +685,7 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 		}
 		if err == nil && cover != nil {
 			h.downloadCoverIfMissing(ctx, album, cover)
-		} else if primary := primaryArtist(artist.Name); primary != artist.Name {
+		} else if primary := library.PrimaryArtistName(artist.Name); primary != artist.Name {
 			cover2, err2 := p.SearchCover(ctx, primary, album.Title)
 			if bulk && h.noteProviderError(p, err2) {
 				return
@@ -763,21 +763,6 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	}
 
 	return
-}
-
-// primaryArtist returns the primary artist name by stripping featured/collaboration
-// suffixes. Handles non-breaking spaces (\u00a0) commonly found in audio file metadata
-// and multiple separator patterns: ", ", " & ", " feat. ", " vs. ", " x ".
-// Returns the original name if no separator is found.
-func primaryArtist(artist string) string {
-	// Normalize non-breaking spaces.
-	name := strings.ReplaceAll(artist, "\u00a0", " ")
-	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
-		if idx := strings.Index(name, sep); idx > 0 {
-			return strings.TrimSpace(name[:idx])
-		}
-	}
-	return artist
 }
 
 // isPlaceholderImage returns true for known empty/default placeholder URLs

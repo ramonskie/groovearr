@@ -3,9 +3,9 @@ package metadata
 import (
 	"context"
 	"log/slog"
-	"strings"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/library"
 )
 
 // MetadataResolver enriches partial track metadata at queue time
@@ -100,7 +100,7 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 				break
 			}
 			// Fallback: try just the primary artist (before first comma).
-			if primary := primaryArtist(artist); primary != artist {
+			if primary := library.PrimaryArtistName(artist); primary != artist {
 				if found := p.SearchAlbum(ctx, primary, title); found != "" {
 					result.Album = found
 					break
@@ -122,7 +122,7 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 				"provider", p.Name(), "artist", artist, "album", result.Album, "error", err,
 			)
 			// Fallback: try primary artist.
-			if primary := primaryArtist(artist); primary != artist {
+			if primary := library.PrimaryArtistName(artist); primary != artist {
 				if cover2, err2 := p.SearchCover(ctx, primary, result.Album); err2 == nil && cover2 != nil && cover2.ImageURL != "" {
 					result.CoverURL = cover2.ImageURL
 					return result, nil
@@ -135,7 +135,7 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 			return result, nil
 		}
 		// Cover search returned nil — try primary artist fallback.
-		if primary := primaryArtist(artist); primary != artist {
+		if primary := library.PrimaryArtistName(artist); primary != artist {
 			if cover2, err2 := p.SearchCover(ctx, primary, result.Album); err2 == nil && cover2 != nil && cover2.ImageURL != "" {
 				result.CoverURL = cover2.ImageURL
 				return result, nil
@@ -144,19 +144,4 @@ func (r *MetadataResolver) EnrichMetadata(ctx context.Context, artist, title, al
 	}
 
 	return result, nil
-}
-
-// primaryArtist returns the primary artist name by stripping featured/collaboration
-// suffixes. Handles non-breaking spaces (\u00a0) commonly found in audio file metadata
-// and multiple separator patterns: ", ", " & ", " feat. ", " vs. ", " x ".
-// Returns the original name if no separator is found.
-func primaryArtist(artist string) string {
-	// Normalize non-breaking spaces.
-	name := strings.ReplaceAll(artist, "\u00a0", " ")
-	for _, sep := range []string{", ", " & ", " feat. ", " vs. ", " x "} {
-		if idx := strings.Index(name, sep); idx > 0 {
-			return strings.TrimSpace(name[:idx])
-		}
-	}
-	return artist
 }

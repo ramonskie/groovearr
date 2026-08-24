@@ -39,8 +39,14 @@ func (h *FileRenamerHandler) Handle(ctx context.Context, record *Record) error {
 	// path than the predicted FilePath (strips @@user/ prefixes, etc.).
 	srcPath := h.resolveSourcePath(record.FilePath, record.Filename)
 
+	// Normalize the artist to its identity form so the file is organized under
+	// the same artist folder the library importer creates ("2Pac feat. X" →
+	// "2Pac", but "Simon & Garfunkel" stays whole). Without this, the file
+	// would land in a "2Pac feat. X/" folder while the DB artist is "2Pac".
+	artist := library.IdentityArtistName(record.Artist)
+
 	meta := library.FileMeta{
-		Artist:   record.Artist,
+		Artist:   artist,
 		Album:    record.Album,
 		Title:    record.Title,
 		Year:     record.Year,
