@@ -59,7 +59,9 @@ export function useJobWatcher() {
               ? "Library scan complete"
               : job?.type === "duplicates"
                 ? "Duplicate check complete"
-                : "Library enrichment complete"),
+                : job?.type === "sync"
+                  ? "Playlist sync complete"
+                  : "Library enrichment complete"),
         );
       } else if (state === "failed") {
         toast.error(`Job failed: ${job?.error ?? "unknown error"}`);

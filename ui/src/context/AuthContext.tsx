@@ -6,6 +6,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
+import { getConfig, login as apiLogin, logout as apiLogout } from "../api/client";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -50,28 +51,22 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   });
 
   // Check if we're already authenticated (session cookie or API key).
+  // All HTTP goes through the api client (rule: no raw fetch in components).
   const checkAuth = useCallback(async () => {
     try {
-      const headers: Record<string, string> = {};
-      const apiKey = getStoredApiKey();
-      if (apiKey) headers["X-Api-Key"] = apiKey;
-
-      const res = await fetch("/api/config", { headers });
-      if (res.ok) {
-        const cfg = await res.json() as { auth?: { method?: string; api_key?: string } };
-        const method = cfg?.auth?.method || "";
-        const key = cfg?.auth?.api_key;
-        // Always store the API key so the SPA can use it for all requests.
-        if (key) {
-          try { localStorage.setItem(API_KEY_KEY, key); } catch {}
-        }
-        setState({ isLoading: false, isAuthenticated: true, username: null, authMethod: method });
-        return;
+      const cfg = await getConfig();
+      const method = cfg.auth?.method || "";
+      const key = cfg.auth?.api_key;
+      // Always store the API key so the SPA can use it for all requests.
+      if (key) {
+        try { localStorage.setItem(API_KEY_KEY, key); } catch {}
       }
+      setState({ isLoading: false, isAuthenticated: true, username: null, authMethod: method });
     } catch {
-      // Network error — treat as unauthenticated.
+      // Unauthenticated (or network error) — the client already redirects
+      // to /login on a 401 response.
+      setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
     }
-    setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
   }, []);
 
   useEffect(() => {
@@ -79,22 +74,12 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [checkAuth]);
 
   const login = useCallback(async (username: string, password: string) => {
-    const res = await fetch("/api/login", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ username, password }),
-    });
-
-    if (!res.ok) {
-      const body = await res.json().catch(() => ({}));
-      throw new Error((body as { error?: string }).error || "Login failed");
-    }
-
+    await apiLogin(username, password);
     setState({ isLoading: false, isAuthenticated: true, username, authMethod: "forms" });
   }, []);
 
   const logout = useCallback(async () => {
-    await fetch("/api/logout", { method: "POST" }).catch(() => {});
+    await apiLogout().catch(() => {});
     localStorage.removeItem(API_KEY_KEY);
     setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
   }, []);

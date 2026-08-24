@@ -124,6 +124,19 @@ export function getConfig(): Promise<Config> {
   return request<Config>("/api/config");
 }
 
+// ─── Auth ────────────────────────────────────────────────────────────
+
+export function login(username: string, password: string): Promise<unknown> {
+  return request(`/api/login`, {
+    method: "POST",
+    body: JSON.stringify({ username, password }),
+  });
+}
+
+export function logout(): Promise<unknown> {
+  return request(`/api/logout`, { method: "POST" });
+}
+
 export function updateConfig(
   payload: ConfigUpdatePayload,
 ): Promise<UpdateConfigResponse> {

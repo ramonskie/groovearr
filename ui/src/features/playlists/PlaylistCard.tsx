@@ -48,7 +48,13 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
   const handleSync = (e: React.MouseEvent) => {
     e.stopPropagation();
     syncMutation.mutate(playlist.id, {
-      onSuccess: () => toast.success(`Syncing "${playlist.name}"`),
+      onSuccess: (data) => {
+        if (data.started) {
+          toast.success(`Syncing "${playlist.name}"`);
+        } else {
+          toast.info("Another job is already running — sync not started");
+        }
+      },
       onError: (err) =>
         toast.error(err instanceof Error ? err.message : "Sync failed"),
     });

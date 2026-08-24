@@ -524,7 +524,7 @@ export interface Album {
 export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Job {
-  type: "scan" | "enrich" | "organize" | "duplicates";
+  type: "scan" | "enrich" | "organize" | "duplicates" | "sync";
   state: JobState;
   progress: number; // 0-100
   message?: string;
@@ -668,9 +668,9 @@ export interface DownloadMissingResponse {
   queued: number;
 }
 
-export interface SyncPlaylistResponse {
-  status: "syncing";
-}
+// Playlist sync runs through the job Manager — same response shape as every
+// other background job start.
+export type SyncPlaylistResponse = StartJobResponse;
 
 export interface DeletePlaylistResponse {
   status: "deleted";
