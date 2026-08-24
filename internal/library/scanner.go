@@ -38,6 +38,21 @@ func NewScanner(store Store, logger *slog.Logger) *Scanner {
 	return &Scanner{store: store, log: logger}
 }
 
+// scanRoot returns the absolute, symlink-resolved scan root. WalkDir does not
+// follow a symlinked root (it would report the symlink as a single entry and
+// stop), so a library path that is a symlink to a real directory must be
+// resolved before walking.
+func scanRoot(path string) string {
+	if real, err := filepath.EvalSymlinks(path); err == nil {
+		return filepath.Clean(real)
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return filepath.Clean(path)
+	}
+	return filepath.Clean(abs)
+}
+
 // tagMeta holds metadata extracted from audio file tags.
 type tagMeta struct {
 	Artist   string
@@ -444,10 +459,7 @@ func (s *Scanner) ScanPath(ctx context.Context, root string) (ScanStats, error) 
 // invoking onProgress with each audio file path it examines. The walk stops
 // early when ctx is cancelled.
 func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgress func(path string)) (ScanStats, error) {
-	absRoot, err := filepath.Abs(root)
-	if err != nil {
-		absRoot = root
-	}
+	absRoot := scanRoot(root)
 
 	var stats ScanStats
 	// coverAttempts bounds how many audio files per album directory are probed
@@ -464,6 +476,7 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 	// whose portrait exists but whose tags keep failing the compilation guard
 	// (e.g. every track of a grouping folder carries a different artist).
 	artistThumbAttempts := make(map[string]int)
+	var err error
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return nil
@@ -472,6 +485,11 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 			return err
 		}
 		if d.IsDir() {
+			// The scan root's overlap with a download staging directory is
+			// rejected before the walk by the scan job (layout guard), not
+			// here: the scanner is config-free and walks whatever it is
+			// given. WalkDir never descends into directory symlinks, so no
+			// per-directory pruning is needed.
 			return nil
 		}
 
