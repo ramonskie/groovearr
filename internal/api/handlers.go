@@ -61,6 +61,7 @@ type Server struct {
 	accessLog           *logger.Rotator
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
+	healthChecker       *plugin.HealthChecker
 	bgCtx               context.Context
 	bgCancel            context.CancelFunc
 }
@@ -69,7 +70,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -87,6 +88,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		matcher:             matching.New(),
 		playlistSvc:         playlistSvc,
 		qualityProfileStore: qualityProfileStore,
+		healthChecker:       healthChecker,
 		log:                 logger,
 		logRotator:          logRotator,
 		accessLog:           accessLog,
@@ -104,6 +106,8 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		Scanner:    scanner,
 		Enrichment: enrichmentHandler,
 		Metadata:   mdRegistry,
+		Playlist:   playlistSvc,
+		RateLimit:  s.providerCooldown,
 	})
 	s.restoreInterruptedJob()
 
@@ -244,13 +248,16 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 
 // SetProviderCooldown replaces the default (self-contained) cooldown with a
 // shared app-wide instance, so a rate limit observed by album discovery or
-// discover search also cools the provider for enrichment. Pass nil to keep the
-// default.
+// discover search also cools the provider for enrichment — and for jobs,
+// which share the same bucket. Pass nil to keep the default.
 func (s *Server) SetProviderCooldown(c *metadata.ProviderCooldown) {
 	if c == nil {
 		return
 	}
 	s.providerCooldown = c
+	if s.runners != nil {
+		s.runners.SetRateLimiter(c)
+	}
 }
 
 // ListenAndServe starts the HTTP server (blocking).
@@ -528,22 +535,10 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 
 	// Re-check connectivity on rebuilt plugins so badges reflect current
 	// state without waiting for the periodic health checker (every 5 min).
-	if len(rebuilt) > 0 {
-		go func() {
-			ctx, cancel := context.WithTimeout(s.bgCtx, 30*time.Second)
-			defer cancel()
-			for _, name := range rebuilt {
-				if p := s.registry.Get(name); p != nil && p.IsConfigured() {
-					if err := p.CheckConnection(ctx); err != nil {
-						s.log.Debug("post-rebuild connection check failed", "name", name, "error", err, "component", "api")
-					}
-				} else if bp := s.registry.Inner().Get(name); bp != nil && bp.IsConfigured() {
-					if err := bp.CheckConnection(ctx); err != nil {
-						s.log.Debug("post-rebuild connection check failed", "name", name, "error", err, "component", "api")
-					}
-				}
-			}
-		}()
+	// The health checker owns the probe: it runs the check on its own loop
+	// goroutine (or a single bounded goroutine when the loop is disabled).
+	if len(rebuilt) > 0 && s.healthChecker != nil {
+		s.healthChecker.RequestCheck(rebuilt)
 	}
 
 	// Sync metadata order with available providers before applying.

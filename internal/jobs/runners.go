@@ -2,7 +2,6 @@ package jobs
 
 import (
 	"context"
-	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -12,6 +11,25 @@ import (
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
 )
+
+// PlaylistSyncer syncs an imported playlist with its upstream source under a
+// per-playlist lock (prevents a job-triggered sync from racing the auto-sync
+// worker or the download-missing rebuild). Declared here (not imported from
+// playlist) so jobs stays free of a concrete dependency; *playlist.Service
+// satisfies it. Returns started=false when a sync for that playlist is
+// already in progress.
+type PlaylistSyncer interface {
+	SyncPlaylistGuarded(ctx context.Context, playlistID int64) (bool, error)
+}
+
+// RateLimiter is the shared per-provider rate-limit cooldown. Declared here
+// so every job consults and marks the same bucket all other provider-calling
+// paths use; *metadata.ProviderCooldown satisfies it. One bucket keeps one
+// task from pushing another into the same throttle.
+type RateLimiter interface {
+	CoolingDown(name string) bool
+	MarkAfter(name string, retryAfter time.Duration)
+}
 
 // RunnerDeps carries the shared dependencies every background job needs.
 type RunnerDeps struct {
@@ -25,6 +43,12 @@ type RunnerDeps struct {
 	// Metadata is the metadata provider registry used for canonical artist
 	// lookups in the duplicates job.
 	Metadata *metadata.Registry
+	// Playlist syncs playlists against upstream sources (may be nil).
+	Playlist PlaylistSyncer
+	// RateLimit is the shared per-provider cooldown bucket. Jobs consult it
+	// before calling a provider and mark it on rate-limit responses (may be
+	// nil — the job then behaves as if no provider is ever cooling down).
+	RateLimit RateLimiter
 }
 
 // Runners implements every background job body. One instance is constructed
@@ -57,6 +81,15 @@ func NewRunners(deps RunnerDeps) *Runners {
 
 // Logger returns the shared logger.
 func (r *Runners) Logger() *slog.Logger { return r.deps.Log }
+
+// SetRateLimiter wires (or swaps) the shared provider cooldown bucket. The
+// api layer calls this when the app-wide cooldown instance is installed, so
+// jobs always share the same bucket as enrichment, discovery, and the health
+// checker. Called once at startup, before any job can run (the write is not
+// synchronized with running-job reads).
+func (r *Runners) SetRateLimiter(rl RateLimiter) {
+	r.deps.RateLimit = rl
+}
 
 // SetBootJob records the persisted job snapshot restored at startup. A job
 // left in "running" (process died mid-run) is marked interrupted so the UI
@@ -154,38 +187,4 @@ func (r *Runners) reconcileDivergedPaths(ctx context.Context, report func(Report
 		}
 	}
 	return n, err
-}
-
-// maxRateLimitPause caps how long the duplicates scan sleeps after a
-// rate-limit response. MusicBrainz's 1 req/s limit self-corrects in a couple
-// of seconds; a larger Retry-After shouldn't stall the whole scan. Var so
-// tests can shrink it.
-var maxRateLimitPause = 10 * time.Second
-
-// defaultRateLimitPause is how long to sleep after a rate-limit response
-// before retrying. Var so tests can shrink it.
-var defaultRateLimitPause = 5 * time.Second
-
-// pauseForRateLimit sleeps after a rate-limit response so the throttled API
-// can recover, honoring the request context (job cancellation aborts the
-// pause). When the error carries a server-requested Retry-After, the pause
-// honors it (bounded by maxRateLimitPause); otherwise the default is used.
-// Returns false when the context was cancelled.
-func (r *Runners) pauseForRateLimit(ctx context.Context, err error) bool {
-	d := defaultRateLimitPause
-	var rl *metadata.RateLimitError
-	if errors.As(err, &rl) && rl.RetryAfter > d {
-		d = rl.RetryAfter
-	}
-	if d > maxRateLimitPause {
-		d = maxRateLimitPause
-	}
-	timer := time.NewTimer(d)
-	defer timer.Stop()
-	select {
-	case <-timer.C:
-		return true
-	case <-ctx.Done():
-		return false
-	}
 }

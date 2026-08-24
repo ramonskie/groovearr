@@ -59,8 +59,8 @@ func (c *stubCooldown) MarkAfter(name string, retryAfter time.Duration) {
 // stubRateLimitedError implements rateLimitedBackoffer for tests.
 type stubRateLimitedError struct{ backoff time.Duration }
 
-func (e *stubRateLimitedError) Error() string             { return "provider rate limited: stub" }
-func (e *stubRateLimitedError) Unwrap() error             { return errors.New("provider rate limited") }
+func (e *stubRateLimitedError) Error() string                   { return "provider rate limited: stub" }
+func (e *stubRateLimitedError) Unwrap() error                   { return errors.New("provider rate limited") }
 func (e *stubRateLimitedError) RateLimitBackoff() time.Duration { return e.backoff }
 
 func newStub(name string, configured, metaAvailable bool) *stubPlugin {
@@ -260,4 +260,55 @@ func TestHealthCheckerNonRateLimitErrorDoesNotMark(t *testing.T) {
 	if _, ok := cd.marked["down"]; ok {
 		t.Errorf("non-rate-limit failure must not mark cooldown, got %v", cd.marked)
 	}
+}
+
+// TestHealthCheckerRequestCheckWithRunningLoop verifies RequestCheck pokes the
+// background loop: only the named plugin is probed, without blocking the caller.
+func TestHealthCheckerRequestCheckWithRunningLoop(t *testing.T) {
+	a := newStub("a", true, false)
+	b := newStub("b", true, false)
+	h := NewHealthChecker(NewRegistry(), time.Hour, slog.New(slog.DiscardHandler))
+	for _, p := range []*stubPlugin{a, b} {
+		if err := h.registry.Register(p); err != nil {
+			t.Fatalf("register: %v", err)
+		}
+	}
+	// The loop probes all plugins once at startup — wait for that pass.
+	ctx, cancel := context.WithCancel(context.Background())
+	h.Start(ctx)
+	defer cancel()
+	waitFor(t, func() bool { return a.checks.Load() >= 1 && b.checks.Load() >= 1 }, 2*time.Second)
+
+	h.RequestCheck([]string{"a"})
+	waitFor(t, func() bool { return a.checks.Load() >= 2 }, 2*time.Second)
+	time.Sleep(50 * time.Millisecond)
+	if b.checks.Load() != 1 {
+		t.Errorf("non-requested plugin checks = %d, want 1", b.checks.Load())
+	}
+}
+
+// TestHealthCheckerRequestCheckWithoutLoop verifies RequestCheck still probes
+// when the periodic loop is disabled (interval <= 0): the check runs on a
+// single bounded goroutine owned by the checker.
+func TestHealthCheckerRequestCheckWithoutLoop(t *testing.T) {
+	p := newStub("solo", true, false)
+	h := NewHealthChecker(NewRegistry(), 0, slog.New(slog.DiscardHandler))
+	if err := h.registry.Register(p); err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	h.RequestCheck([]string{"solo"})
+	waitFor(t, func() bool { return p.checks.Load() >= 1 }, 2*time.Second)
+}
+
+// waitFor polls cond until it returns true or the timeout elapses.
+func waitFor(t *testing.T, cond func() bool, timeout time.Duration) {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		if cond() {
+			return
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("condition not met before timeout")
 }

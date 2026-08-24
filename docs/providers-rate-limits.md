@@ -61,6 +61,12 @@ A single app-wide `ProviderCooldown` instance is wired into:
 
 `ResetBulk()` (enrichment job start) no longer wipes the cooldown — it only clears the per-run artist-image retry dedup. Wiping the cooldown between runs went around the server-requested backoff and re-armed longer `Retry-After` values (observed: Spotify 1h53m after a second enrichment run).
 
+**Jobs share the bucket**: `jobs.Runners` receives the same `ProviderCooldown`
+via `RunnerDeps.RateLimit` (wired from `Server.SetProviderCooldown`). The
+duplicates job's canonical lookups skip cooling providers before calling and
+mark the bucket on `ErrRateLimited`, so a rate-limited MusicBrainz parks
+app-wide and no job re-probes a throttled API to re-arm a longer ban.
+
 ### Cooldown behavior (SoulSync / *arr-inspired)
 
 - **Server `Retry-After` honored**, capped at **4h** (was 10 min — too short to ride out a real ban like Spotify's 1h53m).

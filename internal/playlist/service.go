@@ -353,15 +353,27 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 	return queued, nil
 }
 
-// syncPlaylistGuarded runs SyncPlaylist with a per-playlist mutex to prevent
-// concurrent syncs of the same playlist (e.g., from double-click or overlapping
-// auto-sync).
+// syncPlaylistGuarded runs a background sync with a 15-minute timeout. Used
+// by the auto-sync worker and the download-missing rebuild, which have no
+// caller-owned context.
 func (s *Service) syncPlaylistGuarded(playlistID int64) {
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
+	defer cancel()
+	if _, err := s.SyncPlaylistGuarded(ctx, playlistID); err != nil {
+		s.log.Error("background sync failed", "playlist_id", playlistID, "error", err, "component", "playlist")
+	}
+}
+
+// SyncPlaylistGuarded runs SyncPlaylist under a per-playlist mutex to prevent
+// concurrent syncs of the same playlist (e.g., from double-click, overlapping
+// auto-sync, or a job-triggered sync racing a background rebuild). Returns
+// started=false when a sync for this playlist is already in progress.
+func (s *Service) SyncPlaylistGuarded(ctx context.Context, playlistID int64) (bool, error) {
 	s.syncMu.Lock()
 	if s.syncing[playlistID] {
 		s.syncMu.Unlock()
 		s.log.Warn("sync already in progress, skipping", "playlist_id", playlistID, "component", "playlist")
-		return
+		return false, nil
 	}
 	s.syncing[playlistID] = true
 	s.syncMu.Unlock()
@@ -372,11 +384,10 @@ func (s *Service) syncPlaylistGuarded(playlistID int64) {
 		s.syncMu.Unlock()
 	}()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
-	defer cancel()
 	if err := s.SyncPlaylist(ctx, playlistID); err != nil {
-		s.log.Error("background sync failed", "playlist_id", playlistID, "error", err, "component", "playlist")
+		return true, err
 	}
+	return true, nil
 }
 
 // findAndQueueDownload searches across configured sources for a matching track

@@ -497,12 +497,19 @@ Queue downloads for unmatched playlist tracks.
 ### `POST /api/playlists/{id}/sync`
 
 Sync a playlist with its source (triggers background import + re-match).
+Runs through the job Manager: single-flight, cancellable, SSE progress,
+persisted/restored on restart.
 
 **Path**: `id` — integer playlist ID
 
-**Response** `202`:
+**Response** `202` (job started) — same shape as every other job start:
 ```json
-{"status": "syncing"}
+{"job": {"type": "sync", "state": "running", "progress": 0, "done": 0, "total": 0}, "started": true}
+```
+
+**Response** `200` when another job is already running:
+```json
+{"job": {...}, "started": false}
 ```
 
 ### `DELETE /api/playlists/{id}`

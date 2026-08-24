@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/library"
@@ -78,22 +79,11 @@ func (r *Runners) Duplicates() Runner {
 			}
 			canonical, err := r.LookupCanonicalArtist(ctx, t.repName)
 			if err != nil {
-				// MusicBrainz (the sole canonical-name source) is rate-limited.
-				// Pause ctx-aware so it can recover, then retry this group once so
-				// every group still gets a genuine lookup attempt.
-				if errors.Is(err, metadata.ErrRateLimited) {
-					r.deps.Log.Warn("duplicates scan: canonical lookup rate limited, pausing then retrying",
-						"group", t.key, "error", err, "component", "jobs")
-					if !r.pauseForRateLimit(ctx, err) {
-						return ctx.Err()
-					}
-					canonical, err = r.LookupCanonicalArtist(ctx, t.repName)
-					if err != nil && errors.Is(err, metadata.ErrRateLimited) {
-						r.deps.Log.Warn("duplicates scan: canonical lookup still rate limited after pause",
-							"group", t.key, "error", err, "component", "jobs")
-						canonical = ""
-					}
-				}
+				// The shared cooldown handles rate-limited providers (marked
+				// inside LookupCanonicalArtist, which also skips providers
+				// currently cooling down). The group is persisted with an
+				// empty canonical and re-attempted on the next run.
+				r.deps.Log.Warn("duplicates scan: canonical lookup failed", "group", t.key, "error", err, "component", "jobs")
 			}
 			if err := dss.UpsertDuplicateCanonical(ctx, t.key, canonical); err != nil {
 				r.deps.Log.Warn("duplicates scan: persist failed", "group", t.key, "error", err, "component", "jobs")
@@ -111,7 +101,10 @@ func (r *Runners) Duplicates() Runner {
 
 // LookupCanonicalArtist resolves the canonical spelling for an artist using
 // the first configured provider that implements ArtistNameProvider. Used by
-// the duplicates job and the merge handler.
+// the duplicates job and the merge handler. Consults and marks the shared
+// provider cooldown: a provider currently cooling down is skipped (no probe
+// that could re-arm a longer ban), and a rate-limit response parks the
+// provider app-wide for the backoff window.
 func (r *Runners) LookupCanonicalArtist(ctx context.Context, name string) (string, error) {
 	var lastErr error
 	var rateLimitedErr error
@@ -123,10 +116,21 @@ func (r *Runners) LookupCanonicalArtist(ctx context.Context, name string) (strin
 		if !ok {
 			continue
 		}
+		if r.deps.RateLimit != nil && r.deps.RateLimit.CoolingDown(p.Name()) {
+			continue
+		}
 		got, err := anp.CanonicalArtistName(ctx, name)
 		if err != nil {
 			r.deps.Log.Warn("artist name lookup failed", "artist", name, "provider", p.Name(), "error", err, "component", "jobs")
 			if errors.Is(err, metadata.ErrRateLimited) {
+				if r.deps.RateLimit != nil {
+					var rl *metadata.RateLimitError
+					var retryAfter time.Duration
+					if errors.As(err, &rl) {
+						retryAfter = rl.RetryAfter
+					}
+					r.deps.RateLimit.MarkAfter(p.Name(), retryAfter)
+				}
 				rateLimitedErr = err
 			} else {
 				lastErr = err

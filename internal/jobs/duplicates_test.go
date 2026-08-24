@@ -27,6 +27,27 @@ type stubLibraryStore struct {
 
 var _ DuplicateScanStore = (*stubLibraryStore)(nil)
 
+// stubCooldown is a minimal shared rate-limit bucket for tests.
+type stubCooldown struct {
+	cooling map[string]bool
+	marked  map[string]time.Duration
+}
+
+func (s *stubCooldown) CoolingDown(name string) bool {
+	return s.cooling != nil && s.cooling[name]
+}
+
+func (s *stubCooldown) MarkAfter(name string, retryAfter time.Duration) {
+	if s.marked == nil {
+		s.marked = make(map[string]time.Duration)
+	}
+	s.marked[name] = retryAfter
+	if s.cooling == nil {
+		s.cooling = make(map[string]bool)
+	}
+	s.cooling[name] = true
+}
+
 func (s *stubLibraryStore) ListArtists(ctx context.Context, offset, limit int) ([]domain.Artist, error) {
 	if offset >= len(s.artists) {
 		return nil, nil
@@ -194,41 +215,7 @@ func TestDuplicatesRunnerPersistsCanonicals(t *testing.T) {
 	}
 }
 
-func TestPauseForRateLimitHonorsRetryAfter(t *testing.T) {
-	origPause := defaultRateLimitPause
-	defaultRateLimitPause = 5 * time.Millisecond
-	defer func() { defaultRateLimitPause = origPause }()
-
-	runners := NewRunners(RunnerDeps{Log: testLogger(), Config: func() config.Config { return config.Config{} }})
-
-	t.Run("honors retry-after", func(t *testing.T) {
-		err := metadata.NewRateLimitError("musicbrainz", 50*time.Millisecond, "HTTP 503")
-		start := time.Now()
-		if !runners.pauseForRateLimit(context.Background(), err) {
-			t.Fatal("pauseForRateLimit returned false with live context")
-		}
-		if elapsed := time.Since(start); elapsed < 40*time.Millisecond {
-			t.Errorf("pause = %v, want ~50ms honoring retry-after", elapsed)
-		}
-	})
-
-	t.Run("caps pathological retry-after", func(t *testing.T) {
-		origMax := maxRateLimitPause
-		maxRateLimitPause = 20 * time.Millisecond
-		defer func() { maxRateLimitPause = origMax }()
-
-		err := metadata.NewRateLimitError("musicbrainz", 24*time.Hour, "HTTP 503")
-		start := time.Now()
-		if !runners.pauseForRateLimit(context.Background(), err) {
-			t.Fatal("pauseForRateLimit returned false with live context")
-		}
-		if elapsed := time.Since(start); elapsed >= 100*time.Millisecond {
-			t.Errorf("pause = %v, want capped at maxRateLimitPause", elapsed)
-		}
-	})
-}
-
-func TestDuplicatesRunnerPausesOnRateLimit(t *testing.T) {
+func TestDuplicatesRunnerRateLimitMarksSharedCooldown(t *testing.T) {
 	store := &stubLibraryStore{
 		artists: []domain.Artist{
 			{ID: 1, Name: "Acda en De Munnik"},
@@ -246,24 +233,28 @@ func TestDuplicatesRunnerPausesOnRateLimit(t *testing.T) {
 			"acdaendemunnik": "Acda en de Munnik",
 		},
 		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
-		fails: 1,
+		fails: 100,
 	})
-	origPause := defaultRateLimitPause
-	defaultRateLimitPause = 5 * time.Millisecond
-	defer func() { defaultRateLimitPause = origPause }()
+	cd := &stubCooldown{}
 
 	runners := NewRunners(RunnerDeps{
-		Log:      testLogger(),
-		Store:    store,
-		Config:   func() config.Config { return config.Config{} },
-		Metadata: reg,
+		Log:       testLogger(),
+		Store:     store,
+		Config:    func() config.Config { return config.Config{} },
+		Metadata:  reg,
+		RateLimit: cd,
 	})
 
 	if err := runners.Duplicates()(context.Background(), func(Report) {}); err != nil {
 		t.Fatalf("Duplicates: %v", err)
 	}
-	if store.scan["acda en de munnik"] != "Acda en de Munnik" {
-		t.Errorf("scan = %v, want the canonical resolved after pause+retry", store.scan)
+	// Rate-limited provider is parked app-wide and the group is persisted
+	// with an empty canonical — no retry that could re-arm a longer ban.
+	if _, ok := cd.marked["musicbrainz"]; !ok {
+		t.Errorf("cooldown not marked for musicbrainz: %v", cd.marked)
+	}
+	if got, ok := store.scan["acda en de munnik"]; !ok || got != "" {
+		t.Errorf("group = %q (ok=%v), want empty canonical fallback (scan: %v)", got, ok, store.scan)
 	}
 }
 
@@ -285,9 +276,6 @@ func TestDuplicatesRunnerRateLimitStaysEmptyOnPersistentLimit(t *testing.T) {
 		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
 		fails: 100,
 	})
-	origPause := defaultRateLimitPause
-	defaultRateLimitPause = time.Millisecond
-	defer func() { defaultRateLimitPause = origPause }()
 
 	runners := NewRunners(RunnerDeps{
 		Log:      testLogger(),
@@ -422,5 +410,109 @@ func TestDuplicatesRunnerGroupsFeatMarkedWithPrimary(t *testing.T) {
 	}
 	if c, ok := store.scan["2pac"]; !ok || c != "2Pac" {
 		t.Errorf("scan[\"2pac\"] = %q, want canonical \"2Pac\" (scan: %v)", c, store.scan)
+	}
+}
+
+func TestLookupCanonicalArtistSkipsCoolingProvider(t *testing.T) {
+	p := &stubNameProvider{name: "musicbrainz", names: map[string]string{"tiësto": "Tiësto"}}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(p)
+	cd := &stubCooldown{cooling: map[string]bool{"musicbrainz": true}}
+
+	runners := NewRunners(RunnerDeps{
+		Log:       testLogger(),
+		Config:    func() config.Config { return config.Config{} },
+		Metadata:  reg,
+		RateLimit: cd,
+	})
+
+	got, err := runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if err != nil {
+		t.Fatalf("LookupCanonicalArtist: %v", err)
+	}
+	if got != "" {
+		t.Errorf("canonical = %q, want empty (provider cooling down)", got)
+	}
+	if p.left.Load() != 0 {
+		t.Errorf("provider called %d times, want 0 (must skip cooling provider)", p.left.Load())
+	}
+}
+
+func TestLookupCanonicalArtistMarksCooldownOnRateLimit(t *testing.T) {
+	p := &stubNameProvider{
+		name:  "musicbrainz",
+		names: map[string]string{},
+		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		fails: 100,
+	}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(p)
+	cd := &stubCooldown{}
+
+	runners := NewRunners(RunnerDeps{
+		Log:       testLogger(),
+		Config:    func() config.Config { return config.Config{} },
+		Metadata:  reg,
+		RateLimit: cd,
+	})
+
+	got, err := runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if err == nil {
+		t.Fatal("expected rate-limit error to propagate")
+	}
+	if got != "" {
+		t.Errorf("canonical = %q, want empty on rate limit", got)
+	}
+	if _, ok := cd.marked["musicbrainz"]; !ok {
+		t.Errorf("shared cooldown not marked for musicbrainz: %v", cd.marked)
+	}
+}
+
+func TestLookupCanonicalArtistHonorsRetryAfter(t *testing.T) {
+	p := &stubNameProvider{
+		name:  "musicbrainz",
+		names: map[string]string{},
+		err:   metadata.NewRateLimitError("musicbrainz", 7*time.Minute, "HTTP 503"),
+		fails: 100,
+	}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(p)
+	cd := &stubCooldown{}
+
+	runners := NewRunners(RunnerDeps{
+		Log:       testLogger(),
+		Config:    func() config.Config { return config.Config{} },
+		Metadata:  reg,
+		RateLimit: cd,
+	})
+
+	_, _ = runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if got := cd.marked["musicbrainz"]; got != 7*time.Minute {
+		t.Errorf("cooldown mark = %v, want 7m honoring Retry-After", got)
+	}
+}
+
+func TestLookupCanonicalArtistNilRateLimiter(t *testing.T) {
+	p := &stubNameProvider{
+		name:  "musicbrainz",
+		names: map[string]string{},
+		err:   fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		fails: 100,
+	}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(p)
+
+	runners := NewRunners(RunnerDeps{
+		Log:      testLogger(),
+		Config:   func() config.Config { return config.Config{} },
+		Metadata: reg,
+	})
+
+	got, err := runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if err == nil {
+		t.Fatal("expected rate-limit error to propagate with nil cooldown")
+	}
+	if got != "" {
+		t.Errorf("canonical = %q, want empty", got)
 	}
 }

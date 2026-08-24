@@ -1,12 +1,10 @@
 package api
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"strconv"
-	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/playlist"
@@ -164,14 +162,9 @@ func (s *Server) handleSyncPlaylist(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusServiceUnavailable, fmt.Errorf("playlist service not available"))
 		return
 	}
-	go func() {
-		ctx, cancel := context.WithTimeout(s.bgCtx, 10*time.Minute)
-		defer cancel()
-		if err := s.playlistSvc.SyncPlaylist(ctx, id); err != nil {
-			s.log.Error("playlist sync failed", "playlist_id", id, "error", err, "component", "api")
-		}
-	}()
-	writeJSON(w, http.StatusAccepted, map[string]string{"status": "syncing"})
+	// Runs through the job Manager: single-flight, cancellable, SSE progress,
+	// persisted/restored on restart.
+	s.startJob(w, "sync", s.runners.SyncPlaylist(id))
 }
 
 func (s *Server) handleUpdatePlaylist(w http.ResponseWriter, r *http.Request) {

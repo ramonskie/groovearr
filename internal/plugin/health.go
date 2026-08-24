@@ -6,6 +6,7 @@ import (
 	"errors"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -67,6 +68,15 @@ type HealthChecker struct {
 	// The previous status is kept so the provider isn't shown as disconnected.
 	cooldown CooldownSource
 
+	// wake carries immediate check requests into the background loop.
+	// Each element is the list of plugin names to re-check (nil = all).
+	wake chan []string
+
+	// running is true once Start has launched the background loop. When the
+	// loop is not running (interval <= 0), RequestCheck falls back to a
+	// single bounded goroutine so callers never block on a provider probe.
+	running atomic.Bool
+
 	mu     sync.RWMutex
 	status map[string]HealthStatus // latest result per plugin
 }
@@ -78,6 +88,7 @@ func NewHealthChecker(registry *Registry, interval time.Duration, logger *slog.L
 		registry: registry,
 		log:      logger,
 		interval: interval,
+		wake:     make(chan []string, 1),
 		status:   make(map[string]HealthStatus),
 	}
 }
@@ -88,6 +99,7 @@ func (h *HealthChecker) Start(ctx context.Context) {
 	if h.interval <= 0 {
 		return
 	}
+	h.running.Store(true)
 	go h.loop(ctx)
 }
 
@@ -106,9 +118,54 @@ func (h *HealthChecker) SetProviderCooldown(c CooldownSource) {
 
 // CheckNow runs a health check on all registered plugins immediately.
 func (h *HealthChecker) CheckNow(ctx context.Context) {
-	plugins := h.registry.All()
-	for _, p := range plugins {
-		h.checkOne(ctx, p)
+	h.checkNames(ctx, nil)
+}
+
+// RequestCheck asks the background loop to re-check the given plugins as soon
+// as possible (nil or empty = all plugins). Non-blocking: requests made while
+// the loop is busy are coalesced. Safe to call from HTTP handlers.
+func (h *HealthChecker) RequestCheck(names []string) {
+	if !h.running.Load() {
+		// Loop disabled — run the probes on a service-owned goroutine so the
+		// caller is never blocked. Each call spawns its own goroutine (a
+		// burst of requests probes concurrently), bounded to 30s so it can't
+		// outlive a stuck provider.
+		go func() {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+			defer cancel()
+			h.checkNames(ctx, names)
+		}()
+		return
+	}
+	select {
+	case h.wake <- names:
+	default:
+		// Coalesce: drop the stale pending request and keep the newest one.
+		select {
+		case <-h.wake:
+		default:
+		}
+		select {
+		case h.wake <- names:
+		default:
+		}
+	}
+}
+
+// checkNames probes the named plugins, or all registered plugins when names
+// is empty. Sequential: each CheckConnection call is bounded by the provider's
+// own timeout.
+func (h *HealthChecker) checkNames(ctx context.Context, names []string) {
+	if len(names) == 0 {
+		for _, p := range h.registry.All() {
+			h.checkOne(ctx, p)
+		}
+		return
+	}
+	for _, name := range names {
+		if p := h.registry.Get(name); p != nil {
+			h.checkOne(ctx, p)
+		}
 	}
 }
 
@@ -146,6 +203,8 @@ func (h *HealthChecker) loop(ctx context.Context) {
 			return
 		case <-ticker.C:
 			h.CheckNow(ctx)
+		case names := <-h.wake:
+			h.checkNames(ctx, names)
 		}
 	}
 }
