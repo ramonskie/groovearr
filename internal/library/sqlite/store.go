@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/library"
 
 	_ "modernc.org/sqlite"
 )
@@ -758,6 +759,18 @@ func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName
 }
 
 func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, error) {
+	// Guard: resolve multi-artist track names ("2Pac feat. X") to the primary
+	// artist so every import flow — scanner, download importer, album importer,
+	// playlist sync — files tracks under the main artist instead of fabricating
+	// one artist row per featured string.
+	//
+	// Only an explicit featuring marker ("feat.", "featuring", "ft.", ...) is
+	// authoritative for the split. Ambiguous collaboration separators (" & ",
+	// ", ", " vs ", " x ") are left intact: "Simon & Garfunkel" and "Chaka
+	// Demus & Pliers" are real artist entities known to metadata sources, and
+	// folding them to their first member would mis-attribute tracks.
+	name = library.IdentityArtistName(name)
+
 	existing, err := s.GetArtistByName(ctx, name)
 	if err != nil {
 		s.log.Error("getOrCreateArtist: getByName failed", "error", err, "component", "lib_store")
