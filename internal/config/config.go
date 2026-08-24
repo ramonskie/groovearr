@@ -137,10 +137,14 @@ const (
 // DefaultConfig returns a Config populated with sensible defaults.
 func DefaultConfig() Config {
 	return Config{
-		Sources:        make(map[string]json.RawMessage),
-		Logging:        DefaultLogging(),
+		Sources: make(map[string]json.RawMessage),
+		Logging: DefaultLogging(),
+		// Sanctioned exception to provider isolation: a first-run bootstrap
+		// order so discovery, search, and downloads work out of the box.
+		// This is a seed only — the user's config can override it at any
+		// time. Runtime provider behavior never depends on it.
 		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
-		DownloadOrder:  []string{"soulseek", "deezer"},
+		DownloadOrder:  []string{"soulseek"},
 		AlbumSources:   []string{},
 		DownloadClient: "",
 		Library: LibraryConfig{

@@ -59,8 +59,8 @@ func (r *Renamer) resolverFor(compilation bool) *PathResolver {
 	return r.resolver
 }
 
-// RenameOrganized satisfies the deezer.FileRenamer interface for post-download organization.
-// It accepts individual metadata fields instead of a struct to avoid cross-package coupling.
+// RenameOrganized renames a downloaded file using individual metadata fields
+// instead of a struct to avoid cross-package coupling.
 func (r *Renamer) RenameOrganized(filePath string, artist, album, title string, trackNum, discNum, year int) (string, error) {
 	return r.Rename(filePath, FileMeta{
 		Artist:   artist,

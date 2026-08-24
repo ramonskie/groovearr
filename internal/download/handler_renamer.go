@@ -35,8 +35,8 @@ func (h *FileRenamerHandler) Handle(ctx context.Context, record *Record) error {
 		return fmt.Errorf("renamer: no file path in download record %s", record.ID)
 	}
 
-	// Resolve the actual file on disk. slskd may save the file at a different
-	// path than the predicted FilePath (strips @@user/ prefixes, etc.).
+	// Resolve the actual file on disk. A provider may save the file at a
+	// different path than the predicted FilePath.
 	srcPath := h.resolveSourcePath(record.FilePath, record.Filename)
 
 	// Normalize the artist to its identity form so the file is organized under
