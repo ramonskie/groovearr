@@ -56,6 +56,7 @@ type Store interface {
 	GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error)
 	GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error)
 	ListPlaylists(ctx context.Context) ([]domain.Playlist, error)
+	CountPlaylistsByName(ctx context.Context, source, name string) (int64, error)
 	DeletePlaylist(ctx context.Context, id int64) error
 
 	UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error

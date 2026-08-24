@@ -713,6 +713,9 @@ func (m *mockStore) GetPlaylistBySourceID(ctx context.Context, source, sourceID 
 	return nil, nil
 }
 func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) { return nil, nil }
+func (m *mockStore) CountPlaylistsByName(ctx context.Context, source, name string) (int64, error) {
+	return 0, nil
+}
 func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
 func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
 	return nil

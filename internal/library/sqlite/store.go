@@ -1137,6 +1137,18 @@ func (s *Store) DeletePlaylist(ctx context.Context, id int64) error {
 	return err
 }
 
+func (s *Store) CountPlaylistsByName(ctx context.Context, source, name string) (int64, error) {
+	var n int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM playlists WHERE source=? AND name=?`,
+		source, name,
+	).Scan(&n)
+	if err != nil {
+		s.log.Error("count playlists by name failed", "error", err, "component", "lib_store")
+	}
+	return n, err
+}
+
 func (s *Store) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := s.db.ExecContext(ctx, `

@@ -516,3 +516,46 @@ func TestStore_DuplicateScanCRUD(t *testing.T) {
 		t.Errorf("expected empty scan after clear, got %d groups", len(all))
 	}
 }
+
+func TestStore_CountPlaylistsByName(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+
+	// Two tidal playlists share the name "My Mix", one has a unique name.
+	upserts := []*domain.Playlist{
+		{Source: "tidal", SourcePlaylistID: "aaaa-bbbb", Name: "My Mix"},
+		{Source: "tidal", SourcePlaylistID: "1111-2222", Name: "My Mix"},
+		{Source: "tidal", SourcePlaylistID: "9999-8888", Name: "Solo Mix"},
+		{Source: "deezer", SourcePlaylistID: "dz-1", Name: "My Mix"},
+	}
+	for _, p := range upserts {
+		if _, err := store.UpsertPlaylist(ctx, p); err != nil {
+			t.Fatalf("upsert playlist %+v: %v", p, err)
+		}
+	}
+
+	tests := []struct {
+		source, name string
+		want         int64
+	}{
+		{"tidal", "My Mix", 2},       // same-name collision
+		{"tidal", "Solo Mix", 1},     // unique name
+		{"deezer", "My Mix", 1},      // same name, different source
+		{"tidal", "Does Not Exist", 0},
+	}
+	for _, tc := range tests {
+		got, err := store.CountPlaylistsByName(ctx, tc.source, tc.name)
+		if err != nil {
+			t.Fatalf("CountPlaylistsByName(%q, %q): %v", tc.source, tc.name, err)
+		}
+		if got != tc.want {
+			t.Errorf("CountPlaylistsByName(%q, %q) = %d, want %d", tc.source, tc.name, got, tc.want)
+		}
+	}
+}

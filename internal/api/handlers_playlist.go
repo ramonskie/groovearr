@@ -64,6 +64,11 @@ func (s *Server) handleListPlaylists(w http.ResponseWriter, r *http.Request) {
 	if playlists == nil {
 		playlists = []domain.Playlist{}
 	}
+	// Derive conflict + folder fields so the UI can flag same-name playlists
+	// and report where each one is placed on disk.
+	for i := range playlists {
+		s.playlistSvc.ResolvePlaylistDisplay(ctx, &playlists[i])
+	}
 	writeJSON(w, http.StatusOK, playlists)
 }
 
@@ -83,6 +88,10 @@ func (s *Server) handleGetPlaylist(w http.ResponseWriter, r *http.Request) {
 	if p == nil {
 		writeError(w, http.StatusNotFound, fmt.Errorf("playlist not found"))
 		return
+	}
+	// Derive conflict + folder fields for consistency with the list endpoint.
+	if s.playlistSvc != nil {
+		s.playlistSvc.ResolvePlaylistDisplay(ctx, p)
 	}
 	tracks, _ := s.store.GetPlaylistTracks(ctx, id)
 	if tracks == nil {

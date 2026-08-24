@@ -1,5 +1,5 @@
 import { useState, type FC } from "react";
-import { RefreshCw, Download, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown, Repeat } from "lucide-react";
+import { RefreshCw, Download, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown, Repeat, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { Playlist, PlaylistTrackDownloadStatus } from "../../api/types";
@@ -136,6 +136,15 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
               <SourceIcon size={10} className="mr-1" />
               {sourceDisplayName}
             </Badge>
+            {playlist.name_conflict && (
+              <Badge
+                variant="error"
+                title={`Another ${sourceDisplayName} playlist uses this name. Files are kept separate — this one is placed in folder "${playlist.folder_name}".`}
+              >
+                <TriangleAlert size={10} className="mr-1" />
+                Conflict
+              </Badge>
+            )}
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-xs text-slate-400">{playlist.track_count} tracks</span>

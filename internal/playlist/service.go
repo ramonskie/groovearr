@@ -37,6 +37,7 @@ type Service struct {
 	syncMu              sync.Mutex
 	syncing             map[int64]bool // playlistIDs currently being synced
 	autoSyncSem         chan struct{}  // limits concurrent auto-sync goroutines (capacity 3)
+	folderMu            sync.Mutex    // serializes conflict-resolve + folder mkdir
 }
 
 // NewService creates a playlist service.
@@ -547,6 +548,37 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 	return nil
 }
 
+// shortSourceID returns the first 8 characters of a source playlist ID,
+// enough to disambiguate same-name playlists in folder names.
+func shortSourceID(id string) string {
+	if len(id) > 8 {
+		return id[:8]
+	}
+	return id
+}
+
+// resolvePlaylistDisplay derives the display-time fields NameConflict and
+// FolderName. Same-name playlists from the same source are flagged as a
+// conflict and get an ID-suffixed folder so their files never share a
+// directory. Callers: the folder builder (authoritative for on-disk naming)
+// and the API list handler (so the UI reports the same folder).
+func (s *Service) resolvePlaylistDisplay(ctx context.Context, p *domain.Playlist) {
+	if p == nil {
+		return
+	}
+	n, err := s.store.CountPlaylistsByName(ctx, p.Source, p.Name)
+	p.NameConflict = err == nil && n > 1
+	p.FolderName = sanitize.DirName(p.Name)
+	if p.NameConflict {
+		p.FolderName = fmt.Sprintf("%s (%s)", p.FolderName, shortSourceID(p.SourcePlaylistID))
+	}
+}
+
+// ResolvePlaylistDisplay exposes resolvePlaylistDisplay to the API layer.
+func (s *Service) ResolvePlaylistDisplay(ctx context.Context, p *domain.Playlist) {
+	s.resolvePlaylistDisplay(ctx, p)
+}
+
 // buildPlaylistFolder creates the playlist directory structure from linked tracks.
 func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 	defer s.log.Info("playlist folder build done", "playlist_id", playlistID, "component", "playlist")
@@ -579,11 +611,26 @@ func (s *Service) buildPlaylistFolder(ctx context.Context, playlistID int64) {
 		template = "{position:02d} {artist} - {title}"
 	}
 
-	// Create playlist directory.
-	playlistDir := filepath.Join(root, sanitize.DirName(playlist.Name))
-	if err := os.MkdirAll(playlistDir, 0o755); err != nil {
+	// Create playlist directory. The folder name is resolved conflict-aware:
+	// same-name playlists from the same source get an ID suffix so their
+	// files never share a directory. The mutex is held from the conflict
+	// check through MkdirAll so two concurrent folder builds can't both
+	// pick the unsuffixed name.
+	s.folderMu.Lock()
+	s.resolvePlaylistDisplay(ctx, playlist)
+	playlistDir := filepath.Join(root, playlist.FolderName)
+	err = os.MkdirAll(playlistDir, 0o755)
+	s.folderMu.Unlock()
+	if err != nil {
 		s.log.Error("mkdir failed", "path", playlistDir, "error", err, "component", "playlist")
 		return
+	}
+	if playlist.NameConflict {
+		// Same-name playlists from the same source previously shared the plain
+		// folder. The plain directory may still exist with stale copies; there
+		// is no safe way to attribute old files to one playlist, so cleanup is
+		// manual.
+		s.log.Warn("playlist folder name conflict: using suffixed folder", "name", playlist.Name, "folder", playlist.FolderName, "legacy_folder", sanitize.DirName(playlist.Name), "playlist_id", playlist.ID, "component", "playlist")
 	}
 
 	renamer := library.NewPlaylistRenamer(template, playlistDir)

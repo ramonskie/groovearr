@@ -611,6 +611,10 @@ export interface Playlist {
   sync_mode: string;
   created_at: string;
   updated_at: string;
+  /** Derived: another playlist from the same source shares this name. */
+  name_conflict?: boolean;
+  /** Derived: resolved on-disk folder name (ID-suffixed on conflict). */
+  folder_name?: string;
 }
 
 /** Per-track download status derived from the download pipeline. */

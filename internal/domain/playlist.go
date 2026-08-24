@@ -24,6 +24,12 @@ type Playlist struct {
 	SyncMode         SyncMode `json:"sync_mode"` // "mirror" or "append" (default "mirror")
 	CreatedAt        string   `json:"created_at"`
 	UpdatedAt        string   `json:"updated_at"`
+
+	// Derived at read time (not persisted): another playlist from the same
+	// source shares this name. When true, the on-disk folder gets an ID
+	// suffix so the two playlists never share a directory.
+	NameConflict bool   `json:"name_conflict,omitempty"`
+	FolderName   string `json:"folder_name,omitempty"` // resolved folder name (conflict-aware)
 }
 
 // PlaylistTrack is a single track within an imported playlist.

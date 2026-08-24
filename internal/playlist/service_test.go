@@ -2,9 +2,12 @@ package playlist
 
 import (
 	"context"
+	"log/slog"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/matching"
 )
@@ -88,6 +91,15 @@ func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error
 		out = append(out, *p)
 	}
 	return out, nil
+}
+func (m *mockStore) CountPlaylistsByName(ctx context.Context, source, name string) (int64, error) {
+	var n int64
+	for _, p := range m.playlists {
+		if p.Source == source && p.Name == name {
+			n++
+		}
+	}
+	return n, nil
 }
 func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error {
 	delete(m.playlists, id)
@@ -235,4 +247,89 @@ func TestFindInLibrary(t *testing.T) {
 			t.Errorf("expected 0, got %d", id)
 		}
 	})
+}
+
+func TestShortSourceID(t *testing.T) {
+	if got := shortSourceID("12345678-aaaa"); got != "12345678" {
+		t.Errorf("shortSourceID(long) = %q, want %q", got, "12345678")
+	}
+	if got := shortSourceID("short"); got != "short" {
+		t.Errorf("shortSourceID(short) = %q, want %q", got, "short")
+	}
+}
+
+func TestResolvePlaylistDisplay(t *testing.T) {
+	store := &mockStore{
+		playlists:      map[int64]*domain.Playlist{},
+		playlistTracks: map[int64][]domain.PlaylistTrack{},
+		artists:        map[string]*domain.Artist{},
+	}
+	// Two tidal playlists share the name "My Mix".
+	store.playlists[1] = &domain.Playlist{ID: 1, Source: "tidal", SourcePlaylistID: "aaaa-bbbb-cccc-dddd", Name: "My Mix"}
+	store.playlists[2] = &domain.Playlist{ID: 2, Source: "tidal", SourcePlaylistID: "1111-2222-3333-4444", Name: "My Mix"}
+	svc := &Service{store: store}
+
+	t.Run("same-name conflict is flagged and suffixed", func(t *testing.T) {
+		p := &domain.Playlist{Source: "tidal", SourcePlaylistID: "aaaa-bbbb-cccc-dddd", Name: "My Mix"}
+		svc.ResolvePlaylistDisplay(context.Background(), p)
+		if !p.NameConflict {
+			t.Error("expected NameConflict=true for same-name playlist")
+		}
+		if p.FolderName != "My Mix (aaaa-bbb)" {
+			t.Errorf("FolderName = %q, want %q", p.FolderName, "My Mix (aaaa-bbb)")
+		}
+	})
+
+	t.Run("unique name stays plain", func(t *testing.T) {
+		p := &domain.Playlist{Source: "tidal", SourcePlaylistID: "9999-8888-7777-6666", Name: "Solo Mix"}
+		svc.ResolvePlaylistDisplay(context.Background(), p)
+		if p.NameConflict {
+			t.Error("expected NameConflict=false for unique-name playlist")
+		}
+		if p.FolderName != "Solo Mix" {
+			t.Errorf("FolderName = %q, want %q", p.FolderName, "Solo Mix")
+		}
+	})
+}
+
+func TestBuildPlaylistFolderNameConflict(t *testing.T) {
+	root := t.TempDir()
+	store := &mockStore{
+		playlists:      map[int64]*domain.Playlist{},
+		playlistTracks: map[int64][]domain.PlaylistTrack{},
+		artists:        map[string]*domain.Artist{},
+	}
+	svc := &Service{
+		store: store,
+		cfgFn: func() config.Config {
+			return config.Config{Library: config.LibraryConfig{PlaylistPath: root}}
+		},
+		log: slog.Default(),
+	}
+
+	ctx := context.Background()
+	store.playlists[1] = &domain.Playlist{ID: 1, Source: "tidal", SourcePlaylistID: "aaaa-bbbb-cccc-dddd", Name: "My Mix"}
+	store.playlists[2] = &domain.Playlist{ID: 2, Source: "tidal", SourcePlaylistID: "1111-2222-3333-4444", Name: "My Mix"}
+	store.playlists[3] = &domain.Playlist{ID: 3, Source: "tidal", SourcePlaylistID: "9999-8888-7777-6666", Name: "Solo Mix"}
+
+	svc.buildPlaylistFolder(ctx, 1)
+	svc.buildPlaylistFolder(ctx, 2)
+	svc.buildPlaylistFolder(ctx, 3)
+
+	// Same-name playlists get ID-suffixed folders so their files never mix.
+	for _, tc := range []struct {
+		id   int64
+		want string
+	}{
+		{1, "My Mix (aaaa-bbb)"},
+		{2, "My Mix (1111-222)"},
+	} {
+		if _, err := os.Stat(filepath.Join(root, tc.want)); err != nil {
+			t.Errorf("playlist %d: folder %q not created: %v", tc.id, tc.want, err)
+		}
+	}
+	// Unique-name playlists keep the plain folder name.
+	if _, err := os.Stat(filepath.Join(root, "Solo Mix")); err != nil {
+		t.Errorf("playlist 3: plain folder %q not created: %v", "Solo Mix", err)
+	}
 }

@@ -172,6 +172,11 @@ Groovearr has a **protection layer** that makes these rules safe by construction
   one file at a time, from the file that was actually downloaded. Playlists link
   tracks that already exist in the library and queue the rest through the download
   pipeline; they never scan the filesystem.
+- When two playlists from the same source share a name (e.g. two Tidal playlists
+  both called "My Mix"), each gets its own suffixed folder (`My Mix (a1b2c3d4)`)
+  so their files never mix. If both playlists already existed before this
+  behavior, the old shared folder keeps stale copies after re-sync — remove it
+  manually.
 - If a sweep ever did slip multi-artist entries into the library (e.g. "2Pac feat.
   Anthony Hamilton" as its own artist), run **Settings → Jobs → Artist Cleanup** to
   merge them back into the primary artist ("2Pac").

@@ -423,6 +423,10 @@ List imported playlists.
 
 **Response** `200`: `[Playlist, ...]`
 
+Each playlist includes two derived (non-persisted) fields:
+- `name_conflict` — `true` when another playlist from the same source shares this name. The UI shows a conflict badge.
+- `folder_name` — the resolved on-disk folder name. On a name conflict the folder gets an ID suffix (e.g. `My Mix (a1b2c3d4)`) so the two playlists never share a directory.
+
 ### `GET /api/playlists/{id}`
 
 Get a single playlist with its tracks.

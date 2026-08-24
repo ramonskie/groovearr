@@ -160,6 +160,9 @@ func (m *mockLibStore) GetPlaylistBySourceID(ctx context.Context, source, source
 }
 
 func (m *mockLibStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) { return nil, nil }
+func (m *mockLibStore) CountPlaylistsByName(ctx context.Context, source, name string) (int64, error) {
+	return 0, nil
+}
 func (m *mockLibStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
 func (m *mockLibStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
 	return nil
