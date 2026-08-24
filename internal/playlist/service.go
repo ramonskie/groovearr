@@ -205,7 +205,22 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 
 // ─── Download Missing ─────────────────────────────────────────────────
 
+// requeueCooldown is how long an exhausted-failed download (the monitor gave
+// up after MaxRetries) must sit before the periodic playlist sync re-arms it.
+// Without the gate, every sync would reset the retry budget and a permanently
+// unavailable track would hammer the providers forever. With it, a stuck track
+// is retried at most once per window (the monitor still paces the intra-window
+// attempts with its own exponential backoff).
+var requeueCooldown = 24 * time.Hour
+
 // DownloadMissing queues downloads for all unmatched tracks in a playlist.
+// Idempotent: tracks already added to the download pipeline (queued,
+// downloading, importing, or failed-but-still-within-retry-budget) are
+// skipped, so repeated calls — e.g. from the periodic playlist sync — never
+// double-queue. A failed record whose retries are exhausted (the monitor gave
+// up) is re-armed in place via Service.Retry once it has sat failed for
+// requeueCooldown, reusing the record and the monitor's retry loop instead of
+// creating a duplicate. Ignored (user-cancelled) records are never re-armed.
 func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, error) {
 	tracks, err := s.store.GetPlaylistTracks(ctx, playlistID)
 	if err != nil {
@@ -213,10 +228,61 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 	}
 
 	playlistIDStr := strconv.FormatInt(playlistID, 10)
+
+	// Build the set of tracks already present in the download pipeline for
+	// this playlist, keyed by ISRC and by artist|title. A track is "already
+	// added" if a pipeline record exists in a state that will still make
+	// progress (queued, downloading, importing, or a failed state still within
+	// the monitor's automatic retry budget). A failed record whose retries are
+	// exhausted (RetryCount >= MaxRetries) blocks only until requeueCooldown
+	// elapses; once it has, the sync re-arms it (record ID recorded in rearm).
+	// Ignored records (user-cancelled) always block: cancelling is explicit.
+	already := map[string]bool{}
+	rearm := map[string]string{} // dedup key → exhausted-failed record ID
+	if existing, err := s.downloadSvc.ListByPlaylist(ctx, playlistIDStr); err == nil {
+		now := time.Now().UTC()
+		for _, d := range existing {
+			exhausted := (d.State == download.StateFailed || d.State == download.StateFailedPending) && d.RetryCount >= download.MaxRetries
+			if exhausted && now.Sub(d.UpdatedAt) >= requeueCooldown {
+				if d.ISRC != "" {
+					rearm["isrc:"+d.ISRC] = d.ID
+				}
+				if d.Artist != "" && d.Title != "" {
+					rearm["at:"+strings.ToLower(d.Artist)+"|"+strings.ToLower(d.Title)] = d.ID
+				}
+				continue
+			}
+			if d.ISRC != "" {
+				already["isrc:"+d.ISRC] = true
+			}
+			if d.Artist != "" && d.Title != "" {
+				already["at:"+strings.ToLower(d.Artist)+"|"+strings.ToLower(d.Title)] = true
+			}
+		}
+	} else {
+		s.log.Warn("download missing: list existing failed, proceeding without dedup",
+			"error", err, "component", "playlist")
+	}
+
 	queued := 0
 
 	for _, pt := range tracks {
 		if pt.TrackID != nil {
+			continue
+		}
+
+		// Skip tracks already added to the download pipeline in an earlier sync.
+		if pt.ISRC != "" && already["isrc:"+pt.ISRC] {
+			s.log.Debug("playlist track already queued via ISRC, skipping",
+				"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
+			continue
+		}
+		// The artist|title fallback only applies to tracks that carry no ISRC.
+		// An ISRC-bearing track dedups by its own ISRC: a same-titled sibling
+		// with a different ISRC is a distinct release and must still be queued.
+		if pt.Artist != "" && pt.Title != "" && pt.ISRC == "" && already["at:"+strings.ToLower(pt.Artist)+"|"+strings.ToLower(pt.Title)] {
+			s.log.Debug("playlist track already queued, skipping",
+				"artist", pt.Artist, "title", pt.Title, "component", "playlist")
 			continue
 		}
 
@@ -227,6 +293,35 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 					"artist", pt.Artist, "title", pt.Title, "isrc", pt.ISRC, "component", "playlist")
 				continue
 			}
+		}
+
+		// An exhausted-failed record past the cooldown window is re-armed in
+		// place — the monitor picks it up again with a fresh retry budget.
+		// The artist|title re-arm only applies to ISRC-less tracks, mirroring
+		// the dedup above: an ISRC-bearing track re-arms its own ISRC record.
+		if pt.ISRC == "" {
+			if id := rearm["at:"+strings.ToLower(pt.Artist)+"|"+strings.ToLower(pt.Title)]; id != "" {
+				if err := s.downloadSvc.Retry(ctx, id); err != nil {
+					s.log.Warn("re-arm exhausted download failed",
+						"download_id", id, "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
+					continue
+				}
+				s.log.Info("playlist re-armed exhausted download",
+					"download_id", id, "artist", pt.Artist, "title", pt.Title, "component", "playlist")
+				queued++
+				continue
+			}
+		}
+		if id := rearm["isrc:"+pt.ISRC]; id != "" && pt.ISRC != "" {
+			if err := s.downloadSvc.Retry(ctx, id); err != nil {
+				s.log.Warn("re-arm exhausted download failed",
+					"download_id", id, "artist", pt.Artist, "title", pt.Title, "error", err, "component", "playlist")
+				continue
+			}
+			s.log.Info("playlist re-armed exhausted download",
+				"download_id", id, "artist", pt.Artist, "title", pt.Title, "component", "playlist")
+			queued++
+			continue
 		}
 
 		_, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
@@ -345,7 +440,9 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 
 // ─── Sync (re-link) ───────────────────────────────────────────────────
 
-// SyncPlaylist re-scans the library and links any newly imported tracks.
+// SyncPlaylist re-links playlist tracks to library tracks (downloaded since the
+// last sync) and queues downloads for anything still unmatched. It never scans
+// the filesystem — the library is the single source of truth.
 func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 	p, err := s.store.GetPlaylist(ctx, playlistID)
 	if err != nil || p == nil {
@@ -394,18 +491,12 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 		}
 	}
 
-	// Scan download, library, and playlist paths to import newly downloaded files.
-	cfg := s.cfgFn()
-	scanner := library.NewScanner(s.store, s.log)
-	for _, path := range []string{cfg.Library.DownloadPath, cfg.Library.LibraryPath, cfg.Library.PlaylistPath} {
-		if path == "" {
-			continue
-		}
-		scanner.ScanPath(ctx, path)
-	}
-
-	// Re-link tracks after scan.
+	// Re-link: resolve which tracks now exist in the library (downloaded by
+	// the pipeline since the last sync). No filesystem scan is performed — the
+	// library is the single source of truth and downloads are imported by the
+	// download pipeline, never by scanning the download staging directory.
 	tracks, _ := s.store.GetPlaylistTracks(ctx, playlistID)
+	stillUnmatched := 0
 	for i := range tracks {
 		if tracks[i].TrackID != nil {
 			continue
@@ -419,13 +510,24 @@ func (s *Service) SyncPlaylist(ctx context.Context, playlistID int64) error {
 		if trackID := s.findInLibrary(ctx, info); trackID != 0 {
 			tracks[i].TrackID = &trackID
 			s.store.UpsertPlaylistTrack(ctx, &tracks[i])
+		} else {
+			stillUnmatched++
 		}
 	}
 
 	p.SyncedAt = time.Now().UTC().Format(time.RFC3339)
 	s.store.UpsertPlaylist(ctx, p)
 
-	s.log.Info("synced", "name", p.Name, "tracks", p.TrackCount, "component", "playlist")
+	s.log.Info("synced", "name", p.Name, "tracks", p.TrackCount, "unmatched", stillUnmatched, "component", "playlist")
+
+	// Queue downloads for tracks that are still unmatched. Idempotent — tracks
+	// already in the download pipeline are skipped, so the periodic sync simply
+	// re-checks until every song is satisfied.
+	if stillUnmatched > 0 {
+		if _, err := s.DownloadMissing(ctx, playlistID); err != nil {
+			s.log.Error("download missing failed during sync", "playlist_id", playlistID, "error", err, "component", "playlist")
+		}
+	}
 
 	// Build playlist folder.
 	// Uses background context — the caller may cancel ctx after SyncPlaylist returns.

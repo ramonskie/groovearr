@@ -41,6 +41,9 @@ type Store interface {
 	// FindActiveByTitle returns the first active download matching artist+title, or nil.
 	FindActiveByTitle(ctx context.Context, artist, title string) (*Record, error)
 
+	// FindActiveByISRC returns the first active download matching isrc, or nil.
+	FindActiveByISRC(ctx context.Context, isrc string) (*Record, error)
+
 	// RecordEvent inserts a new event into the download_events table.
 	RecordEvent(ctx context.Context, event *Event) error
 

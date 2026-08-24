@@ -106,14 +106,15 @@ type Record struct {
 	Format      string `json:"format,omitempty"`  // "flac", "mp3", etc.
 
 	// Album-level download fields. Zero-valued for track downloads.
-	AlbumType        string               `json:"album_type,omitempty"`        // "Album", "Compilation"
-	AlbumTracks      []domain.ExpectedTrack `json:"album_tracks,omitempty"`    // expected track listing
-	AlbumMBID        string               `json:"album_mbid,omitempty"`       // resolved MusicBrainz release MBID
-	DownloadClient   string               `json:"download_client,omitempty"`   // dispatch target (e.g. "qbittorrent")
-	ProviderID       string               `json:"provider_id,omitempty"`       // client-side download ID (e.g. torrent hash)
-	MagnetURI        string               `json:"magnet_uri,omitempty"`        // for torrent sources
-	FolderPath       string               `json:"folder_path,omitempty"`       // downloaded folder path
-	ImportedTrackIDs []int64              `json:"imported_track_ids,omitempty"` // linked library tracks
+	AlbumType        string                 `json:"album_type,omitempty"`         // "Album", "Compilation"
+	AlbumTracks      []domain.ExpectedTrack `json:"album_tracks,omitempty"`       // expected track listing
+	AlbumMBID        string                 `json:"album_mbid,omitempty"`         // resolved MusicBrainz release MBID
+	DownloadClient   string                 `json:"download_client,omitempty"`    // dispatch target (e.g. "qbittorrent")
+	ProviderID       string                 `json:"provider_id,omitempty"`        // client-side download ID (e.g. torrent hash)
+	MagnetURI        string                 `json:"magnet_uri,omitempty"`         // for torrent sources
+	FolderPath       string                 `json:"folder_path,omitempty"`        // downloaded folder path
+	ImportedTrackIDs []int64                `json:"imported_track_ids,omitempty"` // linked library tracks
+	UpdatedAt        time.Time              `json:"updated_at,omitempty"`         // last state/field change
 }
 
 // IsPendingSource returns true if the record was created via QueuePending

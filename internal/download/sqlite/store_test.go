@@ -131,6 +131,20 @@ func TestStore_InsertAndGet(t *testing.T) {
 	if got.Progress != 0 {
 		t.Errorf("progress = %f, want 0", got.Progress)
 	}
+
+	// UpdatedAt must be parsed from the stored RFC3339Nano timestamp (both the
+	// single-row Get scan and the multi-row list scan) so cooldown logic that
+	// relies on "how long has this record been in its current state" works.
+	if got.UpdatedAt.IsZero() {
+		t.Error("UpdatedAt should be populated from the DB timestamp")
+	}
+	gotList, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(gotList) != 1 || gotList[0].UpdatedAt.IsZero() {
+		t.Errorf("List UpdatedAt not populated: %+v", gotList)
+	}
 }
 
 func TestStore_GetNotFound(t *testing.T) {

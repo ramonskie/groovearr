@@ -184,6 +184,18 @@ func (m *mockStore) FindActiveByTitle(ctx context.Context, artist, title string)
 	return nil, nil
 }
 
+func (m *mockStore) FindActiveByISRC(ctx context.Context, isrc string) (*Record, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, r := range m.records {
+		if r.ISRC == isrc && !r.State.Terminal() {
+			r2 := *r
+			return &r2, nil
+		}
+	}
+	return nil, nil
+}
+
 func (m *mockStore) RecordEvent(ctx context.Context, event *Event) error { return nil }
 func (m *mockStore) GetEvents(ctx context.Context, downloadID string) ([]Event, error) {
 	return nil, nil
@@ -933,5 +945,51 @@ func TestFailRetrySetsFailed(t *testing.T) {
 	}
 	if stored.Error != "something went wrong" {
 		t.Errorf("error = %q, want %q", stored.Error, "something went wrong")
+	}
+}
+
+// TestQueuePendingISRCAwareDedup verifies the queue-level dedup follows the
+// same rule as the playlist sync: an ISRC-bearing queue is only deduped
+// against a title-matched active record whose ISRC agrees (or is missing). A
+// same-titled record with a DIFFERENT ISRC is a distinct release and must
+// produce its own record — otherwise the playlist's distinct-ISRC releases
+// would be swallowed here after passing the playlist gate.
+func TestQueuePendingISRCAwareDedup(t *testing.T) {
+	store := newMockStore()
+	svc := NewService(store, newMockBus(), testLogger())
+	ctx := context.Background()
+
+	// First release.
+	id1, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Same artist+title, DIFFERENT ISRC → distinct release, new record.
+	id2, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCB"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id2 == id1 {
+		t.Fatalf("distinct ISRC should create its own record, got same id %q", id2)
+	}
+
+	// Re-queue of the FIRST release → deduped back to id1.
+	id3, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id3 != id1 {
+		t.Fatalf("same ISRC should dedup, got %q want %q", id3, id1)
+	}
+
+	// ISRC-less queue of the same title → still deduped by the title fallback
+	// to whichever active record matches (both releases share the title).
+	id4, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if id4 != id1 && id4 != id2 {
+		t.Fatalf("ISRC-less fallback should dedup to an existing title match, got %q (records %q, %q)", id4, id1, id2)
 	}
 }

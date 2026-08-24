@@ -152,6 +152,16 @@ func (m *mockDownloadStore) FindActiveByTitle(ctx context.Context, artist, title
 	return nil, nil
 }
 
+func (m *mockDownloadStore) FindActiveByISRC(ctx context.Context, isrc string) (*Record, error) {
+	for _, r := range m.records {
+		if r.ISRC == isrc && !r.State.Terminal() {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
+
 // trackingBus records published events for assertion in tests.
 type trackingBus struct {
 	events []trackedEvent

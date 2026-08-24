@@ -39,7 +39,7 @@ func (s *Store) Close() error { return nil }
 // Filename, and DisplayName set. State is forced to "queued" regardless of
 // the incoming value.
 func (s *Store) Insert(ctx context.Context, r *download.Record) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO downloads (
@@ -74,7 +74,7 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 // Update atomically modifies the mutable fields of a download record.
 // The record is identified by its ID field.
 func (s *Store) Update(ctx context.Context, r *download.Record) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET
@@ -120,7 +120,7 @@ func (s *Store) Update(ctx context.Context, r *download.Record) error {
 // cover_url is only updated when a non-empty value is passed (e.g., from a
 // plugin that provides cover art). Empty strings preserve the existing value.
 func (s *Store) UpdateProgress(ctx context.Context, id string, state download.State, progress float64, size, transferred, speed int64, filePath, coverURL string) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET
 			state=?, progress=?, size=?, transferred=?,
@@ -147,7 +147,7 @@ func (s *Store) UpdateProgress(ctx context.Context, id string, state download.St
 // TransitionState atomically changes the download's state only if it
 // currently matches oldState. Returns true if the transition occurred.
 func (s *Store) TransitionState(ctx context.Context, id string, oldState, newState download.State) (bool, error) {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	result, err := s.db.ExecContext(ctx, `
 		UPDATE downloads SET state=?, updated_at=? WHERE id=? AND state=?`,
 		string(newState), now, id, string(oldState),
@@ -228,11 +228,20 @@ func (s *Store) FindActiveByTitle(ctx context.Context, artist, title string) (*d
 	return s.scanDownload(row)
 }
 
+// FindActiveByISRC returns the first active download matching isrc, or nil.
+func (s *Store) FindActiveByISRC(ctx context.Context, isrc string) (*download.Record, error) {
+	row := s.db.QueryRowContext(ctx,
+		downloadSelect+" WHERE isrc=? AND state NOT IN (?, ?, ?) LIMIT 1",
+		isrc, download.StateImported, download.StateFailed, download.StateIgnored,
+	)
+	return s.scanDownload(row)
+}
+
 // ─── Events ────────────────────────────────────────────────────────────
 
 // RecordEvent inserts a new event into the download_events table.
 func (s *Store) RecordEvent(ctx context.Context, e *download.Event) error {
-	now := time.Now().UTC().Format(time.RFC3339)
+	now := time.Now().UTC().Format(time.RFC3339Nano)
 	payload := string(e.Payload)
 	if payload == "" {
 		payload = "{}"
@@ -355,6 +364,9 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 	r.State = download.State(stateStr)
 	r.AlbumTracks = parseAlbumTracksJSON(albumTracksJSON)
 	r.ImportedTrackIDs = parseInt64sJSON(importedTrackIDsJSON)
+	if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+		r.UpdatedAt = t
+	}
 	return &r, nil
 }
 
@@ -384,6 +396,9 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 		r.State = download.State(stateStr)
 		r.AlbumTracks = parseAlbumTracksJSON(albumTracksJSON)
 		r.ImportedTrackIDs = parseInt64sJSON(importedTrackIDsJSON)
+		if t, err := time.Parse(time.RFC3339, updatedAt); err == nil {
+			r.UpdatedAt = t
+		}
 		out = append(out, r)
 	}
 	if err := rows.Err(); err != nil {

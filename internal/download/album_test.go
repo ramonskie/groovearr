@@ -34,10 +34,10 @@ func TestRecordIsAlbum(t *testing.T) {
 
 func TestRecordIsCompilation(t *testing.T) {
 	tests := []struct {
-		name       string
-		albumType  string
-		tracks     []domain.ExpectedTrack
-		want       bool
+		name      string
+		albumType string
+		tracks    []domain.ExpectedTrack
+		want      bool
 	}{
 		{"explicit compilation", "compilation", nil, true},
 		{"explicit Compilation", "Compilation", nil, true},
@@ -107,28 +107,36 @@ func TestDownloadClientRegistry(t *testing.T) {
 
 type stubDC struct{}
 
-func (s *stubDC) Name() string                                      { return "stub" }
-func (s *stubDC) DisplayName() string                               { return "Stub" }
-func (s *stubDC) Capabilities() []string                            { return []string{"download"} }
-func (s *stubDC) Create(raw json.RawMessage, r plugin.PluginResources) (plugin.BasePlugin, error) { return &stubDCPlugin{}, nil }
-func (s *stubDC) ValidateConfig(raw json.RawMessage) error         { return nil }
-func (s *stubDC) DefaultConfig() json.RawMessage                   { return json.RawMessage(`{}`) }
+func (s *stubDC) Name() string           { return "stub" }
+func (s *stubDC) DisplayName() string    { return "Stub" }
+func (s *stubDC) Capabilities() []string { return []string{"download"} }
+func (s *stubDC) Create(raw json.RawMessage, r plugin.PluginResources) (plugin.BasePlugin, error) {
+	return &stubDCPlugin{}, nil
+}
+func (s *stubDC) ValidateConfig(raw json.RawMessage) error { return nil }
+func (s *stubDC) DefaultConfig() json.RawMessage           { return json.RawMessage(`{}`) }
 
 type stubDCPlugin struct{}
 
-func (s *stubDCPlugin) Name() string           { return "stub" }
-func (s *stubDCPlugin) DisplayName() string    { return "Stub" }
-func (s *stubDCPlugin) IsConfigured() bool     { return true }
+func (s *stubDCPlugin) Name() string                              { return "stub" }
+func (s *stubDCPlugin) DisplayName() string                       { return "Stub" }
+func (s *stubDCPlugin) IsConfigured() bool                        { return true }
 func (s *stubDCPlugin) CheckConnection(ctx context.Context) error { return nil }
-func (s *stubDCPlugin) Connected() bool        { return false }
-func (s *stubDCPlugin) CapabilityStatus() map[string]string { return nil }
-func (s *stubDCPlugin) AddDownload(ctx context.Context, uri, category, savepath string) (string, error) { return "", nil }
-func (s *stubDCPlugin) GetStatus(ctx context.Context, providerID string) (*Record, error) { return nil, nil }
-func (s *stubDCPlugin) GetProgress(ctx context.Context, providerID string) (*Progress, error) { return nil, nil }
+func (s *stubDCPlugin) Connected() bool                           { return false }
+func (s *stubDCPlugin) CapabilityStatus() map[string]string       { return nil }
+func (s *stubDCPlugin) AddDownload(ctx context.Context, uri, category, savepath string) (string, error) {
+	return "", nil
+}
+func (s *stubDCPlugin) GetStatus(ctx context.Context, providerID string) (*Record, error) {
+	return nil, nil
+}
+func (s *stubDCPlugin) GetProgress(ctx context.Context, providerID string) (*Progress, error) {
+	return nil, nil
+}
 func (s *stubDCPlugin) Cancel(ctx context.Context, providerID string, remove bool) error { return nil }
-func (s *stubDCPlugin) MaxConcurrent() int { return 0 }
-func (s *stubDCPlugin) DownloadTimeout() time.Duration { return 0 }
-func (s *stubDCPlugin) DownloadBasePath() string { return "" }
+func (s *stubDCPlugin) MaxConcurrent() int                                               { return 0 }
+func (s *stubDCPlugin) DownloadTimeout() time.Duration                                   { return 0 }
+func (s *stubDCPlugin) DownloadBasePath() string                                         { return "" }
 
 func TestQueueAlbum_CreatesAlbumRecord(t *testing.T) {
 	store := newMockAlbumStore()
@@ -253,10 +261,14 @@ func (m *mockAlbumStore) Get(_ context.Context, id string) (*Record, error) {
 	cp := *r
 	return &cp, nil
 }
-func (m *mockAlbumStore) List(_ context.Context) ([]Record, error)                    { return nil, nil }
-func (m *mockAlbumStore) ListByState(_ context.Context, state State) ([]Record, error) { return nil, nil }
-func (m *mockAlbumStore) ListActive(_ context.Context) ([]Record, error)              { return nil, nil }
-func (m *mockAlbumStore) ListByPlaylist(_ context.Context, playlistID string) ([]Record, error) { return nil, nil }
+func (m *mockAlbumStore) List(_ context.Context) ([]Record, error) { return nil, nil }
+func (m *mockAlbumStore) ListByState(_ context.Context, state State) ([]Record, error) {
+	return nil, nil
+}
+func (m *mockAlbumStore) ListActive(_ context.Context) ([]Record, error) { return nil, nil }
+func (m *mockAlbumStore) ListByPlaylist(_ context.Context, playlistID string) ([]Record, error) {
+	return nil, nil
+}
 func (m *mockAlbumStore) FindActiveByTitle(_ context.Context, artist, title string) (*Record, error) {
 	for _, r := range m.records {
 		if r.Artist == artist && r.Title == title && !r.State.Terminal() {
@@ -266,17 +278,23 @@ func (m *mockAlbumStore) FindActiveByTitle(_ context.Context, artist, title stri
 	}
 	return nil, nil
 }
+func (m *mockAlbumStore) FindActiveByISRC(_ context.Context, isrc string) (*Record, error) {
+	for _, r := range m.records {
+		if r.ISRC == isrc && !r.State.Terminal() {
+			cp := *r
+			return &cp, nil
+		}
+	}
+	return nil, nil
+}
 func (m *mockAlbumStore) RecordEvent(_ context.Context, event *Event) error { return nil }
-func (m *mockAlbumStore) GetEvents(_ context.Context, downloadID string) ([]Event, error) { return nil, nil }
+func (m *mockAlbumStore) GetEvents(_ context.Context, downloadID string) ([]Event, error) {
+	return nil, nil
+}
 func (m *mockAlbumStore) Delete(ctx context.Context, id string) error {
 	delete(m.records, id)
 	return nil
 }
 
-func (m *mockAlbumStore) DeleteTerminal(_ context.Context) error           { return nil }
-func (m *mockAlbumStore) Close() error                                     { return nil }
-
-
-
-
-
+func (m *mockAlbumStore) DeleteTerminal(_ context.Context) error { return nil }
+func (m *mockAlbumStore) Close() error                           { return nil }

@@ -88,18 +88,41 @@ func (s *Service) SetDownloadOrderProvider(provider *DownloadOrder) {
 // up queued records from the DB and drives the download lifecycle.
 // Skips if an active download already exists for the same artist+title.
 // Returns the generated download ID.
+// dedupMatch returns the active record a new queue for meta should be merged
+// into, or nil to create a fresh record. ISRC is authoritative when present:
+// the queue dedups only against an active record with the same ISRC. When
+// meta carries no ISRC, the artist|title fallback applies — the same rule the
+// playlist sync's DownloadMissing uses. A same-titled record with a different
+// ISRC is a distinct release and must not swallow the new queue.
+func (s *Service) dedupMatch(ctx context.Context, meta Meta) *Record {
+	if meta.ISRC != "" {
+		existing, err := s.store.FindActiveByISRC(ctx, meta.ISRC)
+		if err != nil {
+			s.log.Warn("ISRC dedup check failed, proceeding", "isrc", meta.ISRC, "error", err, "component", "download")
+			return nil
+		}
+		return existing
+	}
+	if meta.Artist == "" || meta.Title == "" {
+		return nil
+	}
+	existing, err := s.store.FindActiveByTitle(ctx, meta.Artist, meta.Title)
+	if err != nil {
+		s.log.Warn("dedup check failed, proceeding", "artist", meta.Artist, "title", meta.Title, "error", err, "component", "download")
+		return nil
+	}
+	return existing
+}
+
 func (s *Service) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Dedup: skip if an active download already exists for the same artist+title.
-	if meta.Artist != "" && meta.Title != "" {
-		if existing, err := s.store.FindActiveByTitle(ctx, meta.Artist, meta.Title); err != nil {
-			s.log.Warn("dedup check failed, proceeding", "artist", meta.Artist, "title", meta.Title, "error", err, "component", "download")
-		} else if existing != nil {
-			return existing.ID, nil
-		}
+	// Dedup: skip if an active download already exists for the same
+	// artist+title (ISRC-aware — see dedupMatch).
+	if existing := s.dedupMatch(ctx, meta); existing != nil {
+		return existing.ID, nil
 	}
 
 	id := fmt.Sprintf("%s-%d-%04x", sourceName, time.Now().UnixNano(), rand.Intn(0xffff))
@@ -153,13 +176,10 @@ func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// Dedup: skip if an active download already exists for the same artist+title.
-	if meta.Artist != "" && meta.Title != "" {
-		if existing, err := s.store.FindActiveByTitle(ctx, meta.Artist, meta.Title); err != nil {
-			s.log.Warn("dedup check failed, proceeding", "artist", meta.Artist, "title", meta.Title, "error", err, "component", "download")
-		} else if existing != nil {
-			return existing.ID, nil
-		}
+	// Dedup: skip if an active download already exists for the same
+	// artist+title (ISRC-aware — see dedupMatch).
+	if existing := s.dedupMatch(ctx, meta); existing != nil {
+		return existing.ID, nil
 	}
 
 	id := fmt.Sprintf("pending-%d-%04x", time.Now().UnixNano(), rand.Intn(0xffff))
@@ -272,6 +292,14 @@ func (s *Service) ListByState(ctx context.Context, state State) ([]Record, error
 // ListActive returns all non-terminal downloads.
 func (s *Service) ListActive(ctx context.Context) ([]Record, error) {
 	return s.store.ListActive(ctx)
+}
+
+// ListByPlaylist returns all download records created for a playlist, in any
+// state. Used to dedup idempotent playlist syncs: a track already added to the
+// download pipeline (queued, downloading, failed, pending) must not be queued
+// again on the next periodic sync.
+func (s *Service) ListByPlaylist(ctx context.Context, playlistID string) ([]Record, error) {
+	return s.store.ListByPlaylist(ctx, playlistID)
 }
 
 // Cancel transitions a download to the "ignored" state and directly cancels

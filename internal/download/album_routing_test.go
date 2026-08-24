@@ -158,21 +158,26 @@ func (s *albumTrackStore) ListByState(_ context.Context, state State) ([]Record,
 	return out, nil
 }
 
-func (s *albumTrackStore) List(_ context.Context) ([]Record, error)               { return nil, nil }
-func (s *albumTrackStore) ListActive(_ context.Context) ([]Record, error)          { return nil, nil }
-func (s *albumTrackStore) ListByPlaylist(_ context.Context, pid string) ([]Record, error) { return nil, nil }
+func (s *albumTrackStore) List(_ context.Context) ([]Record, error)       { return nil, nil }
+func (s *albumTrackStore) ListActive(_ context.Context) ([]Record, error) { return nil, nil }
+func (s *albumTrackStore) ListByPlaylist(_ context.Context, pid string) ([]Record, error) {
+	return nil, nil
+}
 func (s *albumTrackStore) FindActiveByTitle(_ context.Context, artist, title string) (*Record, error) {
 	return nil, nil
 }
+func (s *albumTrackStore) FindActiveByISRC(_ context.Context, isrc string) (*Record, error) {
+	return nil, nil
+}
 func (s *albumTrackStore) RecordEvent(_ context.Context, event *Event) error       { return nil }
-func (s *albumTrackStore) GetEvents(_ context.Context, id string) ([]Event, error)  { return nil, nil }
+func (s *albumTrackStore) GetEvents(_ context.Context, id string) ([]Event, error) { return nil, nil }
 func (s *albumTrackStore) Delete(ctx context.Context, id string) error {
 	delete(s.records, id)
 	return nil
 }
 
-func (s *albumTrackStore) DeleteTerminal(_ context.Context) error                  { return nil }
-func (s *albumTrackStore) Close() error                                            { return nil }
+func (s *albumTrackStore) DeleteTerminal(_ context.Context) error { return nil }
+func (s *albumTrackStore) Close() error                           { return nil }
 
 // ─── album client mock (DownloadClient) ──────────────────────
 
@@ -184,12 +189,12 @@ type albumClientMock struct {
 	status    map[string]*Record
 }
 
-func (m *albumClientMock) Name() string                              { return m.name }
-func (m *albumClientMock) DisplayName() string                       { return m.name }
-func (m *albumClientMock) IsConfigured() bool                        { return true }
-func (m *albumClientMock) Connected() bool                           { return false }
-func (m *albumClientMock) CapabilityStatus() map[string]string       { return nil }
-func (m *albumClientMock) CheckConnection(_ context.Context) error   { return nil }
+func (m *albumClientMock) Name() string                            { return m.name }
+func (m *albumClientMock) DisplayName() string                     { return m.name }
+func (m *albumClientMock) IsConfigured() bool                      { return true }
+func (m *albumClientMock) Connected() bool                         { return false }
+func (m *albumClientMock) CapabilityStatus() map[string]string     { return nil }
+func (m *albumClientMock) CheckConnection(_ context.Context) error { return nil }
 func (m *albumClientMock) AddDownload(_ context.Context, uri, category, savepath string) (string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -209,22 +214,22 @@ func (m *albumClientMock) GetProgress(_ context.Context, providerID string) (*Pr
 	return &Progress{Transferred: 50000, Total: 100000, Speed: 1000}, nil
 }
 func (m *albumClientMock) Cancel(_ context.Context, providerID string, remove bool) error { return nil }
-func (m *albumClientMock) MaxConcurrent() int           { return 1 }
-func (m *albumClientMock) DownloadTimeout() time.Duration { return 10 * time.Minute }
-func (m *albumClientMock) DownloadBasePath() string      { return m.dlPath }
+func (m *albumClientMock) MaxConcurrent() int                                             { return 1 }
+func (m *albumClientMock) DownloadTimeout() time.Duration                                 { return 10 * time.Minute }
+func (m *albumClientMock) DownloadBasePath() string                                       { return m.dlPath }
 
 type albumClientFactory struct {
 	client *albumClientMock
 }
 
-func (f *albumClientFactory) Name() string                                          { return "qbittorrent" }
-func (f *albumClientFactory) DisplayName() string                                   { return "qBittorrent" }
-func (f *albumClientFactory) Capabilities() []string                                { return []string{"download"} }
+func (f *albumClientFactory) Name() string           { return "qbittorrent" }
+func (f *albumClientFactory) DisplayName() string    { return "qBittorrent" }
+func (f *albumClientFactory) Capabilities() []string { return []string{"download"} }
 func (f *albumClientFactory) Create(raw json.RawMessage, r plugin.PluginResources) (plugin.BasePlugin, error) {
 	return f.client, nil
 }
-func (f *albumClientFactory) ValidateConfig(raw json.RawMessage) error             { return nil }
-func (f *albumClientFactory) DefaultConfig() json.RawMessage                       { return json.RawMessage(`{}`) }
+func (f *albumClientFactory) ValidateConfig(raw json.RawMessage) error { return nil }
+func (f *albumClientFactory) DefaultConfig() json.RawMessage           { return json.RawMessage(`{}`) }
 
 // ─── track mock (MonitoredProvider) ────────────────────────
 
@@ -235,11 +240,11 @@ type albumTrackMock struct {
 	downloads map[string]string
 }
 
-func (m *albumTrackMock) Name() string                           { return m.name }
-func (m *albumTrackMock) DisplayName() string                    { return m.name }
-func (m *albumTrackMock) IsConfigured() bool                     { return true }
-func (m *albumTrackMock) Connected() bool                        { return false }
-func (m *albumTrackMock) CapabilityStatus() map[string]string    { return nil }
+func (m *albumTrackMock) Name() string                            { return m.name }
+func (m *albumTrackMock) DisplayName() string                     { return m.name }
+func (m *albumTrackMock) IsConfigured() bool                      { return true }
+func (m *albumTrackMock) Connected() bool                         { return false }
+func (m *albumTrackMock) CapabilityStatus() map[string]string     { return nil }
 func (m *albumTrackMock) CheckConnection(_ context.Context) error { return nil }
 func (m *albumTrackMock) Search(_ context.Context, q string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	return nil, nil, nil
@@ -260,8 +265,7 @@ func (m *albumTrackMock) GetStatus(_ context.Context, id string) (*Record, error
 func (m *albumTrackMock) GetProgress(_ context.Context, id string) (*Progress, error) {
 	return nil, nil
 }
-func (m *albumTrackMock) Cancel(_ context.Context, id string, remove bool) error    { return nil }
-func (m *albumTrackMock) ActiveDownloads() []string                                { return nil }
-func (m *albumTrackMock) MaxConcurrent() int                                       { return 1 }
-func (m *albumTrackMock) DownloadTimeout() time.Duration                            { return 10 * time.Minute }
-
+func (m *albumTrackMock) Cancel(_ context.Context, id string, remove bool) error { return nil }
+func (m *albumTrackMock) ActiveDownloads() []string                              { return nil }
+func (m *albumTrackMock) MaxConcurrent() int                                     { return 1 }
+func (m *albumTrackMock) DownloadTimeout() time.Duration                         { return 10 * time.Minute }
