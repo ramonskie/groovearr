@@ -70,6 +70,21 @@ export function buildFormSchema(sources: SourceInfo[]) {
     album_sources: z.array(z.string()).optional(),
     download_client: z.string().optional(),
 
+    // Artist tracking. The refresh interval is pointer-merged server-side:
+    // an empty input means 0 (explicitly disabled), while an untouched field
+    // is omitted from the payload so the server preserves the existing value.
+    tracking_refresh_mins: z.preprocess(
+      (v) => (v === "" || v === null ? 0 : v),
+      z
+        .coerce.number()
+        .int()
+        .min(0, "Must be 0 or greater")
+        .refine((v) => v === 0 || v >= 5, "Must be 0 (disabled) or at least 5 minutes")
+        .refine((v) => v <= 525600, "Must be at most 525600 minutes (1 year)")
+        .optional(),
+    ),
+    tracking_auto_search_missing: z.boolean().optional(),
+
     // Logging (Logs)
     log_level: z.enum(["debug", "info", "warn", "error"]).optional(),
     log_format: z.enum(["json", "text"]).optional(),
@@ -125,6 +140,8 @@ export function buildDefaults(sources: SourceInfo[]) {
     download_order: [] as string[],
     album_sources: [] as string[],
     download_client: "",
+    tracking_refresh_mins: 720,
+    tracking_auto_search_missing: false,
     log_level: "info" as const,
     log_format: "json" as const,
     log_max_size_mb: 10,

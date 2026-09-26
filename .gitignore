@@ -17,6 +17,10 @@ build/
 /playlists/
 .opencode/
 
+# Runtime artifacts (written at repo root by a running instance)
+job.json
+logs/
+
 # Temporary files
 .tmp/
 

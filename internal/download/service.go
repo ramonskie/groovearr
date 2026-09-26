@@ -24,6 +24,13 @@ type retryOriginalSnap struct {
 	username   string
 }
 
+// AlbumSearcher resolves album-level releases for the canonical
+// album-acquisition policy (see Service.QueueAlbumWithFallback).
+// *Orchestrator satisfies it.
+type AlbumSearcher interface {
+	SearchAlbums(ctx context.Context, query string) ([]domain.AlbumRelease, error)
+}
+
 // Service provides a thin API for download queueing, status tracking,
 // cancellation, and manual retry. The MonitoringService scans the DB and
 // drives the download state machine automatically.
@@ -35,6 +42,7 @@ type Service struct {
 	downloadClients     *DownloadClientRegistry
 	qualityProfileStore quality.ProfileStore
 	downloadOrder       *DownloadOrder
+	albumSearcher       AlbumSearcher // canonical album-acquisition search
 	mu                  sync.Mutex
 }
 
@@ -81,6 +89,25 @@ func (s *Service) SetDownloadOrderProvider(provider *DownloadOrder) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.downloadOrder = provider
+}
+
+// SetAlbumSearcher wires the album source used by the canonical
+// album-acquisition policy (QueueAlbumWithFallback). A nil searcher is
+// ignored so wiring order cannot silently disable the album-first leg.
+func (s *Service) SetAlbumSearcher(a AlbumSearcher) {
+	if a == nil {
+		return
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.albumSearcher = a
+}
+
+// albumSearcherSnapshot returns the wired album searcher under the lock.
+func (s *Service) albumSearcherSnapshot() AlbumSearcher {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.albumSearcher
 }
 
 // Queue creates a new download record in "queued" state, persists it via the

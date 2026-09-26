@@ -7,9 +7,11 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
+	"github.com/ramonskie/groovearr/internal/tracking"
 )
 
 // PlaylistSyncer syncs an imported playlist with its upstream source under a
@@ -20,6 +22,25 @@ import (
 // already in progress.
 type PlaylistSyncer interface {
 	SyncPlaylistGuarded(ctx context.Context, playlistID int64) (bool, error)
+}
+
+// TrackedRefresher lists tracked artists, resolves a single artist, refreshes
+// one artist's discography, and queues one artist's missing albums. Declared
+// here (not imported from tracking as a concrete type) so jobs stays free of a
+// construction dependency; *tracking.Service satisfies it. RefreshArtist
+// consults and marks the shared per-provider cooldown bucket itself (AGENTS §8);
+// the jobs additionally pre-filter cooling-down providers before spending a
+// provider call.
+type TrackedRefresher interface {
+	ListTrackedArtists(ctx context.Context) ([]domain.TrackedArtist, error)
+	// GetTrackedArtist resolves the artist so single-artist jobs can read its
+	// ProviderName for the shared cooling-down pre-filter without reaching into
+	// the tracking store (AGENTS §3). Returns (nil, nil) when the artist is gone.
+	GetTrackedArtist(ctx context.Context, id int64) (*domain.TrackedArtist, error)
+	RefreshArtist(ctx context.Context, artistID int64) (*tracking.RefreshResult, error)
+	// SearchMissing queues downloads for one artist's wanted albums and returns
+	// the pass summary (queued/skipped/errors).
+	SearchMissing(ctx context.Context, artistID int64) (*tracking.SearchResult, error)
 }
 
 // RateLimiter is the shared per-provider rate-limit cooldown. Declared here
@@ -45,6 +66,9 @@ type RunnerDeps struct {
 	Metadata *metadata.Registry
 	// Playlist syncs playlists against upstream sources (may be nil).
 	Playlist PlaylistSyncer
+	// Tracking lists and refreshes tracked artists (may be nil — the
+	// RefreshTracked job then returns an error instead of panicking).
+	Tracking TrackedRefresher
 	// RateLimit is the shared per-provider cooldown bucket. Jobs consult it
 	// before calling a provider and mark it on rate-limit responses (may be
 	// nil — the job then behaves as if no provider is ever cooling down).

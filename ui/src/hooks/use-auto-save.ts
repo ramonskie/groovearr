@@ -1,10 +1,27 @@
 import { useEffect, useRef, useCallback } from "react";
 import type { UseFormReturn } from "react-hook-form";
 import type { UseMutationResult } from "@tanstack/react-query";
-import type { ConfigUpdatePayload, UpdateConfigResponse, SourceInfo, ConfigField } from "../api/types";
+import type {
+  ConfigUpdatePayload,
+  UpdateConfigResponse,
+  SourceInfo,
+  ConfigField,
+  TrackingConfig,
+} from "../api/types";
 import type { SettingsFormValues } from "../features/settings/settings-schema";
 
 const AUTO_SAVE_MS = 1000;
+
+// Form inputs hold strings (or the number seeded by form.reset). Collapse a
+// blank input to 0 ("explicitly disabled") and leave an absent field as
+// undefined so the field is omitted from the payload and the server preserves
+// the existing value (merge is pointer-aware).
+function normalizeRefreshMins(value: unknown): number | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (value === "") return 0;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : undefined;
+}
 
 interface UseAutoSaveOptions {
   form: UseFormReturn<SettingsFormValues>;
@@ -47,6 +64,13 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
         }
       }
 
+      const tracking: Partial<TrackingConfig> = {};
+      const refreshMins = normalizeRefreshMins(values.tracking_refresh_mins);
+      if (refreshMins !== undefined) tracking.refresh_mins = refreshMins;
+      if (values.tracking_auto_search_missing !== undefined) {
+        tracking.auto_search_missing = values.tracking_auto_search_missing;
+      }
+
       updateConfig.mutate({
         sources: sourcesPayload,
         library: {
@@ -80,6 +104,7 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
           access_log: values.log_access_log ?? false,
           captured_max: values.log_captured_max ?? 2000,
         },
+        tracking,
       });
     },
     [updateConfig, config, sourceList],

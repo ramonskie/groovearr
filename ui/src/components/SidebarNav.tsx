@@ -6,13 +6,21 @@ import {
   ListMusic,
   Settings,
   Compass,
+  Radio,
   LogOut,
 } from "lucide-react";
 
 export interface NavPage {
   id: string;
   label: string;
-  icon: "compass" | "search" | "downloads" | "library" | "playlists" | "settings";
+  icon:
+    | "compass"
+    | "search"
+    | "downloads"
+    | "library"
+    | "playlists"
+    | "artists"
+    | "settings";
   href: string;
 }
 
@@ -26,6 +34,7 @@ interface SidebarNavProps {
 
 const DEFAULT_PAGES: NavPage[] = [
   { id: "discover", label: "Discover", icon: "compass", href: "/discover" },
+  { id: "tracking", label: "Artists", icon: "artists", href: "/tracking" },
   { id: "downloads", label: "Downloads", icon: "downloads", href: "/downloads" },
   { id: "library", label: "Library", icon: "library", href: "/library" },
   { id: "playlists", label: "Playlists", icon: "playlists", href: "/playlists" },
@@ -37,6 +46,7 @@ const iconMap: Record<string, typeof Search> = {
   downloads: Download,
   library: Music,
   playlists: ListMusic,
+  artists: Radio,
   settings: Settings,
 };
 

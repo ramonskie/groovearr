@@ -43,6 +43,14 @@ import type {
   QualityProfileUpdatePayload,
   OrganizeReport,
   ArtistDuplicatesResponse,
+  TrackedArtist,
+  TrackedAlbum,
+  AddTrackedArtistRequest,
+  UpdateTrackedArtistRequest,
+  ArtistWithAlbums,
+  DeleteTrackedArtistResponse,
+  UpdateTrackedAlbumRequest,
+  UpdateTrackedAlbumResponse,
 } from "./types";
 
 // ─── Base fetch wrapper ────────────────────────────────────────────
@@ -330,6 +338,97 @@ export function downloadMissingForAlbum(
     `/api/library/albums/${albumId}/download-missing`,
     { method: "POST" },
   );
+}
+
+// ─── Artist tracking ───────────────────────────────────────────────
+
+export function listTrackedArtists(): Promise<TrackedArtist[]> {
+  return request<TrackedArtist[]>("/api/tracking/artists");
+}
+
+export function getTrackedArtist(artistId: number): Promise<ArtistWithAlbums> {
+  return request<ArtistWithAlbums>(`/api/tracking/artists/${artistId}`);
+}
+
+/** Starts tracking an artist. Synchronous: returns the created row (201). */
+export function addTrackedArtist(
+  body: AddTrackedArtistRequest,
+): Promise<TrackedArtist> {
+  return request<TrackedArtist>("/api/tracking/artists", {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export function deleteTrackedArtist(
+  artistId: number,
+): Promise<DeleteTrackedArtistResponse> {
+  return request<DeleteTrackedArtistResponse>(`/api/tracking/artists/${artistId}`, {
+    method: "DELETE",
+  });
+}
+
+export function setArtistMonitor(
+  artistId: number,
+  body: UpdateTrackedArtistRequest,
+): Promise<TrackedArtist> {
+  return request<TrackedArtist>(`/api/tracking/artists/${artistId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listTrackedAlbums(artistId: number): Promise<TrackedAlbum[]> {
+  return request<TrackedAlbum[]>(`/api/tracking/artists/${artistId}/albums`);
+}
+
+export function setAlbumMonitored(
+  albumId: number,
+  monitored: boolean,
+): Promise<UpdateTrackedAlbumResponse> {
+  return request<UpdateTrackedAlbumResponse>(`/api/tracking/albums/${albumId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ monitored }),
+  });
+}
+
+export function setAlbumStatus(
+  albumId: number,
+  status: "wanted" | "ignored",
+): Promise<UpdateTrackedAlbumResponse> {
+  const body: UpdateTrackedAlbumRequest = { status };
+  return request<UpdateTrackedAlbumResponse>(`/api/tracking/albums/${albumId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export function listAllWanted(): Promise<TrackedAlbum[]> {
+  return request<TrackedAlbum[]>("/api/tracking/wanted");
+}
+
+// Job-backed actions: provider I/O runs through the job Manager, so these
+// return the standard {job, started} start response (StartJobResponse).
+
+export function refreshTrackedArtist(
+  artistId: number,
+): Promise<StartJobResponse> {
+  return request<StartJobResponse>(`/api/tracking/artists/${artistId}/refresh`, {
+    method: "POST",
+  });
+}
+
+export function searchMissingArtist(
+  artistId: number,
+): Promise<StartJobResponse> {
+  return request<StartJobResponse>(
+    `/api/tracking/artists/${artistId}/search-missing`,
+    { method: "POST" },
+  );
+}
+
+export function refreshAllTracked(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/tracking/refresh", { method: "POST" });
 }
 
 // ─── Playlists ─────────────────────────────────────────────────────

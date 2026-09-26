@@ -24,7 +24,11 @@ type Store struct {
 
 // New opens (or creates) a SQLite database at the given path.
 func New(path string, logger *slog.Logger) (*Store, error) {
-	db, err := sql.Open("sqlite", path+"?_journal_mode=WAL&_busy_timeout=30000&_foreign_keys=on")
+	// modernc.org/sqlite only honors pragmas passed as repeated _pragma=...
+	// params (each becomes a "PRAGMA ..."); _journal_mode/_busy_timeout/
+	// _foreign_keys are silently ignored, so foreign keys and WAL must be set
+	// this way or enforcement is off app-wide.
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)")
 	if err != nil {
 		return nil, fmt.Errorf("sqlite open: %w", err)
 	}
@@ -255,6 +259,47 @@ func (s *Store) migrate() error {
 			canonical_name TEXT NOT NULL,
 			scanned_at     TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
+
+		// ── Artist tracking ──
+		// tracked_artists holds provider artists the user wants monitored;
+		// library_artist_id is NULL until matched to a local artist.
+		`CREATE TABLE IF NOT EXISTS tracked_artists (
+			id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+			name               TEXT NOT NULL,
+			provider_name      TEXT NOT NULL,
+			provider_artist_id TEXT NOT NULL,
+			monitored          INTEGER NOT NULL DEFAULT 0,
+			monitor_mode       TEXT NOT NULL DEFAULT 'all',
+			library_artist_id  INTEGER REFERENCES artists(id) ON DELETE SET NULL,
+			auto_refresh       INTEGER NOT NULL DEFAULT 0,
+			last_refreshed_at  TEXT,
+			created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+			updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+			UNIQUE(provider_name, provider_artist_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracked_artists_library_artist ON tracked_artists(library_artist_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracked_artists_monitored ON tracked_artists(monitored)`,
+		// tracked_albums records discovered releases per tracked artist;
+		// library_album_id is NULL until the album exists in the library.
+		`CREATE TABLE IF NOT EXISTS tracked_albums (
+			id                INTEGER PRIMARY KEY AUTOINCREMENT,
+			tracked_artist_id INTEGER NOT NULL REFERENCES tracked_artists(id) ON DELETE CASCADE,
+			provider_album_id TEXT NOT NULL,
+			provider_name     TEXT NOT NULL,
+			title             TEXT NOT NULL,
+			year              INTEGER,
+			album_type        TEXT DEFAULT 'album',
+			monitored         INTEGER NOT NULL DEFAULT 0,
+			status            TEXT NOT NULL DEFAULT 'wanted',
+			library_album_id  INTEGER REFERENCES albums(id) ON DELETE SET NULL,
+			first_seen_at     TEXT NOT NULL DEFAULT (datetime('now')),
+			last_seen_at      TEXT NOT NULL DEFAULT (datetime('now')),
+			last_searched_at  TEXT,
+			UNIQUE(tracked_artist_id, provider_album_id)
+		)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracked_albums_artist ON tracked_albums(tracked_artist_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracked_albums_status ON tracked_albums(status)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracked_albums_library_album ON tracked_albums(library_album_id)`,
 	}
 
 	// Wrap schema init in a transaction so partial failures don't leave the
@@ -284,6 +329,9 @@ func (s *Store) migrate() error {
 		`ALTER TABLE playlists ADD COLUMN sync_mode TEXT DEFAULT 'mirror'`,
 		`UPDATE playlists SET sync_mode='mirror' WHERE sync_mode IS NULL OR sync_mode=''`,
 		`ALTER TABLE downloads ADD COLUMN provider_id TEXT DEFAULT ''`,
+		// tracked_albums.last_searched_at powers the rotating SearchMissing
+		// batch (R1); added here for databases created before the column.
+		`ALTER TABLE tracked_albums ADD COLUMN last_searched_at TEXT`,
 	}
 	for _, stmt := range migrations {
 		if _, err := s.db.Exec(stmt); err != nil {

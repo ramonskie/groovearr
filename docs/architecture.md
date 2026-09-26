@@ -15,6 +15,7 @@ drift fixed during verification):
 - [Album Import Handler](flows/album-import-handler.md)
 - [Metadata Enrichment](flows/metadata-enrichment.md)
 - [Queue-Time Resolution](flows/queue-time-resolution.md)
+- [Tracking Refresh & Search-Missing](flows/tracking-refresh.md)
 
 ## High-Level Component Diagram
 
@@ -86,6 +87,8 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/sanitize` | Filename/path sanitization | `PathSegment`, `TrimLeadingDots` |
 | `internal/sse` | Server-Sent Events hub + notifier | `SSEHub`, `SSENotifier` |
 | `internal/tagging` | Audio metadata tag writing (ID3, FLAC) | `TagWriter` |
+| `internal/tracking` | Tracked artists + discographies: provider-agnostic refresh, reconcile, and search-missing | `Service`, `Store` (interface), `AddArtistOptions`, `RefreshResult`, `SearchResult` |
+| `internal/tracking/sqlite` | SQLite tracking store sharing the library DB connection | `Store` (implements `tracking.Store`) |
 
 ## Domain Model
 
@@ -484,7 +487,29 @@ SQLite library record
 SQLite via `modernc.org/sqlite` (pure Go, no CGo). WAL mode, foreign keys ON.
 Idempotent `CREATE TABLE IF NOT EXISTS` (no migration versioning).
 
-Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache`.
+> **Behavior change — DB pragmas now enforced.** The connection DSN previously
+> passed `_journal_mode` / `_busy_timeout` / `_foreign_keys` query params, which
+> `modernc.org/sqlite` silently ignores. WAL, a 30s busy timeout, and
+> foreign-key enforcement were therefore **off**; the DSN now uses repeated
+> `_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)`
+> params, which the driver honors. Existing databases pick all three up on the
+> next start — no migration needed. Caveat: `playlist_tracks.track_id` has no
+> `ON DELETE` action, so a future delete that touches a playlist-referenced
+> track now raises a foreign-key constraint error instead of silently leaving a
+> dangling reference.
+
+Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache`, `tracked_artists`, `tracked_albums`.
+
+The tracking store (`internal/tracking/sqlite`) is a dedicated store that does
+not own a database: it wraps the same `*sql.DB` as the library store (via
+`library/sqlite.Store.DB()`), so the tracking tables live on the same
+connection and honour the same WAL / `foreign_keys=on` settings — the same
+pattern used by the quality and download stores. It re-asserts
+`PRAGMA foreign_keys = ON` because the modernc driver only honours
+`_pragma=...`, so `tracked_albums`' `ON DELETE CASCADE` fires. All tracked-artist
+refresh and search-missing execution goes through `jobs.Manager` (single-flight,
+cancellable, SSE, persisted); the periodic loop is
+`Server.StartTrackedRefreshScheduler`.
 
 ## Album Discovery Cache
 

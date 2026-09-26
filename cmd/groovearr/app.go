@@ -38,6 +38,8 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
+	"github.com/ramonskie/groovearr/internal/tracking"
+	trackingsqlite "github.com/ramonskie/groovearr/internal/tracking/sqlite"
 )
 
 // App holds all initialized application components.
@@ -251,6 +253,18 @@ func NewApp(configPath string) (*App, error) {
 	})
 	logTailer.Start(bgCtx)
 
+	// Artist tracking service. The store wraps the same shared library
+	// connection as the quality/download stores (never its own DB). The
+	// service reuses the ONE app-wide providerCooldown bucket created above
+	// (AGENTS §8) and the canonical download service for album acquisition
+	// (queuer) and record lookup (activeFinder), so tracking never maintains a
+	// parallel rate-limit, queue, or album-acquisition policy.
+	// Constructed before the import chain so the chain can hold a post-import
+	// tracking-link step.
+	currentCfgFn := func() config.Config { return cfg.Get() }
+	trackingStore := trackingsqlite.NewSQLiteStore(libStore.DB())
+	trackingSvc := tracking.NewService(trackingStore, discoveryReg, libStore, providerCooldown, downloadSvc, downloadSvc, currentCfgFn, log)
+
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
 	enrichmentHandler.SetProviderCooldown(providerCooldown)
@@ -263,6 +277,9 @@ func NewApp(configPath string) (*App, error) {
 		download.NewLibraryImporterHandler(libStore, log),
 		enrichmentHandler,
 		download.NewPlaylistLinkerHandler(libStore, log),
+		// Promote a tracked album to downloaded as soon as the import is
+		// linked into the library (best-effort; never fails the import).
+		download.NewTrackingLinkHandler(trackingSvc, log),
 		sseNotifier,
 	}
 
@@ -300,13 +317,18 @@ func NewApp(configPath string) (*App, error) {
 	orch.SetDownloadOrderProvider(downloadOrder)
 	orch.SetAlbumSources(currentCfg.AlbumSources)
 
+	// Wire the canonical album-acquisition policy's searcher (AGENTS §2: one
+	// path). QueueAlbumWithFallback owns the album-first/per-track decision.
+	downloadSvc.SetAlbumSearcher(orch)
+
 	// HTTP server.
 	addr := os.Getenv("GROOVEARR_ADDR")
 	if addr == "" {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, healthChecker, logRot, accessLog, logPath, jobStatePath,
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
+		qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, healthChecker, logRot, accessLog, logPath, jobStatePath,
 		func(mux *http.ServeMux) {
 			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
@@ -343,6 +365,15 @@ func NewApp(configPath string) (*App, error) {
 		},
 	)
 	srv.SetProviderCooldown(providerCooldown)
+
+	// Tracked-artist refresh: drive the existing "tracked-refresh" job on an
+	// interval through the job Manager (no bespoke worker). nil/0 or < 5 min
+	// disables it. Cancellable via bgCtx, so it never blocks Shutdown().
+	if refreshMins := currentCfg.Tracking.RefreshMins; refreshMins != nil && *refreshMins >= 5 {
+		srv.StartTrackedRefreshScheduler(bgCtx, time.Duration(*refreshMins)*time.Minute)
+	} else {
+		log.Info("tracked-artist refresh disabled (set tracking.refresh_mins to 5+ to enable)", "component", "main")
+	}
 
 	// Startup logging.
 	log.Info("groovearr starting",

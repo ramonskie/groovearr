@@ -13,6 +13,7 @@ document (files are the source of truth; the old ASCII diagrams in
 | [Album Import Handler](album-import-handler.md) | Post-download folder scan → track resolution → file matching → synthetic records → discovery cache | `internal/download/handler_album_import.go` |
 | [Metadata Enrichment](metadata-enrichment.md) | Provider loop, album/cover/track enrichment, cooldown handling, bulk vs per-download | `internal/download/handler_enrichment.go`, `internal/metadata/` |
 | [Queue-Time Resolution](queue-time-resolution.md) | Pre-queue album/cover lookup via `MetadataResolver.EnrichMetadata` (best-effort, no cooldown gating) | `internal/metadata/resolver.go` |
+| [Tracking Refresh & Search-Missing](tracking-refresh.md) | Tracked-artist discography refresh (scheduled + manual + sync `AddArtist`), reconcile/library-match rules, and the search-missing queue path (album-first, per-track fallback) | `internal/tracking/service_search.go`, `service_reconcile.go`, `internal/jobs/tracked.go`, `manager.go`, `internal/api/handlers_tracking.go`, `internal/tracking/sqlite/store.go` |
 
 ## Known Drift (old ASCII docs vs. current code)
 

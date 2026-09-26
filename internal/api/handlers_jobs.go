@@ -67,17 +67,31 @@ func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 // lifecycle is persisted to disk so an interrupted run is visible after a
 // restart (see restoreInterruptedJob).
 func (s *Server) startJob(w http.ResponseWriter, jobType string, runner jobs.Runner) {
-	// Wrap the runner to persist the job lifecycle. The running snapshot is
-	// written at entry — before the runner runs — so the persist order is
-	// deterministic (running → terminal). Persisting it after Start returns
-	// would race with fast runners whose terminal write lands first, leaving
-	// job.json stuck at "running" for a finished job.
-	//
-	// The terminal progress is read from the manager's snapshot (Current)
-	// rather than captured in the report closure: enrichRunner reports from
-	// multiple worker goroutines, so capturing into a shared variable would be
-	// a data race.
-	wrapped := func(ctx context.Context, report func(jobs.Report)) error {
+	job, err := s.jobs.Start(jobType, s.runPersistedJob(jobType, runner))
+	if err != nil {
+		if errors.Is(err, jobs.ErrBusy) {
+			writeJSON(w, http.StatusOK, map[string]any{"job": s.jobs.Current(), "started": false})
+			return
+		}
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "started": true})
+}
+
+// runPersistedJob wraps runner so the job lifecycle is persisted to disk,
+// returning a jobs.Runner the Manager can start. The running snapshot is
+// written at entry — before the runner runs — so the persist order is
+// deterministic (running → terminal). Persisting it after Start returns would
+// race with fast runners whose terminal write lands first, leaving job.json
+// stuck at "running" for a finished job.
+//
+// The terminal progress is read from the manager's snapshot (Current) rather
+// than captured in a report closure: some runners (e.g. enrich) report from
+// multiple worker goroutines, so capturing into a shared variable would be a
+// data race.
+func (s *Server) runPersistedJob(jobType string, runner jobs.Runner) jobs.Runner {
+	return func(ctx context.Context, report func(jobs.Report)) error {
 		now := time.Now().UTC()
 		s.saveJobState(&jobs.Job{Type: jobType, State: jobs.StateRunning, StartedAt: &now})
 
@@ -107,17 +121,6 @@ func (s *Server) startJob(w http.ResponseWriter, jobType string, runner jobs.Run
 		s.saveJobState(term)
 		return err
 	}
-
-	job, err := s.jobs.Start(jobType, wrapped)
-	if err != nil {
-		if errors.Is(err, jobs.ErrBusy) {
-			writeJSON(w, http.StatusOK, map[string]any{"job": s.jobs.Current(), "started": false})
-			return
-		}
-		writeError(w, http.StatusInternalServerError, err)
-		return
-	}
-	writeJSON(w, http.StatusAccepted, map[string]any{"job": job, "started": true})
 }
 
 // handleJobActivity returns the current job plus the recent per-track

@@ -3,10 +3,12 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -68,6 +70,69 @@ func waitJobState(t *testing.T, s *Server, want jobs.State) {
 			t.Fatalf("job did not reach %s, last state: %+v", want, j)
 		}
 		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+func TestRunPersistedJobPersistsLifecycle(t *testing.T) {
+	tests := []struct {
+		name      string
+		runnerErr error
+		wantState jobs.State
+		wantError string
+	}{
+		{"success persists running then completed", nil, jobs.StateCompleted, ""},
+		{"cancelled persists cancelled", context.Canceled, jobs.StateCancelled, ""},
+		{"failure persists failed with error", errors.New("boom"), jobs.StateFailed, "boom"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			logger := testAPILogger()
+			s := &Server{
+				jobStatePath: filepath.Join(t.TempDir(), jobStateFileName),
+				log:          logger,
+				jobs:         jobs.NewManager(sse.NewSSEHub(logger), context.Background(), logger),
+				runners:      jobs.NewRunners(jobs.RunnerDeps{Log: logger}),
+			}
+
+			// Capture what the wrapper persisted at entry — before the terminal
+			// write — to prove the running → terminal ordering, not just the
+			// state left on disk at the end.
+			var midRunState jobs.State
+			runner := func(context.Context, func(jobs.Report)) error {
+				if persisted := s.loadJobState(); persisted != nil {
+					midRunState = persisted.State
+				}
+				return tc.runnerErr
+			}
+
+			if _, err := s.jobs.Start("test-job", s.runPersistedJob("test-job", runner)); err != nil {
+				t.Fatalf("start job: %v", err)
+			}
+			waitJobState(t, s, tc.wantState)
+
+			if midRunState != jobs.StateRunning {
+				t.Errorf("mid-run persisted state = %q, want running", midRunState)
+			}
+			persisted := s.loadJobState()
+			if persisted == nil {
+				t.Fatal("no terminal state persisted")
+			}
+			if persisted.Type != "test-job" {
+				t.Errorf("persisted type = %q, want test-job", persisted.Type)
+			}
+			if persisted.State != tc.wantState {
+				t.Errorf("persisted state = %q, want %q", persisted.State, tc.wantState)
+			}
+			if persisted.Error != tc.wantError {
+				t.Errorf("persisted error = %q, want %q", persisted.Error, tc.wantError)
+			}
+			if persisted.FinishedAt == nil {
+				t.Error("terminal state missing FinishedAt")
+			}
+			if persisted.StartedAt == nil {
+				t.Error("terminal state missing StartedAt")
+			}
+		})
 	}
 }
 

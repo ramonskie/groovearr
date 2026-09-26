@@ -55,6 +55,14 @@ export interface LoggingConfig {
   captured_max: number;
 }
 
+/** Controls the artist-tracking refresh loop (config.TrackingConfig). */
+export interface TrackingConfig {
+  /** Minutes between tracked-artist refresh passes. null/0 = disabled. */
+  refresh_mins: number | null;
+  /** Queue monitored wanted albums automatically after each refresh. */
+  auto_search_missing?: boolean | null;
+}
+
 /** One log line as sent by GET /api/logs and streamed as "log_line" SSE events.
  * raw is the untouched line exactly as it appears in the log file. */
 export interface LogEntry {
@@ -79,6 +87,7 @@ export interface Config {
   album_sources?: string[];
   download_client?: string;
   logging?: LoggingConfig;
+  tracking?: TrackingConfig;
   setup_completed?: boolean;
 }
 
@@ -88,6 +97,8 @@ export interface ConfigUpdatePayload {
   library?: Partial<LibraryConfig>;
   auth?: Partial<AuthConfig>;
   logging?: Partial<LoggingConfig>;
+  /** Pointer-merged server-side: omit a field to preserve it, send 0 to disable. */
+  tracking?: Partial<TrackingConfig>;
   metadata_order?: string[];
   download_order?: string[];
   album_sources?: string[];
@@ -517,6 +528,122 @@ export interface Album {
   updated_at: string;
   external_ids?: Record<string, string>;
   release_date?: string;
+}
+
+// ─── Artist tracking ───────────────────────────────────────────────
+
+/** How a tracked artist is monitored for releases (domain.MonitorMode). */
+export type MonitorMode = "all" | "future" | "none";
+
+/** Acquisition lifecycle of a discovered tracked album (domain.AlbumStatus). */
+export type AlbumStatus = "wanted" | "downloading" | "downloaded" | "ignored";
+
+/** An artist monitored for releases from a provider. Mirrors domain.TrackedArtist. */
+export interface TrackedArtist {
+  id: number;
+  name: string;
+  provider_name: string;
+  provider_artist_id: string;
+  monitored: boolean;
+  monitor_mode: MonitorMode;
+  /** Set once the artist is matched to a local library entry. */
+  library_artist_id?: number;
+  auto_refresh: boolean;
+  last_refreshed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** An album discovered for a tracked artist. Mirrors domain.TrackedAlbum. */
+export interface TrackedAlbum {
+  id: number;
+  tracked_artist_id: number;
+  provider_album_id: string;
+  provider_name: string;
+  title: string;
+  /** Omitted when the provider reports no year (Go `omitempty`). */
+  year?: number;
+  /** Omitted when the provider reports no type (Go `omitempty`). */
+  album_type?: string;
+  monitored: boolean;
+  status: AlbumStatus;
+  /** Set once the album is matched to a local library entry. */
+  library_album_id?: number;
+  first_seen_at: string;
+  last_seen_at: string;
+}
+
+/** Payload for POST /api/tracking/artists (synchronous 201). */
+export interface AddTrackedArtistRequest {
+  provider_name: string;
+  provider_artist_id: string;
+  name: string;
+  /** Omit to default to monitored (mode "none" always wins). */
+  monitored?: boolean;
+  /** Omit to default to "all". */
+  monitor_mode?: MonitorMode;
+  /** Omit to follow the tracking.refresh_mins setting. */
+  auto_refresh?: boolean;
+  /**
+   * Opt-in: start a search for missing albums once the artist is added.
+   * Omit/false to add without searching (Lidarr "Start Search for Missing Albums").
+   */
+  search_on_add?: boolean;
+}
+
+/** Payload for PATCH /api/tracking/artists/{id} — at least one field required. */
+export interface UpdateTrackedArtistRequest {
+  monitored?: boolean;
+  monitor_mode?: MonitorMode;
+}
+
+/** Response for GET /api/tracking/artists/{id}: artist plus its albums. */
+export interface ArtistWithAlbums {
+  artist: TrackedArtist;
+  albums: TrackedAlbum[];
+}
+
+/** Response for DELETE /api/tracking/artists/{id}. */
+export interface DeleteTrackedArtistResponse {
+  status: "deleted";
+}
+
+/** Payload for PATCH /api/tracking/albums/{id} — at least one field required. */
+export interface UpdateTrackedAlbumRequest {
+  monitored?: boolean;
+  /** Only "wanted" and "ignored" are accepted by the backend. */
+  status?: "wanted" | "ignored";
+}
+
+/** Response for PATCH /api/tracking/albums/{id}. */
+export interface UpdateTrackedAlbumResponse {
+  status: "updated";
+  id: number;
+  /** Present only when the request set `monitored`. */
+  monitored?: boolean;
+  /** Present only when the request set `status`. */
+  album_status?: AlbumStatus;
+}
+
+/**
+ * Summary of one RefreshArtist pass (tracking.RefreshResult). Job-backed
+ * refreshes currently report through the job Manager rather than the HTTP
+ * response, so this mirrors the Go JSON shape for consumers of job output.
+ */
+export interface RefreshResult {
+  albums_seen: number;
+  newly_wanted: number;
+  missing: number;
+}
+
+/**
+ * Summary of one SearchMissing pass (tracking.SearchResult). Same caveat as
+ * RefreshResult: surfaced through the job Manager, not the start response.
+ */
+export interface SearchResult {
+  queued: number;
+  skipped: number;
+  errors: number;
 }
 
 // ─── Background jobs ────────────────────────────────────────────────

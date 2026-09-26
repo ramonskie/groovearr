@@ -5,7 +5,9 @@ import {
   type FormEvent,
 } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
+import { Check } from "lucide-react";
 import {
   useDiscoveryProviders,
   useDiscoverySearch,
@@ -13,6 +15,7 @@ import {
   useAlbumTracks,
   useDownloadAlbum,
 } from "../../hooks/use-discovery";
+import { addTrackedArtist, listTrackedArtists } from "../../api/client";
 import Button from "../../components/Button";
 import type { ArtistSummary, DiscoveryAlbum, DiscoveryTrack } from "../../api/types";
 
@@ -48,12 +51,44 @@ export default function DiscoverPage() {
 
   const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [coverUrl, setCoverUrl] = useState("");
+  // Opt-in for "Start Search for Missing Albums" (Lidarr behavior). Default off.
+  const [searchOnAdd, setSearchOnAdd] = useState(false);
 
   const { data: providers } = useDiscoveryProviders();
   const searchMutation = useDiscoverySearch();
   const { data: albums } = useArtistAlbums(artistId, artistProvider);
   const { data: tracks } = useAlbumTracks(albumId, albumProvider);
   const downloadAlbumMutation = useDownloadAlbum();
+
+  // ── Artist tracking ──
+  const queryClient = useQueryClient();
+  const trackedQuery = useQuery({
+    queryKey: ["tracking", "artists"],
+    queryFn: listTrackedArtists,
+  });
+  const trackMutation = useMutation({
+    mutationFn: addTrackedArtist,
+    onSuccess: (artist) => {
+      queryClient.invalidateQueries({ queryKey: ["tracking"] });
+      toast.success(`Now monitoring ${artist.name}`);
+    },
+    onError: (err) => {
+      const message =
+        err instanceof Error ? err.message : "Failed to track artist";
+      toast.error(message);
+    },
+  });
+
+  // The artist view is driven by URL params, so the resolved discovery artist's
+  // provider name/id and display name are exactly what tracking needs.
+  const canTrackArtist = !!artistId && !!artistProvider && !!artistName;
+  const isTracked =
+    canTrackArtist &&
+    (trackedQuery.data ?? []).some(
+      (a) =>
+        a.provider_name === artistProvider &&
+        a.provider_artist_id === artistId,
+    );
 
   const noProviders = providers && providers.length === 0;
 
@@ -141,6 +176,16 @@ export default function DiscoverPage() {
       },
     });
   }, [albumId, downloadAlbumMutation, navigate]);
+
+  const handleTrackArtist = useCallback(() => {
+    if (!artistId || !artistProvider || !artistName) return;
+    trackMutation.mutate({
+      provider_name: artistProvider,
+      provider_artist_id: artistId,
+      name: artistName,
+      search_on_add: searchOnAdd,
+    });
+  }, [artistId, artistProvider, artistName, searchOnAdd, trackMutation]);
 
   const results = searchMutation.data;
 
@@ -255,9 +300,45 @@ export default function DiscoverPage() {
       {/* Artist detail: album grid */}
       {view === "artist" && (
         <section>
-          <h2 className="text-xl font-bold text-gray-100 mb-2">
-            {artistName}
-          </h2>
+          <div className="mb-2 flex flex-wrap items-start justify-between gap-3">
+            <h2 className="text-xl font-bold text-gray-100">{artistName}</h2>
+            {canTrackArtist && (
+              <div className="flex flex-wrap items-center gap-3">
+                {!isTracked && (
+                  <label
+                    htmlFor="discover-search-on-add"
+                    className="flex cursor-pointer items-center gap-2 text-xs text-slate-400"
+                    title="Start Search for Missing Albums when this artist is added"
+                  >
+                    <input
+                      id="discover-search-on-add"
+                      type="checkbox"
+                      checked={searchOnAdd}
+                      onChange={(e) => setSearchOnAdd(e.target.checked)}
+                      disabled={trackMutation.isPending}
+                      className="h-4 w-4 rounded border-slate-700 bg-slate-800 text-purple-500 focus:ring-purple-500 disabled:cursor-not-allowed disabled:opacity-50"
+                    />
+                    Search missing albums on add
+                  </label>
+                )}
+                <Button
+                  size="sm"
+                  variant={isTracked ? "ghost" : "primary"}
+                  disabled={isTracked || trackedQuery.isLoading}
+                  loading={trackMutation.isPending}
+                  onClick={handleTrackArtist}
+                >
+                  {isTracked ? (
+                    <>
+                      <Check size={14} /> Tracked
+                    </>
+                  ) : (
+                    "Monitor"
+                  )}
+                </Button>
+              </div>
+            )}
+          </div>
           <p className="text-gray-400 mb-6">Albums</p>
           {albums ? (
             <AlbumGrid albums={albums} onAlbumClick={handleAlbumClick} />

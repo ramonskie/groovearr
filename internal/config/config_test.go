@@ -324,3 +324,137 @@ func TestMergeAlbumSourcesPresenceBased(t *testing.T) {
 		t.Errorf("album_sources not replaced, got %v", cfg.AlbumSources)
 	}
 }
+
+func TestTrackingConfigDefaults(t *testing.T) {
+	tests := []struct {
+		name              string
+		wantRefreshSet    bool
+		wantRefreshMins   int
+		wantAutoSearching bool
+	}{
+		{name: "defaults", wantRefreshSet: true, wantRefreshMins: 720, wantAutoSearching: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			if got := cfg.Tracking.RefreshMins != nil; got != tt.wantRefreshSet {
+				t.Fatalf("tracking.refresh_mins set = %v, want %v", got, tt.wantRefreshSet)
+			}
+			if tt.wantRefreshSet && *cfg.Tracking.RefreshMins != tt.wantRefreshMins {
+				t.Errorf("tracking.refresh_mins = %d, want %d", *cfg.Tracking.RefreshMins, tt.wantRefreshMins)
+			}
+			if cfg.Tracking.AutoSearchMissing == nil {
+				t.Fatal("tracking.auto_search_missing = nil, want a default pointer")
+			}
+			if *cfg.Tracking.AutoSearchMissing != tt.wantAutoSearching {
+				t.Errorf("tracking.auto_search_missing = %v, want %v", *cfg.Tracking.AutoSearchMissing, tt.wantAutoSearching)
+			}
+		})
+	}
+}
+
+func TestMergeTrackingConfig(t *testing.T) {
+	tests := []struct {
+		name              string
+		initialRefresh    *int
+		initialAutoSearch *bool
+		partial           TrackingConfig
+		wantRefresh       *int
+		wantAutoSearch    *bool
+	}{
+		{
+			name:           "explicit override",
+			initialRefresh: intPtr(720),
+			partial:        TrackingConfig{RefreshMins: intPtr(60)},
+			wantRefresh:    intPtr(60),
+		},
+		{
+			name:           "nil preserves existing",
+			initialRefresh: intPtr(720),
+			partial:        TrackingConfig{},
+			wantRefresh:    intPtr(720),
+		},
+		{
+			name:           "explicit zero disables",
+			initialRefresh: intPtr(720),
+			partial:        TrackingConfig{RefreshMins: intPtr(0)},
+			wantRefresh:    intPtr(0),
+		},
+		{
+			name:              "auto-search true overrides",
+			initialAutoSearch: boolPtr(false),
+			partial:           TrackingConfig{AutoSearchMissing: boolPtr(true)},
+			wantAutoSearch:    boolPtr(true),
+		},
+		{
+			name:              "auto-search false clears",
+			initialAutoSearch: boolPtr(true),
+			partial:           TrackingConfig{AutoSearchMissing: boolPtr(false)},
+			wantAutoSearch:    boolPtr(false),
+		},
+		{
+			name:              "auto-search nil preserves",
+			initialAutoSearch: boolPtr(true),
+			partial:           TrackingConfig{},
+			wantAutoSearch:    boolPtr(true),
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Tracking: TrackingConfig{
+				RefreshMins:       tt.initialRefresh,
+				AutoSearchMissing: tt.initialAutoSearch,
+			}}
+			cfg.Merge(&Config{Tracking: tt.partial})
+
+			if (cfg.Tracking.RefreshMins == nil) != (tt.wantRefresh == nil) {
+				t.Fatalf("tracking.refresh_mins = %v, want %v", cfg.Tracking.RefreshMins, tt.wantRefresh)
+			}
+			if cfg.Tracking.RefreshMins != nil && *cfg.Tracking.RefreshMins != *tt.wantRefresh {
+				t.Errorf("tracking.refresh_mins = %d, want %d", *cfg.Tracking.RefreshMins, *tt.wantRefresh)
+			}
+			if (cfg.Tracking.AutoSearchMissing == nil) != (tt.wantAutoSearch == nil) {
+				t.Fatalf("tracking.auto_search_missing = %v, want %v", cfg.Tracking.AutoSearchMissing, tt.wantAutoSearch)
+			}
+			if cfg.Tracking.AutoSearchMissing != nil && *cfg.Tracking.AutoSearchMissing != *tt.wantAutoSearch {
+				t.Errorf("tracking.auto_search_missing = %v, want %v", *cfg.Tracking.AutoSearchMissing, *tt.wantAutoSearch)
+			}
+		})
+	}
+}
+
+func TestValidateTrackingRefreshMins(t *testing.T) {
+	tests := []struct {
+		name    string
+		mins    *int
+		wantErr bool
+	}{
+		{name: "nil is valid", mins: nil, wantErr: false},
+		{name: "zero disables and is valid", mins: intPtr(0), wantErr: false},
+		{name: "below minimum is invalid", mins: intPtr(1), wantErr: true},
+		{name: "three minutes is invalid", mins: intPtr(3), wantErr: true},
+		{name: "four minutes is invalid", mins: intPtr(4), wantErr: true},
+		{name: "five minutes is valid", mins: intPtr(5), wantErr: false},
+		{name: "positive is valid", mins: intPtr(720), wantErr: false},
+		{name: "one year is valid", mins: intPtr(525600), wantErr: false},
+		{name: "negative is invalid", mins: intPtr(-1), wantErr: true},
+		{name: "above one year is invalid", mins: intPtr(525601), wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Tracking.RefreshMins = tt.mins
+			errs := cfg.Validate()
+
+			got := false
+			for _, e := range errs {
+				if strings.Contains(e, "tracking.refresh_mins") {
+					got = true
+				}
+			}
+			if got != tt.wantErr {
+				t.Errorf("tracking.refresh_mins validation = %v, want %v (errs: %v)", got, tt.wantErr, errs)
+			}
+		})
+	}
+}

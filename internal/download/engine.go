@@ -52,6 +52,9 @@ func (o *Orchestrator) SetDownloadOrderProvider(provider *DownloadOrder) {
 	o.orderMu.Unlock()
 }
 
+// Orchestrator is the album source for the canonical album-acquisition policy.
+var _ AlbumSearcher = (*Orchestrator)(nil)
+
 // SetAlbumSources configures the priority order for album-capable sources.
 func (o *Orchestrator) SetAlbumSources(sources []string) {
 	o.orderMu.Lock()

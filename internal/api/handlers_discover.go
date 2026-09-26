@@ -696,71 +696,41 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 		albumName = tracks[0].AlbumTitle
 	}
 
-	// ── Try album-level download if album sources are configured ──
-
-	if artistName != "" && albumName != "" && s.orchestrator != nil {
-		cfg := s.cfg.Get()
-		if len(cfg.AlbumSources) > 0 && cfg.DownloadClient != "" {
-			query := artistName + " " + albumName
-			releases, searchErr := s.orchestrator.SearchAlbums(ctx, query)
-			if searchErr == nil && len(releases) > 0 {
-				best := releases[0]
-				downloadID, queueErr := s.downloadSvc.QueueAlbum(ctx, best, nil, cfg.DownloadClient)
-				if queueErr != nil {
-					writeError(w, http.StatusInternalServerError, fmt.Errorf("queue album: %w", queueErr))
-					return
-				}
-				s.log.Info("album download queued via album source",
-					"download_id", downloadID,
-					"artist", best.Artist,
-					"album", best.Album,
-					"component", "api",
-				)
-				writeJSON(w, http.StatusOK, map[string]any{
-					"mode":        "album",
-					"download_id": downloadID,
-					"artist":      best.Artist,
-					"album":       best.Album,
-				})
-				return
-			}
-			if searchErr != nil {
-				s.log.Warn("album search failed, falling back to per-track",
-					"artist", artistName, "album", albumName,
-					"error", searchErr, "component", "api")
-			} else {
-				s.log.Info("no album releases found, falling back to per-track",
-					"artist", artistName, "album", albumName, "component", "api")
-			}
-		}
-	}
-
-	// ── Per-track fallback ──
-
-	var queued int
-	var errors []string
+	// Album-acquisition policy (album-first vs per-track) lives ONLY in
+	// download.Service.QueueAlbumWithFallback — do not re-implement it here.
+	trackQueues := make([]download.TrackQueue, 0, len(tracks))
 	for _, t := range tracks {
-		if t.ArtistName == "" || t.Title == "" {
-			continue
-		}
-		_, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
+		trackQueues = append(trackQueues, download.TrackQueue{
 			Artist:      t.ArtistName,
 			Album:       t.AlbumTitle,
 			Title:       t.Title,
 			TrackNumber: t.TrackNumber,
 			DiscNumber:  t.DiscNumber,
+			ISRC:        t.ISRC,
 		})
-		if dlErr != nil {
-			errors = append(errors, fmt.Sprintf("%s - %s: queue: %v", t.ArtistName, t.Title, dlErr))
-			continue
-		}
-		queued++
+	}
+
+	cfg := s.cfg.Get()
+	res, err := s.downloadSvc.QueueAlbumWithFallback(ctx, artistName, albumName, trackQueues, cfg.DownloadClient, cfg.AlbumSources)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+
+	if res.Mode == download.QueueModeAlbum {
+		writeJSON(w, http.StatusOK, map[string]any{
+			"mode":        "album",
+			"download_id": res.DownloadID,
+			"artist":      artistName,
+			"album":       albumName,
+		})
+		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]any{
 		"mode":   "track",
-		"queued": queued,
-		"total":  len(tracks),
-		"errors": errors,
+		"queued": res.Queued,
+		"total":  res.Total,
+		"errors": res.Errors,
 	})
 }

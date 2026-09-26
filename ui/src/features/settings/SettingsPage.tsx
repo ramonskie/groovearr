@@ -17,6 +17,7 @@ import LibrarySettings from "./LibrarySettings";
 import SecuritySettings from "./SecuritySettings";
 import QualitySettings from "./QualitySettings";
 import JobsSettings from "./JobsSettings";
+import TrackingSettings from "./TrackingSettings";
 import LogsSettings from "./LogsSettings";
 
 const TABS = [
@@ -25,6 +26,7 @@ const TABS = [
   { id: "quality", label: "Quality" },
   { id: "library", label: "Library" },
   { id: "jobs", label: "Jobs" },
+  { id: "tracking", label: "Tracking" },
   { id: "security", label: "Security" },
   { id: "logs", label: "Logs" },
 ] as const;
@@ -87,6 +89,11 @@ export default function SettingsPage() {
           download_order: config.download_order ?? [],
           album_sources: config.album_sources ?? [],
           download_client: config.download_client ?? "",
+          tracking_refresh_mins:
+            config.tracking === undefined
+              ? 720
+              : (config.tracking.refresh_mins ?? 0),
+          tracking_auto_search_missing: config.tracking?.auto_search_missing ?? false,
           log_level: (config.logging?.level ?? "info") as "info" | "debug" | "warn" | "error",
           log_format: (config.logging?.format ?? "json") as "text" | "json",
           log_max_size_mb: config.logging?.max_size_mb ?? undefined,
@@ -143,6 +150,7 @@ export default function SettingsPage() {
           {activeTab === "sources" && <SourcesSettings />}
           {activeTab === "library" && <LibrarySettings />}
           {activeTab === "jobs" && <JobsSettings />}
+          {activeTab === "tracking" && <TrackingSettings />}
           {activeTab === "security" && <SecuritySettings />}
           {activeTab === "logs" && <LogsSettings />}
         </div>

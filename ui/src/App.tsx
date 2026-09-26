@@ -13,6 +13,7 @@ import { useAuth } from "./context/AuthContext";
 import { useDownloads } from "./hooks/use-downloads";
 import { useSetupStatus } from "./hooks/use-config";
 import { useJobWatcher } from "./hooks/use-job";
+import { useTrackingEvents } from "./hooks/use-tracking-events";
 import type { DownloadState } from "./api/types";
 
 const LoginPage = lazy(() => import("./features/auth/LoginPage"));
@@ -24,6 +25,7 @@ export type PageName =
   | "downloads"
   | "library"
   | "playlists"
+  | "tracking"
   | "settings";
 
 // ─── Lazy-loaded pages ───────────────────────────────────────────────
@@ -41,6 +43,9 @@ const SettingsPage = lazy(
 );
 const DiscoverPage = lazy(
   () => import("./features/discover/DiscoverPage"),
+);
+const TrackingPage = lazy(
+  () => import("./features/tracking/TrackingPage"),
 );
 
 // ─── Suspense fallback ───────────────────────────────────────────────
@@ -69,6 +74,7 @@ const VALID_PAGES = new Set<string>([
   "downloads",
   "library",
   "playlists",
+  "tracking",
   "settings",
 ]);
 
@@ -112,6 +118,10 @@ function AppShell() {
   // a scan/enrich job finishes.
   useJobWatcher();
 
+  // Refresh tracking views (wanted badge, album statuses) on import completion
+  // app-wide — imports can be started from any page, not just Downloads.
+  useTrackingEvents();
+
   const activePage = pathToPage(location.pathname);
 
   const activeDownloadCount =
@@ -139,6 +149,7 @@ function AppShell() {
           <Route path="/downloads" element={<DownloadsPage />} />
           <Route path="/library" element={<LibraryPage />} />
           <Route path="/playlists" element={<PlaylistsPage />} />
+          <Route path="/tracking" element={<TrackingPage />} />
           <Route path="/settings" element={<SettingsPage />} />
           <Route path="/setup" element={<SetupWizard />} />
         </Routes>

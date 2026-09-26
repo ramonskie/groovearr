@@ -224,7 +224,7 @@ with next candidate (exclude_source). If all exhausted, stays "wanted" for retry
 | 2 | `DiscoveryProvider` interface + type-safe registry | S | — |
 | 3 | Spotify discovery plugin (wraps existing `API`) | S | 1, 2 |
 | 4 | `GET/POST /api/discover/...` endpoints | M | 2, 3 |
-| 5 | `POST /api/discover/albums/{id}/download` — bridge to orchestrator | M | 4 |
+| 5 | `POST /api/discover/albums/{id}/download` — delegates to the shared canonical policy `download.Service.QueueAlbumWithFallback` (album-first → per-track fallback), also used by tracking | M | 4 |
 | 6 | UI: Discover page (artist → albums → tracks → download) | L | 4, 5 |
 | 7 | `TagValidatorHandler` — validate file tags match expected metadata | S | 5 |
 | 8 | Delete filename parsing code | S | 5, 7 |

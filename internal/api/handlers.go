@@ -49,6 +49,7 @@ type Server struct {
 	sseHub              *sse.SSEHub
 	matcher             *matching.Engine
 	playlistSvc         *playlist.Service
+	trackingSvc         trackingService
 	qualityProfileStore quality.ProfileStore
 	jobs                *jobs.Manager
 	runners             *jobs.Runners
@@ -70,7 +71,7 @@ type Server struct {
 // giving plugins a chance to add their own HTTP endpoints.
 type PluginRouteRegistrar func(mux *http.ServeMux)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -87,6 +88,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		sseHub:              sseHub,
 		matcher:             matching.New(),
 		playlistSvc:         playlistSvc,
+		trackingSvc:         trackingSvc,
 		qualityProfileStore: qualityProfileStore,
 		healthChecker:       healthChecker,
 		log:                 logger,
@@ -107,6 +109,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		Enrichment: enrichmentHandler,
 		Metadata:   mdRegistry,
 		Playlist:   playlistSvc,
+		Tracking:   trackingSvc,
 		RateLimit:  s.providerCooldown,
 	})
 	s.restoreInterruptedJob()
@@ -193,6 +196,20 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	mux.Handle("POST /api/playlists/{id}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadMissing)))
 	mux.Handle("POST /api/playlists/{id}/sync", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleSyncPlaylist)))
 	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
+
+	// Artist tracking routes — tracked artists, their discographies, and the
+	// global wanted view. Refresh/search-missing go through the job Manager.
+	mux.HandleFunc("GET /api/tracking/artists", s.handleListTrackedArtists)
+	mux.HandleFunc("POST /api/tracking/artists", s.handleAddTrackedArtist)
+	mux.HandleFunc("GET /api/tracking/artists/{artistID}", s.handleGetTrackedArtist)
+	mux.HandleFunc("PATCH /api/tracking/artists/{artistID}", s.handleUpdateTrackedArtist)
+	mux.HandleFunc("DELETE /api/tracking/artists/{artistID}", s.handleDeleteTrackedArtist)
+	mux.HandleFunc("GET /api/tracking/artists/{artistID}/albums", s.handleListTrackedAlbums)
+	mux.HandleFunc("POST /api/tracking/artists/{artistID}/refresh", s.handleRefreshTrackedArtist)
+	mux.HandleFunc("POST /api/tracking/artists/{artistID}/search-missing", s.handleSearchMissingArtist)
+	mux.HandleFunc("POST /api/tracking/refresh", s.handleRefreshAllTracked)
+	mux.HandleFunc("GET /api/tracking/wanted", s.handleListAllWanted)
+	mux.HandleFunc("PATCH /api/tracking/albums/{albumID}", s.handleUpdateTrackedAlbum)
 
 	// Discovery routes — metadata-first album/track browsing.
 	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)

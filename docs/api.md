@@ -529,6 +529,266 @@ Delete an imported playlist.
 
 ---
 
+## Tracking
+
+Tracked artists and their discovered discographies. A tracked artist is keyed
+by a provider pair (`provider_name` + `provider_artist_id`); each discovered
+album carries a `status` of `wanted` / `downloading` / `downloaded` /
+`ignored`. Status is forward-only with one requeue: reconcile only promotes
+`wanted` → `downloaded`, and the post-import chain promotes the matching
+album to `downloaded` as soon as its download is imported (via
+`TrackingLinkHandler` → `LinkImportedAlbum`) — so an album flips on import,
+not only on the next refresh. A `downloading` album whose download is a
+re-armable exhausted failure is reset to `wanted` and retried
+(`downloading` → `wanted` is the only allowed regression); `downloaded` and
+`ignored` are terminal. `ignored` is written only by the per-album PATCH
+`status` field. Per-album `monitored`
+toggles survive every refresh — `monitor_mode` is applied to existing albums
+only by the explicit Set Artist Monitor action
+(`PATCH /api/tracking/artists/{artistID}`). Refresh and search-missing do
+provider I/O, so they only enqueue a runner on the shared `jobs.Manager`; every
+provider call respects the shared per-provider cooldown (AGENTS §8). Every
+tracking route returns `503` when the tracking service is not wired, and
+`POST /api/tracking/artists` also returns `503` when the discovery provider is
+cooling down.
+
+### `GET /api/tracking/artists`
+
+List every tracked artist.
+
+**Response** `200`:
+```json
+[
+  {
+    "id": 1,
+    "name": "Daft Punk",
+    "provider_name": "deezer",
+    "provider_artist_id": "27",
+    "monitored": true,
+    "monitor_mode": "all",
+    "library_artist_id": 4,
+    "auto_refresh": true,
+    "last_refreshed_at": "2026-09-26T10:00:00Z",
+    "created_at": "2026-09-01T09:00:00Z",
+    "updated_at": "2026-09-26T10:00:00Z"
+  }
+]
+```
+
+### `POST /api/tracking/artists`
+
+Start tracking an artist. **Synchronous**: it fetches the discography *before*
+writing the artist row, reconciles it, and returns the resolved artist (`201`),
+not a job. The call is bounded by a per-call timeout, so an unresponsive
+provider fails the request and leaves no tracked artist behind. The response
+includes `library_artist_id` when the artist is already in the local library.
+
+**Body**:
+```json
+{
+  "provider_name": "deezer",
+  "provider_artist_id": "27",
+  "name": "Daft Punk",
+  "monitored": true,
+  "monitor_mode": "all",
+  "auto_refresh": true,
+  "search_on_add": false
+}
+```
+- `provider_name`, `provider_artist_id` — required
+- `monitored` — optional, default `true`
+- `monitor_mode` — optional, `all` (default) | `future` | `none`; seeds `monitored` on albums discovered by this call (`none` → `false`, `future` → only releases after the current year) and forces the artist's own `monitored=false` when `none`
+- `auto_refresh` — optional, defaults to whether `tracking.refresh_mins` is enabled
+- `search_on_add` — optional, default `false`. When `true`, one bounded
+  `SearchMissing` run is triggered immediately after the reconcile (Lidarr's
+  "Start Search for Missing Albums"). When `false`, adding an artist only builds
+  the wanted list; albums are queued later by manual Search Missing, the
+  `tracked-search` job, or the periodic refresh when
+  `tracking.auto_search_missing` is enabled.
+
+Idempotent: an existing provider pair is reconciled in place, never duplicated.
+
+**Response** `201`: the created/updated tracked artist (same shape as above).
+
+**Errors**:
+- `400` — missing provider fields, invalid `monitor_mode`, or the discovery
+  provider is not registered
+- `503` — the discovery provider is currently cooling down (shared rate-limit
+  bucket, AGENTS §8)
+- `500` — any other failure, including the per-call timeout
+
+### `GET /api/tracking/artists/{artistID}`
+
+Get one tracked artist with its discovered albums.
+
+**Response** `200`:
+```json
+{
+  "artist": {
+    "id": 1,
+    "name": "Daft Punk",
+    "provider_name": "deezer",
+    "provider_artist_id": "27",
+    "monitored": true,
+    "monitor_mode": "all",
+    "auto_refresh": true
+  },
+  "albums": [
+    {
+      "id": 10,
+      "tracked_artist_id": 1,
+      "provider_album_id": "302127",
+      "provider_name": "deezer",
+      "title": "Discovery",
+      "year": 2001,
+      "album_type": "album",
+      "monitored": true,
+      "status": "downloaded",
+      "library_album_id": 7
+    }
+  ]
+}
+```
+
+**Errors**: `404` tracked artist not found.
+
+### `PATCH /api/tracking/artists/{artistID}`
+
+Set Artist Monitor: update an artist's monitoring and re-apply `monitor_mode`
+to its existing albums. At least one field is required; omitted fields keep
+their current value.
+
+**Body**:
+```json
+{"monitored": false, "monitor_mode": "future"}
+```
+`monitor_mode` is `all` | `future` | `none`; `none` forces the artist's
+`monitored=false`. When `monitor_mode` changes it is applied to existing albums:
+- `none` — unmonitors the artist's albums, except albums with status `ignored`,
+  which keep their explicit skip
+- `all` — re-monitors them
+- `future` — monitors only releases with `year >` the current year
+
+This is the only path that rewrites `monitored` on existing albums. The
+background refresh never does, so per-album toggles survive every refresh until
+the next Set Artist Monitor call.
+
+**Response** `200`: the updated tracked artist.
+
+**Errors**: `400` neither field sent or invalid `monitor_mode`; `404` not found.
+
+### `DELETE /api/tracking/artists/{artistID}`
+
+Delete a tracked artist; its discovered albums cascade (`ON DELETE CASCADE`).
+
+**Response** `200`:
+```json
+{"status": "deleted"}
+```
+
+### `GET /api/tracking/artists/{artistID}/albums`
+
+List every album discovered for a tracked artist.
+
+**Response** `200`: array of tracked albums (shape as above; `[]` when none).
+
+### `POST /api/tracking/artists/{artistID}/refresh`
+
+Start the `tracked-refresh` job for one artist: re-fetch the discography,
+reconcile it, then auto-search when `tracking.auto_search_missing` is on. The
+auto-search uses the same rotating per-run batch as `search-missing` (at most
+`searchBatchSize`, default 5 — never-searched first, then oldest
+`last_searched_at`; the rest stay `wanted`).
+
+**Response** `202`:
+```json
+{"job": {"type": "tracked-refresh", "state": "running"}, "started": true}
+```
+When another job is already running the current snapshot is returned with
+`started: false` (`200`) — see [Job single-flight](#job-single-flight).
+
+### `POST /api/tracking/artists/{artistID}/search-missing`
+
+Start the `tracked-search` job: queue the artist's monitored `wanted` albums
+(album-first, per-track fallback). **Bounded and rotating per run**: each pass
+selects at most `searchBatchSize` wanted albums (default 5) ordered
+never-searched first, then oldest `last_searched_at` first, and records the
+search time. An album that cannot be queued this pass (nothing found, or its
+provider is cooling down) is counted as `skipped` and retried on a later run —
+it no longer blocks the albums behind it. The rest stay `wanted` and are picked
+up by the next run. The job summary reports `Remaining`, the count still wanted
+after the cap, so a whole discography is never dumped into the queue at once.
+
+A tracked album stuck in `downloading` whose download is a re-armable exhausted
+failure is reset to `wanted` and retried; `downloading` → `wanted` is the only
+allowed status regression.
+
+Album-first vs per-track is the shared canonical policy implemented only by
+`download.Service.QueueAlbumWithFallback`; the discover album-download handler
+(`POST /api/discover/albums/{id}/download`) calls the same method. No endpoint
+re-implements the policy.
+
+**Response**: `202 {job, started:true}` or `200 {job, started:false}` as above.
+
+### `POST /api/tracking/refresh`
+
+Start the bulk `tracked-refresh` job over every `auto_refresh` artist
+(sequential; cooling-down providers skipped). Any auto-search it triggers is
+bounded per run like `search-missing` (at most `searchBatchSize`, default 5 —
+never-searched first, then oldest `last_searched_at`; the rest stay `wanted`).
+
+**Response**: `202 {job, started:true}` or `200 {job, started:false}` as above.
+
+### `GET /api/tracking/wanted`
+
+List the globally wanted albums — monitored albums with status `wanted` or
+`downloading` across all tracked artists.
+
+**Response** `200`: array of tracked albums.
+
+### `PATCH /api/tracking/albums/{albumID}`
+
+Update a single album's monitoring and/or status. The `monitored` flag survives
+every background refresh — only Set Artist Monitor re-applies `monitor_mode`.
+The `status` field is the per-album skip control and the only writer of
+`ignored`.
+
+**Body**:
+```json
+{"monitored": true, "status": "ignored"}
+```
+- `monitored` — optional boolean; omitted keeps the current value
+- `status` — optional; only `"wanted"` or `"ignored"` accepted. `"ignored"` is
+  the explicit user skip; `"wanted"` clears it back into the search queue
+- at least one of `monitored` / `status` is required
+
+**Response** `200`:
+```json
+{"status": "updated", "id": 10, "monitored": true, "album_status": "ignored"}
+```
+
+**Errors**: `400` neither field sent or `status` not `wanted`/`ignored`;
+`404` album not found.
+
+### Job single-flight
+
+Refresh and search-missing endpoints only enqueue a runner. The shared
+`jobs.Manager` permits one running job at a time app-wide; a second request
+while a job runs returns the current job with `started:false` (`200`) rather
+than erroring. The scheduled refresh loop (`tracking.refresh_mins`) starts the
+same `tracked-refresh` job and skips a busy tick. Progress streams over SSE —
+see [SSE Streaming](#sse-streaming) — and the job snapshot carries a summary
+**message** string: `refreshed N artists, skipped M cooling down` for a refresh
+and `queued X, skipped Y, errors Z, remaining R` for a search-missing pass
+(`R` is the wanted albums left after the per-run batch cap). The underlying
+`RefreshResult` / `SearchResult` structs are not surfaced in the snapshot.
+
+> **Note:** manual and scheduled runs share the `tracked-refresh` job type.
+> Both persist their snapshot to `job.json`, so an interrupted scheduled
+> refresh is restored after restart exactly like a manual one.
+
+---
+
 ## Common Patterns
 
 ### Pagination

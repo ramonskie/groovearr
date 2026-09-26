@@ -73,6 +73,8 @@ export function useDownloadEvents() {
     });
     es.addEventListener("import_completed", (e: MessageEvent) => {
       handleEvent(e, (r) => storeRef.current.upsertRecord(r));
+      // Tracking invalidation lives in useTrackingEvents (app-wide) so it
+      // fires no matter which page the user is on.
       queryClient.invalidateQueries({ queryKey: ["library"] });
     });
 

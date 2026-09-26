@@ -17,6 +17,7 @@ import (
 type Config struct {
 	Sources        map[string]json.RawMessage `json:"sources"`
 	Library        LibraryConfig              `json:"library"`
+	Tracking       TrackingConfig             `json:"tracking"` // artist-tracking refresh settings
 	Auth           AuthConfig                 `json:"auth"`
 	Logging        *LoggingConfig             `json:"logging"`         // log level, format, rotation policy
 	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
@@ -36,6 +37,15 @@ type LibraryConfig struct {
 	PlaylistTemplate     string `json:"playlist_template"`       // e.g. "{position:02d} {artist} - {title}"
 	MaxDownloadWorkers   int    `json:"max_download_workers"`    // concurrent download workers (default 3)
 	PlaylistAutoSyncMins *int   `json:"playlist_auto_sync_mins"` // interval for auto-sync (nil/0 = disabled, default 30)
+}
+
+// TrackingConfig controls the artist-tracking refresh loop.
+type TrackingConfig struct {
+	RefreshMins *int `json:"refresh_mins"` // nil/0 = disabled (default 720 = 12h)
+	// AutoSearchMissing is a pointer so a partial update can distinguish
+	// "not sent" (nil, preserve) from an explicit false (disable). A plain
+	// bool could only ever be enabled by the true-overrides merge convention.
+	AutoSearchMissing *bool `json:"auto_search_missing"` // automatically search for missing tracked releases (default false)
 }
 
 // AuthConfig holds authentication settings.
@@ -157,6 +167,10 @@ func DefaultConfig() Config {
 			PlaylistTemplate:     "{position:02d} {artist} - {title}",
 			PlaylistAutoSyncMins: intPtr(30),
 		},
+		Tracking: TrackingConfig{
+			RefreshMins:       intPtr(720), // 12h
+			AutoSearchMissing: boolPtr(false),
+		},
 	}
 }
 
@@ -217,6 +231,24 @@ func (c Config) Validate() []string {
 	}
 	if c.Library.PlaylistAutoSyncMins != nil && *c.Library.PlaylistAutoSyncMins > 0 && *c.Library.PlaylistAutoSyncMins < 5 {
 		errs = append(errs, "library.playlist_auto_sync_mins: minimum 5 minutes (or 0 to disable)")
+	}
+
+	// Tracking. A nil pointer means "not sent" (merge preserves the existing
+	// value); 0 explicitly disables the refresh loop and is valid. The
+	// scheduler only enables periodic refresh at >= 5 minutes, so 1-4 would be
+	// a silently-dead config and is rejected. Negative intervals are
+	// meaningless and anything above one year is treated as an absurd/mis-keyed
+	// value rather than a real interval. Checks are ordered so every value
+	// yields exactly one error.
+	if c.Tracking.RefreshMins != nil {
+		v := *c.Tracking.RefreshMins
+		if v < 0 {
+			errs = append(errs, "tracking.refresh_mins: must not be negative (or 0 to disable)")
+		} else if v > 0 && v < 5 {
+			errs = append(errs, "tracking.refresh_mins: minimum 5 minutes (or 0 to disable)")
+		} else if v > 525600 {
+			errs = append(errs, "tracking.refresh_mins: must be at most 525600 minutes (1 year)")
+		}
 	}
 
 	// Auth.
@@ -300,6 +332,22 @@ func (c *Config) mergeFields(partial *Config) {
 		v := *partial.Library.PlaylistAutoSyncMins
 		if c.Library.PlaylistAutoSyncMins == nil || v != *c.Library.PlaylistAutoSyncMins {
 			c.Library.PlaylistAutoSyncMins = &v
+		}
+	}
+
+	// Tracking. Both fields are pointer-aware: a nil pointer means "not sent"
+	// and preserves the existing value, while an explicit 0 disables the
+	// refresh loop and an explicit false disables auto-search.
+	if partial.Tracking.RefreshMins != nil {
+		v := *partial.Tracking.RefreshMins
+		if c.Tracking.RefreshMins == nil || v != *c.Tracking.RefreshMins {
+			c.Tracking.RefreshMins = &v
+		}
+	}
+	if partial.Tracking.AutoSearchMissing != nil {
+		v := *partial.Tracking.AutoSearchMissing
+		if c.Tracking.AutoSearchMissing == nil || v != *c.Tracking.AutoSearchMissing {
+			c.Tracking.AutoSearchMissing = &v
 		}
 	}
 
