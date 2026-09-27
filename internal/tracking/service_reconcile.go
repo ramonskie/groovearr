@@ -118,9 +118,10 @@ func (s *Service) searchOnAdd(ctx context.Context, artistID int64) {
 	}
 }
 
-// upsertArtist finds the row for the provider pair and updates its monitor
-// settings, or creates a new tracked artist. AutoRefresh is only applied at
-// creation: the store offers no standalone updater for it.
+// upsertArtist finds the row for the provider pair and refreshes its
+// provider-owned name and monitor settings, or creates a new tracked artist.
+// AutoRefresh is only applied at creation: the store offers no standalone
+// updater for it.
 func (s *Service) upsertArtist(ctx context.Context, providerName, providerArtistID, name string, monitored bool, mode domain.MonitorMode, opts AddArtistOptions) (*domain.TrackedArtist, error) {
 	existing, err := s.store.GetTrackedArtistByProvider(ctx, providerName, providerArtistID)
 	if err != nil {
@@ -133,6 +134,15 @@ func (s *Service) upsertArtist(ctx context.Context, providerName, providerArtist
 			}
 			existing.Monitored = monitored
 			existing.MonitorMode = mode
+		}
+		// The provider is authoritative for the display name: re-adding a
+		// provider pair with a corrected name (e.g. a disambiguation suffix)
+		// must persist it instead of keeping the stale first-seen name.
+		if existing.Name != name {
+			if err := s.store.UpdateArtistName(ctx, existing.ID, name); err != nil {
+				return nil, fmt.Errorf("update artist name %d: %w", existing.ID, err)
+			}
+			existing.Name = name
 		}
 		return existing, nil
 	}

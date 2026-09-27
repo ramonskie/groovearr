@@ -79,6 +79,86 @@ func TestAddArtistIdempotentReAdd(t *testing.T) {
 	}
 }
 
+// TestAddArtistReAddUpdatesName pins MINOR 1: re-adding an existing provider
+// pair with a corrected name persists it on the existing row.
+func TestAddArtistReAddUpdatesName(t *testing.T) {
+	store := newMockStore()
+	provider := &fakeDiscoveryProvider{name: "deezer"}
+	svc := newTestService(t, store, newMockLibraryStore(), provider, nil, config.DefaultConfig())
+	ctx := context.Background()
+
+	first, err := svc.AddArtist(ctx, "deezer", "art1", "Tool", AddArtistOptions{})
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	second, err := svc.AddArtist(ctx, "deezer", "art1", "Tool (US)", AddArtistOptions{})
+	if err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if second.ID != first.ID {
+		t.Fatalf("re-add created a new row: %d != %d", second.ID, first.ID)
+	}
+	if second.Name != "Tool (US)" {
+		t.Fatalf("returned name = %q, want Tool (US)", second.Name)
+	}
+	if store.nameUpdateCalls != 1 {
+		t.Fatalf("UpdateArtistName calls = %d, want 1", store.nameUpdateCalls)
+	}
+	got, _ := store.GetTrackedArtist(ctx, first.ID)
+	if got.Name != "Tool (US)" {
+		t.Fatalf("stored name = %q, want Tool (US)", got.Name)
+	}
+}
+
+// TestAddArtistReAddSameNameSkipsNameUpdate proves the store is not written when
+// the provider repeats the name already on the row.
+func TestAddArtistReAddSameNameSkipsNameUpdate(t *testing.T) {
+	store := newMockStore()
+	provider := &fakeDiscoveryProvider{name: "deezer"}
+	svc := newTestService(t, store, newMockLibraryStore(), provider, nil, config.DefaultConfig())
+	ctx := context.Background()
+
+	if _, err := svc.AddArtist(ctx, "deezer", "art1", "Tool", AddArtistOptions{}); err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	if _, err := svc.AddArtist(ctx, "deezer", "art1", "Tool", AddArtistOptions{}); err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if store.nameUpdateCalls != 0 {
+		t.Fatalf("UpdateArtistName calls = %d, want 0 for an unchanged name", store.nameUpdateCalls)
+	}
+}
+
+// TestAddArtistReAddNameChangePreservesMonitor proves a name correction does not
+// disturb the user's monitor state: identical monitor options leave it untouched.
+func TestAddArtistReAddNameChangePreservesMonitor(t *testing.T) {
+	store := newMockStore()
+	provider := &fakeDiscoveryProvider{name: "deezer"}
+	svc := newTestService(t, store, newMockLibraryStore(), provider, nil, config.DefaultConfig())
+	ctx := context.Background()
+	monitored := false
+	opts := AddArtistOptions{MonitorMode: domain.MonitorModeNone, Monitored: &monitored}
+
+	first, err := svc.AddArtist(ctx, "deezer", "art1", "Tool", opts)
+	if err != nil {
+		t.Fatalf("first add: %v", err)
+	}
+	second, err := svc.AddArtist(ctx, "deezer", "art1", "Tool (US)", opts)
+	if err != nil {
+		t.Fatalf("re-add: %v", err)
+	}
+	if store.nameUpdateCalls != 1 {
+		t.Fatalf("UpdateArtistName calls = %d, want 1", store.nameUpdateCalls)
+	}
+	if store.monitorCalls != 0 {
+		t.Fatalf("UpdateArtistMonitor calls = %d, want 0 (monitor unchanged)", store.monitorCalls)
+	}
+	if second.ID != first.ID || second.Monitored || second.MonitorMode != domain.MonitorModeNone {
+		t.Fatalf("re-add = id %d monitor %v/%q, want id %d and preserved false/none",
+			second.ID, second.Monitored, second.MonitorMode, first.ID)
+	}
+}
+
 // TestAddArtistSearchOnAddGate proves the opt-in post-add search: with
 // SearchOnAdd true the canonical queuer is invoked for the wanted album; with
 // the default false the add only builds the wanted list.

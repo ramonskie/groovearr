@@ -115,6 +115,13 @@ type Record struct {
 	FolderPath       string                 `json:"folder_path,omitempty"`        // downloaded folder path
 	ImportedTrackIDs []int64                `json:"imported_track_ids,omitempty"` // linked library tracks
 	UpdatedAt        time.Time              `json:"updated_at,omitempty"`         // last state/field change
+
+	// AlbumSynth marks a synthetic per-track record built by AlbumImportHandler
+	// for one matched file of an album import. After the per-track chain runs,
+	// AlbumImportHandler fires the album-level completion hook once, so
+	// album-scoped handlers skip these records and act once per album instead.
+	// Internal only — never serialized to the API.
+	AlbumSynth bool `json:"-"`
 }
 
 // IsPendingSource returns true if the record was created via QueuePending

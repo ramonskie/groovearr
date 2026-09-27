@@ -114,3 +114,70 @@ func TestTrackingLinkHandler_PromotesAlbumRecord(t *testing.T) {
 		t.Fatalf("LinkImportedAlbum calls=%d album=%q, want 1 / Mer de Noms", linker.calls, linker.album)
 	}
 }
+
+// AlbumImportHandler builds one synthetic record per matched track; those carry
+// AlbumSynth, so Handle must not link per track (the album hook links once).
+func TestTrackingLinkHandler_SkipsSyntheticAlbumRecords(t *testing.T) {
+	linker := &fakeTrackingLinker{}
+	handler := NewTrackingLinkHandler(linker, testLogger())
+
+	record := &Record{
+		ID: "album-t01", Artist: "Tool", Album: "Lateralus",
+		AlbumType: "album", AlbumSynth: true,
+	}
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle returned error: %v", err)
+	}
+	if linker.calls != 0 {
+		t.Fatalf("LinkImportedAlbum calls = %d, want 0 for a synthetic album record", linker.calls)
+	}
+}
+
+func TestTrackingLinkHandler_HandleAlbumPromotesOnce(t *testing.T) {
+	linker := &fakeTrackingLinker{}
+	handler := NewTrackingLinkHandler(linker, testLogger())
+
+	record := &Record{
+		ID: "album-1", Artist: "Tool", Album: "Lateralus",
+		AlbumType: "album", AlbumSynth: true,
+	}
+	if err := handler.HandleAlbum(context.Background(), record); err != nil {
+		t.Fatalf("HandleAlbum returned error: %v", err)
+	}
+	if linker.calls != 1 || linker.artist != "Tool" || linker.album != "Lateralus" {
+		t.Fatalf("HandleAlbum calls=%d (%q,%q), want 1 (Tool, Lateralus)",
+			linker.calls, linker.artist, linker.album)
+	}
+}
+
+func TestTrackingLinkHandler_HandleAlbumNoops(t *testing.T) {
+	tests := []struct {
+		name   string
+		linker TrackingLinker
+		record *Record
+	}{
+		{name: "nil linker", linker: nil, record: &Record{ID: "t", Artist: "Tool", Album: "Lateralus"}},
+		{name: "missing metadata", linker: &fakeTrackingLinker{}, record: &Record{ID: "t"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := NewTrackingLinkHandler(tt.linker, testLogger())
+			if err := handler.HandleAlbum(context.Background(), tt.record); err != nil {
+				t.Fatalf("HandleAlbum returned error: %v", err)
+			}
+		})
+	}
+}
+
+func TestTrackingLinkHandler_HandleAlbumBestEffortOnError(t *testing.T) {
+	linker := &fakeTrackingLinker{err: errors.New("tracking store down")}
+	handler := NewTrackingLinkHandler(linker, testLogger())
+
+	record := &Record{ID: "album-err", Artist: "Tool", Album: "Lateralus", AlbumSynth: true}
+	if err := handler.HandleAlbum(context.Background(), record); err != nil {
+		t.Fatalf("HandleAlbum must swallow linker error (best-effort), got: %v", err)
+	}
+	if linker.calls != 1 {
+		t.Fatalf("LinkImportedAlbum calls = %d, want 1", linker.calls)
+	}
+}

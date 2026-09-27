@@ -214,6 +214,21 @@ func (s *Store) UpdateArtistLibraryLink(ctx context.Context, artistID int64, lib
 	return nil
 }
 
+// UpdateArtistName persists a corrected provider-supplied display name,
+// refreshing updated_at. Only the name column changes, so monitor settings,
+// library_artist_id, and auto_refresh are left intact.
+func (s *Store) UpdateArtistName(ctx context.Context, artistID int64, name string) error {
+	if _, err := s.db.ExecContext(ctx, `
+		UPDATE tracked_artists
+		SET name = ?, updated_at = ?
+		WHERE id = ?`,
+		name, nowRFC3339(), artistID,
+	); err != nil {
+		return fmt.Errorf("update artist name %d: %w", artistID, err)
+	}
+	return nil
+}
+
 // DeleteTrackedArtist removes the artist row. Discovered albums are removed by
 // the tracked_albums ON DELETE CASCADE constraint (foreign_keys=on).
 func (s *Store) DeleteTrackedArtist(ctx context.Context, id int64) error {

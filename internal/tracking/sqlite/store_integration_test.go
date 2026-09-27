@@ -404,6 +404,48 @@ func TestUpdateArtistLibraryLink(t *testing.T) {
 	}
 }
 
+// TestUpdateArtistName verifies a name correction touches only the name:
+// monitor settings, the library link, and auto_refresh all survive.
+func TestUpdateArtistName(t *testing.T) {
+	ctx := context.Background()
+	store, libStore := newTestStore(t)
+
+	id, err := store.CreateTrackedArtist(ctx, &domain.TrackedArtist{
+		Name: "Aphex Twin", ProviderName: "musicbrainz", ProviderArtistID: "mb-name",
+		Monitored: true, MonitorMode: domain.MonitorModeFuture, AutoRefresh: true,
+	})
+	if err != nil {
+		t.Fatalf("CreateTrackedArtist: %v", err)
+	}
+	libArtistID, err := libStore.UpsertArtist(ctx, &domain.Artist{Name: "Aphex Twin"})
+	if err != nil {
+		t.Fatalf("UpsertArtist: %v", err)
+	}
+	if err := store.UpdateArtistLibraryLink(ctx, id, libArtistID); err != nil {
+		t.Fatalf("UpdateArtistLibraryLink: %v", err)
+	}
+	if err := store.UpdateArtistName(ctx, id, "Aphex Twin (UK)"); err != nil {
+		t.Fatalf("UpdateArtistName: %v", err)
+	}
+
+	got, err := store.GetTrackedArtist(ctx, id)
+	if err != nil {
+		t.Fatalf("GetTrackedArtist: %v", err)
+	}
+	if got.Name != "Aphex Twin (UK)" {
+		t.Fatalf("Name = %q, want corrected name", got.Name)
+	}
+	if !got.Monitored || got.MonitorMode != domain.MonitorModeFuture {
+		t.Fatalf("monitor = %v/%q, want preserved true/future", got.Monitored, got.MonitorMode)
+	}
+	if !got.AutoRefresh {
+		t.Fatal("AutoRefresh regressed to false; want preserved true")
+	}
+	if got.LibraryArtistID == nil || *got.LibraryArtistID != libArtistID {
+		t.Fatalf("LibraryArtistID = %v, want preserved %d", got.LibraryArtistID, libArtistID)
+	}
+}
+
 func TestTouchArtistRefreshed(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)

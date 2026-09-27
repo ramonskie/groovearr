@@ -26,6 +26,7 @@ type mockStore struct {
 	nextAlbumID      int64
 	monitorCalls     int
 	libraryLinkCalls int
+	nameUpdateCalls  int
 	touchCalls       int
 	searchedIDs      []int64
 }
@@ -193,6 +194,14 @@ func (m *mockStore) UpdateArtistLibraryLink(_ context.Context, artistID int64, l
 	if a := m.artists[artistID]; a != nil {
 		link := libraryArtistID
 		a.LibraryArtistID = &link
+	}
+	return nil
+}
+
+func (m *mockStore) UpdateArtistName(_ context.Context, artistID int64, name string) error {
+	m.nameUpdateCalls++
+	if a := m.artists[artistID]; a != nil {
+		a.Name = name
 	}
 	return nil
 }

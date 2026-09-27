@@ -150,9 +150,10 @@ flowchart TD
   satisfies — the download package does not import `internal/tracking`.
 - **Covers both download shapes**: single-track records run the chain directly;
   `AlbumImportHandler` feeds each matched file through the *same* chain as a
-  synthetic per-track record carrying `Artist`/`Album`, so album imports get
-  the promotion too (called once per track; `LinkImportedAlbum` is idempotent —
-  already-`downloaded`/`ignored` albums are skipped).
+  synthetic per-track record (flagged `AlbumSynth`) for per-track work, then
+  calls the album-level `HandleAlbum` hook once, so the import link runs **once
+  per album import** rather than N times per album. `LinkImportedAlbum` remains
+  idempotent — already-`downloaded`/`ignored` albums are skipped.
 - **Best-effort**: tracking is a side ledger, so a `LinkImportedAlbum` failure
   is logged at warn and `Handle` returns `nil`. Unlike `PlaylistLinkerHandler`,
   a tracking-link failure must never fail the import; the next reconcile/

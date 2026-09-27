@@ -42,6 +42,11 @@ type Store interface {
 	// local library artist by persisting library_artist_id.
 	UpdateArtistLibraryLink(ctx context.Context, artistID int64, libraryArtistID int64) error
 
+	// UpdateArtistName persists a corrected provider-supplied display name for
+	// an existing tracked artist, refreshing updated_at. It touches only the
+	// name: monitor settings, the library link, and auto_refresh survive.
+	UpdateArtistName(ctx context.Context, artistID int64, name string) error
+
 	// DeleteTrackedArtist removes a tracked artist and its discovered
 	// albums (via ON DELETE CASCADE).
 	DeleteTrackedArtist(ctx context.Context, id int64) error

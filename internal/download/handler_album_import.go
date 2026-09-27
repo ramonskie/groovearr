@@ -18,6 +18,16 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
+// AlbumImportObserver is an optional ImportHandler extension invoked once after
+// a whole album import succeeds, instead of once per synthetic per-track record.
+// A handler with album-level side effects (the tracking link, for example)
+// implements it; AlbumImportHandler calls HandleAlbum on every chain handler
+// that does. It is best-effort: a hook error is logged and never fails the
+// import. Implementations must be safe for concurrent use.
+type AlbumImportObserver interface {
+	HandleAlbum(ctx context.Context, record *Record) error
+}
+
 // AlbumImportHandler processes completed album downloads. Its only job is
 // album-specific logic: scan the download folder, resolve tracks against the
 // actual file count, match files to expected tracks, then feed each matched
@@ -127,6 +137,7 @@ func (h *AlbumImportHandler) Handle(ctx context.Context, record *Record) error {
 			Year:        record.Year,
 			CoverURL:    record.CoverURL,
 			AlbumMBID:   record.AlbumMBID,
+			AlbumSynth:  true,
 		}
 
 		// Insert into store so handlers that call store.Update() (e.g.,
@@ -180,7 +191,29 @@ func (h *AlbumImportHandler) Handle(ctx context.Context, record *Record) error {
 		"component", "album_import",
 	)
 
+	// 6. Run album-level completion hooks exactly once. The per-track chain
+	// already ran above; album-scoped handlers use this hook so they act once
+	// per album instead of once per synthetic track.
+	h.notifyAlbumObservers(ctx, record)
+
 	return nil
+}
+
+// notifyAlbumObservers invokes HandleAlbum on every chain handler that
+// implements AlbumImportObserver. It runs once per successful album import (the
+// per-track chain handled per-track work) and is best-effort: a hook error is
+// logged and swallowed, so an observer can never fail the import.
+func (h *AlbumImportHandler) notifyAlbumObservers(ctx context.Context, record *Record) {
+	for _, handler := range h.chain {
+		observer, ok := handler.(AlbumImportObserver)
+		if !ok {
+			continue
+		}
+		if err := observer.HandleAlbum(ctx, record); err != nil {
+			h.log.Warn("album import: album-level hook failed",
+				"album", record.Album, "error", err, "component", "album_import")
+		}
+	}
 }
 
 // fileMatch pairs a filesystem path with an expected track.
@@ -233,6 +266,7 @@ func (h *AlbumImportHandler) scanWithRetry(ctx context.Context, folderPath strin
 
 	return nil, fmt.Errorf("album import: folder not found after %d attempts: %s", maxRetries, folderPath)
 }
+
 // subdirectories (e.g., CD1/, CD2/ in multi-disc torrents).
 func (h *AlbumImportHandler) scanAudioFiles(folderPath string) ([]string, error) {
 	exts := map[string]bool{

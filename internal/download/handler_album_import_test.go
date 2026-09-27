@@ -1,10 +1,14 @@
 package download
 
 import (
+	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"sort"
 	"testing"
+
+	"github.com/ramonskie/groovearr/internal/domain"
 )
 
 func TestScanAudioFiles_Recursive(t *testing.T) {
@@ -91,6 +95,66 @@ func TestScanAudioFiles_NonexistentDir(t *testing.T) {
 	_, err := h.scanAudioFiles("/nonexistent/path")
 	if err == nil {
 		t.Error("expected error for nonexistent directory")
+	}
+}
+
+// TestAlbumImport_LinksOnceForWholeAlbum proves the album-level hook replaced
+// the per-track link: an album with N matched files calls LinkImportedAlbum
+// exactly once, not N times.
+func TestAlbumImport_LinksOnceForWholeAlbum(t *testing.T) {
+	tmp := t.TempDir()
+	for _, name := range []string{"01 - One.flac", "02 - Two.flac", "03 - Three.flac"} {
+		createFile(t, filepath.Join(tmp, name))
+	}
+
+	resolver := func(context.Context, string, string, string, int, string) ([]domain.ExpectedTrack, string, error) {
+		return []domain.ExpectedTrack{
+			{TrackNumber: 1, Title: "One"},
+			{TrackNumber: 2, Title: "Two"},
+			{TrackNumber: 3, Title: "Three"},
+		}, "mbid-1", nil
+	}
+	linker := &fakeTrackingLinker{}
+	chain := []ImportHandler{NewTrackingLinkHandler(linker, testLogger())}
+	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, nil, testLogger())
+
+	record := &Record{
+		ID: "album-link-once", SourceName: "prowlarr", State: StateImporting,
+		Artist: "Tool", Album: "Lateralus", AlbumType: "album", FilePath: tmp,
+	}
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if linker.calls != 1 {
+		t.Fatalf("LinkImportedAlbum calls = %d, want exactly 1 for the whole album", linker.calls)
+	}
+	if linker.album != "Lateralus" {
+		t.Fatalf("linked album = %q, want Lateralus", linker.album)
+	}
+}
+
+// TestAlbumImport_HookErrorDoesNotFailImport proves the album hook is
+// best-effort: a linking failure is swallowed and the import still succeeds.
+func TestAlbumImport_HookErrorDoesNotFailImport(t *testing.T) {
+	tmp := t.TempDir()
+	createFile(t, filepath.Join(tmp, "01 - One.flac"))
+
+	resolver := func(context.Context, string, string, string, int, string) ([]domain.ExpectedTrack, string, error) {
+		return []domain.ExpectedTrack{{TrackNumber: 1, Title: "One"}}, "", nil
+	}
+	linker := &fakeTrackingLinker{err: errors.New("tracking store down")}
+	chain := []ImportHandler{NewTrackingLinkHandler(linker, testLogger())}
+	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, nil, testLogger())
+
+	record := &Record{
+		ID: "album-hook-err", SourceName: "prowlarr", State: StateImporting,
+		Artist: "Tool", Album: "Lateralus", AlbumType: "album", FilePath: tmp,
+	}
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle must swallow album hook error, got: %v", err)
+	}
+	if linker.calls != 1 {
+		t.Fatalf("LinkImportedAlbum calls = %d, want 1", linker.calls)
 	}
 }
 

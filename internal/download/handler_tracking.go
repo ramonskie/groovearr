@@ -15,13 +15,17 @@ type TrackingLinker interface {
 
 // TrackingLinkHandler is a post-import step that promotes a tracked album to
 // "downloaded" as soon as its download is imported, instead of waiting for the
-// next reconcile/refresh. It runs inside the standard import chain, so it
-// covers both single-track downloads and per-track records produced by the
-// album import handler.
+// next reconcile/refresh. It runs inside the standard import chain for genuine
+// single-track downloads; for album imports it links once via HandleAlbum, the
+// AlbumImportObserver hook, rather than once per synthetic per-track record.
 type TrackingLinkHandler struct {
 	log    *slog.Logger
 	linker TrackingLinker
 }
+
+// Compile-time proof the handler satisfies the album-level completion hook the
+// AlbumImportHandler dispatches to.
+var _ AlbumImportObserver = (*TrackingLinkHandler)(nil)
 
 // NewTrackingLinkHandler creates a post-import handler that links a completed
 // import back onto artist tracking. linker may be nil (tracking disabled), in
@@ -34,11 +38,33 @@ func NewTrackingLinkHandler(linker TrackingLinker, logger *slog.Logger) *Trackin
 }
 
 // Handle promotes the tracked album matching record.Artist|record.Album to
-// "downloaded". It is best-effort by design: tracking is a side ledger that
-// must never fail an import (unlike PlaylistLinkerHandler, which participates
-// in import success). A missing linker, missing artist/album metadata, or a
-// LinkImportedAlbum error is logged and swallowed; Handle always returns nil.
+// "downloaded" for a genuine single-track download. Synthetic per-track records
+// built by AlbumImportHandler are skipped: the album is promoted once by
+// HandleAlbum, so one album import does not link N times. It is best-effort by
+// design: tracking is a side ledger that must never fail an import (unlike
+// PlaylistLinkerHandler, which participates in import success). A missing
+// linker, missing artist/album metadata, or a LinkImportedAlbum error is logged
+// and swallowed; Handle always returns nil.
 func (h *TrackingLinkHandler) Handle(ctx context.Context, record *Record) error {
+	if record.AlbumSynth {
+		// Album imports fire HandleAlbum once; per-track chain runs must not
+		// re-link the same album N times.
+		return nil
+	}
+	return h.link(ctx, record)
+}
+
+// HandleAlbum is the AlbumImportObserver hook: AlbumImportHandler calls it once
+// after the whole album import succeeds. It promotes the album through the same
+// best-effort path as Handle.
+func (h *TrackingLinkHandler) HandleAlbum(ctx context.Context, record *Record) error {
+	return h.link(ctx, record)
+}
+
+// link performs the shared best-effort LinkImportedAlbum call. A nil linker or
+// missing artist/album metadata skips; a linker error is logged and swallowed
+// because tracking is a side ledger the next reconcile/refresh would catch up.
+func (h *TrackingLinkHandler) link(ctx context.Context, record *Record) error {
 	if h.linker == nil {
 		h.log.Debug("skipped - tracking linker not configured",
 			"download_id", record.ID, "component", "tracking_linker")
