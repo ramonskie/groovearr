@@ -155,6 +155,18 @@ func TestSetAlbumMonitoredAndDeleteArtist(t *testing.T) {
 	}
 }
 
+// TestSetAlbumMonitoredUnknownAlbum locks the unknown-album contract: an
+// unknown internal album ID returns ErrAlbumNotFound so the handler answers 404
+// instead of a 500.
+func TestSetAlbumMonitoredUnknownAlbum(t *testing.T) {
+	store := newMockStore()
+	svc := newTestService(t, store, newMockLibraryStore(), nil, nil, config.DefaultConfig())
+
+	if err := svc.SetAlbumMonitored(context.Background(), 99999, false); !errors.Is(err, ErrAlbumNotFound) {
+		t.Fatalf("unknown album error = %v, want ErrAlbumNotFound", err)
+	}
+}
+
 // ─── RefreshArtist ────────────────────────────────────────────────────
 
 func TestRefreshArtistReconcilesAndMarksRefreshed(t *testing.T) {
@@ -626,8 +638,8 @@ func TestSearchMissingRequeuesStalledDownloading(t *testing.T) {
 		t.Fatalf("queued = %d, want 1", res.Queued)
 	}
 	got, _ := store.GetTrackedAlbum(context.Background(), album.ID)
-	if got.Status != domain.AlbumStatusWanted {
-		t.Fatalf("status after requeue = %q, want wanted", got.Status)
+	if got.Status != domain.AlbumStatusDownloading {
+		t.Fatalf("status after requeue = %q, want downloading", got.Status)
 	}
 }
 

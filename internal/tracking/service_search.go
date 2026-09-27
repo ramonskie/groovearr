@@ -65,10 +65,19 @@ func (s *Service) recomputeArtistAlbums(ctx context.Context, artistID int64, mon
 	return nil
 }
 
-// SetAlbumMonitored toggles the monitored flag of a single tracked album.
+// SetAlbumMonitored toggles the monitored flag of a single tracked album. An
+// unknown album returns ErrAlbumNotFound so the handler can answer 404 rather
+// than a 500.
 func (s *Service) SetAlbumMonitored(ctx context.Context, albumID int64, monitored bool) error {
 	if albumID == 0 {
 		return errors.New("tracking: album ID is required")
+	}
+	album, err := s.store.GetTrackedAlbum(ctx, albumID)
+	if err != nil {
+		return fmt.Errorf("get tracked album %d: %w", albumID, err)
+	}
+	if album == nil {
+		return fmt.Errorf("%w: album %d", ErrAlbumNotFound, albumID)
 	}
 	if err := s.store.UpdateAlbumMonitor(ctx, albumID, monitored); err != nil {
 		return fmt.Errorf("update album monitor %d: %w", albumID, err)
@@ -324,10 +333,11 @@ func searchBatch(wanted []domain.TrackedAlbum) ([]domain.TrackedAlbum, int) {
 // into result. Every processed album is stamped with last_searched_at (all
 // branches, via defer) so a capped run rotates past stalled albums.
 //
-// Outcomes: a re-armable exhausted record is retried (Queued); an album already
-// in the pipeline is skipped (Skipped); a canonical-policy success increments
-// Queued (and marks downloading when it queued anything) and its per-track
-// errors increment Errors; a canonical-policy no-op (Queued==0 and no Errors)
+// Outcomes: a re-armable exhausted record is retried, marked downloading, and
+// counted as Queued; an album already in the pipeline is skipped (Skipped); a
+// canonical-policy success increments Queued (and marks downloading when it
+// queued anything) and its per-track errors increment Errors; a
+// canonical-policy no-op (Queued==0 and no Errors)
 // counts as Skipped instead of vanishing, so "processed but nothing to do" is
 // visible in the result.
 func (s *Service) processWanted(ctx context.Context, artist *domain.TrackedArtist, album domain.TrackedAlbum, idx downloadIndex, result *SearchResult) {
@@ -338,6 +348,11 @@ func (s *Service) processWanted(ctx context.Context, artist *domain.TrackedArtis
 			s.log.Warn("re-arm exhausted album failed", "download_id", id, "album", album.Title, "error", err, "component", "tracking")
 			result.Errors++
 			return
+		}
+		// The record is in flight again, so downloading is the correct status;
+		// leaving it wanted would re-select it on the next run.
+		if err := s.store.MarkAlbumStatus(ctx, album.ID, domain.AlbumStatusDownloading); err != nil {
+			s.log.Warn("mark album downloading after re-arm failed", "album_id", album.ID, "error", err, "component", "tracking")
 		}
 		result.Queued++
 		return

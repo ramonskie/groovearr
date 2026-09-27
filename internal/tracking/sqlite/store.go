@@ -25,11 +25,12 @@ type Store struct {
 // NewSQLiteStore creates a tracking store backed by an existing *sql.DB. The
 // caller owns the connection; the store never opens or closes its own.
 func NewSQLiteStore(db *sql.DB) *Store {
-	// The shared library connection requests foreign keys via a DSN query
-	// parameter, but the modernc SQLite driver only honours _pragma=... — so
-	// re-assert enforcement here, otherwise tracked_albums' ON DELETE CASCADE
-	// never fires. library/sqlite.New pins MaxOpenConns(1), so this applies to
-	// the single pooled connection the store is handed.
+	// The shared library DSN now enables foreign keys via
+	// _pragma=foreign_keys(1), which the modernc driver honours, so the
+	// tracked_albums ON DELETE CASCADE fires without this call. The PRAGMA is
+	// kept as idempotent defense-in-depth for the single pooled connection the
+	// store is handed: library/sqlite.New pins MaxOpenConns(1), so it applies
+	// to that one connection.
 	// Best-effort: if the connection is already gone the store still reads and
 	// writes fine; only cascade-dependent deletes are affected.
 	_, _ = db.Exec("PRAGMA foreign_keys = ON")

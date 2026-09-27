@@ -514,6 +514,7 @@ func TestHandleUpdateTrackedAlbum(t *testing.T) {
 		{"missing monitored", "5", `{}`, &fakeTrackingService{}, http.StatusBadRequest, false, false},
 		{"non-numeric id", "abc", `{"monitored":true}`, &fakeTrackingService{}, http.StatusBadRequest, false, false},
 		{"service error", "5", `{"monitored":false}`, &fakeTrackingService{albumMonErr: errors.New("boom")}, http.StatusInternalServerError, true, false},
+		{"unknown album maps to 404", "9", `{"monitored":false}`, &fakeTrackingService{albumMonErr: tracking.ErrAlbumNotFound}, http.StatusNotFound, true, false},
 		{"nil service", "5", `{"monitored":true}`, nil, http.StatusServiceUnavailable, false, false},
 	}
 	for _, tc := range tests {

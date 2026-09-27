@@ -637,13 +637,15 @@ export interface RefreshResult {
 }
 
 /**
- * Summary of one SearchMissing pass (tracking.SearchResult). Same caveat as
+ * Summary of one SearchMissing pass (Go tracking.SearchResult). Same caveat as
  * RefreshResult: surfaced through the job Manager, not the start response.
  */
-export interface SearchResult {
+export interface TrackingSearchResult {
   queued: number;
   skipped: number;
   errors: number;
+  /** Wanted albums left for later runs after the per-run batch cap. */
+  remaining: number;
 }
 
 // ─── Background jobs ────────────────────────────────────────────────

@@ -335,7 +335,7 @@ func (s *Server) handleUpdateTrackedAlbum(w http.ResponseWriter, r *http.Request
 	}
 	if req.Monitored != nil {
 		if err := s.trackingSvc.SetAlbumMonitored(ctx, id, *req.Monitored); err != nil {
-			writeError(w, http.StatusInternalServerError, err)
+			writeTrackingAlbumError(w, err)
 			return
 		}
 	}
