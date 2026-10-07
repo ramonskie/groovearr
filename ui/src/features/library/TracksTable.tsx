@@ -1,6 +1,8 @@
+import { Download } from "lucide-react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import Badge from "../../components/Badge";
+import { libraryTrackDownloadUrl } from "../../api/client";
 import type { Track } from "../../api/types";
 
 interface TracksTableProps {
@@ -101,6 +103,9 @@ export default function TracksTable({
               <th className="w-24 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-400">
                 Size
               </th>
+              <th className="w-12 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
+                <span className="sr-only">Download</span>
+              </th>
             </tr>
           </thead>
           <tbody>
@@ -132,6 +137,17 @@ export default function TracksTable({
                 </td>
                 <td className="px-4 py-3 text-right text-xs text-slate-500 tabular-nums">
                   {formatSize(track.file_size)}
+                </td>
+                <td className="px-4 py-3 text-center">
+                  <a
+                    href={libraryTrackDownloadUrl(track.id)}
+                    download
+                    title={`Download ${track.title}`}
+                    aria-label={`Download ${track.title}`}
+                    className="mx-auto flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-400 transition-colors hover:border-purple-500 hover:text-purple-400"
+                  >
+                    <Download size={14} />
+                  </a>
                 </td>
               </tr>
             ))}

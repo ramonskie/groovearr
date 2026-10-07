@@ -318,6 +318,21 @@ export function getLibraryAlbums(params?: PaginationParams): Promise<Album[]> {
   return request<Album[]>(`/api/library/albums${toQuery(params)}`);
 }
 
+/**
+ * Same-origin download URLs for the library stream endpoints.  Used as
+ * `<a href={url} download>` — the browser sends the session cookie
+ * automatically, so no `apikey` query is needed (the SPA never holds the
+ * key).  URL knowledge stays here per AGENTS §12; components must not
+ * hardcode these paths.
+ */
+export function libraryTrackDownloadUrl(trackId: number | string): string {
+  return `${BASE_URL}/api/library/tracks/${trackId}/download`;
+}
+
+export function libraryAlbumDownloadUrl(albumId: number | string): string {
+  return `${BASE_URL}/api/library/albums/${albumId}/download`;
+}
+
 // ─── Background jobs ────────────────────────────────────────────────
 
 export function getJob(): Promise<Job | null> {

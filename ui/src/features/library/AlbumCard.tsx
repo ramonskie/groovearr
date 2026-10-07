@@ -1,5 +1,6 @@
 import { useState } from "react";
-import { Music } from "lucide-react";
+import { Download, Music } from "lucide-react";
+import { libraryAlbumDownloadUrl } from "../../api/client";
 import type { Album } from "../../api/types";
 
 interface AlbumCardProps {
@@ -27,6 +28,16 @@ export default function AlbumCard({ album, artistName }: AlbumCardProps) {
             <Music size={36} className="text-slate-600" />
           </div>
         )}
+        <a
+          href={libraryAlbumDownloadUrl(album.id)}
+          download
+          onClick={(e) => e.stopPropagation()}
+          title={`Download ${album.title}`}
+          aria-label={`Download ${album.title}`}
+          className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-slate-900/80 text-slate-300 transition-colors hover:bg-slate-900 hover:text-white"
+        >
+          <Download size={15} />
+        </a>
       </div>
 
       {/* Metadata */}

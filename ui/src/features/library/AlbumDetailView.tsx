@@ -6,6 +6,7 @@ import StatusMessage from "../../components/StatusMessage";
 import Badge from "../../components/Badge";
 import { useStartBestDownload } from "../../hooks/use-downloads";
 import { useLibraryAlbumDiscovery, useDownloadMissingForAlbum } from "../../hooks/use-library";
+import { libraryAlbumDownloadUrl } from "../../api/client";
 import type { Album, DiscoveryTrackEntry } from "../../api/types";
 
 interface AlbumDetailViewProps {
@@ -245,19 +246,31 @@ export default function AlbumDetailView({
               Requested by {album.added_by_username}
             </Badge>
           )}
-          {undownloadedTracks.length > 0 && (
-            <button
-              type="button"
-              onClick={handleDownloadAll}
-              disabled={downloadMissing.isPending || startBestDownload.isPending}
-              className="mt-2 flex w-fit items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
+          <div className="mt-2 flex flex-wrap items-center gap-2">
+            <a
+              href={libraryAlbumDownloadUrl(album.id)}
+              download
+              title={`Download ${album.title}`}
+              aria-label={`Download ${album.title}`}
+              className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-purple-500 hover:text-purple-400"
             >
               <Download size={14} />
-              {downloadMissing.isPending
-                ? "Queueing…"
-                : `Download ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""}`}
-            </button>
-          )}
+              Download
+            </a>
+            {undownloadedTracks.length > 0 && (
+              <button
+                type="button"
+                onClick={handleDownloadAll}
+                disabled={downloadMissing.isPending || startBestDownload.isPending}
+                className="flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
+              >
+                <Download size={14} />
+                {downloadMissing.isPending
+                  ? "Queueing…"
+                  : `Download ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""}`}
+              </button>
+            )}
+          </div>
           {batchError && (
             <StatusMessage variant="error" message={batchError} />
           )}
