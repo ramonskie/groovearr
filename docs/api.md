@@ -493,9 +493,10 @@ not — may list it and download its files. The two download routes below serve
 **only files that resolve under `library.library_path`**; the stored path is
 resolved and symlink-checked before any bytes are sent, and server paths are
 never written to a response body. Both download routes are rate-limited on the
-shared `download` bucket, the same one the download queue uses, and clear the
-per-request write deadline for the duration of their stream so a large file on
-a slow link is not cut off by the server's global 30s timeout.
+shared `download` bucket, the same one the download queue uses, and extend the
+per-request write deadline to a finite cap (re-armed per archive entry) so a
+large file on a slow link is not cut off by the server's global 30s timeout,
+while a stalled client is still eventually cut.
 
 ### `GET /api/library/tracks`
 
@@ -596,8 +597,10 @@ files, no buffering). `Content-Disposition: attachment` suggests
 
 Tracks whose stored path is empty or fails the `library_path` containment check
 are skipped rather than failing the archive, and a missing cover or playlist
-never fails it either. An album whose tracks are all unservable returns `404`
-before any bytes are written.
+never fails it either. An album with no resolvable tracks returns `404` before
+any bytes are written; a track that passes containment but cannot be opened
+(removed or unreadable at read time) is skipped like any other, so a rare
+all-unopenable album yields a valid but entry-less archive.
 
 At most **3 album ZIPs stream at once**; beyond that the request is rejected
 rather than queued.

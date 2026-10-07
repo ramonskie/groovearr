@@ -68,6 +68,25 @@ func audioContentType(name string) string {
 	return "application/octet-stream"
 }
 
+// zipStoredExts holds extensions whose payload is already compressed (audio
+// codecs and image formats), so storing the bytes avoids deflate's wasted CPU
+// and possible size growth. Everything else (text playlists, WAV, unknown) uses
+// deflate.
+var zipStoredExts = map[string]bool{
+	".flac": true, ".mp3": true, ".m4a": true, ".aac": true,
+	".opus": true, ".ogg": true, ".oga": true,
+	".jpg": true, ".jpeg": true, ".png": true, ".webp": true, ".gif": true,
+}
+
+// zipMethodForName returns the compression method for a zip entry based on its
+// name. Already-compressed formats are stored; everything else is deflated.
+func zipMethodForName(name string) uint16 {
+	if zipStoredExts[strings.ToLower(filepath.Ext(name))] {
+		return zip.Store
+	}
+	return zip.Deflate
+}
+
 // contentDispositionAttachment builds the Content-Disposition value for a
 // download. It emits both a legacy ASCII `filename=` fallback and an RFC 5987
 // `filename*=` parameter so non-ASCII titles survive intact.
@@ -558,9 +577,10 @@ func writeZipFileEntry(zw *zip.Writer, resolved string, nameFn func() string) (o
 	}
 
 	// Claim the (deduped) name now that the entry will definitely be written.
+	entryName := safeZipEntryName(nameFn())
 	hdr := &zip.FileHeader{
-		Name:   safeZipEntryName(nameFn()),
-		Method: zip.Deflate,
+		Name:   entryName,
+		Method: zipMethodForName(entryName),
 	}
 	hdr.SetModTime(fi.ModTime())
 

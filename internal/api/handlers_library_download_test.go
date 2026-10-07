@@ -1178,3 +1178,22 @@ func TestHandleLibraryAlbumDownloadHEAD(t *testing.T) {
 		}
 	})
 }
+
+func TestZipMethodForName(t *testing.T) {
+	cases := []struct {
+		name string
+		want uint16
+	}{
+		{"01 - Song.flac", zip.Store},
+		{"01 - Song.mp3", zip.Store},
+		{"cover.jpg", zip.Store},
+		{"album.m3u", zip.Deflate},
+		{"01 - Song.wav", zip.Deflate},
+		{"noext", zip.Deflate},
+	}
+	for _, tc := range cases {
+		if got := zipMethodForName(tc.name); got != tc.want {
+			t.Errorf("zipMethodForName(%q) = %d, want %d", tc.name, got, tc.want)
+		}
+	}
+}
