@@ -3,6 +3,7 @@ import { useQueryClient } from "@tanstack/react-query";
 import { ArrowLeft, Music, Download, Check } from "lucide-react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
+import Badge from "../../components/Badge";
 import { useStartBestDownload } from "../../hooks/use-downloads";
 import { useLibraryAlbumDiscovery, useDownloadMissingForAlbum } from "../../hooks/use-library";
 import type { Album, DiscoveryTrackEntry } from "../../api/types";
@@ -239,6 +240,11 @@ export default function AlbumDetailView({
               : `${album.track_count} track${album.track_count !== 1 ? "s" : ""}`}
             {downloadedCount > 0 && ` · ${downloadedCount} downloaded`}
           </p>
+          {album.added_by_username && (
+            <Badge variant="muted" className="w-fit">
+              Requested by {album.added_by_username}
+            </Badge>
+          )}
           {undownloadedTracks.length > 0 && (
             <button
               type="button"

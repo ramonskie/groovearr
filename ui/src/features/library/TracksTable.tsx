@@ -1,5 +1,6 @@
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
+import Badge from "../../components/Badge";
 import type { Track } from "../../api/types";
 
 interface TracksTableProps {
@@ -112,7 +113,14 @@ export default function TracksTable({
                   {idx + 1}
                 </td>
                 <td className="px-4 py-3 font-medium text-slate-200">
-                  <span className="line-clamp-1">{track.title}</span>
+                  <div className="flex flex-col items-start gap-1">
+                    <span className="line-clamp-1">{track.title}</span>
+                    {track.added_by_username && (
+                      <Badge variant="muted" className="w-fit">
+                        Requested by {track.added_by_username}
+                      </Badge>
+                    )}
+                  </div>
                 </td>
                 <td className="hidden px-4 py-3 sm:table-cell">
                   <span

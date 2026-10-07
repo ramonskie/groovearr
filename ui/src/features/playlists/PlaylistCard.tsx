@@ -148,6 +148,9 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
           </div>
           <div className="mt-1 flex items-center gap-2">
             <span className="text-xs text-slate-400">{playlist.track_count} tracks</span>
+            {playlist.added_by_username && (
+              <Badge variant="muted">Added by {playlist.added_by_username}</Badge>
+            )}
             {playlist.sync_mode === "append" && (
               <Badge variant="muted">append</Badge>
             )}
