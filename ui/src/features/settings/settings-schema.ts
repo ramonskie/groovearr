@@ -57,7 +57,6 @@ export function buildFormSchema(sources: SourceInfo[]) {
     auth_method: z.enum(["none", "forms"]).optional(),
     auth_username: z.string().optional(),
     auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
-    auth_api_key: z.string().optional(),
     auth_local_bypass_subnets: z.string().optional(),
 
     // Metadata provider order
@@ -134,7 +133,6 @@ export function buildDefaults(sources: SourceInfo[]) {
     auth_method: "none" as const,
     auth_username: "",
     auth_password: "",
-    auth_api_key: "",
     auth_local_bypass_subnets: "",
     metadata_order: [] as string[],
     download_order: [] as string[],

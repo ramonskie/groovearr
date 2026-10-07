@@ -19,8 +19,10 @@ import QualitySettings from "./QualitySettings";
 import JobsSettings from "./JobsSettings";
 import TrackingSettings from "./TrackingSettings";
 import LogsSettings from "./LogsSettings";
+import UsersSection from "./UsersSection";
+import { useAuth } from "../../context/AuthContext";
 
-const TABS = [
+const BASE_TABS = [
   { id: "general", label: "General" },
   { id: "sources", label: "Download Sources" },
   { id: "quality", label: "Quality" },
@@ -31,17 +33,30 @@ const TABS = [
   { id: "logs", label: "Logs" },
 ] as const;
 
-type TabId = (typeof TABS)[number]["id"];
+const USERS_TAB = { id: "users", label: "Users" } as const;
+
+const ALL_TABS = [...BASE_TABS, USERS_TAB] as const;
+
+type TabId = (typeof ALL_TABS)[number]["id"];
 
 function useActiveTab(searchParams: URLSearchParams): TabId {
   const fromParam = searchParams.get("tab");
-  if (fromParam && TABS.some((t) => t.id === fromParam)) return fromParam as TabId;
+  if (fromParam && ALL_TABS.some((t) => t.id === fromParam)) {
+    return fromParam as TabId;
+  }
   return searchParams.get("spotify") === "connected" ? "sources" : "general";
 }
 
 export default function SettingsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const activeTab = useActiveTab(searchParams);
+  const { isAdmin } = useAuth();
+
+  // Users tab is admin-only: filtered from the tab strip and guarded below so
+  // a non-admin never mounts the section (server routes are adminOnly too).
+  const tabs: ReadonlyArray<{ id: TabId; label: string }> = isAdmin
+    ? ALL_TABS
+    : BASE_TABS;
 
   const { data: config, isLoading: configLoading, error } = useConfig();
   const { data: sources, isLoading: sourcesLoading } = useSources();
@@ -83,7 +98,6 @@ export default function SettingsPage() {
           auth_method: (config.auth?.method || "none") as "none" | "forms",
           auth_username: config.auth?.username ?? "",
           auth_password: "",
-          auth_api_key: config.auth?.api_key ?? "",
           auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
           metadata_order: config.metadata_order ?? [],
           download_order: config.download_order ?? [],
@@ -132,7 +146,7 @@ export default function SettingsPage() {
         <h2 className="mb-4 text-xl font-bold text-white">Settings</h2>
 
         <SubTabs
-          tabs={TABS.map((t) => ({ id: t.id, label: t.label }))}
+          tabs={tabs.map((t) => ({ id: t.id, label: t.label }))}
           activeTab={activeTab}
           onTabChange={(id) => {
             setSearchParams((prev) => {
@@ -155,6 +169,7 @@ export default function SettingsPage() {
           {activeTab === "logs" && <LogsSettings />}
         </div>
         {activeTab === "quality" && <QualitySettings />}
+        {activeTab === "users" && isAdmin && <UsersSection />}
       </div>
     </FormProvider>
   );

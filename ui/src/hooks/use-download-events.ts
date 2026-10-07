@@ -40,13 +40,8 @@ export function useDownloadEvents() {
     const store = storeRef.current;
     store.setSseStatus("connecting");
 
-    let url = "/api/events";
-    try {
-      const apiKey = localStorage.getItem("groovearr_api_key");
-      if (apiKey) url += `?apikey=${encodeURIComponent(apiKey)}`;
-    } catch {}
-
-    const es = new EventSource(url);
+    // Same-origin EventSource sends the session cookie automatically.
+    const es = new EventSource("/api/events");
     esRef.current = es;
 
     es.onopen = () => {

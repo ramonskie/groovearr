@@ -13,11 +13,17 @@ import {
 /**
  * Shared query for the current background job. Polls /api/jobs once per
  * second while a job is running.
+ *
+ * GET /api/jobs is admin-only, so callers must pass `enabled` (normally their
+ * `isAdmin`), and a non-admin gets no request. Gating via React Query's
+ * `enabled` — rather than `enabled && useQuery(...)` at the call site — keeps
+ * the hook call order stable (Rules of Hooks).
  */
-export function useJobState() {
+export function useJobState(enabled: boolean) {
   return useQuery({
     queryKey: ["jobs", "current"] as const,
     queryFn: getJob,
+    enabled,
     refetchInterval: (q) => (q.state.data?.state === "running" ? 1000 : false),
     staleTime: 0,
   });
@@ -30,14 +36,17 @@ export function useJobState() {
  * effect fires exactly once no matter which page is open — otherwise a scan
  * started from Settings would leave the Library page stale for up to 30m.
  *
+ * `enabled` gates the admin-only /api/jobs poll; a non-admin never issues the
+ * request and the completion effect stays inert (no data => no transition).
+ *
  * Only jobs observed as `running` and then terminal are handled here; jobs
  * that finish before this watcher samples them are handled by useStartJob,
  * which knows the response was for a start it just issued.
  */
-export function useJobWatcher() {
+export function useJobWatcher(enabled: boolean) {
   const queryClient = useQueryClient();
   const prevStateRef = useRef<string | undefined>(undefined);
-  const query = useJobState();
+  const query = useJobState(enabled);
   const job = query.data;
 
   useEffect(() => {

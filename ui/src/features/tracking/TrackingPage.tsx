@@ -15,6 +15,7 @@ import Button from "../../components/Button";
 import Badge from "../../components/Badge";
 import TrackingArtistDetailView from "./TrackingArtistDetailView";
 import { useJobState } from "../../hooks/use-job";
+import { useAuth } from "../../context/AuthContext";
 import {
   listTrackedArtists,
   listAllWanted,
@@ -84,11 +85,12 @@ function notifyStarted(
 /**
  * A tracking job (refresh / search-missing) only changes the tracking data
  * once it finishes, so refetch the tracking queries when the shared job
- * transitions out of `running`.
+ * transitions out of `running`. Gated on `enabled` so a non-admin never
+ * polls the admin-only /api/jobs endpoint.
  */
-function useTrackingJobRefresh(): void {
+function useTrackingJobRefresh(enabled: boolean): void {
   const queryClient = useQueryClient();
-  const { data: job } = useJobState();
+  const { data: job } = useJobState(enabled);
   const prevState = useRef<string | undefined>(undefined);
 
   useEffect(() => {
@@ -252,16 +254,22 @@ function EmptyTrackingState() {
 export default function TrackingPage() {
   const [selectedArtistId, setSelectedArtistId] = useState<number | null>(null);
   const queryClient = useQueryClient();
-  useTrackingJobRefresh();
+  const { isAdmin } = useAuth();
+  useTrackingJobRefresh(isAdmin);
 
+  // Tracking is an admin-only surface. The route is gated in the nav/router,
+  // but gate the queries here too so a direct URL hit (or the brief window
+  // before the redirect) never fires the admin-only tracking endpoints.
   const artistsQuery = useQuery({
     queryKey: ["tracking", "artists"],
     queryFn: listTrackedArtists,
+    enabled: isAdmin,
   });
 
   const wantedQuery = useQuery({
     queryKey: ["tracking", "wanted"],
     queryFn: listAllWanted,
+    enabled: isAdmin,
   });
 
   const refreshAll = useMutation({

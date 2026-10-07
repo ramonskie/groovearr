@@ -61,7 +61,6 @@ export default function SetupWizard() {
           auth_method: (config.auth?.method || "none") as "none" | "forms",
           auth_username: config.auth?.username ?? "",
           auth_password: "",
-          auth_api_key: config.auth?.api_key ?? "",
           auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
           metadata_order: config.metadata_order ?? [],
           download_order: config.download_order ?? [],

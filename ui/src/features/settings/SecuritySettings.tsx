@@ -1,6 +1,7 @@
 import { useFormContext } from "react-hook-form";
 import Card from "../../components/Card";
 import FormGroup from "../../components/FormGroup";
+import Badge from "../../components/Badge";
 import { useConfig } from "../../hooks/use-config";
 import type { SettingsFormValues } from "./settings-schema";
 
@@ -13,7 +14,10 @@ export default function SecuritySettings() {
 
   const { data: config } = useConfig();
   const authMethod = watch("auth_method");
-  const apiKey = config?.auth?.api_key ?? "";
+  // The raw key is never returned by any endpoint; `api_key` is the masked
+  // sentinel ("********") and must not be rendered or copied. Render presence
+  // from the derived `has_api_key` flag instead.
+  const hasApiKey = config?.auth?.has_api_key ?? false;
 
   return (
     <div>
@@ -90,30 +94,21 @@ export default function SecuritySettings() {
       <Card title="API Key">
         <FormGroup
           label="API Key"
-          htmlFor="auth_api_key"
-          hint={authMethod === "forms"
-            ? "Used for programmatic access. Also accepted via X-Api-Key header, ?apikey= query, or Authorization: Bearer."
-            : "Not used while authentication is disabled. Will be required when you enable Forms or Basic auth."
+          hint={
+            authMethod === "forms"
+              ? "Programmatic access credential. Sent via X-Api-Key header, ?apikey= query, or Authorization: Bearer. For security the raw key is never returned by the API, so it cannot be displayed or copied here."
+              : "A key is generated automatically and accepted for programmatic access; it becomes the login credential once Forms is enabled. The raw key is never returned by the API."
           }
         >
-          <div className="flex gap-2">
-            <input
-              id="auth_api_key"
-              type="text"
-              readOnly
-              value={apiKey || (authMethod === "forms" ? "Generating..." : "Not active")}
-              className="flex-1 rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm font-mono text-slate-300 focus:outline-none"
-            />
-            <button
-              type="button"
-              onClick={() => {
-                if (apiKey) navigator.clipboard.writeText(apiKey);
-              }}
-              disabled={!apiKey}
-              className="rounded-lg border border-slate-700 bg-slate-800 px-3 py-2 text-sm text-slate-300 hover:bg-slate-700 transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
-            >
-              Copy
-            </button>
+          <div className="flex items-center gap-2">
+            <Badge variant={hasApiKey ? "success" : "muted"}>
+              {hasApiKey ? "Configured" : "Not set"}
+            </Badge>
+            <span className="text-xs text-slate-500">
+              {hasApiKey
+                ? "An API key is configured."
+                : "No API key configured."}
+            </span>
           </div>
         </FormGroup>
       </Card>

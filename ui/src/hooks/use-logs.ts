@@ -65,15 +65,8 @@ export function useLogStream(limit = 500) {
   }, [snapshot, limit]);
 
   useEffect(() => {
-    let url = "/api/events";
-    try {
-      const apiKey = localStorage.getItem("groovearr_api_key");
-      if (apiKey) url += `?apikey=${encodeURIComponent(apiKey)}`;
-    } catch {
-      // Ignore localStorage access errors.
-    }
-
-    const es = new EventSource(url);
+    // Same-origin EventSource sends the session cookie automatically.
+    const es = new EventSource("/api/events");
     es.onopen = () => setConnected(true);
     es.onerror = () => setConnected(false);
 

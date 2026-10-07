@@ -30,6 +30,12 @@ interface SidebarNavProps {
   downloadCount?: number;
   className?: string;
   onLogout?: () => void;
+  /**
+   * Whether the current caller is an admin. Defaults to false so an unresolved
+   * role is treated as non-admin (least privilege) — admin-only entries never
+   * flash for a user whose role is still loading.
+   */
+  isAdmin?: boolean;
 }
 
 const DEFAULT_PAGES: NavPage[] = [
@@ -39,6 +45,9 @@ const DEFAULT_PAGES: NavPage[] = [
   { id: "library", label: "Library", icon: "library", href: "/library" },
   { id: "playlists", label: "Playlists", icon: "playlists", href: "/playlists" },
 ];
+
+/** Nav page ids that only admins may see. */
+const ADMIN_ONLY_PAGE_IDS: ReadonlySet<string> = new Set(["tracking"]);
 
 const iconMap: Record<string, typeof Search> = {
   compass: Compass,
@@ -56,7 +65,14 @@ const SidebarNav: FC<SidebarNavProps> = ({
   downloadCount,
   className = "",
   onLogout,
+  isAdmin = false,
 }) => {
+  // Derive the visible pages from the caller's role rather than branching in
+  // JSX: non-admins simply never receive the admin-only entries (tracking).
+  const pages = isAdmin
+    ? DEFAULT_PAGES
+    : DEFAULT_PAGES.filter((page) => !ADMIN_ONLY_PAGE_IDS.has(page.id));
+
   return (
     <nav
       className={`flex h-full flex-col bg-slate-900 border-r border-slate-800 ${className}`}
@@ -70,7 +86,7 @@ const SidebarNav: FC<SidebarNavProps> = ({
 
       {/* Nav links */}
       <div className="flex flex-1 flex-col gap-0.5 px-2">
-        {DEFAULT_PAGES.map((page) => {
+        {pages.map((page) => {
           const Icon = iconMap[page.icon];
           const isActive = activePage === page.id;
           return (
@@ -98,18 +114,20 @@ const SidebarNav: FC<SidebarNavProps> = ({
 
       {/* Settings + logout footer */}
       <div className="border-t border-slate-800 px-2 py-3 space-y-1">
-        <button
-          type="button"
-          onClick={() => onNavigate("/settings")}
-          className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
-            activePage === "settings"
-              ? "border-l-4 border-purple-500 bg-slate-800 text-white"
-              : "border-l-4 border-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200"
-          }`}
-        >
-          <Settings size={18} />
-          <span>Settings</span>
-        </button>
+        {isAdmin && (
+          <button
+            type="button"
+            onClick={() => onNavigate("/settings")}
+            className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-sm font-medium transition-colors ${
+              activePage === "settings"
+                ? "border-l-4 border-purple-500 bg-slate-800 text-white"
+                : "border-l-4 border-transparent text-slate-400 hover:bg-slate-800 hover:text-slate-200"
+            }`}
+          >
+            <Settings size={18} />
+            <span>Settings</span>
+          </button>
+        )}
         {onLogout && (
           <button
             type="button"

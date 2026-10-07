@@ -16,9 +16,13 @@ import {
 } from "../../api/client";
 import Card from "../../components/Card";
 import Button from "../../components/Button";
+import { useAuth } from "../../context/AuthContext";
 
 export default function JobsSettings() {
-  const jobQuery = useJobState();
+  const { isAdmin } = useAuth();
+  // GET /api/jobs is admin-only; gate the poll so a non-admin reaching
+  // /settings (before the route gate) never issues the request.
+  const jobQuery = useJobState(isAdmin);
   const startScan = useStartScanJob();
   const startEnrich = useStartEnrichJob();
   const startOrganize = useStartOrganizeJob();

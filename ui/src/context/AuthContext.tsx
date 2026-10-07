@@ -6,7 +6,13 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { getConfig, login as apiLogin, logout as apiLogout } from "../api/client";
+import {
+  getMe,
+  login as apiLogin,
+  logout as apiLogout,
+  ApiRequestError,
+} from "../api/client";
+import type { MeResponse } from "../api/types";
 
 // ─── Types ────────────────────────────────────────────────────────────
 
@@ -14,28 +20,29 @@ interface AuthState {
   isLoading: boolean;
   isAuthenticated: boolean;
   username: string | null;
+  /** Coarse account role from GET /api/me ("admin" | "user"); null if unknown. */
+  role: string | null;
   authMethod: string;
 }
 
 interface AuthContextValue extends AuthState {
+  /** Convenience accessor: true only when the resolved role is "admin". */
+  isAdmin: boolean;
   login: (username: string, password: string) => Promise<void>;
   logout: () => Promise<void>;
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────
 
-const API_KEY_KEY = "groovearr_api_key";
-
-function getStoredApiKey(): string | null {
-  try {
-    return localStorage.getItem(API_KEY_KEY);
-  } catch {
-    return null;
-  }
-}
-
-export function getApiKey(): string | null {
-  return getStoredApiKey();
+/**
+ * Derive the shell's auth method from the identity response. GET /api/me does
+ * not report the configured method, so infer it: an API-key caller, else a
+ * session username, else "none" (fully open — no logout shown).
+ */
+function authMethodFromMe(me: MeResponse): string {
+  if (me.via_api_key) return "api_key";
+  if (me.username) return "forms";
+  return "none";
 }
 
 // ─── Context ──────────────────────────────────────────────────────────
@@ -47,25 +54,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     isLoading: true,
     isAuthenticated: false,
     username: null,
+    role: null,
     authMethod: "",
   });
 
-  // Check if we're already authenticated (session cookie or API key).
+  // Check if we're already authenticated (session cookie).
   // All HTTP goes through the api client (rule: no raw fetch in components).
   const checkAuth = useCallback(async () => {
     try {
-      const cfg = await getConfig();
-      const method = cfg.auth?.method || "";
-      const key = cfg.auth?.api_key;
-      // Always store the API key so the SPA can use it for all requests.
-      if (key) {
-        try { localStorage.setItem(API_KEY_KEY, key); } catch {}
+      const me = await getMe();
+      setState({
+        isLoading: false,
+        isAuthenticated: true,
+        username: me.username || null,
+        role: me.role,
+        authMethod: authMethodFromMe(me),
+      });
+    } catch (err) {
+      // A 403 means the caller IS authenticated but lacks permission for the
+      // endpoint. Never treat it as unauthenticated: doing so caused a login
+      // loop when the check hit admin-only GET /api/config (finding C2).
+      if (err instanceof ApiRequestError && err.status === 403) {
+        setState({
+          isLoading: false,
+          isAuthenticated: true,
+          username: null,
+          role: null,
+          authMethod: "",
+        });
+        return;
       }
-      setState({ isLoading: false, isAuthenticated: true, username: null, authMethod: method });
-    } catch {
-      // Unauthenticated (or network error) — the client already redirects
-      // to /login on a 401 response.
-      setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
+      // 401 (or network error): unauthenticated. request() already redirects
+      // to /login on a 401 outside the login page.
+      setState({
+        isLoading: false,
+        isAuthenticated: false,
+        username: null,
+        role: null,
+        authMethod: "",
+      });
     }
   }, []);
 
@@ -75,17 +102,43 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(async (username: string, password: string) => {
     await apiLogin(username, password);
-    setState({ isLoading: false, isAuthenticated: true, username, authMethod: "forms" });
+    // The login response carries no identity, so resolve the role (and the
+    // canonical username) from GET /api/me right away — otherwise admin-only
+    // UI would stay hidden until the next mount-time auth check. On failure
+    // stay least-privileged: role null => treated as non-admin.
+    let role: string | null = null;
+    let name = username;
+    try {
+      const me = await getMe();
+      role = me.role;
+      name = me.username || username;
+    } catch {
+      // Resolving identity failed; a later auth check will correct the role.
+    }
+    setState({
+      isLoading: false,
+      isAuthenticated: true,
+      username: name,
+      role,
+      authMethod: "forms",
+    });
   }, []);
 
   const logout = useCallback(async () => {
     await apiLogout().catch(() => {});
-    localStorage.removeItem(API_KEY_KEY);
-    setState({ isLoading: false, isAuthenticated: false, username: null, authMethod: "" });
+    setState({
+      isLoading: false,
+      isAuthenticated: false,
+      username: null,
+      role: null,
+      authMethod: "",
+    });
   }, []);
 
   return (
-    <AuthContext.Provider value={{ ...state, login, logout }}>
+    <AuthContext.Provider
+      value={{ ...state, isAdmin: state.role === "admin", login, logout }}
+    >
       {children}
     </AuthContext.Provider>
   );

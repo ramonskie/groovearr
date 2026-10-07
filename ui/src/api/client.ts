@@ -1,5 +1,6 @@
 import type {
   HealthResponse,
+  MeResponse,
   Config,
   ConfigUpdatePayload,
   UpdateConfigResponse,
@@ -51,6 +52,10 @@ import type {
   DeleteTrackedArtistResponse,
   UpdateTrackedAlbumRequest,
   UpdateTrackedAlbumResponse,
+  UserRecord,
+  CreateUserRequest,
+  UpdateUserRequest,
+  DeleteUserResponse,
 } from "./types";
 
 // ─── Base fetch wrapper ────────────────────────────────────────────
@@ -58,29 +63,45 @@ import type {
 const BASE_URL = "";
 
 /**
+ * Error thrown by request() carrying the HTTP status.
+ *
+ * Callers need to tell 401 (unauthenticated) apart from 403 (authenticated but
+ * forbidden). The auth check must treat a 403 as a normal authenticated error,
+ * never as a redirect — doing otherwise caused a login loop (finding C2).
+ */
+export class ApiRequestError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = "ApiRequestError";
+    this.status = status;
+  }
+}
+
+/**
  * Typed fetch wrapper.  Throws parsed error message on non-ok responses.
- * On 401, clears stored state and redirects to login (unless already there).
- * In dev, Vite proxies /api → localhost:8008; in prod the Go binary serves both.
+ * Auth rides on the same-origin session cookie; on 401 it redirects to login
+ * (unless already there).  In dev, Vite proxies /api → localhost:8008; in prod
+ * the Go binary serves both.
  */
 async function request<T>(
   path: string,
   init?: Omit<RequestInit, "headers"> & { headers?: Record<string, string> },
 ): Promise<T> {
-  const apiKey = getStoredApiKey();
   const res = await fetch(`${BASE_URL}${path}`, {
     ...init,
+    credentials: "same-origin",
     headers: {
       "Content-Type": "application/json",
-      ...(apiKey ? { "X-Api-Key": apiKey } : {}),
       ...init?.headers,
     },
   });
 
   if (!res.ok) {
     if (res.status === 401 && window.location.pathname !== "/login") {
-      try { localStorage.removeItem("groovearr_api_key"); } catch {}
       window.location.href = "/login";
-      throw new Error("Session expired");
+      throw new ApiRequestError("Session expired", 401);
     }
     let message = `HTTP ${res.status} ${res.statusText}`;
     try {
@@ -91,7 +112,7 @@ async function request<T>(
     } catch {
       // response is not JSON — keep HTTP status message
     }
-    throw new Error(message);
+    throw new ApiRequestError(message, res.status);
   }
 
   return res.json() as Promise<T>;
@@ -99,9 +120,8 @@ async function request<T>(
 
 /** Like request() but returns a Blob (used for cover art images). */
 async function requestBlob(path: string): Promise<Blob> {
-  const apiKey = getStoredApiKey();
   const res = await fetch(`${BASE_URL}${path}`, {
-    headers: apiKey ? { "X-Api-Key": apiKey } : {},
+    credentials: "same-origin",
   });
   if (!res.ok) {
     throw new Error(`HTTP ${res.status} ${res.statusText}`);
@@ -145,6 +165,15 @@ export function logout(): Promise<unknown> {
   return request(`/api/logout`, { method: "POST" });
 }
 
+/**
+ * GET /api/me — resolves the caller's identity (username, role, via_api_key).
+ * Used by the auth check; works for every authenticated user, unlike the
+ * admin-only GET /api/config. Never returns the API key.
+ */
+export function getMe(): Promise<MeResponse> {
+  return request<MeResponse>("/api/me");
+}
+
 export function updateConfig(
   payload: ConfigUpdatePayload,
 ): Promise<UpdateConfigResponse> {
@@ -157,6 +186,44 @@ export function updateConfig(
 
 export function getLogs(): Promise<LogsResponse> {
   return request<LogsResponse>(`/api/logs`);
+}
+
+// ─── Users (admin-only) ──────────────────────────────────────────────
+//
+// Every /api/users route is wrapped with adminOnly server-side; a non-admin
+// receives 403. The SPA additionally hides the management surface (Phase 8.3)
+// but the client does not pre-check the role — the server is authoritative.
+
+export function listUsers(): Promise<UserRecord[]> {
+  return request<UserRecord[]>("/api/users");
+}
+
+/** Creates an account. Server returns 201 with the created record. */
+export function createUser(payload: CreateUserRequest): Promise<UserRecord> {
+  return request<UserRecord>("/api/users", {
+    method: "POST",
+    body: JSON.stringify(payload),
+  });
+}
+
+/**
+ * Partial update. Omitted fields are preserved (the backend uses pointer
+ * fields), so send only what changed. Returns the updated record.
+ */
+export function updateUser(
+  id: number,
+  payload: UpdateUserRequest,
+): Promise<UserRecord> {
+  return request<UserRecord>(`/api/users/${id}`, {
+    method: "PATCH",
+    body: JSON.stringify(payload),
+  });
+}
+
+export function deleteUser(id: number): Promise<DeleteUserResponse> {
+  return request<DeleteUserResponse>(`/api/users/${id}`, {
+    method: "DELETE",
+  });
 }
 
 // ─── Setup ───────────────────────────────────────────────────────
@@ -601,16 +668,4 @@ export function setDefaultQualityProfile(id: number): Promise<void> {
 
 export function getQualityPresets(): Promise<Record<string, QualityProfile>> {
   return request<Record<string, QualityProfile>>("/api/quality-profiles/presets");
-}
-
-// ─── Auth helpers ───────────────────────────────────────────────────
-
-const API_KEY_KEY = "groovearr_api_key";
-
-function getStoredApiKey(): string | null {
-  try {
-    return localStorage.getItem(API_KEY_KEY);
-  } catch {
-    return null;
-  }
 }

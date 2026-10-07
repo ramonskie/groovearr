@@ -1,4 +1,4 @@
-import { lazy, Suspense } from "react";
+import { lazy, Suspense, type ReactNode } from "react";
 import {
   Routes,
   Route,
@@ -108,15 +108,38 @@ function SetupGate() {
   return null;
 }
 
+// ─── Route guards ────────────────────────────────────────────────────
+
+/**
+ * Blocks the admin-only surface for everyone else. `isAdmin` is only true when
+ * the resolved role is exactly "admin"; an unresolved role (null) is therefore
+ * treated as non-admin, so an unknown role can never briefly expose settings or
+ * tracking. Redirects to /discover — a page every authenticated user may use.
+ */
+function RequireAdmin({
+  isAdmin,
+  children,
+}: {
+  isAdmin: boolean;
+  children: ReactNode;
+}) {
+  if (!isAdmin) {
+    return <Navigate to="/discover" replace />;
+  }
+  return <>{children}</>;
+}
+
 function AppShell() {
   const location = useLocation();
   const navigate = useNavigate();
   const { data: downloads } = useDownloads();
-  const { logout, authMethod } = useAuth();
+  const { logout, authMethod, isAdmin } = useAuth();
 
   // Keep the background-job query alive app-wide and refresh the library when
-  // a scan/enrich job finishes.
-  useJobWatcher();
+  // a scan/enrich job finishes. GET /api/jobs is admin-only: the hook must be
+  // called unconditionally (Rules of Hooks), so the gate is passed in as an
+  // `enabled` flag — a non-admin never issues the request.
+  useJobWatcher(isAdmin);
 
   // Refresh tracking views (wanted badge, album statuses) on import completion
   // app-wide — imports can be started from any page, not just Downloads.
@@ -135,6 +158,7 @@ function AppShell() {
       onNavigate={(href) => navigate(href)}
       downloadCount={activeDownloadCount}
       onLogout={isAuthEnabled ? () => logout() : undefined}
+      isAdmin={isAdmin}
     />
   );
 
@@ -149,8 +173,22 @@ function AppShell() {
           <Route path="/downloads" element={<DownloadsPage />} />
           <Route path="/library" element={<LibraryPage />} />
           <Route path="/playlists" element={<PlaylistsPage />} />
-          <Route path="/tracking" element={<TrackingPage />} />
-          <Route path="/settings" element={<SettingsPage />} />
+          <Route
+            path="/tracking"
+            element={
+              <RequireAdmin isAdmin={isAdmin}>
+                <TrackingPage />
+              </RequireAdmin>
+            }
+          />
+          <Route
+            path="/settings/*"
+            element={
+              <RequireAdmin isAdmin={isAdmin}>
+                <SettingsPage />
+              </RequireAdmin>
+            }
+          />
           <Route path="/setup" element={<SetupWizard />} />
         </Routes>
       </Suspense>

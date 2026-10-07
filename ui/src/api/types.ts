@@ -4,6 +4,15 @@ export interface HealthResponse {
   status: "ok";
 }
 
+// ─── Identity ──────────────────────────────────────────────────────
+
+/** Caller identity from GET /api/me. Never contains the API key. */
+export interface MeResponse {
+  username: string;
+  role: string;
+  via_api_key: boolean;
+}
+
 // ─── Config ────────────────────────────────────────────────────────
 
 export interface SoulseekConfig {
@@ -40,7 +49,14 @@ export interface AuthConfig {
   method?: string;
   username?: string;
   password?: string;
+  /**
+   * Masked form of the API key (`"********"` when configured, `""` otherwise).
+   * The raw key is never returned by any endpoint — treat this as a secret
+   * sentinel, not a usable credential.
+   */
   api_key?: string;
+  /** Derived by `Config.Mask()`: true when a real API key is configured. */
+  has_api_key?: boolean;
   local_bypass_subnets?: string[];
 }
 
@@ -113,6 +129,44 @@ export interface UpdateConfigResponse {
 export interface ConfigValidationError {
   error: string;
   errors: string[];
+}
+
+// ─── Users (admin) ─────────────────────────────────────────────────
+
+/** Account role (user.Role: "admin" | "user"). */
+export type UserRole = "admin" | "user";
+
+/**
+ * One account as returned by GET/POST/PATCH /api/users.
+ * Mirrors the backend `userResponse` DTO exactly. The bcrypt hash is never
+ * exposed — it does not exist on the wire shape.
+ */
+export interface UserRecord {
+  id: number;
+  username: string;
+  role: UserRole;
+  disabled: boolean;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Payload for POST /api/users. */
+export interface CreateUserRequest {
+  username: string;
+  password: string;
+  role: UserRole;
+}
+
+/** Payload for PATCH /api/users/{id} — at least one field required. */
+export interface UpdateUserRequest {
+  role?: UserRole;
+  disabled?: boolean;
+  password?: string;
+}
+
+/** Response for DELETE /api/users/{id}. */
+export interface DeleteUserResponse {
+  status: "deleted";
 }
 
 // ─── Quality Profiles ──────────────────────────────────────────────
@@ -500,6 +554,12 @@ export interface Track {
   external_ids?: Record<string, string>;
   acoustid?: string;
   isrc?: string;
+  /**
+   * Who requested the download that imported this track. DB-only attribution
+   * (never written to audio tags). Absent/blank for scanned or system imports.
+   */
+  added_by_user_id?: number;
+  added_by_username?: string;
 }
 
 export interface Artist {
@@ -528,6 +588,12 @@ export interface Album {
   updated_at: string;
   external_ids?: Record<string, string>;
   release_date?: string;
+  /**
+   * Who requested the download that imported this album. DB-only attribution
+   * (never written to audio tags). Absent/blank for scanned or system imports.
+   */
+  added_by_user_id?: number;
+  added_by_username?: string;
 }
 
 // ─── Artist tracking ───────────────────────────────────────────────
@@ -744,6 +810,12 @@ export interface Playlist {
   name_conflict?: boolean;
   /** Derived: resolved on-disk folder name (ID-suffixed on conflict). */
   folder_name?: string;
+  /**
+   * Who imported this playlist. DB-only attribution. Absent/blank for
+   * system or unknown imports.
+   */
+  added_by_user_id?: number;
+  added_by_username?: string;
 }
 
 /** Per-track download status derived from the download pipeline. */
