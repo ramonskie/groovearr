@@ -488,6 +488,15 @@ Server-Sent Events stream for real-time download progress.
 
 ## Library
 
+The library is **shared and read-only**: every authenticated user — admin or
+not — may list it and download its files. The two download routes below serve
+**only files that resolve under `library.library_path`**; the stored path is
+resolved and symlink-checked before any bytes are sent, and server paths are
+never written to a response body. Both download routes are rate-limited on the
+shared `download` bucket, the same one the download queue uses, and clear the
+per-request write deadline for the duration of their stream so a large file on
+a slow link is not cut off by the server's global 30s timeout.
+
 ### `GET /api/library/tracks`
 
 List/search library tracks.
@@ -523,6 +532,33 @@ system-imported. The fields are set on insert only (re-scans and re-enrichment
 never rewrite them) and are **DB-only** — never written to audio tags or
 filenames.
 
+### `GET /api/library/tracks/{trackID}/download`
+
+Stream a single library track file. Available to any authenticated user
+(shared, not admin-gated).
+
+**Path**: `trackID` — integer library track ID
+
+**Response** `200`: the raw audio file, with:
+
+- `Content-Type` from the explicit audio MIME map — `.flac` → `audio/flac`,
+  `.mp3` → `audio/mpeg`, `.m4a` → `audio/mp4`, `.opus`/`.ogg` → `audio/ogg`,
+  `.wav` → `audio/wav`, `.aac` → `audio/aac` — falling back to the stdlib MIME
+  lookup, then `application/octet-stream`.
+- `Content-Disposition: attachment` with both a legacy ASCII `filename=` and an
+  RFC 5987 `filename*=UTF-8''…` parameter, so non-ASCII titles survive intact.
+- `Range` and `HEAD` support (partial content / resume) via `http.ServeContent`,
+  plus `Last-Modified` and `Content-Length`.
+
+**Errors**:
+- `404` `{"error": "not found"}` — unknown `trackID`, a track with no stored
+  file path, a path that escapes `library_path` (traversal or symlink), or a
+  non-regular file. These are deliberately indistinguishable and never reveal
+  the server path.
+- `429` — shared `download` rate-limit bucket exhausted; carries `Retry-After`
+  and `X-RateLimit-Bucket: download`.
+- `500` `{"error": "internal error"}` — the store could not be read.
+
 ### `GET /api/library/artists`
 
 List/search library artists.
@@ -538,6 +574,43 @@ List/search library albums.
 **Query params**: `q`, `offset`, `limit`
 
 **Response** `200`: `[Album, ...]`
+
+### `GET /api/library/albums/{albumID}/download`
+
+Stream an album as a ZIP archive. Available to any authenticated user (shared,
+not admin-gated).
+
+**Path**: `albumID` — integer library album ID
+
+**Response** `200` `application/zip`, written straight to the response (no temp
+files, no buffering). `Content-Disposition: attachment` suggests
+`"<Artist> - <Album>.zip"`. Entries are added in the store's disc/track order:
+
+- Audio tracks named `<NN> - <Title>.<ext>`, or `<DD>-<NN> - <Title>.<ext>` for a
+  multi-disc album. Colliding names are deduplicated with ` (2)`, ` (3)`, …
+  before the extension.
+- The album cover when a recognized cover file already exists on disk — a
+  lookup, never generated or fetched.
+- Any existing `.m3u` / `.m3u8` playlists, copied **verbatim** under their
+  album-relative path — never generated or rewritten.
+
+Tracks whose stored path is empty or fails the `library_path` containment check
+are skipped rather than failing the archive, and a missing cover or playlist
+never fails it either. An album whose tracks are all unservable returns `404`
+before any bytes are written.
+
+At most **3 album ZIPs stream at once**; beyond that the request is rejected
+rather than queued.
+
+**Errors**:
+- `404` `{"error": "not found"}` — unknown `albumID`, or no track resolves to a
+  servable file.
+- `503` `{"error": "album download capacity reached, retry shortly"}` with
+  `Retry-After: 5` — the album-ZIP concurrency cap (3) is saturated; retry
+  shortly.
+- `429` — shared `download` rate-limit bucket exhausted; carries `Retry-After`
+  and `X-RateLimit-Bucket: download`.
+- `500` `{"error": "internal error"}` — the store could not be read.
 
 ### `GET /api/jobs`
 
@@ -1049,10 +1122,12 @@ All errors follow this format:
 {"error": "human-readable message"}
 ```
 
-HTTP status codes used: `200`, `201`, `202`, `400`, `401`, `403`, `404`, `405`, `409`, `500`, `503`.
+HTTP status codes used: `200`, `201`, `202`, `400`, `401`, `403`, `404`, `405`, `409`, `429`, `500`, `503`.
 
 - `401` — no valid credential (any `/api/*` route under `forms`).
 - `403` — authenticated but not allowed (admin-only route reached by a `user`).
+- `429` — per-client-IP rate limit exceeded; carries `Retry-After` and
+  `X-RateLimit-Bucket` identifying the bucket.
 
 ### SSE Streaming
 
