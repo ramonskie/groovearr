@@ -285,6 +285,44 @@ func TestValidateValidSourceJSON(t *testing.T) {
 	}
 }
 
+// TestValidateAuthMethod pins the accepted auth methods. "basic" was never
+// implemented (phantom method) and must be rejected, not silently accepted.
+func TestValidateAuthMethod(t *testing.T) {
+	tests := []struct {
+		name         string
+		method       string
+		wantAccepted bool
+	}{
+		{name: "empty defaults to none", method: "", wantAccepted: true},
+		{name: "none is accepted", method: "none", wantAccepted: true},
+		{name: "forms is accepted", method: "forms", wantAccepted: true},
+		{name: "basic is rejected", method: "basic", wantAccepted: false},
+		{name: "unknown method is rejected", method: "oauth", wantAccepted: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Auth.Method = tt.method
+			// Supply credentials so forms/method checks isolate the method error.
+			cfg.Auth.Username = "admin"
+			cfg.Auth.Password = "hash"
+
+			errs := cfg.Validate()
+
+			gotMethodErr := false
+			for _, e := range errs {
+				if strings.Contains(e, "auth.method") {
+					gotMethodErr = true
+				}
+			}
+			if gotMethodErr == tt.wantAccepted {
+				t.Errorf("auth.method=%q accepted=%v, want accepted=%v (errs: %v)",
+					tt.method, !gotMethodErr, tt.wantAccepted, errs)
+			}
+		})
+	}
+}
+
 func TestMergeSources(t *testing.T) {
 	cfg := DefaultConfig()
 	partial := Config{
@@ -456,5 +494,150 @@ func TestValidateTrackingRefreshMins(t *testing.T) {
 				t.Errorf("tracking.refresh_mins validation = %v, want %v (errs: %v)", got, tt.wantErr, errs)
 			}
 		})
+	}
+}
+
+func TestMaskHidesAPIKey(t *testing.T) {
+	const rawKey = "s3cr3t-api-key-0123456789abcdef"
+
+	tests := []struct {
+		name       string
+		apiKey     string
+		wantKey    string
+		wantHasKey bool
+	}{
+		{
+			name:       "configured key is masked and flagged",
+			apiKey:     rawKey,
+			wantKey:    "********",
+			wantHasKey: true,
+		},
+		{
+			name:       "absent key stays empty and unflagged",
+			apiKey:     "",
+			wantKey:    "",
+			wantHasKey: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.Auth.APIKey = tt.apiKey
+
+			masked := cfg.Mask()
+
+			if masked.Auth.APIKey != tt.wantKey {
+				t.Errorf("masked Auth.APIKey = %q, want %q", masked.Auth.APIKey, tt.wantKey)
+			}
+			if masked.Auth.HasAPIKey != tt.wantHasKey {
+				t.Errorf("masked Auth.HasAPIKey = %v, want %v", masked.Auth.HasAPIKey, tt.wantHasKey)
+			}
+
+			// The derived flag must be present in serialized output so the UI
+			// can tell whether a key exists without receiving it.
+			out, err := json.Marshal(masked)
+			if err != nil {
+				t.Fatalf("marshal masked config: %v", err)
+			}
+			if !strings.Contains(string(out), `"has_api_key"`) {
+				t.Errorf("masked output missing has_api_key: %s", out)
+			}
+			if tt.apiKey != "" && strings.Contains(string(out), tt.apiKey) {
+				t.Errorf("raw API key leaked in masked output: %s", out)
+			}
+
+			// Mask must not mutate the original config (value receiver).
+			if cfg.Auth.APIKey != tt.apiKey {
+				t.Errorf("Mask mutated original API key: got %q, want %q", cfg.Auth.APIKey, tt.apiKey)
+			}
+		})
+	}
+}
+
+// TestMaskSensitiveJSONNestedArray is the array/short-secret regression test:
+// maskSensitiveJSON must recurse into []any and must mask a short value under a
+// sensitive key (the old code only masked strings longer than 4 bytes and never
+// descended into arrays).
+func TestMaskSensitiveJSONNestedArray(t *testing.T) {
+	raw := json.RawMessage(`{"accounts":[{"name":"main","api_key":"abcdef123456"},{"name":"backup","password":"xy"}]}`)
+
+	masked := maskSensitiveJSON(raw)
+	var got map[string]any
+	if err := json.Unmarshal(masked, &got); err != nil {
+		t.Fatalf("unmarshal masked JSON: %v (raw=%s)", err, masked)
+	}
+	accounts, ok := got["accounts"].([]any)
+	if !ok || len(accounts) != 2 {
+		t.Fatalf("accounts = %#v, want a 2-element array", got["accounts"])
+	}
+
+	first, ok := accounts[0].(map[string]any)
+	if !ok {
+		t.Fatalf("accounts[0] = %#v, want an object", accounts[0])
+	}
+	if first["name"] != "main" {
+		t.Errorf("non-sensitive name changed: %v", first["name"])
+	}
+	if s, _ := first["api_key"].(string); strings.Contains(s, "abcdef") || s == "abcdef123456" {
+		t.Errorf("nested api_key in array not masked: %q", s)
+	}
+
+	second, ok := accounts[1].(map[string]any)
+	if !ok {
+		t.Fatalf("accounts[1] = %#v, want an object", accounts[1])
+	}
+	if second["password"] == "xy" {
+		t.Errorf("short sensitive value in array not masked: %q", second["password"])
+	}
+}
+
+// TestMergePreservesNestedMaskedSecret is the round-trip guard for arrays:
+// masking a secret nested in an array and echoing that payload back must not
+// clobber the real value on merge (merge must descend into arrays too).
+func TestMergePreservesNestedMaskedSecret(t *testing.T) {
+	orig := json.RawMessage(`{"accounts":[{"name":"main","api_key":"realsecret"},{"name":"backup","password":"realpw"}]}`)
+
+	masked := maskSensitiveJSON(orig)
+	var sent map[string]any
+	if err := json.Unmarshal(masked, &sent); err != nil {
+		t.Fatalf("unmarshal masked: %v", err)
+	}
+	sentAccounts := sent["accounts"].([]any)
+	if sentAccounts[0].(map[string]any)["api_key"] == "realsecret" {
+		t.Fatal("precondition: api_key was not masked")
+	}
+
+	merged := mergeJSONPreservingSecrets(orig, masked)
+	var got map[string]any
+	if err := json.Unmarshal(merged, &got); err != nil {
+		t.Fatalf("unmarshal merged: %v (merged=%s)", err, merged)
+	}
+	accounts := got["accounts"].([]any)
+	first := accounts[0].(map[string]any)
+	second := accounts[1].(map[string]any)
+	if first["api_key"] != "realsecret" {
+		t.Errorf("merged api_key = %v, want realsecret (masked value clobbered it)", first["api_key"])
+	}
+	if second["password"] != "realpw" {
+		t.Errorf("merged password = %v, want realpw (masked value clobbered it)", second["password"])
+	}
+	if first["name"] != "main" {
+		t.Errorf("merged name = %v, want main", first["name"])
+	}
+}
+
+func TestMergePreservesMaskedAPIKey(t *testing.T) {
+	const rawKey = "s3cr3t-api-key-0123456789abcdef"
+
+	cfg := DefaultConfig()
+	cfg.Auth.APIKey = rawKey
+
+	// Simulate the settings UI echoing the masked GET /api/config payload back.
+	masked := cfg.Mask()
+	cfg.Merge(&masked)
+
+	if cfg.Auth.APIKey != rawKey {
+		t.Errorf("Merge clobbered the API key with a masked value: got %q, want %q", cfg.Auth.APIKey, rawKey)
 	}
 }

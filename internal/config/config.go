@@ -52,15 +52,15 @@ type TrackingConfig struct {
 //
 // Method = "none" (default): no authentication required.
 // Method = "forms": cookie-based login page with username + password.
-// Method = "basic": HTTP Basic Auth (browser popup).
 //
 // APIKey is always accepted regardless of method (for API/programmatic access).
 // LocalBypassSubnets lists CIDR ranges that skip authentication entirely.
 type AuthConfig struct {
-	Method             string   `json:"method"`               // none, forms, basic
-	Username           string   `json:"username"`             // for forms/basic auth
+	Method             string   `json:"method"`               // none, forms
+	Username           string   `json:"username"`             // for forms auth
 	Password           string   `json:"password"`             // bcrypt hash, masked in API responses
 	APIKey             string   `json:"api_key"`              // accepted via X-Api-Key header or ?apikey query
+	HasAPIKey          bool     `json:"has_api_key"`          // derived: an API key is configured; set by Mask(), never stored raw
 	LocalBypassSubnets []string `json:"local_bypass_subnets"` // CIDR ranges that skip auth (e.g. 192.168.1.0/24)
 }
 
@@ -252,9 +252,12 @@ func (c Config) Validate() []string {
 	}
 
 	// Auth.
-	validMethods := map[string]bool{"none": true, "forms": true, "basic": true, "": true}
+	// "basic" was never implemented (withAuth never called r.BasicAuth() and
+	// handleLogin only accepted forms), so it is rejected rather than silently
+	// behaving like "none".
+	validMethods := map[string]bool{"none": true, "forms": true, "": true}
 	if !validMethods[c.Auth.Method] {
-		errs = append(errs, fmt.Sprintf("auth.method: must be none, forms, or basic (got %q)", c.Auth.Method))
+		errs = append(errs, fmt.Sprintf("auth.method: must be none or forms (got %q)", c.Auth.Method))
 	}
 	if c.Auth.Method != "" && c.Auth.Method != "none" {
 		if c.Auth.Username == "" {
@@ -364,7 +367,9 @@ func (c *Config) mergeFields(partial *Config) {
 			c.Auth.Password = hashed
 		}
 	}
-	if partial.Auth.APIKey != "" {
+	// Preserve the API key when partial carries a masked value (i.e. came from
+	// Config.Mask()), so echoing GET /api/config back on save cannot clobber it.
+	if partial.Auth.APIKey != "" && !isMaskedString(partial.Auth.APIKey) {
 		c.Auth.APIKey = partial.Auth.APIKey
 	}
 	if partial.Auth.LocalBypassSubnets != nil {
@@ -529,6 +534,13 @@ func (c Config) Mask() Config {
 	if masked.Auth.Password != "" {
 		masked.Auth.Password = "********"
 	}
+	// Mask the API key the same way and expose only whether one is set, so the
+	// UI can show it as configured without ever receiving the credential.
+	// Derive presence from the raw key (c) before masking the copy.
+	masked.Auth.HasAPIKey = c.Auth.APIKey != ""
+	if masked.Auth.APIKey != "" {
+		masked.Auth.APIKey = "********"
+	}
 	masked.Sources = make(map[string]json.RawMessage, len(c.Sources))
 	for name, raw := range c.Sources {
 		masked.Sources[name] = maskSensitiveJSON(raw)
@@ -547,18 +559,44 @@ func maskSensitiveJSON(raw json.RawMessage) json.RawMessage {
 	return result
 }
 
+// maskMap masks values for known sensitive keys and recurses through nested
+// objects and arrays. A sensitive value under a sensitive key is masked
+// regardless of length so a short secret is never emitted verbatim; container
+// values (arrays/objects) are walked so a keyed secret nested inside an array
+// element is still masked.
 func maskMap(m map[string]any) {
 	for k, v := range m {
-		lower := strings.ToLower(k)
-		if isSensitiveKey(lower) {
-			if s, ok := v.(string); ok && len(s) > 4 {
-				m[k] = s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
+		if isSensitiveKey(strings.ToLower(k)) {
+			if s, ok := v.(string); ok && s != "" {
+				m[k] = maskSecretString(s)
 			}
 		}
-		if nested, ok := v.(map[string]any); ok {
-			maskMap(nested)
+		maskNested(v)
+	}
+}
+
+// maskNested recurses into container values so sensitive keys inside nested
+// objects or array elements are still masked.
+func maskNested(v any) {
+	switch t := v.(type) {
+	case map[string]any:
+		maskMap(t)
+	case []any:
+		for _, item := range t {
+			maskNested(item)
 		}
 	}
+}
+
+// maskSecretString hides a secret string value. Longer values keep a 2-char
+// prefix and suffix (matching isMaskedString so the UI round-trip is detected
+// and the original is preserved on merge); short values are replaced with a
+// fixed mask that is still recognized as masked by isMaskedString.
+func maskSecretString(s string) string {
+	if len(s) > 4 {
+		return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
+	}
+	return strings.Repeat("*", 8)
 }
 
 // isMaskedString detects a string that has been through maskSensitiveJSON:
@@ -614,12 +652,11 @@ func mergeJSONPreservingSecrets(orig, partial json.RawMessage) json.RawMessage {
 				continue
 			}
 		}
-		// Recurse into nested objects.
-		if nestedPartial, ok := v.(map[string]any); ok {
-			if nestedOrig, ok := origMap[k].(map[string]any); ok {
-				mergeMapPreservingSecrets(nestedOrig, nestedPartial)
-				partialMap[k] = nestedPartial
-			}
+		// Recurse into nested objects and arrays so a masked secret nested in
+		// either is replaced by the original.
+		switch v.(type) {
+		case map[string]any, []any:
+			mergeContainerPreservingSecrets(origMap[k], v)
 		}
 	}
 
@@ -639,9 +676,36 @@ func mergeMapPreservingSecrets(orig, partial map[string]any) {
 				continue
 			}
 		}
-		if nestedPartial, ok := v.(map[string]any); ok {
-			if nestedOrig, ok := orig[k].(map[string]any); ok {
-				mergeMapPreservingSecrets(nestedOrig, nestedPartial)
+		switch v.(type) {
+		case map[string]any, []any:
+			mergeContainerPreservingSecrets(orig[k], v)
+		}
+	}
+}
+
+// mergeContainerPreservingSecrets merges partial into orig in-place for a
+// matching container (object or array), descending so a masked secret is
+// replaced by the original value wherever it appears. Arrays merge
+// element-wise by index; mismatched kinds or lengths are left as-is.
+func mergeContainerPreservingSecrets(orig, partial any) {
+	switch p := partial.(type) {
+	case map[string]any:
+		if o, ok := orig.(map[string]any); ok {
+			mergeMapPreservingSecrets(o, p)
+		}
+	case []any:
+		o, ok := orig.([]any)
+		if !ok {
+			return
+		}
+		n := len(p)
+		if len(o) < n {
+			n = len(o)
+		}
+		for i := 0; i < n; i++ {
+			switch p[i].(type) {
+			case map[string]any, []any:
+				mergeContainerPreservingSecrets(o[i], p[i])
 			}
 		}
 	}
