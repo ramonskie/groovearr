@@ -41,7 +41,7 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
   ├─ library.sqlite.Store    download.DownloadService    api.Server
   │  SQLite (artists,        │ queue/cancel/retry        │ HTTP :8008
   │  albums, tracks,         │                           │ embedded SPA
-  │  playlists)              │                           │ 26 endpoints
+  │  playlists)              │                           │ REST endpoints
   │                          │                           │ SSE stream
   ├─ library.Scanner         │                           │
   │  filesystem → SQLite     │                           │
@@ -67,7 +67,8 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | Package | Purpose | Key Types |
 |---------|---------|-----------|
 | `cmd/groovearr` | Entry point, wiring, graceful shutdown | `main()` |
-| `internal/api` | HTTP server + 26 REST handlers + SSE endpoint | `Server`, handlers |
+| `internal/api` | HTTP server + REST handlers + SSE endpoint | `Server`, handlers |
+| `internal/user` | Persistent accounts + first-admin bootstrap; role source of truth | `User`, `Role` (`admin`/`user`), `Store` (interface), `EnsureBootstrapAdmin` |
 | `internal/config` | JSON config load/validate/persist (thread-safe) | `Config`, `Persistence` |
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Download lifecycle, album provider contract, import pipeline, monitoring | `Record`, `MonitoredProvider`, `DownloadClient`, `AlbumProvider`, `AlbumImportHandler`, import handler chain, `CompletedDownloadService`, `MonitoringService` |
@@ -498,7 +499,7 @@ Idempotent `CREATE TABLE IF NOT EXISTS` (no migration versioning).
 > track now raises a foreign-key constraint error instead of silently leaving a
 > dangling reference.
 
-Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache`, `tracked_artists`, `tracked_albums`.
+Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache`, `tracked_artists`, `tracked_albums`, `users`.
 
 The tracking store (`internal/tracking/sqlite`) is a dedicated store that does
 not own a database: it wraps the same `*sql.DB` as the library store (via
@@ -568,6 +569,54 @@ accepts its own IDs natively — no translation layer needed.
 > **Cancel → `ignored` (not `failed`).** `ignored` is terminal and not retryable —
 > a cancelled download is never re-queued by `scanRetry()`. See
 > [Download State Machine](flows/download-state-machine.md).
+
+## Roles & Attribution
+
+### Roles & authorization
+
+Accounts live in the `users` table (`internal/user`, with the SQLite store in
+`internal/user/sqlite` sharing the library DB connection). A role is `admin` or
+`user`. Two layers enforce access:
+
+- **`withAuth`** — middleware around the whole mux. It resolves the caller and
+  injects an `Identity` into the request context. Resolution order: no auth
+  configured (`auth.method` empty or `none`) → admin (backwards-compatible and
+  explicitly **not** access control); a valid session → that account's
+  ID/username/role; a valid API key (any transport) → admin; a local-bypass host
+  presenting no credential → regular **user**; otherwise `401`. Explicit
+  credentials always win over the local bypass, so a configured admin is never
+  downgraded by their source subnet.
+- **`adminOnly`** — per-route gate. It rejects a non-admin with
+  `403 {"error":"forbidden"}` and fails closed when no identity is present.
+
+The admin-only surface is config, rate limits, background jobs, artist tracking,
+quality profiles, logs, debug, and user management. Everything else (search,
+downloads, library, playlists, discovery, events, and `/api/me`) is shared by all
+authenticated users. The SSE hub additionally withholds `log_line` and `job_*`
+events from non-admin subscribers.
+
+Local-bypass behavior is a deliberate change (plan finding C4): a host inside
+`auth.local_bypass_subnets` previously received the same access as a valid
+credential, and now authenticates only as `user`.
+
+### Attribution
+
+Who requested a download is recorded for display/audit only:
+
+- Download records carry `requested_by_user_id` / `requested_by_username`
+  (`internal/download` `Record`). The username is snapshotted at queue time and
+  survives deletion of the account; `0` / `""` means system/unknown.
+- Library tracks and albums carry `added_by_user_id` / `added_by_username`
+  (`internal/domain` `Track`, `Album`) — set on INSERT only, so re-scans,
+  re-enrichment, and organize never rewrite them. `0` / `""` means scanned or
+  system-imported.
+- Imported playlists carry the same `added_by_*` pair (`domain.Playlist`),
+  stamped on create; sync preserves it.
+
+**Attribution is DB-only.** It is never written to audio tags or filenames —
+`internal/tagging` is intentionally untouched, so a downloaded file is
+byte-for-byte what a plain download would produce. A per-user "my requests" view
+is a future consumer of these fields, not part of the current scope.
 
 ## Technology Stack
 

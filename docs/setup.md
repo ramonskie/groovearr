@@ -192,6 +192,45 @@ Groovearr has a **protection layer** that makes these rules safe by construction
 
 ---
 
+## Authentication
+
+`auth.method` accepts two values:
+
+- `none` (default) — no login. **This is not access control:** every request is
+  treated as admin, so only use it on a trusted network.
+- `forms` — cookie-based login page with username + password.
+
+HTTP Basic (`basic`) is retired: it was never implemented end-to-end. **On save**
+(`PUT /api/config`) a config that sets `basic` is rejected by validation. A
+pre-existing `config.json` that already sets `basic` is not fatal —
+`Config.Load` logs a validation warning and continues — but the setting yields
+no working login: `withAuth` never evaluated Basic credentials and `POST
+/api/login` only accepts `forms`, so Groovearr treats the request as if no
+credential were present. Use `forms` instead.
+
+### Bootstrap credentials (`auth.username` / `auth.password`)
+
+`auth.username` and `auth.password` are **bootstrap-only**. They create the very
+first account and are ignored afterwards:
+
+- **First run (`forms` only):** when `auth.method` is `forms`, both a username
+  and password are configured, and the `users` table is still empty, Groovearr
+  seeds a single **admin** from those credentials at startup
+  (`internal/user` `EnsureBootstrapAdmin`). Once any user exists it is a no-op,
+  so it is safe on every subsequent start.
+- **After bootstrap:** login authenticates against the `users` table, not the
+  config. Changing `auth.username` / `auth.password` later does **not** change
+  an existing account's password, and does **not** create another account — the
+  configured values are simply unused.
+- **Managing users:** create, disable, change roles, and set passwords from the
+  admin-only **Users** screen (backed by `/api/users`). Usernames are fixed at
+  creation — there is no rename. The bootstrap credentials are not a live login.
+- **`auth.method="none"` never seeds an account:** with no login there is no one
+  to authenticate as, and every request is treated as admin (see the warning
+  above).
+
+---
+
 ## Troubleshooting
 
 | Symptom | Fix |

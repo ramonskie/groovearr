@@ -4,6 +4,178 @@ Base URL: `http://localhost:8008`
 
 All responses are JSON. Errors use `{"error": "message"}`.
 
+## Authentication & Authorization
+
+Authentication is chosen by `auth.method`:
+
+- `none` (default) — no login. Every request is treated as **admin**. This is
+  **not access control**; only run it on a trusted network.
+- `forms` — username/password login backed by the `users` table. Log in with
+  `POST /api/login`, which sets the `groovearr_sid` session cookie.
+
+With `forms`, every `/api/*` route requires an identity except `GET /api/health`
+and `POST /api/login`. Three transports resolve an identity:
+
+- **Session cookie** `groovearr_sid` — set by login; carries the account's role.
+- **API key** — a full **admin** credential, accepted as `X-Api-Key: <key>`,
+  `?apikey=<key>`, or `Authorization: Bearer <key>`. The key itself is never
+  returned by any endpoint and is masked in `GET /api/config`.
+- **Local bypass** — a host inside `auth.local_bypass_subnets` that presents no
+  credential is authenticated as a regular **user**, never admin. (Behavior
+  change: it previously carried the same access as a valid credential.)
+
+Roles are `admin` and `user` (DB-only — see
+[architecture](architecture.md#roles--attribution)). The **admin-only** settings
+surface — config, rate limits, background jobs, artist tracking, quality
+profiles, logs, debug, user management, and the provider OAuth connect flows
+(`/api/spotify/*`, `/api/tidal/*`) — returns
+`403 {"error": "forbidden"}` to a non-admin. The **shared** surface — search,
+downloads, library, playlists, discovery, and events — is available to any
+authenticated user. A missing or invalid credential returns
+`401 {"error": "unauthorized"}`.
+
+`GET /api/setup/status` is the first-run probe. It is **not** admin-gated, but
+it is still wrapped by `withAuth` like every other `/api/*` route: under
+`auth.method=forms` it requires an authenticated identity and returns `401`
+without one — it is **not** unauthenticated. There are no setup mutation routes
+today (any future `/api/setup/*` mutation is part of the admin-only settings
+surface).
+
+### `GET /api/me`
+
+Return the caller's coarse identity. Never exposes the API key.
+
+**Response** `200`:
+```json
+{"username": "admin", "role": "admin", "via_api_key": false}
+```
+
+- Session — the account's `username` and `role`.
+- API key — `{"username": "", "role": "admin", "via_api_key": true}`.
+- `auth.method=none` — `{"username": "", "role": "admin", "via_api_key": false}`.
+- Local-bypassed host — `{"username": "", "role": "user", "via_api_key": false}`.
+
+**Errors**: `401` — no identity was resolved.
+
+### `POST /api/login`
+
+Only available when `auth.method` is `forms`. Authenticates a username/password
+against the `users` table and, on success, sets the `groovearr_sid` session
+cookie. The bootstrap `auth.username` / `auth.password` are not consulted here.
+
+**Request**:
+```json
+{"username": "admin", "password": "secret"}
+```
+
+**Response** `200`:
+```json
+{"status": "ok"}
+```
+
+**Errors**:
+- `400` — invalid body, or `{"error": "login not available with current auth method"}` when `auth.method` is not `forms`
+- `401` — `{"error": "invalid credentials"}` for an unknown user, disabled account, or wrong password (all indistinguishable)
+- `500` — `{"error": "authentication unavailable"}` when no user store is wired
+
+### `POST /api/logout`
+
+Clear the `groovearr_sid` session cookie.
+
+**Response** `200`:
+```json
+{"status": "ok"}
+```
+
+## Users (Admin only)
+
+Account management. Every route below is gated by `s.adminOnly` and returns
+`403 {"error": "forbidden"}` to a non-admin.
+
+A user response is the safe wire shape — it **never** includes the stored
+password hash:
+
+```json
+{
+  "id": 1,
+  "username": "admin",
+  "role": "admin",
+  "disabled": false,
+  "created_at": "2026-10-01T09:00:00Z",
+  "updated_at": "2026-10-01T09:00:00Z"
+}
+```
+
+### `GET /api/users`
+
+List every account.
+
+**Response** `200`: `[userResponse, ...]`
+
+### `POST /api/users`
+
+Create an account.
+
+**Request**:
+```json
+{"username": "alice", "password": "at-least-8-chars", "role": "user"}
+```
+
+- `username` — required
+- `password` — required, minimum 8 characters
+- `role` — optional, `admin` | `user`; empty defaults to `user`
+
+**Response** `201`: the created `userResponse`.
+
+**Errors**:
+- `400` — invalid body, missing username, password shorter than 8, or invalid role
+- `409` — `{"error": "username already exists"}` (case-insensitive duplicate)
+- `500` — internal error
+
+### `PATCH /api/users/{id}`
+
+Partial update. Omitted fields keep their current value.
+
+**Path**: `id` — integer user ID
+
+**Request** (at least one field):
+```json
+{"role": "admin", "disabled": false, "password": "new-password-8+"}
+```
+
+**Response** `200`: the updated `userResponse`.
+
+Live sessions for the target account (and its open SSE stream) are invalidated
+only when a `role`, `disabled`, or `password` field **actually changes** — a
+PATCH that echoes the current value is a no-op and does not retire sessions. This
+makes a real role/password change take effect immediately. A self password
+change logs the acting admin out on their next request (no fresh session is
+re-issued).
+
+**Errors**:
+- `400` — invalid user ID, invalid body, invalid role, or password shorter than 8
+- `404` — user not found
+- `409` — `{"error": "cannot remove the last active admin"}` (demoting/disabling the last admin)
+- `500` — internal error
+
+### `DELETE /api/users/{id}`
+
+Delete an account.
+
+**Path**: `id` — integer user ID
+
+**Response** `200`:
+```json
+{"status": "deleted"}
+```
+
+**Errors**:
+- `400` — invalid user ID
+- `403` — `{"error": "cannot delete your own account"}`
+- `404` — user not found
+- `409` — `{"error": "cannot remove the last active admin"}`
+- `500` — internal error
+
 ## Health & Config
 
 ### `GET /api/health`
@@ -16,6 +188,8 @@ Health check.
 ```
 
 ### `GET /api/config`
+
+**Admin only.**
 
 Get current configuration. API keys are partially masked.
 
@@ -44,11 +218,28 @@ Get current configuration. API keys are partially masked.
   "quality": {
     "preferred_format": "flac",
     "min_bitrate": 0
+  },
+  "auth": {
+    "method": "forms",
+    "username": "admin",
+    "password": "********",
+    "api_key": "********",
+    "has_api_key": true,
+    "local_bypass_subnets": []
   }
 }
 ```
 
+Sensitive fields are masked (`Config.Mask()`): `auth.password` and `auth.api_key`
+are never returned raw. The **raw API key is never returned by any endpoint**;
+instead `auth.has_api_key` is a derived boolean (`true` when a key is
+configured, `false` otherwise) that signals presence without revealing the
+credential. Provider source secrets (`soulseek.api_key`, `deezer.arl`,
+`deezer.access_token`, …) are masked in the same response.
+
 ### `PUT /api/config`
+
+**Admin only.**
 
 Merge partial config and persist. Triggers plugin reload and directory creation.
 
@@ -70,6 +261,8 @@ Merge partial config and persist. Triggers plugin reload and directory creation.
 
 ### `GET /api/config/sources`
 
+**Admin only.**
+
 List registered download source plugins with status.
 
 **Response** `200`:
@@ -83,6 +276,8 @@ List registered download source plugins with status.
 Status values: `connected`, `configured`, `not_configured`.
 
 ### `POST /api/config/test/{source}`
+
+**Admin only.**
 
 Test connectivity to a download source.
 
@@ -100,6 +295,20 @@ Or if unreachable but configured:
 **Errors**:
 - `400` — source not configured: `{"error": "source not configured", "status": "not_configured"}`
 - `404` — unknown source
+
+### Provider OAuth (Admin only)
+
+Provider OAuth connect flows are registered through the plugin `RouteRegistrar`
+and are **admin-only** — they mutate global provider credentials (server-side
+tokens) and are part of the settings surface. Each returns
+`403 {"error": "forbidden"}` to a non-admin.
+
+| Route | Purpose |
+|-------|---------|
+| `GET /api/spotify/login` | Start the Spotify PKCE flow; redirects to Spotify's authorization page. |
+| `GET /api/spotify/callback` | OAuth callback; verifies `state`, exchanges the code, and stores tokens in `sources.spotify`. Redirects to `/settings?spotify=connected`. |
+| `GET /api/tidal/login` | Start the Tidal device-code flow; returns an HTML page with the user code and a self-polling status. |
+| `GET /api/tidal/poll` | Poll device-code completion; on success stores tokens in `sources.tidal`. Returns `{"status": "pending" \| "connected" \| "expired" \| "error", "message": "..."}`. |
 
 ---
 
@@ -149,6 +358,10 @@ Search tracks and albums across download sources.
 ---
 
 ## Downloads
+
+The download queue is **shared**: any authenticated user, admin or not, may
+search, queue, list, cancel, and retry downloads. These routes are not
+admin-gated (they are rate-limited per client IP).
 
 ### `POST /api/download`
 
@@ -226,10 +439,18 @@ List all downloads with full state.
     "title": "Get Lucky",
     "track_number": 7,
     "year": 2013,
-    "playlist_id": "5"
+    "playlist_id": "5",
+    "requested_by_user_id": 3,
+    "requested_by_username": "alice"
   }
 ]
 ```
+
+Each record carries `requested_by_user_id` / `requested_by_username` — the
+account that queued the download. `requested_by_username` is a snapshot taken at
+queue time and survives deletion of the account; `0` / `""` means a
+system-queued download. This attribution is **DB-only** and is never written to
+audio tags.
 
 **States**: `queued` → `downloading` → `importPending` → `importing` → `imported` | `failed` | `ignored`
 
@@ -288,11 +509,19 @@ List/search library tracks.
     "bitrate": 909,
     "file_size": 30123456,
     "isrc": "USQX91300105",
+    "added_by_user_id": 3,
+    "added_by_username": "alice",
     "created_at": "2026-07-19T12:00:00Z",
     "updated_at": "2026-07-19T12:00:00Z"
   }
 ]
 ```
+
+Tracks, albums, and playlists carry `added_by_user_id` / `added_by_username` —
+the account whose download imported the row. `0` / `""` means scanned or
+system-imported. The fields are set on insert only (re-scans and re-enrichment
+never rewrite them) and are **DB-only** — never written to audio tags or
+filenames.
 
 ### `GET /api/library/artists`
 
@@ -311,6 +540,8 @@ List/search library albums.
 **Response** `200`: `[Album, ...]`
 
 ### `GET /api/jobs`
+
+**Admin only.**
 
 Return the current (or last) background job, or `null` when none has run.
 
@@ -333,6 +564,8 @@ Return the current (or last) background job, or `null` when none has run.
 
 ### `POST /api/jobs/scan`
 
+**Admin only.**
+
 Start a background filesystem scan of the library path. Imports new files,
 skips duplicates (by file path), and backfills embedded cover art. If a job is
 already running, the current job is returned with `started: false` instead.
@@ -349,6 +582,8 @@ Rate-limited: 2 req/min per client IP (override via `RATE_SCAN`).
 
 ### `POST /api/jobs/enrich`
 
+**Admin only.**
+
 Start a background metadata enrichment of the whole library — fills in missing
 ISRC, genres, release dates, external IDs, cover art, and artist images from
 the configured metadata providers. Outgoing requests honor each provider's own
@@ -364,6 +599,8 @@ provider rate limits) while serializing per album.
 Rate-limited: 2 req/min per client IP (override via `RATE_ENRICH`).
 
 ### `POST /api/jobs/cancel`
+
+**Admin only.**
 
 Request cancellation of the running job.
 
@@ -427,6 +664,9 @@ Each playlist includes two derived (non-persisted) fields:
 - `name_conflict` — `true` when another playlist from the same source shares this name. The UI shows a conflict badge.
 - `folder_name` — the resolved on-disk folder name. On a name conflict the folder gets an ID suffix (e.g. `My Mix (a1b2c3d4)`) so the two playlists never share a directory.
 
+Playlists also carry `added_by_user_id` / `added_by_username` (the account that
+imported the playlist; `0` / `""` for system imports). DB-only, as above.
+
 ### `GET /api/playlists/{id}`
 
 Get a single playlist with its tracks.
@@ -445,7 +685,9 @@ Get a single playlist with its tracks.
     "cover_url": "https://...",
     "owner_name": "user123",
     "is_public": true,
-    "auto_sync": false
+    "auto_sync": false,
+    "added_by_user_id": 3,
+    "added_by_username": "alice"
   },
   "tracks": [
     {
@@ -530,6 +772,8 @@ Delete an imported playlist.
 ---
 
 ## Tracking
+
+**All tracking routes are Admin only.**
 
 Tracked artists and their discovered discographies. A tracked artist is keyed
 by a provider pair (`provider_name` + `provider_artist_id`); each discovered
@@ -805,7 +1049,10 @@ All errors follow this format:
 {"error": "human-readable message"}
 ```
 
-HTTP status codes used: `200`, `202`, `400`, `404`, `500`, `503`.
+HTTP status codes used: `200`, `201`, `202`, `400`, `401`, `403`, `404`, `405`, `409`, `500`, `503`.
+
+- `401` — no valid credential (any `/api/*` route under `forms`).
+- `403` — authenticated but not allowed (admin-only route reached by a `user`).
 
 ### SSE Streaming
 
@@ -820,3 +1067,8 @@ es.addEventListener('download:progress', (e) => {
 ```
 
 The server sends a `:heartbeat` comment every 15 seconds to keep the connection alive.
+
+`/api/events` is available to any authenticated user. Two event classes are
+admin-only and withheld from a regular user's stream: `log_line` and every
+`job_*` event (`job_started`, `job_progress`, `job_completed`, `job_failed`,
+`job_cancelled`). Download and import events are delivered to everyone.
