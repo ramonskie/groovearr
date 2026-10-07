@@ -76,6 +76,8 @@ var sharedRoutes = []roleRoute{
 	{"downloads", http.MethodDelete, "/api/downloads/abc"},
 	{"downloads", http.MethodPost, "/api/download"},
 	{"library", http.MethodGet, "/api/library/tracks"},
+	{"library", http.MethodGet, "/api/library/tracks/1/download"},
+	{"library", http.MethodGet, "/api/library/albums/1/download"},
 	{"library", http.MethodGet, "/api/library/artists"},
 	{"library", http.MethodGet, "/api/library/albums"},
 	{"covers", http.MethodGet, "/api/covers/1"},

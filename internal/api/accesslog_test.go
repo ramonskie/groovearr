@@ -5,9 +5,12 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/logger"
+	"github.com/ramonskie/groovearr/internal/user"
 )
 
 func TestWithAccessLog(t *testing.T) {
@@ -118,6 +121,113 @@ func TestWithAccessLog(t *testing.T) {
 		h.ServeHTTP(httptest.NewRecorder(), httptest.NewRequest(http.MethodPost, "/api/jobs/scan", nil))
 		if buf.Len() == 0 {
 			t.Fatal("POST /api/jobs/scan should be logged (only the poll GET /api/jobs is skipped)")
+		}
+	})
+}
+
+// TestWithAccessLogUserAttribution drives requests through the real middleware
+// chain (withAccessLog -> withAuth) and asserts the access-log line carries the
+// caller resolved by withAuth. This is the M8 regression: withAuth injects its
+// Identity into a *new* request context, so the outer log middleware cannot
+// read it from the request it holds — only from the shared accessIdentity
+// holder installed before the chain ran.
+func TestWithAccessLogUserAttribution(t *testing.T) {
+	ok := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	// A shared, logged (never-skipped) library route: the download surface M8
+	// exists to attribute.
+	const sharedPath = "/api/library/tracks/1/download"
+
+	// decodeLine parses the single access-log line written to buf.
+	decodeLine := func(t *testing.T, buf *bytes.Buffer) map[string]any {
+		t.Helper()
+		lines := bytes.Split(bytes.TrimSpace(buf.Bytes()), []byte("\n"))
+		if len(lines) != 1 {
+			t.Fatalf("expected 1 access line, got %d: %q", len(lines), buf.Bytes())
+		}
+		var rec map[string]any
+		if err := json.Unmarshal(lines[0], &rec); err != nil {
+			t.Fatalf("access line not valid JSON: %v", err)
+		}
+		return rec
+	}
+
+	t.Run("session records the username", func(t *testing.T) {
+		srv, sessions := newMeTestServer(t, func(c *config.Config) error {
+			c.Auth.Method = "forms"
+			return nil
+		})
+		token, _, _ := sessions.Create(user.User{ID: 7, Username: "alice", Role: user.RoleAdmin})
+
+		req := httptest.NewRequest(http.MethodGet, sharedPath, nil)
+		req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})
+		var buf bytes.Buffer
+		rec := httptest.NewRecorder()
+		withAccessLog(&buf)(srv.withAuth(ok)).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		got := decodeLine(t, &buf)
+		if got["user"] != "alice" {
+			t.Errorf("user = %v, want alice", got["user"])
+		}
+		if got["via_api_key"] != false {
+			t.Errorf("via_api_key = %v, want false", got["via_api_key"])
+		}
+	})
+
+	t.Run("api key records via_api_key and never the key", func(t *testing.T) {
+		srv, _ := newMeTestServer(t, func(c *config.Config) error {
+			c.Auth.Method = "forms"
+			c.Auth.APIKey = testMeAPIKey
+			return nil
+		})
+
+		req := httptest.NewRequest(http.MethodGet, sharedPath, nil)
+		req.Header.Set("X-Api-Key", testMeAPIKey)
+		var buf bytes.Buffer
+		rec := httptest.NewRecorder()
+		withAccessLog(&buf)(srv.withAuth(ok)).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200", rec.Code)
+		}
+		got := decodeLine(t, &buf)
+		if got["user"] != "" {
+			t.Errorf("user = %v, want empty for api key", got["user"])
+		}
+		if got["via_api_key"] != true {
+			t.Errorf("via_api_key = %v, want true", got["via_api_key"])
+		}
+		if strings.Contains(buf.String(), testMeAPIKey) {
+			t.Fatalf("raw API key leaked into access log: %q", buf.Bytes())
+		}
+	})
+
+	t.Run("unauthenticated is still logged with a blank user", func(t *testing.T) {
+		srv, _ := newMeTestServer(t, func(c *config.Config) error {
+			c.Auth.Method = "forms"
+			c.Auth.APIKey = testMeAPIKey
+			return nil
+		})
+
+		req := httptest.NewRequest(http.MethodGet, sharedPath, nil)
+		var buf bytes.Buffer
+		rec := httptest.NewRecorder()
+		withAccessLog(&buf)(srv.withAuth(ok)).ServeHTTP(rec, req)
+
+		if rec.Code != http.StatusUnauthorized {
+			t.Fatalf("status = %d, want 401", rec.Code)
+		}
+		got := decodeLine(t, &buf)
+		if got["user"] != "" {
+			t.Errorf("user = %v, want empty", got["user"])
+		}
+		if got["via_api_key"] != false {
+			t.Errorf("via_api_key = %v, want false", got["via_api_key"])
 		}
 	})
 }

@@ -43,7 +43,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		// The caller is trusted by configuration, not by a credential; this is
 		// backwards compatible and explicitly NOT access control.
 		if cfg.Auth.Method == "" || cfg.Auth.Method == "none" {
-			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), Identity{Role: user.RoleAdmin})))
+			id := Identity{Role: user.RoleAdmin}
+			accessIdentityFrom(r.Context()).record(id)
+			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
 			return
 		}
 
@@ -58,6 +60,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		if cookie, err := r.Cookie("groovearr_sid"); err == nil && cookie.Value != "" {
 			if ses, ok := s.sessions.Validate(cookie.Value); ok {
 				id := Identity{UserID: ses.UserID, Username: ses.Username, Role: ses.Role}
+				accessIdentityFrom(r.Context()).record(id)
 				next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
 				return
 			}
@@ -66,6 +69,7 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		// API key (any supported transport) — an explicit admin credential.
 		if s.hasValidAPIKey(r) {
 			id := Identity{Role: user.RoleAdmin, ViaAPIKey: true}
+			accessIdentityFrom(r.Context()).record(id)
 			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
 			return
 		}
@@ -74,7 +78,9 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		// from a trusted subnet. Grant the least-privileged role (C4): never
 		// admin, so the settings surface stays locked.
 		if len(cfg.Auth.LocalBypassSubnets) > 0 && isInSubnet(r.RemoteAddr, cfg.Auth.LocalBypassSubnets) {
-			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), Identity{Role: user.RoleUser})))
+			id := Identity{Role: user.RoleUser}
+			accessIdentityFrom(r.Context()).record(id)
+			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
 			return
 		}
 

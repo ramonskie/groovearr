@@ -65,8 +65,14 @@ type Server struct {
 	rateLimiter         *ipRateLimiter
 	sessions            *sessionStore
 	healthChecker       *plugin.HealthChecker
-	bgCtx               context.Context
-	bgCancel            context.CancelFunc
+	// albumZipSem caps simultaneous album-zip streams so a few large requests
+	// cannot exhaust the process (see handlers_library_download.go). Buffered
+	// channel used as a counting semaphore; lazily initialized so a bare
+	// Server{} in tests is safe.
+	albumZipSem  chan struct{}
+	albumZipOnce sync.Once
+	bgCtx        context.Context
+	bgCancel     context.CancelFunc
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
@@ -122,6 +128,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		jobStatePath:        jobStatePath,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
 		sessions:            newSessionStore(),
+		albumZipSem:         make(chan struct{}, albumZipMaxConcurrent),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
 	s.jobs = jobs.NewManager(sseHub, s.bgCtx, logger)
@@ -246,6 +253,8 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 
 	// ── Shared surface: library, covers, artist images ─────────────────
 	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
+	mux.Handle("GET /api/library/tracks/{trackID}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryTrackDownload)))
+	mux.Handle("GET /api/library/albums/{albumID}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownload)))
 	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
 	mux.HandleFunc("GET /api/library/artists/duplicates", s.handleLibraryArtistDuplicates)
 	mux.Handle("POST /api/library/artists/{artistID}/merge", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryArtistMerge)))
@@ -397,19 +406,95 @@ func skipAccessLog(r *http.Request) bool {
 	return false
 }
 
+// accessIdentity is a request-scoped, mutable holder that lets withAccessLog
+// learn who withAuth authenticated.
+//
+// Why a holder: withAccessLog wraps withAuth, and withAuth injects the resolved
+// Identity into a *new* request context (contextWithIdentity) that the outer
+// middleware never sees — it keeps the original *http.Request. A pointer
+// installed in the original context is shared by value, so withAuth can fill it
+// in and withAccessLog can read it after the chain returns.
+//
+// The mutex guards the record/read pair: resolution happens on the handler
+// goroutine, but the holder is shared state and handlers may legitimately start
+// work that touches it concurrently. Reads and writes are tiny, so contention
+// is a non-issue.
+//
+// The raw API key is never stored here — only whether the request used it.
+type accessIdentity struct {
+	mu        sync.Mutex
+	username  string
+	viaAPIKey bool
+}
+
+// accessIdentityKey is the unexported context key type for *accessIdentity.
+type accessIdentityKey struct{}
+
+// withAccessIdentity returns a copy of ctx carrying holder.
+func withAccessIdentity(ctx context.Context, holder *accessIdentity) context.Context {
+	return context.WithValue(ctx, accessIdentityKey{}, holder)
+}
+
+// accessIdentityFrom returns the holder installed on ctx, or nil when none is
+// present (e.g. withAuth exercised without the access-log middleware, as in
+// tests). Callers must tolerate nil: record and snapshot are nil-safe.
+func accessIdentityFrom(ctx context.Context) *accessIdentity {
+	holder, _ := ctx.Value(accessIdentityKey{}).(*accessIdentity)
+	return holder
+}
+
+// record stores the resolved identity on the holder. It is safe to call on a
+// nil holder (the identity was resolved outside the access-log chain).
+func (a *accessIdentity) record(id Identity) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.username = id.Username
+	a.viaAPIKey = id.ViaAPIKey
+}
+
+// snapshot returns the recorded username and via-API-key flag, or zero values
+// for a nil holder. Never returns the raw key.
+func (a *accessIdentity) snapshot() (username string, viaAPIKey bool) {
+	if a == nil {
+		return "", false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.username, a.viaAPIKey
+}
+
 // withAccessLog writes one structured line per request to the dedicated access
 // log (opt-in via logging.access_log). The app event log and stderr never see
 // request lines. Polling endpoints are skipped entirely. A nil access log
 // (feature disabled) is a no-op, so routing stays cheap when off.
+//
+// The line carries the resolved caller as "user" (blank when there is none)
+// and "via_api_key" (true only for the global API key — the key itself is never
+// logged). withAccessLog installs an accessIdentity holder before calling next;
+// withAuth records the identity into it. 401 responses are still logged with a
+// blank user, so failed auth remains visible.
 func withAccessLog(accessLog io.Writer) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			start := time.Now()
 			wr := &responseWriter{ResponseWriter: w, status: http.StatusOK}
+
+			// Install the holder before the chain runs so withAuth can fill it
+			// in. Skip it when logging is disabled: no reader, no allocation.
+			var holder *accessIdentity
+			if accessLog != nil {
+				holder = &accessIdentity{}
+				r = r.WithContext(withAccessIdentity(r.Context(), holder))
+			}
+
 			next.ServeHTTP(wr, r)
 			if accessLog == nil || skipAccessLog(r) {
 				return
 			}
+			username, viaAPIKey := holder.snapshot()
 			line, err := json.Marshal(map[string]any{
 				"time":        time.Now().UTC().Format(time.RFC3339Nano),
 				"remote_addr": clientAddr(r),
@@ -421,6 +506,8 @@ func withAccessLog(accessLog io.Writer) func(http.Handler) http.Handler {
 				"duration_ms": time.Since(start).Milliseconds(),
 				"referer":     r.Referer(),
 				"user_agent":  r.UserAgent(),
+				"user":        username,
+				"via_api_key": viaAPIKey,
 			})
 			if err != nil {
 				return
@@ -469,6 +556,13 @@ func (rw *responseWriter) Flush() {
 		f.Flush()
 	}
 }
+
+// Unwrap exposes the underlying writer so http.ResponseController can reach the
+// connection (e.g. SetWriteDeadline for streaming downloads, H4). Without this
+// the access-log wrapper hides the real ResponseWriter, NewResponseController
+// returns http.ErrNotSupported, and the global 30s WriteTimeout silently cuts
+// every large download.
+func (rw *responseWriter) Unwrap() http.ResponseWriter { return rw.ResponseWriter }
 
 type requestIDKey struct{}
 
