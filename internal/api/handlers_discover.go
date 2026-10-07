@@ -711,7 +711,7 @@ func (s *Server) handleDiscoverAlbumDownload(w http.ResponseWriter, r *http.Requ
 	}
 
 	cfg := s.cfg.Get()
-	res, err := s.downloadSvc.QueueAlbumWithFallback(ctx, artistName, albumName, trackQueues, cfg.DownloadClient, cfg.AlbumSources)
+	res, err := s.downloadSvc.QueueAlbumWithFallback(ctx, requesterID(ctx), requesterUsername(ctx), artistName, albumName, trackQueues, cfg.DownloadClient, cfg.AlbumSources)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

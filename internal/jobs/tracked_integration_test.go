@@ -73,11 +73,13 @@ type jobFakeQueuer struct {
 
 // jobQueuerCall captures one delegated QueueAlbumWithFallback invocation.
 type jobQueuerCall struct {
-	artist         string
-	album          string
-	tracks         []download.TrackQueue
-	downloadClient string
-	albumSources   []string
+	requestedByUserID   int64
+	requestedByUsername string
+	artist              string
+	album               string
+	tracks              []download.TrackQueue
+	downloadClient      string
+	albumSources        []string
 }
 
 var (
@@ -85,8 +87,8 @@ var (
 	_ tracking.ActiveDownloadFinder = (*jobFakeQueuer)(nil)
 )
 
-func (f *jobFakeQueuer) QueueAlbumWithFallback(_ context.Context, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error) {
-	f.calls = append(f.calls, jobQueuerCall{artist: artist, album: album, tracks: tracks, downloadClient: downloadClient, albumSources: albumSources})
+func (f *jobFakeQueuer) QueueAlbumWithFallback(_ context.Context, requestedByUserID int64, requestedByUsername, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error) {
+	f.calls = append(f.calls, jobQueuerCall{requestedByUserID: requestedByUserID, requestedByUsername: requestedByUsername, artist: artist, album: album, tracks: tracks, downloadClient: downloadClient, albumSources: albumSources})
 	if f.queueErr != nil {
 		return f.result, f.queueErr
 	}

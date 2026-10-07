@@ -25,6 +25,12 @@ type Playlist struct {
 	CreatedAt        string   `json:"created_at"`
 	UpdatedAt        string   `json:"updated_at"`
 
+	// AddedByUserID/AddedByUsername record who imported this playlist. DB-only
+	// attribution — never written to audio tags or filenames. 0/"" means
+	// system/unknown. Set on INSERT only; sync and upserts never clobber it.
+	AddedByUserID   int64  `json:"added_by_user_id,omitempty"`
+	AddedByUsername string `json:"added_by_username,omitempty"`
+
 	// Derived at read time (not persisted): another playlist from the same
 	// source shares this name. When true, the on-disk folder gets an ID
 	// suffix so the two playlists never share a directory.

@@ -26,7 +26,7 @@ func TestRegisterClient(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	id := hub.Register(ch)
+	id := hub.Register(ch, true, 1)
 
 	if id != 1 {
 		t.Errorf("expected first client ID 1, got %d", id)
@@ -42,7 +42,7 @@ func TestRegisterMultipleClients(t *testing.T) {
 	ids := make(map[int64]bool)
 	for i := 0; i < 5; i++ {
 		ch := make(chan SSEEvent, 1)
-		id := hub.Register(ch)
+		id := hub.Register(ch, true, 1)
 		if _, exists := ids[id]; exists {
 			t.Errorf("duplicate client ID %d", id)
 		}
@@ -58,7 +58,7 @@ func TestUnregisterRemovesClient(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 1)
-	id := hub.Register(ch)
+	id := hub.Register(ch, true, 1)
 
 	if hub.ClientCount() != 1 {
 		t.Fatal("expected 1 client after register")
@@ -81,7 +81,7 @@ func TestUnregisterIsIdempotent(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 1)
-	id := hub.Register(ch)
+	id := hub.Register(ch, true, 1)
 
 	hub.Unregister(id)
 	// Second call must not panic.
@@ -92,11 +92,59 @@ func TestUnregisterIsIdempotent(t *testing.T) {
 	}
 }
 
+// TestUnregisterByUserID verifies a demotion/disable teardown closes only the
+// target account's streams; other subscribers (including other users) keep
+// receiving broadcasts.
+func TestUnregisterByUserID(t *testing.T) {
+	hub := NewSSEHub(testLogger())
+
+	u1a := make(chan SSEEvent, 4)
+	u1b := make(chan SSEEvent, 4)
+	u2 := make(chan SSEEvent, 4)
+	hub.Register(u1a, true, 1)
+	hub.Register(u1b, true, 1)
+	hub.Register(u2, true, 2)
+
+	hub.UnregisterByUserID(1)
+
+	if hub.ClientCount() != 1 {
+		t.Fatalf("ClientCount = %d, want 1 (only user 2 remains)", hub.ClientCount())
+	}
+	for i, ch := range []chan SSEEvent{u1a, u1b} {
+		select {
+		case _, ok := <-ch:
+			if ok {
+				t.Errorf("user 1 channel %d still open", i)
+			}
+		case <-time.After(200 * time.Millisecond):
+			t.Errorf("user 1 channel %d was not closed", i)
+		}
+	}
+
+	// The surviving subscriber must still receive broadcasts.
+	hub.Broadcast(SSEEvent{ID: "keep", Type: "download_progress"})
+	select {
+	case evt := <-u2:
+		if evt.ID != "keep" {
+			t.Errorf("user 2 got ID %q, want keep", evt.ID)
+		}
+	case <-time.After(200 * time.Millisecond):
+		t.Fatal("user 2 did not receive a broadcast after another user was unregistered")
+	}
+
+	// An unknown user id is a no-op, and a repeat call must not panic.
+	hub.UnregisterByUserID(999)
+	hub.UnregisterByUserID(1)
+	if hub.ClientCount() != 1 {
+		t.Errorf("ClientCount = %d, want 1 after no-op/repeat unregister", hub.ClientCount())
+	}
+}
+
 func TestBroadcastToSingleClient(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	event := SSEEvent{
 		ID:        "dl-1",
@@ -126,7 +174,7 @@ func TestBroadcastToMultipleClients(t *testing.T) {
 	chs := make([]chan SSEEvent, numClients)
 	for i := 0; i < numClients; i++ {
 		chs[i] = make(chan SSEEvent, 4)
-		hub.Register(chs[i])
+		hub.Register(chs[i], true, 1)
 	}
 
 	event := SSEEvent{
@@ -150,19 +198,116 @@ func TestBroadcastToMultipleClients(t *testing.T) {
 	}
 }
 
+func TestIsAdminOnlyEvent(t *testing.T) {
+	cases := map[string]bool{
+		"log_line":           true,
+		"job_started":        true,
+		"job_progress":       true,
+		"job_completed":      true,
+		"job_failed":         true,
+		"job_cancelled":      true,
+		"download_queued":    false,
+		"download_progress":  false,
+		"download_completed": false,
+		"import_completed":   false,
+		"import_failed":      false,
+		"heartbeat":          false,
+		"":                   false,
+	}
+
+	for eventType, want := range cases {
+		if got := isAdminOnlyEvent(eventType); got != want {
+			t.Errorf("isAdminOnlyEvent(%q) = %v, want %v", eventType, got, want)
+		}
+	}
+}
+
+// TestBroadcastRoleFiltering verifies that non-admin subscribers never receive
+// admin-only events (log_line, job_*), while both admin and non-admin
+// subscribers receive shared events (download:*, import_*).
+func TestBroadcastRoleFiltering(t *testing.T) {
+	adminOnly := []string{
+		"log_line",
+		"job_started",
+		"job_progress",
+		"job_completed",
+		"job_failed",
+		"job_cancelled",
+	}
+	shared := []string{
+		"download_queued",
+		"download_progress",
+		"download_completed",
+		"download_failed",
+		"import_completed",
+		"import_failed",
+	}
+
+	t.Run("admin-only withheld from non-admin", func(t *testing.T) {
+		for _, eventType := range adminOnly {
+			t.Run(eventType, func(t *testing.T) {
+				hub := NewSSEHub(testLogger())
+				adminCh := make(chan SSEEvent, 4)
+				userCh := make(chan SSEEvent, 4)
+				hub.Register(adminCh, true, 1)
+				hub.Register(userCh, false, 2)
+
+				hub.Broadcast(SSEEvent{ID: "e1", Type: eventType})
+
+				select {
+				case got := <-adminCh:
+					if got.Type != eventType {
+						t.Errorf("admin got type %q, want %q", got.Type, eventType)
+					}
+				case <-time.After(200 * time.Millisecond):
+					t.Fatalf("admin did not receive %q", eventType)
+				}
+
+				select {
+				case got := <-userCh:
+					t.Fatalf("non-admin received admin-only event %q", got.Type)
+				case <-time.After(50 * time.Millisecond):
+					// OK — withheld.
+				}
+			})
+		}
+	})
+
+	t.Run("shared events reach non-admin", func(t *testing.T) {
+		for _, eventType := range shared {
+			t.Run(eventType, func(t *testing.T) {
+				hub := NewSSEHub(testLogger())
+				userCh := make(chan SSEEvent, 4)
+				hub.Register(userCh, false, 2)
+
+				hub.Broadcast(SSEEvent{ID: "e2", Type: eventType})
+
+				select {
+				case got := <-userCh:
+					if got.Type != eventType {
+						t.Errorf("non-admin got type %q, want %q", got.Type, eventType)
+					}
+				case <-time.After(200 * time.Millisecond):
+					t.Fatalf("non-admin did not receive %q", eventType)
+				}
+			})
+		}
+	})
+}
+
 func TestBroadcastSlowClientDropped(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 
 	// Channel with buffer size 0 — always full.
 	slowCh := make(chan SSEEvent)
-	hub.Register(slowCh)
+	hub.Register(slowCh, true, 1)
 
 	// Drain goroutine that never drains.
 	var droppedCount int32
 
 	// Fast client with sufficient buffer.
 	fastCh := make(chan SSEEvent, 16)
-	hub.Register(fastCh)
+	hub.Register(fastCh, true, 1)
 
 	// Send many events. The slow client's channel will fill immediately (capacity 0)
 	// so all events get dropped. The fast client should receive them all.
@@ -201,7 +346,7 @@ func TestBroadcastNonBlockingDoesNotHang(t *testing.T) {
 
 	// Register a client with a zero-size buffer and no reader.
 	ch := make(chan SSEEvent)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	// Broadcasting must return immediately even though nobody reads ch.
 	done := make(chan struct{})
@@ -226,7 +371,7 @@ func TestHeartbeatGoroutine(t *testing.T) {
 	defer cancel()
 
 	ch := make(chan SSEEvent, 32)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	hub.StartHeartbeat(ctx)
 
@@ -261,7 +406,7 @@ func TestHeartbeatStopsOnCancel(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	ch := make(chan SSEEvent, 32)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	hub.StartHeartbeat(ctx)
 
@@ -313,7 +458,7 @@ func TestServeHTTPSetsHeaders(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		hub.ServeHTTP(rec, req)
+		hub.ServeHTTP(rec, req, true, 1)
 		close(done)
 	}()
 
@@ -346,7 +491,7 @@ func TestServeHTTPCleansUpOnDisconnect(t *testing.T) {
 
 	done := make(chan struct{})
 	go func() {
-		hub.ServeHTTP(rec, req)
+		hub.ServeHTTP(rec, req, true, 1)
 		close(done)
 	}()
 
@@ -382,7 +527,7 @@ func TestServeHTTPStreamsEvents(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		hub.ServeHTTP(rec, req)
+		hub.ServeHTTP(rec, req, true, 1)
 	}()
 
 	// Wait for handler to register.
@@ -427,7 +572,7 @@ func TestServeHTTPHeartbeatWritesComment(t *testing.T) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		hub.ServeHTTP(rec, req)
+		hub.ServeHTTP(rec, req, true, 1)
 	}()
 
 	time.Sleep(30 * time.Millisecond)
@@ -455,7 +600,7 @@ func TestSSENotifierReceivesProgress(t *testing.T) {
 	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	record := &download.Record{
 		ID:         "n1",
@@ -483,7 +628,7 @@ func TestSSENotifierReceivesCompleted(t *testing.T) {
 	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	record := &download.Record{
 		ID:         "n2",
@@ -511,7 +656,7 @@ func TestSSENotifierReceivesFailed(t *testing.T) {
 	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	record := &download.Record{
 		ID:         "n3",
@@ -543,7 +688,7 @@ func TestSSENotifierReceivesImportCompleted(t *testing.T) {
 	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	record := &download.Record{
 		ID:         "n4",
@@ -570,7 +715,7 @@ func TestSSENotifierHandle(t *testing.T) {
 	notifier := NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	record := &download.Record{
 		ID:         "n5",
@@ -603,7 +748,7 @@ func TestSSENotifierHandlesNonDownloadRecordEvents(t *testing.T) {
 	_ = NewSSENotifier(hub, bus, testLogger())
 
 	ch := make(chan SSEEvent, 4)
-	hub.Register(ch)
+	hub.Register(ch, true, 1)
 
 	// Publish an unexpected type — must not panic.
 	bus.Publish(context.Background(), events.TopicDownloadProgress, "not-a-record")
@@ -648,7 +793,7 @@ func TestConcurrentRegisterUnregister(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			ch := make(chan SSEEvent, 1)
-			hub.Register(ch)
+			hub.Register(ch, true, 1)
 		}()
 	}
 	wg.Wait()
@@ -665,7 +810,7 @@ func TestConcurrentBroadcastDoesNotRace(t *testing.T) {
 	const numClients = 10
 	for i := 0; i < numClients; i++ {
 		ch := make(chan SSEEvent, 64)
-		hub.Register(ch)
+		hub.Register(ch, true, 1)
 		go func() {
 			for range ch {
 			}
@@ -713,7 +858,7 @@ func BenchmarkBroadcast(b *testing.B) {
 	const numClients = 50
 	for i := 0; i < numClients; i++ {
 		ch := make(chan SSEEvent, 128)
-		hub.Register(ch)
+		hub.Register(ch, true, 1)
 		// Drain in background.
 		go func() {
 			for range ch {
@@ -736,7 +881,7 @@ func TestClientIDIsMonotonic(t *testing.T) {
 	var lastID int64
 	for i := 0; i < 100; i++ {
 		ch := make(chan SSEEvent, 1)
-		id := hub.Register(ch)
+		id := hub.Register(ch, true, 1)
 		if id <= lastID {
 			t.Errorf("ID not monotonic: %d followed by %d", lastID, id)
 		}
@@ -791,7 +936,7 @@ func TestServeHTTPNonFlusher(t *testing.T) {
 		http.ResponseWriter
 	}{ResponseWriter: rec}
 
-	hub.ServeHTTP(rw, req)
+	hub.ServeHTTP(rw, req, true, 1)
 
 	resp := rec.Result()
 	if resp.StatusCode != http.StatusInternalServerError {
@@ -802,7 +947,7 @@ func TestServeHTTPNonFlusher(t *testing.T) {
 func TestShutdownClosesClients(t *testing.T) {
 	hub := NewSSEHub(testLogger())
 	ch := make(chan SSEEvent, 1)
-	id := hub.Register(ch)
+	id := hub.Register(ch, true, 1)
 	if hub.ClientCount() != 1 {
 		t.Fatalf("ClientCount = %d, want 1", hub.ClientCount())
 	}
@@ -827,7 +972,7 @@ func TestShutdownClosesClients(t *testing.T) {
 
 func TestShutdownIdempotent(t *testing.T) {
 	hub := NewSSEHub(testLogger())
-	hub.Register(make(chan SSEEvent, 1))
+	hub.Register(make(chan SSEEvent, 1), true, 1)
 	hub.Shutdown()
 	hub.Shutdown()
 }

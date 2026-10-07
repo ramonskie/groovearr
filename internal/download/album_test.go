@@ -157,7 +157,7 @@ func TestQueueAlbum_CreatesAlbumRecord(t *testing.T) {
 		{TrackNumber: 2, Artist: "Metallica", Title: "Master of Puppets"},
 	}
 
-	id, err := svc.QueueAlbum(context.Background(), release, tracks, "qbittorrent")
+	id, err := svc.QueueAlbum(context.Background(), 0, "", release, tracks, "qbittorrent")
 	if err != nil {
 		t.Fatalf("QueueAlbum: %v", err)
 	}
@@ -201,7 +201,7 @@ func TestQueueAlbum_DefaultsAlbumType(t *testing.T) {
 	svc := NewService(store, bus, nil)
 
 	release := domain.AlbumRelease{SourceName: "prowlarr", Artist: "Test", Album: "Test"}
-	id, err := svc.QueueAlbum(context.Background(), release, nil, "qbittorrent")
+	id, err := svc.QueueAlbum(context.Background(), 0, "", release, nil, "qbittorrent")
 	if err != nil {
 		t.Fatalf("QueueAlbum: %v", err)
 	}
@@ -217,8 +217,8 @@ func TestQueueAlbum_Dedup(t *testing.T) {
 	svc := NewService(store, bus, nil)
 
 	release := domain.AlbumRelease{SourceName: "prowlarr", Artist: "Metallica", Album: "Ride the Lightning"}
-	id1, _ := svc.QueueAlbum(context.Background(), release, nil, "qbittorrent")
-	id2, _ := svc.QueueAlbum(context.Background(), release, nil, "qbittorrent")
+	id1, _ := svc.QueueAlbum(context.Background(), 0, "", release, nil, "qbittorrent")
+	id2, _ := svc.QueueAlbum(context.Background(), 0, "", release, nil, "qbittorrent")
 
 	if id1 != id2 {
 		t.Error("expected dedup to return same ID")

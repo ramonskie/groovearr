@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/plugin"
 )
 
 // oauthStates stores in-progress OAuth state parameters.
@@ -31,13 +32,15 @@ func init() {
 	}()
 }
 
-// RegisterOAuthRoutes adds Spotify OAuth login and callback endpoints to the given mux.
+// RegisterOAuthRoutes adds Spotify OAuth login and callback endpoints. Both are
+// admin-only: they mutate global provider credentials (server-side tokens) and
+// are part of the settings surface.
 // The rebuild callback is invoked after tokens are stored to recreate the spotify plugin
 // so it picks up the new access token. The verify callback is called after rebuild to
 // run CheckConnection so the UI reflects the new state.
-func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
-	mux.HandleFunc("GET /api/spotify/login", handleSpotifyLogin(cfg))
-	mux.HandleFunc("GET /api/spotify/callback", handleSpotifyCallback(cfg, logger, rebuild, verify))
+func RegisterOAuthRoutes(r plugin.RouteRegistrar, cfg *config.Persistence, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
+	r.Admin("GET", "/api/spotify/login", handleSpotifyLogin(cfg))
+	r.Admin("GET", "/api/spotify/callback", handleSpotifyCallback(cfg, logger, rebuild, verify))
 }
 
 // handleSpotifyLogin initiates the OAuth PKCE flow by redirecting the user

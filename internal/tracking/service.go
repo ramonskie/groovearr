@@ -45,8 +45,11 @@ var _ RateLimiter = (*metadata.ProviderCooldown)(nil)
 
 // DownloadQueuer delegates album acquisition to the single canonical
 // policy in internal/download — tracking must not re-implement it.
+//
+// requestedByUserID is the DB-only requester; tracking runs as a background
+// job and always passes 0 (system/unknown).
 type DownloadQueuer interface {
-	QueueAlbumWithFallback(ctx context.Context, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error)
+	QueueAlbumWithFallback(ctx context.Context, requestedByUserID int64, requestedByUsername, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error)
 }
 
 // ActiveDownloadFinder exposes the download records SearchMissing needs to

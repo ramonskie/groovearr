@@ -37,7 +37,7 @@ func TestAlbumVsTrackRouting(t *testing.T) {
 
 	// Queue one album and one track record.
 	svc := NewService(store, bus, nil)
-	albumID, err := svc.QueueAlbum(context.Background(), domain.AlbumRelease{
+	albumID, err := svc.QueueAlbum(context.Background(), 0, "", domain.AlbumRelease{
 		SourceName: "prowlarr", Artist: "Metallica", Album: "Test Album",
 		MagnetURI: "magnet:?xt=urn:test", AlbumType: "Album",
 	}, nil, "qbittorrent")
@@ -45,7 +45,7 @@ func TestAlbumVsTrackRouting(t *testing.T) {
 		t.Fatalf("QueueAlbum: %v", err)
 	}
 
-	trackID, err := svc.Queue(context.Background(), "mock", "user", "test.flac", 1000, Meta{Artist: "Test", Title: "Song"})
+	trackID, err := svc.Queue(context.Background(), 0, "", "mock", "user", "test.flac", 1000, Meta{Artist: "Test", Title: "Song"})
 	if err != nil {
 		t.Fatalf("Queue: %v", err)
 	}

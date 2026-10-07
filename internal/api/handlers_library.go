@@ -638,7 +638,7 @@ func (s *Server) handleLibraryAlbumDownloadMissing(w http.ResponseWriter, r *htt
 		if dt.Downloaded {
 			continue
 		}
-		_, err := s.downloadSvc.QueuePending(ctx, download.Meta{
+		_, err := s.downloadSvc.QueuePending(ctx, requesterID(ctx), requesterUsername(ctx), download.Meta{
 			Artist:      artist.Name,
 			Album:       album.Title,
 			Title:       dt.Title,

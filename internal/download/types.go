@@ -74,25 +74,27 @@ type Event struct {
 
 // Record holds the live state of a single download task.
 type Record struct {
-	ID               string  `json:"id"`
-	SourceName       string  `json:"source_name"`
-	Filename         string  `json:"filename"`
-	DisplayName      string  `json:"display_name"`
-	State            State   `json:"state"`
-	Progress         float64 `json:"progress"` // 0.0 — 100.0
-	Size             int64   `json:"size"`     // bytes
-	Transferred      int64   `json:"transferred"`
-	Speed            int64   `json:"speed"` // bytes/sec
-	FilePath         string  `json:"file_path,omitempty"`
-	Error            string  `json:"error,omitempty"`
-	Username         string  `json:"username,omitempty"`           // source-specific username for download
-	TrackID          string  `json:"track_id,omitempty"`           // source-specific ID
-	CoverURL         string  `json:"cover_url,omitempty"`          // album cover image URL
-	PlaylistID       string  `json:"playlist_id,omitempty"`        // playlist this download belongs to
-	LibraryTrackID   int64   `json:"library_track_id,omitempty"`   // imported library track ID
-	QualityProfileID *int64  `json:"quality_profile_id,omitempty"` // profile applied at download time
-	RetryCount       int     `json:"retry_count,omitempty"`        // number of resolution retries
-	RetryAfter       string  `json:"retry_after,omitempty"`        // RFC3339 — don't retry until after this time
+	ID                  string  `json:"id"`
+	SourceName          string  `json:"source_name"`
+	Filename            string  `json:"filename"`
+	DisplayName         string  `json:"display_name"`
+	State               State   `json:"state"`
+	Progress            float64 `json:"progress"` // 0.0 — 100.0
+	Size                int64   `json:"size"`     // bytes
+	Transferred         int64   `json:"transferred"`
+	Speed               int64   `json:"speed"` // bytes/sec
+	FilePath            string  `json:"file_path,omitempty"`
+	Error               string  `json:"error,omitempty"`
+	Username            string  `json:"username,omitempty"`              // source-specific username for download
+	TrackID             string  `json:"track_id,omitempty"`              // source-specific ID
+	CoverURL            string  `json:"cover_url,omitempty"`             // album cover image URL
+	PlaylistID          string  `json:"playlist_id,omitempty"`           // playlist this download belongs to
+	LibraryTrackID      int64   `json:"library_track_id,omitempty"`      // imported library track ID
+	RequestedByUserID   int64   `json:"requested_by_user_id,omitempty"`  // 0 = system/unknown; DB-only attribution
+	RequestedByUsername string  `json:"requested_by_username,omitempty"` // username snapshot at queue time; survives user deletion (9.7)
+	QualityProfileID    *int64  `json:"quality_profile_id,omitempty"`    // profile applied at download time
+	RetryCount          int     `json:"retry_count,omitempty"`           // number of resolution retries
+	RetryAfter          string  `json:"retry_after,omitempty"`           // RFC3339 — don't retry until after this time
 
 	// Track metadata for post-download organization.
 	Artist      string `json:"artist,omitempty"`

@@ -42,10 +42,12 @@ func init() {
 	}()
 }
 
-// RegisterOAuthRoutes adds Tidal OAuth device code flow endpoints to the mux.
-func RegisterOAuthRoutes(mux *http.ServeMux, cfg *config.Persistence, registry *plugin.Registry, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
-	mux.HandleFunc("GET /api/tidal/login", handleTidalLogin(cfg, registry, logger))
-	mux.HandleFunc("GET /api/tidal/poll", handleTidalPoll(cfg, registry, logger, rebuild, verify))
+// RegisterOAuthRoutes adds Tidal OAuth device code flow endpoints. Both are
+// admin-only: they mutate global provider credentials (server-side tokens) and
+// are part of the settings surface.
+func RegisterOAuthRoutes(r plugin.RouteRegistrar, cfg *config.Persistence, registry *plugin.Registry, logger *slog.Logger, rebuild func(name string, rawCfg json.RawMessage) error, verify func(name string)) {
+	r.Admin("GET", "/api/tidal/login", handleTidalLogin(cfg, registry, logger))
+	r.Admin("GET", "/api/tidal/poll", handleTidalPoll(cfg, registry, logger, rebuild, verify))
 
 	// Wire token persistence on startup so refreshed tokens survive restarts.
 	if tp := registry.Get("tidal"); tp != nil {

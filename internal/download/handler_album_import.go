@@ -138,6 +138,10 @@ func (h *AlbumImportHandler) Handle(ctx context.Context, record *Record) error {
 			CoverURL:    record.CoverURL,
 			AlbumMBID:   record.AlbumMBID,
 			AlbumSynth:  true,
+			// Propagate attribution so per-track library rows created by the
+			// synthetic record carry the album download's requester (9.3).
+			RequestedByUserID:   record.RequestedByUserID,
+			RequestedByUsername: record.RequestedByUsername,
 		}
 
 		// Insert into store so handlers that call store.Update() (e.g.,

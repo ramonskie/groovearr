@@ -32,10 +32,11 @@ func testAPILogger() *slog.Logger {
 // panics, which is fine for these narrow handler tests.
 type stubLibraryStore struct {
 	library.Store
-	artists []domain.Artist
-	tracks  map[int64][]domain.Track
-	merges  [][2]int64 // (keep, remove)
-	renames []struct {
+	artists      []domain.Artist
+	tracks       map[int64][]domain.Track
+	searchTracks []domain.Track
+	merges       [][2]int64 // (keep, remove)
+	renames      []struct {
 		id   int64
 		name string
 	}
@@ -66,6 +67,10 @@ func (s *stubLibraryStore) GetArtist(ctx context.Context, id int64) (*domain.Art
 
 func (s *stubLibraryStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
 	return s.tracks[artistID], nil
+}
+
+func (s *stubLibraryStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
+	return s.searchTracks, nil
 }
 
 func (s *stubLibraryStore) MergeArtists(ctx context.Context, keepID, removeID int64) error {
@@ -712,5 +717,51 @@ func TestArtistDuplicatesFeatMarkedGroupedWithPrimary(t *testing.T) {
 	}
 	if len(store.merges) != 1 || store.merges[0] != [2]int64{1, 2} {
 		t.Errorf("merge not forwarded to store: %v", store.merges)
+	}
+}
+
+// TestHandleLibraryTracks_ExposesAddedByAttribution verifies the library list
+// handler passes domain.Track attribution straight through to JSON as
+// snake_case added_by_user_id/added_by_username for user-added items. System
+// items carry zero/blank attribution, which the omitempty tags drop.
+func TestHandleLibraryTracks_ExposesAddedByAttribution(t *testing.T) {
+	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stubLibraryStore{
+		searchTracks: []domain.Track{
+			{ID: 1, Title: "User Song", AddedByUserID: 42, AddedByUsername: "alice"},
+			{ID: 2, Title: "Scanned Song"},
+		},
+	}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/tracks", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryTracks(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+
+	var got []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("expected 2 tracks, got %d", len(got))
+	}
+	if got[0]["added_by_user_id"] != float64(42) {
+		t.Errorf("added_by_user_id = %v, want 42", got[0]["added_by_user_id"])
+	}
+	if got[0]["added_by_username"] != "alice" {
+		t.Errorf("added_by_username = %v, want alice", got[0]["added_by_username"])
+	}
+	// System row: zero/blank attribution is omitted, not serialized.
+	if _, ok := got[1]["added_by_user_id"]; ok {
+		t.Errorf("system track should omit added_by_user_id, got %v", got[1]["added_by_user_id"])
+	}
+	if _, ok := got[1]["added_by_username"]; ok {
+		t.Errorf("system track should omit added_by_username, got %v", got[1]["added_by_username"])
 	}
 }

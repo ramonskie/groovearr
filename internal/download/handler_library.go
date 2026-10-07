@@ -68,6 +68,11 @@ func (h *LibraryImporterHandler) Handle(ctx context.Context, record *Record) err
 		FileSize:    fi.Size(),
 		Bitrate:     record.Bitrate,
 		ISRC:        record.ISRC,
+		// DB-only attribution (plan 9.3): stamp the download's requester so
+		// the library row shows who asked for it. Never written to audio tags.
+		// Zero/blank for system downloads, which the store persists as NULL/''.
+		AddedByUserID:   record.RequestedByUserID,
+		AddedByUsername: record.RequestedByUsername,
 	}
 
 	// Copy external IDs from record to track.

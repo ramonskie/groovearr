@@ -270,7 +270,7 @@ func TestQueueCreatesRecord(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 12345678, Meta{})
+	id, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "song.flac", 12345678, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestQueueSetsDisplayName(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "song.flac", 1, Meta{
 		Artist: "Artist", Title: "Title",
 	})
 	record, _ := store.Get(context.Background(), id)
@@ -312,12 +312,44 @@ func TestQueueSetsDisplayName(t *testing.T) {
 	}
 }
 
+// TestQueueThreadsRequestedByUserID verifies all three queue entry points
+// stamp the requester onto the persisted record for DB-only attribution.
+func TestQueueThreadsRequestedByUserID(t *testing.T) {
+	store := newMockStore()
+	svc := NewService(store, newMockBus(), testLogger())
+	ctx := context.Background()
+
+	id, err := svc.Queue(ctx, 11, "", "soulseek", "peer", "song.flac", 1, Meta{Artist: "A", Title: "T1"})
+	if err != nil {
+		t.Fatalf("Queue: %v", err)
+	}
+	if rec, _ := store.Get(ctx, id); rec == nil || rec.RequestedByUserID != 11 {
+		t.Errorf("Queue RequestedByUserID = %v, want 11", rec)
+	}
+
+	id, err = svc.QueuePending(ctx, 22, "", Meta{Artist: "A", Title: "T2"})
+	if err != nil {
+		t.Fatalf("QueuePending: %v", err)
+	}
+	if rec, _ := store.Get(ctx, id); rec == nil || rec.RequestedByUserID != 22 {
+		t.Errorf("QueuePending RequestedByUserID = %v, want 22", rec)
+	}
+
+	id, err = svc.QueueAlbum(ctx, 33, "", domain.AlbumRelease{SourceName: "prowlarr", Artist: "A", Album: "B"}, nil, "qbit")
+	if err != nil {
+		t.Fatalf("QueueAlbum: %v", err)
+	}
+	if rec, _ := store.Get(ctx, id); rec == nil || rec.RequestedByUserID != 33 {
+		t.Errorf("QueueAlbum RequestedByUserID = %v, want 33", rec)
+	}
+}
+
 func TestQueueFiresQueuedEvent(t *testing.T) {
 	store := newMockStore()
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "song.flac", 1, Meta{})
+	id, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "song.flac", 1, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +377,7 @@ func TestQueuePersistsMetaFields(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "deezer", "dluser", "42.mp3", 999, Meta{
+	id, _ := svc.Queue(context.Background(), 0, "", "deezer", "dluser", "42.mp3", 999, Meta{
 		Artist: "TestArtist", Album: "TestAlbum", Title: "TestTitle",
 		TrackNumber: 3, DiscNumber: 1, Year: 2024,
 		TrackID: "trk-42", ISRC: "US-ABC-24-00001", CoverURL: "http://cover.jpg",
@@ -377,13 +409,13 @@ func TestQueueDedupSkipsActive(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "DupeArtist", Title: "DupeTitle"}
-	id1, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
+	id1, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f1.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Second queue with same artist+title should return existing ID.
-	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
+	id2, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -397,7 +429,7 @@ func TestQueueDedupErrorLogsWarning(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "ErrArtist", Title: "ErrTitle"}
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
+	id, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f1.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -409,7 +441,7 @@ func TestQueueDedupErrorLogsWarning(t *testing.T) {
 
 	// Insert nil record will trigger an error on FindActiveByTitle in real store;
 	// mock always returns nil,nil so this tests the happy dedup miss path.
-	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
+	id2, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -423,12 +455,12 @@ func TestQueueDedupPreservesState(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "PreserveArt", Title: "PreserveTitle"}
-	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
+	id1, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f1.flac", 1, meta)
 
 	// Manually change state — dedup should still return id1 since it's active.
 	_ = store.Update(context.Background(), &Record{ID: id1, State: StateDownloading})
 
-	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
+	id2, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -442,10 +474,10 @@ func TestQueueNoDedupForTerminal(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "TermArt", Title: "TermTitle"}
-	id1, _ := svc.Queue(context.Background(), "soulseek", "peer", "f1.flac", 1, meta)
+	id1, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f1.flac", 1, meta)
 	_ = store.Update(context.Background(), &Record{ID: id1, State: StateImported})
 
-	id2, err := svc.Queue(context.Background(), "soulseek", "peer", "f2.flac", 1, meta)
+	id2, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f2.flac", 1, meta)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -461,7 +493,7 @@ func TestQueuePendingCreatesRecord(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, err := svc.QueuePending(context.Background(), Meta{
+	id, err := svc.QueuePending(context.Background(), 0, "", Meta{
 		Artist: "Artist", Album: "Album", Title: "Title",
 		Bitrate: 320, Format: "flac",
 	})
@@ -491,8 +523,8 @@ func TestQueuePendingDedup(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	meta := Meta{Artist: "A", Title: "T"}
-	id1, _ := svc.QueuePending(context.Background(), meta)
-	id2, _ := svc.QueuePending(context.Background(), meta)
+	id1, _ := svc.QueuePending(context.Background(), 0, "", meta)
+	id2, _ := svc.QueuePending(context.Background(), 0, "", meta)
 	if id1 != id2 {
 		t.Errorf("expected dedup, got %q and %q", id1, id2)
 	}
@@ -503,8 +535,8 @@ func TestQueuePendingNoDedupMissingArtistTitle(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 
 	// No artist/title → dedup is skipped, two records are created.
-	id1, _ := svc.QueuePending(context.Background(), Meta{})
-	id2, _ := svc.QueuePending(context.Background(), Meta{})
+	id1, _ := svc.QueuePending(context.Background(), 0, "", Meta{})
+	id2, _ := svc.QueuePending(context.Background(), 0, "", Meta{})
 	if id1 == id2 {
 		t.Error("expected two distinct records when artist/title are empty")
 	}
@@ -516,7 +548,7 @@ func TestGetStatus(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, err := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 42, Meta{})
+	id, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 42, Meta{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -551,8 +583,8 @@ func TestList(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	_, _ = svc.Queue(context.Background(), "soulseek", "p1", "a.flac", 1, Meta{})
-	_, _ = svc.Queue(context.Background(), "deezer", "u1", "b.mp3", 2, Meta{})
+	_, _ = svc.Queue(context.Background(), 0, "", "soulseek", "p1", "a.flac", 1, Meta{})
+	_, _ = svc.Queue(context.Background(), 0, "", "deezer", "u1", "b.mp3", 2, Meta{})
 
 	records, err := svc.List(context.Background())
 	if err != nil {
@@ -570,7 +602,7 @@ func TestCancelSetsIgnored(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 
 	err := svc.Cancel(context.Background(), id)
 	if err != nil {
@@ -588,7 +620,7 @@ func TestCancelFiresStateChangedEvent(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = svc.Cancel(context.Background(), id)
 
 	evts := bus.published()
@@ -619,7 +651,7 @@ func TestCancelAlreadyTerminalIsNoOp(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	// Manually set to terminal in store.
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateImported})
 
@@ -648,7 +680,7 @@ func TestRetryResetsToQueued(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 
 	// Manually set to failed in store.
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, Error: "download error"})
@@ -675,7 +707,7 @@ func TestRetryFiresStateChangedEvent(t *testing.T) {
 	bus := newMockBus()
 	svc := NewService(store, bus, testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed})
 
 	_ = svc.Retry(context.Background(), id)
@@ -699,7 +731,7 @@ func TestRetryNonRetryableState(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 
 	// Record is in "queued" state — not retryable.
 	err := svc.Retry(context.Background(), id)
@@ -728,7 +760,7 @@ func TestConcurrentQueueAndCancel(t *testing.T) {
 		wg.Add(1)
 		go func(n int) {
 			defer wg.Done()
-			_, err := svc.Queue(context.Background(), "soulseek", "peer", fmt.Sprintf("f%d.flac", n), int64(n), Meta{})
+			_, err := svc.Queue(context.Background(), 0, "", "soulseek", "peer", fmt.Sprintf("f%d.flac", n), int64(n), Meta{})
 			if err != nil {
 				t.Errorf("concurrent Queue failed: %v", err)
 			}
@@ -748,7 +780,7 @@ func TestManualRetryResetsRetryCount(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: 5})
 
 	_ = svc.Retry(context.Background(), id)
@@ -766,7 +798,7 @@ func TestManualRetryNotBlockedByMaxRetries(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed, RetryCount: MaxRetries})
 
 	err := svc.Retry(context.Background(), id)
@@ -784,7 +816,7 @@ func TestManualRetryClearsBackoff(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer", "f.flac", 1, Meta{})
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer", "f.flac", 1, Meta{})
 	_ = store.Update(context.Background(), &Record{
 		ID: id, State: StateFailed,
 		RetryAfter: time.Now().UTC().Add(time.Hour).Format(time.RFC3339),
@@ -815,7 +847,7 @@ func TestResolveRetrySourcePopulatesFields(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 	svc.SetRegistry(reg)
 
-	id, _ := svc.Queue(context.Background(), "soulseek", "peer1", "old.flac", 100, Meta{
+	id, _ := svc.Queue(context.Background(), 0, "", "soulseek", "peer1", "old.flac", 100, Meta{
 		Artist: "Artist", Title: "Title",
 	})
 	_ = store.Update(context.Background(), &Record{ID: id, State: StateFailed})
@@ -960,13 +992,13 @@ func TestQueuePendingISRCAwareDedup(t *testing.T) {
 	ctx := context.Background()
 
 	// First release.
-	id1, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
+	id1, err := svc.QueuePending(ctx, 0, "", Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Same artist+title, DIFFERENT ISRC → distinct release, new record.
-	id2, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCB"})
+	id2, err := svc.QueuePending(ctx, 0, "", Meta{Artist: "A", Title: "T", ISRC: "ISRCB"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -975,7 +1007,7 @@ func TestQueuePendingISRCAwareDedup(t *testing.T) {
 	}
 
 	// Re-queue of the FIRST release → deduped back to id1.
-	id3, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
+	id3, err := svc.QueuePending(ctx, 0, "", Meta{Artist: "A", Title: "T", ISRC: "ISRCA"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -985,7 +1017,7 @@ func TestQueuePendingISRCAwareDedup(t *testing.T) {
 
 	// ISRC-less queue of the same title → still deduped by the title fallback
 	// to whichever active record matches (both releases share the title).
-	id4, err := svc.QueuePending(ctx, Meta{Artist: "A", Title: "T"})
+	id4, err := svc.QueuePending(ctx, 0, "", Meta{Artist: "A", Title: "T"})
 	if err != nil {
 		t.Fatal(err)
 	}

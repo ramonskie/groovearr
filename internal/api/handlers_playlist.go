@@ -126,7 +126,11 @@ func (s *Server) handleImportPlaylist(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID, req.SyncMode)
+	// Attribute the import to the authenticated caller (DB-only, create-only).
+	// A request with no identity (auth.method="none", API key) carries 0/"" and
+	// the playlist is stamped blank.
+	identity, _ := identityFrom(r.Context())
+	result, err := s.playlistSvc.ImportPlaylist(r.Context(), req.Source, req.PlaylistID, req.SyncMode, identity.UserID, identity.Username)
 	if err != nil {
 		s.log.Error("playlist import failed", "source", req.Source, "playlist_id", req.PlaylistID, "error", err, "component", "api")
 		writeError(w, http.StatusInternalServerError, err)

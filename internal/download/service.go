@@ -141,7 +141,11 @@ func (s *Service) dedupMatch(ctx context.Context, meta Meta) *Record {
 	return existing
 }
 
-func (s *Service) Queue(ctx context.Context, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
+// requestedByUserID is the authenticated requester for DB-only attribution;
+// 0 means system/unknown (background jobs, playlist sync, API-key callers).
+// requestedByUsername is the requester's name snapshot taken at queue time so
+// attribution survives user deletion (plan 9.7); "" for system/unknown.
+func (s *Service) Queue(ctx context.Context, requestedByUserID int64, requestedByUsername string, sourceName, username, filename string, fileSize int64, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -162,25 +166,27 @@ func (s *Service) Queue(ctx context.Context, sourceName, username, filename stri
 	}
 
 	record := &Record{
-		ID:          id,
-		SourceName:  sourceName,
-		Username:    username,
-		Filename:    filename,
-		DisplayName: displayName,
-		State:       StateQueued,
-		Size:        fileSize,
-		TrackID:     meta.TrackID,
-		ISRC:        meta.ISRC,
-		CoverURL:    meta.CoverURL,
-		PlaylistID:  meta.PlaylistID,
-		Artist:      meta.Artist,
-		Album:       meta.Album,
-		Title:       meta.Title,
-		TrackNumber: meta.TrackNumber,
-		DiscNumber:  meta.DiscNumber,
-		Year:        meta.Year,
-		Bitrate:     meta.Bitrate,
-		Format:      meta.Format,
+		ID:                  id,
+		SourceName:          sourceName,
+		Username:            username,
+		Filename:            filename,
+		DisplayName:         displayName,
+		State:               StateQueued,
+		Size:                fileSize,
+		TrackID:             meta.TrackID,
+		ISRC:                meta.ISRC,
+		CoverURL:            meta.CoverURL,
+		PlaylistID:          meta.PlaylistID,
+		RequestedByUserID:   requestedByUserID,
+		RequestedByUsername: requestedByUsername,
+		Artist:              meta.Artist,
+		Album:               meta.Album,
+		Title:               meta.Title,
+		TrackNumber:         meta.TrackNumber,
+		DiscNumber:          meta.DiscNumber,
+		Year:                meta.Year,
+		Bitrate:             meta.Bitrate,
+		Format:              meta.Format,
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {
@@ -198,7 +204,7 @@ func (s *Service) Queue(ctx context.Context, sourceName, username, filename stri
 //
 // This enables batch-queuing all items first (visible in UI), then resolving
 // them in the background.
-func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
+func (s *Service) QueuePending(ctx context.Context, requestedByUserID int64, requestedByUsername string, meta Meta) (string, error) {
 	// Serialize dedup check + insert to prevent TOCTOU race.
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -214,22 +220,24 @@ func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
 	displayName := meta.Artist + " - " + meta.Title
 
 	record := &Record{
-		ID:          id,
-		SourceName:  PendingSource,
-		DisplayName: displayName,
-		State:       StateQueued,
-		TrackID:     meta.TrackID,
-		ISRC:        meta.ISRC,
-		CoverURL:    meta.CoverURL,
-		PlaylistID:  meta.PlaylistID,
-		Artist:      meta.Artist,
-		Album:       meta.Album,
-		Title:       meta.Title,
-		TrackNumber: meta.TrackNumber,
-		DiscNumber:  meta.DiscNumber,
-		Year:        meta.Year,
-		Bitrate:     meta.Bitrate,
-		Format:      meta.Format,
+		ID:                  id,
+		SourceName:          PendingSource,
+		DisplayName:         displayName,
+		State:               StateQueued,
+		TrackID:             meta.TrackID,
+		ISRC:                meta.ISRC,
+		CoverURL:            meta.CoverURL,
+		PlaylistID:          meta.PlaylistID,
+		RequestedByUserID:   requestedByUserID,
+		RequestedByUsername: requestedByUsername,
+		Artist:              meta.Artist,
+		Album:               meta.Album,
+		Title:               meta.Title,
+		TrackNumber:         meta.TrackNumber,
+		DiscNumber:          meta.DiscNumber,
+		Year:                meta.Year,
+		Bitrate:             meta.Bitrate,
+		Format:              meta.Format,
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {
@@ -243,7 +251,7 @@ func (s *Service) QueuePending(ctx context.Context, meta Meta) (string, error) {
 // QueueAlbum creates a single download record for a full album release.
 // Unlike Queue (per-track), this produces ONE record that imports N tracks
 // from a downloaded folder. Used by album-capable sources (prowlarr/torrent).
-func (s *Service) QueueAlbum(ctx context.Context, release domain.AlbumRelease, tracks []domain.ExpectedTrack, downloadClient string) (string, error) {
+func (s *Service) QueueAlbum(ctx context.Context, requestedByUserID int64, requestedByUsername string, release domain.AlbumRelease, tracks []domain.ExpectedTrack, downloadClient string) (string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -266,21 +274,23 @@ func (s *Service) QueueAlbum(ctx context.Context, release domain.AlbumRelease, t
 	}
 
 	record := &Record{
-		ID:             id,
-		SourceName:     release.SourceName,
-		State:          StateQueued,
-		DisplayName:    displayName,
-		Title:          release.Album, // used by FindActiveByTitle dedup for albums
-		AlbumType:      albumType,
-		AlbumTracks:    tracks,
-		DownloadClient: downloadClient,
-		Artist:         release.Artist,
-		Album:          release.Album,
-		Year:           release.Year,
-		MagnetURI:      release.MagnetURI,
-		Size:           release.Size,
-		CoverURL:       release.CoverURL,
-		Filename:       release.MagnetURI, // for backward compat with monitor dispatch
+		ID:                  id,
+		SourceName:          release.SourceName,
+		State:               StateQueued,
+		DisplayName:         displayName,
+		Title:               release.Album, // used by FindActiveByTitle dedup for albums
+		AlbumType:           albumType,
+		AlbumTracks:         tracks,
+		DownloadClient:      downloadClient,
+		Artist:              release.Artist,
+		Album:               release.Album,
+		Year:                release.Year,
+		MagnetURI:           release.MagnetURI,
+		Size:                release.Size,
+		CoverURL:            release.CoverURL,
+		Filename:            release.MagnetURI, // for backward compat with monitor dispatch
+		RequestedByUserID:   requestedByUserID,
+		RequestedByUsername: requestedByUsername,
 	}
 
 	if err := s.store.Insert(ctx, record); err != nil {

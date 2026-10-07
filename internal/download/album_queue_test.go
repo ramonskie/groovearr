@@ -140,7 +140,7 @@ func TestQueueAlbumWithFallback(t *testing.T) {
 				svc.SetAlbumSearcher(tc.searcher)
 			}
 
-			res, err := svc.QueueAlbumWithFallback(context.Background(), "A", "B", tc.tracks, tc.client, tc.sources)
+			res, err := svc.QueueAlbumWithFallback(context.Background(), 0, "", "A", "B", tc.tracks, tc.client, tc.sources)
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -172,7 +172,7 @@ func TestQueueAlbumWithFallbackPerTrackPersists(t *testing.T) {
 	store := newMockStore()
 	svc := NewService(store, newMockBus(), testLogger())
 
-	res, err := svc.QueueAlbumWithFallback(context.Background(), "A", "B", sampleTracks(), "", nil)
+	res, err := svc.QueueAlbumWithFallback(context.Background(), 0, "", "A", "B", sampleTracks(), "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -202,7 +202,7 @@ func TestQueueAlbumWithFallbackPerTrackWhenMetadataEmpty(t *testing.T) {
 	svc := NewService(newMockStore(), newMockBus(), testLogger())
 	svc.SetAlbumSearcher(searcher)
 
-	res, err := svc.QueueAlbumWithFallback(context.Background(), "", "", sampleTracks(), "qbit", []string{"prowlarr"})
+	res, err := svc.QueueAlbumWithFallback(context.Background(), 0, "", "", "", sampleTracks(), "qbit", []string{"prowlarr"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func TestQueueAlbumWithFallbackQueueAlbumErrorPropagates(t *testing.T) {
 	svc := NewService(store, newMockBus(), testLogger())
 	svc.SetAlbumSearcher(&fakeAlbumSearcher{releases: oneAlbumRelease()})
 
-	res, err := svc.QueueAlbumWithFallback(context.Background(), "A", "B", sampleTracks(), "qbit", []string{"prowlarr"})
+	res, err := svc.QueueAlbumWithFallback(context.Background(), 0, "", "A", "B", sampleTracks(), "qbit", []string{"prowlarr"})
 	if err == nil {
 		t.Fatal("expected error from failed QueueAlbum")
 	}
@@ -256,7 +256,7 @@ func TestQueueAlbumWithFallbackPerTrackSkipsAndCollectsErrors(t *testing.T) {
 		{Artist: "A", Title: ""},        // skipped
 	}
 
-	res, err := svc.QueueAlbumWithFallback(context.Background(), "A", "B", tracks, "", nil)
+	res, err := svc.QueueAlbumWithFallback(context.Background(), 0, "", "A", "B", tracks, "", nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

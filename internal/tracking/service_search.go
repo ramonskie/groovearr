@@ -399,7 +399,8 @@ func (s *Service) queueWantedAlbum(ctx context.Context, artist *domain.TrackedAr
 		s.log.Warn("album track lookup failed, attempting album-first without tracks", "artist", artist.Name, "album", album.Title, "error", err, "component", "tracking")
 		tracks = nil
 	}
-	return s.queuer.QueueAlbumWithFallback(ctx, artist.Name, album.Title, trackQueues(tracks), s.cfg().DownloadClient, s.cfg().AlbumSources)
+	// 0: tracking is a background job — requester is system/unknown.
+	return s.queuer.QueueAlbumWithFallback(ctx, 0, "", artist.Name, album.Title, trackQueues(tracks), s.cfg().DownloadClient, s.cfg().AlbumSources)
 }
 
 // trackQueues converts resolved discovery tracks into the canonical queue shape

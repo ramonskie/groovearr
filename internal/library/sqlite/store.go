@@ -83,6 +83,8 @@ func (s *Store) migrate() error {
 			album_type TEXT DEFAULT 'album',
 			release_date TEXT,
 			external_ids TEXT DEFAULT '{}',
+			added_by_user_id INTEGER,
+			added_by_username TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (artist_id) REFERENCES artists(id) ON DELETE CASCADE
@@ -102,6 +104,8 @@ func (s *Store) migrate() error {
 			acoustid TEXT,
 			isrc TEXT,
 			quality_profile_id INTEGER,
+			added_by_user_id INTEGER,
+			added_by_username TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now')),
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE,
@@ -126,6 +130,8 @@ func (s *Store) migrate() error {
 			auto_sync          INTEGER DEFAULT 0,
 			sync_mode          TEXT DEFAULT 'mirror',
 			synced_at          TEXT,
+			added_by_user_id   INTEGER,
+			added_by_username  TEXT NOT NULL DEFAULT '',
 			created_at         TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
 			UNIQUE(source, source_playlist_id)
@@ -181,6 +187,8 @@ func (s *Store) migrate() error {
 			magnet_uri TEXT NOT NULL DEFAULT '',
 			folder_path TEXT NOT NULL DEFAULT '',
 			imported_track_ids TEXT NOT NULL DEFAULT '',
+			requested_by_user_id INTEGER NOT NULL DEFAULT 0,
+			requested_by_username TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
@@ -332,6 +340,26 @@ func (s *Store) migrate() error {
 		// tracked_albums.last_searched_at powers the rotating SearchMissing
 		// batch (R1); added here for databases created before the column.
 		`ALTER TABLE tracked_albums ADD COLUMN last_searched_at TEXT`,
+		// Phase 9 attribution: who requested each download and who added each
+		// track/album/playlist. NULL/0 = system or unknown; existing rows keep
+		// NULL/0. Additive only — no behavior change to scanners or organizers.
+		`ALTER TABLE downloads ADD COLUMN requested_by_user_id INTEGER NOT NULL DEFAULT 0`,
+		// requested_by_username snapshots the requester's name at queue time so
+		// attribution survives user deletion (plan 9.7). Additive only.
+		`ALTER TABLE downloads ADD COLUMN requested_by_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE tracks ADD COLUMN added_by_user_id INTEGER`,
+		`ALTER TABLE tracks ADD COLUMN added_by_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE albums ADD COLUMN added_by_user_id INTEGER`,
+		`ALTER TABLE albums ADD COLUMN added_by_username TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE playlists ADD COLUMN added_by_user_id INTEGER`,
+		`ALTER TABLE playlists ADD COLUMN added_by_username TEXT NOT NULL DEFAULT ''`,
+		// Indexes are created here (after the ALTERs) so a database that
+		// predates the columns indexes them too; IF NOT EXISTS keeps fresh
+		// databases idempotent.
+		`CREATE INDEX IF NOT EXISTS idx_downloads_requested_by_user_id ON downloads(requested_by_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_tracks_added_by_user_id ON tracks(added_by_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_albums_added_by_user_id ON albums(added_by_user_id)`,
+		`CREATE INDEX IF NOT EXISTS idx_playlists_added_by_user_id ON playlists(added_by_user_id)`,
 	}
 	for _, stmt := range migrations {
 		if _, err := s.db.Exec(stmt); err != nil {
@@ -634,11 +662,11 @@ func (s *Store) UpsertAlbum(ctx context.Context, album *domain.Album) (int64, er
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO albums (artist_id, title, year, genres, track_count,
 			duration, thumb_url, album_type, release_date,
-			external_ids, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, added_by_user_id, added_by_username, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		album.ArtistID, album.Title, album.Year, string(genresJSON), album.TrackCount,
 		album.Duration, album.ThumbURL, album.AlbumType, album.ReleaseDate,
-		string(extIDsJSON), now, now,
+		string(extIDsJSON), nullableUserID(album.AddedByUserID), album.AddedByUsername, now, now,
 	)
 	if err != nil {
 		s.log.Error("upsert album insert failed", "error", err, "component", "lib_store")
@@ -699,12 +727,13 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 	result, err := s.db.ExecContext(ctx, `
 		INSERT INTO tracks (album_id, artist_id, title, track_number,
 			disc_number, duration, file_path, bitrate, file_size,
-			external_ids, acoustid, isrc, quality_profile_id, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			external_ids, acoustid, isrc, quality_profile_id,
+			added_by_user_id, added_by_username, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		track.AlbumID, track.ArtistID, track.Title, track.TrackNumber,
 		track.DiscNumber, track.Duration, track.FilePath, track.Bitrate, track.FileSize,
 		string(extIDsJSON), track.AcoustID, track.ISRC, track.QualityProfileID,
-		now, now,
+		nullableUserID(track.AddedByUserID), track.AddedByUsername, now, now,
 	)
 	if err != nil {
 		s.log.Error("upsert track insert failed", "error", err, "component", "lib_store")
@@ -795,7 +824,7 @@ func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName
 		return 0, fmt.Errorf("import artist: %w", err)
 	}
 
-	albumID, err := s.getOrCreateAlbum(ctx, artistID, albumTitle, albumYear, genres)
+	albumID, err := s.getOrCreateAlbum(ctx, artistID, albumTitle, albumYear, genres, track.AddedByUserID, track.AddedByUsername)
 	if err != nil {
 		s.log.Error("import track: getOrCreateAlbum failed", "error", err, "component", "lib_store")
 		return 0, fmt.Errorf("import album: %w", err)
@@ -804,6 +833,16 @@ func (s *Store) ImportTrack(ctx context.Context, track *domain.Track, artistName
 	track.ArtistID = artistID
 	track.AlbumID = albumID
 	return s.UpsertTrack(ctx, track)
+}
+
+// nullableUserID maps the zero user id to SQL NULL so system-imported rows
+// store NULL rather than 0 (plan 9.1: NULL/0 = system or unknown). Any
+// non-zero requester id is stored as-is.
+func nullableUserID(id int64) any {
+	if id == 0 {
+		return nil
+	}
+	return id
 }
 
 func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, error) {
@@ -830,7 +869,7 @@ func (s *Store) getOrCreateArtist(ctx context.Context, name string) (int64, erro
 	return s.UpsertArtist(ctx, &domain.Artist{Name: name})
 }
 
-func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title string, year int, genres []string) (int64, error) {
+func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title string, year int, genres []string, addedByUserID int64, addedByUsername string) (int64, error) {
 	// Exact match first — SearchAlbums uses LIKE and a hard limit of 10,
 	// which can miss the correct album if 10+ similar titles exist.
 	row := s.db.QueryRowContext(ctx,
@@ -870,11 +909,13 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 	}
 
 	return s.UpsertAlbum(ctx, &domain.Album{
-		ArtistID:  artistID,
-		Title:     title,
-		Year:      year,
-		Genres:    genres,
-		AlbumType: domain.AlbumTypeAlbum,
+		ArtistID:        artistID,
+		Title:           title,
+		Year:            year,
+		Genres:          genres,
+		AlbumType:       domain.AlbumTypeAlbum,
+		AddedByUserID:   addedByUserID,
+		AddedByUsername: addedByUsername,
 	})
 }
 
@@ -907,13 +948,23 @@ func (s *Store) GetTrackByExternalID(ctx context.Context, service, externalID st
 // ─── Internal scan helpers ───────────────────────────────────────────
 
 const albumSelect = `SELECT id, artist_id, title, year, genres, track_count, duration, thumb_url,
-	album_type, release_date, external_ids, created_at, updated_at
+	album_type, release_date, external_ids, created_at, updated_at,
+	added_by_user_id, added_by_username
 	FROM albums`
 
 const trackSelect = `SELECT id, album_id, artist_id, title, track_number, disc_number,
 	duration, file_path, bitrate, file_size,
-	external_ids, acoustid, isrc, quality_profile_id, created_at, updated_at
+	external_ids, acoustid, isrc, quality_profile_id, created_at, updated_at,
+	added_by_user_id, added_by_username
 	FROM tracks`
+
+// playlistSelect is the canonical column list for playlist reads. added_by_*
+// carries DB-only attribution; it must be selected on every read path so the
+// API exposes it (the domain struct is serialized directly).
+const playlistSelect = `SELECT id, source, source_playlist_id, name, description, track_count,
+	cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at,
+	added_by_user_id, added_by_username
+	FROM playlists`
 
 func (s *Store) scanArtist(row *sql.Row) (*domain.Artist, error) {
 	var a domain.Artist
@@ -960,9 +1011,10 @@ func (s *Store) scanArtists(rows *sql.Rows) ([]domain.Artist, error) {
 func (s *Store) scanAlbum(row *sql.Row) (*domain.Album, error) {
 	var a domain.Album
 	var genresJSON, extIDsJSON, createdAt, updatedAt, albumType string
+	var addedByUserID sql.NullInt64
 	err := row.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON, &a.TrackCount,
 		&a.Duration, &a.ThumbURL, &albumType, &a.ReleaseDate,
-		&extIDsJSON, &createdAt, &updatedAt)
+		&extIDsJSON, &createdAt, &updatedAt, &addedByUserID, &a.AddedByUsername)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -975,6 +1027,7 @@ func (s *Store) scanAlbum(row *sql.Row) (*domain.Album, error) {
 		json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
 	}
 	a.AlbumType = domain.AlbumType(albumType)
+	a.AddedByUserID = addedByUserID.Int64
 	a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &a, nil
@@ -985,9 +1038,10 @@ func (s *Store) scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 	for rows.Next() {
 		var a domain.Album
 		var genresJSON, extIDsJSON, createdAt, updatedAt, albumType string
+		var addedByUserID sql.NullInt64
 		if err := rows.Scan(&a.ID, &a.ArtistID, &a.Title, &a.Year, &genresJSON,
 			&a.TrackCount, &a.Duration, &a.ThumbURL, &albumType, &a.ReleaseDate,
-			&extIDsJSON, &createdAt, &updatedAt); err != nil {
+			&extIDsJSON, &createdAt, &updatedAt, &addedByUserID, &a.AddedByUsername); err != nil {
 			s.log.Error("scan albums failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
@@ -996,6 +1050,7 @@ func (s *Store) scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 			json.Unmarshal([]byte(extIDsJSON), &a.ExternalIDs)
 		}
 		a.AlbumType = domain.AlbumType(albumType)
+		a.AddedByUserID = addedByUserID.Int64
 		a.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		a.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 		albums = append(albums, a)
@@ -1006,10 +1061,11 @@ func (s *Store) scanAlbums(rows *sql.Rows) ([]domain.Album, error) {
 func (s *Store) scanTrack(row *sql.Row) (*domain.Track, error) {
 	var t domain.Track
 	var extIDsJSON, createdAt, updatedAt string
+	var addedByUserID sql.NullInt64
 	err := row.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 		&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
 		&extIDsJSON, &t.AcoustID, &t.ISRC, &t.QualityProfileID,
-		&createdAt, &updatedAt)
+		&createdAt, &updatedAt, &addedByUserID, &t.AddedByUsername)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
@@ -1020,6 +1076,7 @@ func (s *Store) scanTrack(row *sql.Row) (*domain.Track, error) {
 	if extIDsJSON != "" {
 		json.Unmarshal([]byte(extIDsJSON), &t.ExternalIDs)
 	}
+	t.AddedByUserID = addedByUserID.Int64
 	t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 	t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 	return &t, nil
@@ -1030,16 +1087,18 @@ func (s *Store) scanTracks(rows *sql.Rows) ([]domain.Track, error) {
 	for rows.Next() {
 		var t domain.Track
 		var extIDsJSON, createdAt, updatedAt string
+		var addedByUserID sql.NullInt64
 		if err := rows.Scan(&t.ID, &t.AlbumID, &t.ArtistID, &t.Title, &t.TrackNumber,
 			&t.DiscNumber, &t.Duration, &t.FilePath, &t.Bitrate, &t.FileSize,
 			&extIDsJSON, &t.AcoustID, &t.ISRC, &t.QualityProfileID,
-			&createdAt, &updatedAt); err != nil {
+			&createdAt, &updatedAt, &addedByUserID, &t.AddedByUsername); err != nil {
 			s.log.Error("scan tracks failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		if extIDsJSON != "" {
 			json.Unmarshal([]byte(extIDsJSON), &t.ExternalIDs)
 		}
+		t.AddedByUserID = addedByUserID.Int64
 		t.CreatedAt, _ = time.Parse(time.RFC3339, createdAt)
 		t.UpdatedAt, _ = time.Parse(time.RFC3339, updatedAt)
 		tracks = append(tracks, t)
@@ -1076,11 +1135,12 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 
 	result, err := s.db.ExecContext(ctx, `
 		INSERT OR IGNORE INTO playlists (source, source_playlist_id, name, description,
-			track_count, cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			track_count, cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at,
+			added_by_user_id, added_by_username, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		p.Source, p.SourcePlaylistID, p.Name, p.Description,
 		p.TrackCount, p.CoverURL, p.OwnerName, boolToInt(p.IsPublic), autoSync,
-		syncMode, p.SyncedAt, now, now,
+		syncMode, p.SyncedAt, nullableUserID(p.AddedByUserID), p.AddedByUsername, now, now,
 	)
 	if err != nil {
 		s.log.Error("upsert playlist insert failed", "error", err, "component", "lib_store")
@@ -1104,74 +1164,63 @@ func (s *Store) UpsertPlaylist(ctx context.Context, p *domain.Playlist) (int64, 
 }
 
 func (s *Store) GetPlaylist(ctx context.Context, id int64) (*domain.Playlist, error) {
-	p := &domain.Playlist{}
-	var autoSync int
-	var syncMode string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
-		FROM playlists WHERE id=?`, id,
-	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
-		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
-		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		s.log.Error("get playlist failed", "error", err, "component", "lib_store")
-	}
-	p.AutoSync = autoSync != 0
-	p.SyncMode = domain.SyncMode(syncMode)
-	return p, err
+	row := s.db.QueryRowContext(ctx, playlistSelect+" WHERE id=?", id)
+	return s.scanPlaylist(row)
 }
 
 func (s *Store) GetPlaylistBySourceID(ctx context.Context, source, sourceID string) (*domain.Playlist, error) {
-	p := &domain.Playlist{}
-	var autoSync int
-	var syncMode string
-	err := s.db.QueryRowContext(ctx, `
-		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
-		FROM playlists WHERE source=? AND source_playlist_id=?`,
-		source, sourceID,
-	).Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
-		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
-		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return nil, nil
-	}
-	if err != nil {
-		s.log.Error("get playlist by source ID failed", "error", err, "component", "lib_store")
-	}
-	p.AutoSync = autoSync != 0
-	p.SyncMode = domain.SyncMode(syncMode)
-	return p, err
+	row := s.db.QueryRowContext(ctx,
+		playlistSelect+" WHERE source=? AND source_playlist_id=?", source, sourceID)
+	return s.scanPlaylist(row)
 }
 
 func (s *Store) ListPlaylists(ctx context.Context) ([]domain.Playlist, error) {
-	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, source, source_playlist_id, name, description, track_count,
-			cover_url, owner_name, is_public, auto_sync, sync_mode, synced_at, created_at, updated_at
-		FROM playlists ORDER BY created_at DESC`)
+	rows, err := s.db.QueryContext(ctx, playlistSelect+" ORDER BY created_at DESC")
 	if err != nil {
 		s.log.Error("list playlists failed", "error", err, "component", "lib_store")
 		return nil, err
 	}
 	defer rows.Close()
+	return s.scanPlaylists(rows)
+}
 
+func (s *Store) scanPlaylist(row *sql.Row) (*domain.Playlist, error) {
+	var p domain.Playlist
+	var autoSync int
+	var syncMode string
+	var addedByUserID sql.NullInt64
+	err := row.Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
+		&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
+		&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt, &addedByUserID, &p.AddedByUsername)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		s.log.Error("scan playlist failed", "error", err, "component", "lib_store")
+		return nil, err
+	}
+	p.AutoSync = autoSync != 0
+	p.SyncMode = domain.SyncMode(syncMode)
+	p.AddedByUserID = addedByUserID.Int64
+	return &p, nil
+}
+
+func (s *Store) scanPlaylists(rows *sql.Rows) ([]domain.Playlist, error) {
 	var out []domain.Playlist
 	for rows.Next() {
 		var p domain.Playlist
 		var autoSync int
 		var syncMode string
+		var addedByUserID sql.NullInt64
 		if err := rows.Scan(&p.ID, &p.Source, &p.SourcePlaylistID, &p.Name, &p.Description,
 			&p.TrackCount, &p.CoverURL, &p.OwnerName, &p.IsPublic, &autoSync, &syncMode,
-			&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt); err != nil {
-			s.log.Error("list playlists scan failed", "error", err, "component", "lib_store")
+			&p.SyncedAt, &p.CreatedAt, &p.UpdatedAt, &addedByUserID, &p.AddedByUsername); err != nil {
+			s.log.Error("scan playlists failed", "error", err, "component", "lib_store")
 			return nil, err
 		}
 		p.AutoSync = autoSync != 0
 		p.SyncMode = domain.SyncMode(syncMode)
+		p.AddedByUserID = addedByUserID.Int64
 		out = append(out, p)
 	}
 	return out, rows.Err()

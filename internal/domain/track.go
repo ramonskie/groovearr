@@ -22,4 +22,11 @@ type Track struct {
 	ExternalIDs map[string]string `json:"external_ids,omitempty"`
 	AcoustID    string            `json:"acoustid,omitempty"`
 	ISRC        string            `json:"isrc,omitempty"`
+
+	// AddedByUserID/AddedByUsername record who requested the download that
+	// imported this track. DB-only attribution — never written to audio tags.
+	// 0/"" means scanned or system-imported. Set on INSERT only; upserts never
+	// clobber it.
+	AddedByUserID   int64  `json:"added_by_user_id,omitempty"`
+	AddedByUsername string `json:"added_by_username,omitempty"`
 }

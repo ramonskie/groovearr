@@ -95,3 +95,73 @@ func TestLibraryImporterHandler_NoFilePath(t *testing.T) {
 		t.Error("expected error for missing file path")
 	}
 }
+
+// TestLibraryImporterHandler_StampsRequesterAttribution verifies a download
+// queued by a user produces a library track carrying that user's id + name
+// snapshot (DB-only attribution).
+func TestLibraryImporterHandler_StampsRequesterAttribution(t *testing.T) {
+	tmpDir := t.TempDir()
+	trackFile := filepath.Join(tmpDir, "01 Song.mp3")
+	os.WriteFile(trackFile, []byte("audio"), 0o644)
+
+	libStore := newMockLibStore()
+	handler := NewLibraryImporterHandler(libStore, nil)
+
+	record := &Record{
+		ID:                  "test-lib-attr",
+		SourceName:          "deezer",
+		FilePath:            trackFile,
+		Artist:              "Test Artist",
+		Album:               "Test Album",
+		Title:               "Test Song",
+		TrackNumber:         1,
+		RequestedByUserID:   42,
+		RequestedByUsername: "alice",
+	}
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+
+	stored, err := libStore.GetTrackByFilePath(context.Background(), trackFile)
+	if err != nil || stored == nil {
+		t.Fatalf("imported track not found: %v", err)
+	}
+	if stored.AddedByUserID != 42 {
+		t.Errorf("AddedByUserID = %d, want 42", stored.AddedByUserID)
+	}
+	if stored.AddedByUsername != "alice" {
+		t.Errorf("AddedByUsername = %q, want alice", stored.AddedByUsername)
+	}
+}
+
+// TestLibraryImporterHandler_SystemLeavesAttributionBlank verifies a download
+// with no requester (system/scanner path) stamps zero/blank attribution.
+func TestLibraryImporterHandler_SystemLeavesAttributionBlank(t *testing.T) {
+	tmpDir := t.TempDir()
+	trackFile := filepath.Join(tmpDir, "02 Song.mp3")
+	os.WriteFile(trackFile, []byte("audio"), 0o644)
+
+	libStore := newMockLibStore()
+	handler := NewLibraryImporterHandler(libStore, nil)
+
+	record := &Record{
+		ID:       "test-lib-system",
+		FilePath: trackFile,
+		Artist:   "Test Artist",
+		Title:    "Test Song",
+	}
+
+	if err := handler.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle failed: %v", err)
+	}
+
+	stored, err := libStore.GetTrackByFilePath(context.Background(), trackFile)
+	if err != nil || stored == nil {
+		t.Fatalf("imported track not found: %v", err)
+	}
+	if stored.AddedByUserID != 0 || stored.AddedByUsername != "" {
+		t.Errorf("system attribution = (%d, %q), want (0, \"\")",
+			stored.AddedByUserID, stored.AddedByUsername)
+	}
+}

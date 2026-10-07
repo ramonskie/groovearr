@@ -37,7 +37,7 @@ type Service struct {
 	syncMu              sync.Mutex
 	syncing             map[int64]bool // playlistIDs currently being synced
 	autoSyncSem         chan struct{}  // limits concurrent auto-sync goroutines (capacity 3)
-	folderMu            sync.Mutex    // serializes conflict-resolve + folder mkdir
+	folderMu            sync.Mutex     // serializes conflict-resolve + folder mkdir
 }
 
 // NewService creates a playlist service.
@@ -129,7 +129,12 @@ type ImportResult struct {
 // ImportPlaylist imports a playlist from a source: saves tracks and links existing library matches.
 // Imports playlist metadata and tracks from a source.
 // On first import, unmatched tracks are automatically queued for download.
-func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string, syncMode string) (*ImportResult, error) {
+//
+// actorUserID/actorUsername are the authenticated importer, stamped on the
+// created playlist row for DB-only attribution (Phase 9.4). They are written on
+// CREATE only — re-imports and syncs never overwrite them. Background/system
+// callers pass 0/"" so a system-created playlist stays blank.
+func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylistID string, syncMode string, actorUserID int64, actorUsername string) (*ImportResult, error) {
 	if syncMode == "" {
 		syncMode = "mirror"
 	}
@@ -150,7 +155,7 @@ func (s *Service) ImportPlaylist(ctx context.Context, sourceName, sourcePlaylist
 		playlists = nil
 	}
 
-	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos), syncMode)
+	playlistRecord, err := s.upsertPlaylist(ctx, sourceName, sourcePlaylistID, playlistName, playlists, len(trackInfos), syncMode, actorUserID, actorUsername)
 	if err != nil {
 		return nil, err
 	}
@@ -325,7 +330,9 @@ func (s *Service) DownloadMissing(ctx context.Context, playlistID int64) (int, e
 			continue
 		}
 
-		_, dlErr := s.downloadSvc.QueuePending(ctx, download.Meta{
+		// 0: playlist download paths are attributed via playlist added_by_*
+		// (Phase 9.4), not per-download requested_by_user_id.
+		_, dlErr := s.downloadSvc.QueuePending(ctx, 0, "", download.Meta{
 			Artist:      pt.Artist,
 			Album:       pt.Album,
 			Title:       pt.Title,
@@ -442,7 +449,8 @@ func (s *Service) findAndQueueDownload(ctx context.Context, title, artist, album
 		}
 	}
 
-	id, dlErr := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, meta)
+	// 0: background/playlist sync path — playlist attribution is Phase 9.4.
+	id, dlErr := s.downloadSvc.Queue(ctx, 0, "", best.SourceName, username, best.Track.Filename, best.Track.Size, meta)
 	if dlErr != nil {
 		return "", "", best.Score, fmt.Errorf("queue download: %w", dlErr)
 	}
@@ -738,7 +746,12 @@ func (s *Service) waitForDownloads(ctx context.Context) error {
 }
 
 // upsertPlaylist finds or creates a playlist record.
-func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int, syncMode string) (*domain.Playlist, error) {
+//
+// actorUserID/actorUsername are stamped only on the create path. An existing
+// playlist keeps its original attribution: the update branch below never
+// assigns added_by_* and the store UPDATE does not touch those columns, so a
+// re-import or sync preserves whoever first imported it (Phase 9.4/9.7).
+func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceName string, candidates []PlaylistInfo, trackCount int, syncMode string, actorUserID int64, actorUsername string) (*domain.Playlist, error) {
 	existing, _ := s.store.GetPlaylistBySourceID(ctx, source, sourceID)
 	if existing != nil {
 		existing.TrackCount = trackCount
@@ -780,6 +793,9 @@ func (s *Service) upsertPlaylist(ctx context.Context, source, sourceID, sourceNa
 		OwnerName:        owner,
 		IsPublic:         true,
 		SyncMode:         domain.SyncMode(syncMode),
+		// Attribution is create-only. 0/"" for system/background callers.
+		AddedByUserID:   actorUserID,
+		AddedByUsername: actorUsername,
 	}
 	id, err := s.store.UpsertPlaylist(ctx, p)
 	if err != nil {

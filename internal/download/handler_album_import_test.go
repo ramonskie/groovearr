@@ -158,6 +158,54 @@ func TestAlbumImport_HookErrorDoesNotFailImport(t *testing.T) {
 	}
 }
 
+// captureRecordHandler is a chain handler that records every record it sees.
+// It lets a test assert what the album importer passed down to the per-track
+// chain without depending on the real library store.
+type captureRecordHandler struct {
+	records []*Record
+}
+
+func (c *captureRecordHandler) Handle(_ context.Context, r *Record) error {
+	c.records = append(c.records, r)
+	return nil
+}
+
+// TestAlbumImport_PropagatesRequesterToSyntheticRecords proves an album
+// download's requester is copied onto each synthetic per-track record, so the
+// per-track LibraryImporterHandler stamps attribution on every imported row.
+func TestAlbumImport_PropagatesRequesterToSyntheticRecords(t *testing.T) {
+	tmp := t.TempDir()
+	createFile(t, filepath.Join(tmp, "01 - One.flac"))
+	createFile(t, filepath.Join(tmp, "02 - Two.flac"))
+
+	resolver := func(context.Context, string, string, string, int, string) ([]domain.ExpectedTrack, string, error) {
+		return []domain.ExpectedTrack{
+			{TrackNumber: 1, Title: "One"},
+			{TrackNumber: 2, Title: "Two"},
+		}, "", nil
+	}
+	capturer := &captureRecordHandler{}
+	h := NewAlbumImportHandler([]ImportHandler{capturer}, resolver, newMockAlbumStore(), nil, nil, testLogger())
+
+	record := &Record{
+		ID: "album-attr", SourceName: "prowlarr", State: StateImporting,
+		Artist: "Tool", Album: "Lateralus", AlbumType: "album", FilePath: tmp,
+		RequestedByUserID: 42, RequestedByUsername: "alice",
+	}
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(capturer.records) != 2 {
+		t.Fatalf("chain saw %d records, want 2", len(capturer.records))
+	}
+	for i, r := range capturer.records {
+		if r.RequestedByUserID != 42 || r.RequestedByUsername != "alice" {
+			t.Errorf("synth record %d attribution = (%d, %q), want (42, alice)",
+				i, r.RequestedByUserID, r.RequestedByUsername)
+		}
+	}
+}
+
 func createFile(t *testing.T, path string) {
 	t.Helper()
 	if err := os.WriteFile(path, []byte("dummy"), 0644); err != nil {

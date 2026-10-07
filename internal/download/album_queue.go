@@ -49,9 +49,9 @@ type AlbumQueueResult struct {
 // returned wrapped, with Mode still QueueModeAlbum, so callers can surface a
 // 500 — matching the discover handler's existing behavior. Dedup/idempotency
 // is whatever QueueAlbum/QueuePending already do; no new dedup is added here.
-func (s *Service) QueueAlbumWithFallback(ctx context.Context, artist, album string, tracks []TrackQueue, downloadClient string, albumSources []string) (AlbumQueueResult, error) {
+func (s *Service) QueueAlbumWithFallback(ctx context.Context, requestedByUserID int64, requestedByUsername, artist, album string, tracks []TrackQueue, downloadClient string, albumSources []string) (AlbumQueueResult, error) {
 	if s.albumFirstEligible(artist, album, downloadClient, albumSources) {
-		res, handled, err := s.tryAlbumQueue(ctx, artist, album, downloadClient)
+		res, handled, err := s.tryAlbumQueue(ctx, requestedByUserID, requestedByUsername, artist, album, downloadClient)
 		if err != nil {
 			return res, err
 		}
@@ -59,7 +59,7 @@ func (s *Service) QueueAlbumWithFallback(ctx context.Context, artist, album stri
 			return res, nil
 		}
 	}
-	return s.queueTrackFallback(ctx, tracks), nil
+	return s.queueTrackFallback(ctx, requestedByUserID, requestedByUsername, tracks), nil
 }
 
 // albumFirstEligible reports whether the whole-album leg can be attempted.
@@ -73,7 +73,7 @@ func (s *Service) albumFirstEligible(artist, album, downloadClient string, album
 // tryAlbumQueue runs the whole-album leg. handled is false when the caller
 // should fall through to per-track (search error or no releases); err is
 // non-nil only for a genuine QueueAlbum failure.
-func (s *Service) tryAlbumQueue(ctx context.Context, artist, album, downloadClient string) (AlbumQueueResult, bool, error) {
+func (s *Service) tryAlbumQueue(ctx context.Context, requestedByUserID int64, requestedByUsername, artist, album, downloadClient string) (AlbumQueueResult, bool, error) {
 	searcher := s.albumSearcherSnapshot()
 	releases, searchErr := searcher.SearchAlbums(ctx, artist+" "+album)
 	if searchErr != nil {
@@ -88,7 +88,7 @@ func (s *Service) tryAlbumQueue(ctx context.Context, artist, album, downloadClie
 	}
 
 	release := releases[0]
-	id, queueErr := s.QueueAlbum(ctx, release, nil, downloadClient)
+	id, queueErr := s.QueueAlbum(ctx, requestedByUserID, requestedByUsername, release, nil, downloadClient)
 	if queueErr != nil {
 		// Real failure — surface it (wrapped) so callers can 500. By contrast,
 		// the search error above falls through to per-track.
@@ -103,13 +103,13 @@ func (s *Service) tryAlbumQueue(ctx context.Context, artist, album, downloadClie
 // queueTrackFallback queues one pending download per eligible track. Tracks
 // missing an artist or title are skipped; a per-track failure is collected in
 // Errors and never aborts the loop.
-func (s *Service) queueTrackFallback(ctx context.Context, tracks []TrackQueue) AlbumQueueResult {
+func (s *Service) queueTrackFallback(ctx context.Context, requestedByUserID int64, requestedByUsername string, tracks []TrackQueue) AlbumQueueResult {
 	res := AlbumQueueResult{Mode: QueueModeTracks, Total: len(tracks)}
 	for _, t := range tracks {
 		if t.Artist == "" || t.Title == "" {
 			continue
 		}
-		_, err := s.QueuePending(ctx, Meta{
+		_, err := s.QueuePending(ctx, requestedByUserID, requestedByUsername, Meta{
 			Artist:      t.Artist,
 			Album:       t.Album,
 			Title:       t.Title,

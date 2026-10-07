@@ -65,6 +65,8 @@ func openTestDB(t *testing.T) *sql.DB {
 			magnet_uri TEXT NOT NULL DEFAULT '',
 			folder_path TEXT NOT NULL DEFAULT '',
 			imported_track_ids TEXT NOT NULL DEFAULT '',
+			requested_by_user_id INTEGER NOT NULL DEFAULT 0,
+			requested_by_username TEXT NOT NULL DEFAULT '',
 			created_at TEXT NOT NULL DEFAULT (datetime('now')),
 			updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 		)`,
@@ -158,6 +160,75 @@ func TestStore_GetNotFound(t *testing.T) {
 	}
 	if got != nil {
 		t.Error("expected nil for nonexistent record")
+	}
+}
+
+// TestStore_InsertPersistsRequestedByUserID verifies DB-only attribution
+// round-trips: a queued record's requester is written on insert and read back
+// by both the single-row Get and the multi-row List scan.
+func TestStore_InsertPersistsRequestedByUserID(t *testing.T) {
+	db := openTestDB(t)
+	store := New(db, slog.Default())
+	ctx := context.Background()
+
+	r := newTestRecord("dl-attr", "soulseek", "track.flac", "Artist - Title")
+	r.RequestedByUserID = 42
+	r.RequestedByUsername = "alice"
+	if err := store.Insert(ctx, r); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	got, err := store.Get(ctx, "dl-attr")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got == nil {
+		t.Fatal("expected record, got nil")
+	}
+	if got.RequestedByUserID != 42 {
+		t.Errorf("Get RequestedByUserID = %d, want 42", got.RequestedByUserID)
+	}
+	if got.RequestedByUsername != "alice" {
+		t.Errorf("Get RequestedByUsername = %q, want alice", got.RequestedByUsername)
+	}
+
+	list, err := store.List(ctx)
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(list) != 1 || list[0].RequestedByUserID != 42 || list[0].RequestedByUsername != "alice" {
+		t.Errorf("List attribution = %+v, want single record with (42, alice)", list)
+	}
+}
+
+// TestStore_UpdatePreservesRequestedByUserID guards insert-only attribution:
+// a later mutable update must not clobber the stored requester.
+func TestStore_UpdatePreservesRequestedByUserID(t *testing.T) {
+	db := openTestDB(t)
+	store := New(db, slog.Default())
+	ctx := context.Background()
+
+	r := newTestRecord("dl-attr2", "soulseek", "track.flac", "Artist - Title")
+	r.RequestedByUserID = 7
+	r.RequestedByUsername = "carol"
+	if err := store.Insert(ctx, r); err != nil {
+		t.Fatalf("Insert: %v", err)
+	}
+
+	// Update with a zero requester (as the monitor does) must leave it intact.
+	if err := store.Update(ctx, &download.Record{ID: "dl-attr2", State: download.StateDownloading}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+
+	got, err := store.Get(ctx, "dl-attr2")
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.RequestedByUserID != 7 {
+		t.Errorf("RequestedByUserID after update = %d, want 7 (insert-only)", got.RequestedByUserID)
+	}
+	if got.RequestedByUsername != "carol" {
+		t.Errorf("RequestedByUsername after update = %q, want carol (insert-only)", got.RequestedByUsername)
 	}
 }
 

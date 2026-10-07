@@ -11,6 +11,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/user"
 )
 
 func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
@@ -151,7 +152,7 @@ func (s *Server) handleAlbumDownloadBest(w http.ResponseWriter, r *http.Request)
 
 	// 3. Queue the album download. Track resolution happens later,
 	// after download, when AlbumImportHandler knows the actual file count.
-	downloadID, err := s.downloadSvc.QueueAlbum(r.Context(), best, nil, req.DownloadClient)
+	downloadID, err := s.downloadSvc.QueueAlbum(r.Context(), requesterID(r.Context()), requesterUsername(r.Context()), best, nil, req.DownloadClient)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("queue album: %w", err))
 		return
@@ -208,7 +209,7 @@ func (s *Server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.downloadSvc.Queue(ctx, req.Source, req.Username, req.Filename, req.Size, download.Meta{
+	id, err := s.downloadSvc.Queue(ctx, requesterID(ctx), requesterUsername(ctx), req.Source, req.Username, req.Filename, req.Size, download.Meta{
 		Artist:      artist,
 		Album:       album,
 		Title:       req.Title,
@@ -299,7 +300,7 @@ func (s *Server) handleDownloadBest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	id, err := s.downloadSvc.Queue(ctx, best.SourceName, username, best.Track.Filename, best.Track.Size, download.Meta{
+	id, err := s.downloadSvc.Queue(ctx, requesterID(ctx), requesterUsername(ctx), best.SourceName, username, best.Track.Filename, best.Track.Size, download.Meta{
 		Artist:      artist,
 		Album:       album,
 		Title:       title,
@@ -394,9 +395,20 @@ func (s *Server) handleRetryDownload(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// handleEvents serves SSE stream for real-time download events.
+// handleEvents serves SSE stream for real-time download events. The caller's
+// role and account id are resolved from the Identity injected by withAuth;
+// non-admins are registered as non-admin subscribers so the hub withholds
+// admin-only event types (log_line, job_*) while still delivering
+// download/import events. The account id lets the hub tear the stream down if
+// the user is later demoted, disabled, or deleted (0 when anonymous).
 func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
-	s.sseHub.ServeHTTP(w, r)
+	admin := false
+	var userID int64
+	if id, ok := identityFrom(r.Context()); ok {
+		admin = id.Role == user.RoleAdmin
+		userID = id.UserID
+	}
+	s.sseHub.ServeHTTP(w, r, admin, userID)
 }
 
 // ─── Debug ────────────────────────────────────────────────────────────

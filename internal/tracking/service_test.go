@@ -348,11 +348,13 @@ type fakeQueuer struct {
 
 // queuerCall captures one delegated QueueAlbumWithFallback invocation.
 type queuerCall struct {
-	artist         string
-	album          string
-	tracks         []download.TrackQueue
-	downloadClient string
-	albumSources   []string
+	requestedByUserID   int64
+	requestedByUsername string
+	artist              string
+	album               string
+	tracks              []download.TrackQueue
+	downloadClient      string
+	albumSources        []string
 }
 
 var (
@@ -360,8 +362,8 @@ var (
 	_ ActiveDownloadFinder = (*fakeQueuer)(nil)
 )
 
-func (f *fakeQueuer) QueueAlbumWithFallback(_ context.Context, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error) {
-	f.calls = append(f.calls, queuerCall{artist: artist, album: album, tracks: tracks, downloadClient: downloadClient, albumSources: albumSources})
+func (f *fakeQueuer) QueueAlbumWithFallback(_ context.Context, requestedByUserID int64, requestedByUsername, artist, album string, tracks []download.TrackQueue, downloadClient string, albumSources []string) (download.AlbumQueueResult, error) {
+	f.calls = append(f.calls, queuerCall{requestedByUserID: requestedByUserID, requestedByUsername: requestedByUsername, artist: artist, album: album, tracks: tracks, downloadClient: downloadClient, albumSources: albumSources})
 	if f.queueErr != nil {
 		return f.result, f.queueErr
 	}

@@ -30,6 +30,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/sse"
+	"github.com/ramonskie/groovearr/internal/user"
 )
 
 // Server holds all dependencies for HTTP handlers.
@@ -43,6 +44,7 @@ type Server struct {
 	orchestrator        *download.Orchestrator
 	discoveryReg        *discovery.Registry
 	store               library.Store
+	userStore           user.Store
 	scanner             *library.Scanner
 	downloadSvc         *download.Service
 	eventBus            events.IEventAggregator
@@ -68,10 +70,31 @@ type Server struct {
 }
 
 // PluginRouteRegistrar is called after all standard routes are registered,
-// giving plugins a chance to add their own HTTP endpoints.
-type PluginRouteRegistrar func(mux *http.ServeMux)
+// giving plugins a chance to add their own HTTP endpoints. It receives an
+// authorization-aware registrar rather than the raw mux, so every plugin route
+// must declare its access level (see plugin.RouteRegistrar).
+type PluginRouteRegistrar func(r plugin.RouteRegistrar)
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+// pluginRouteAdapter implements plugin.RouteRegistrar on top of the app mux.
+// Admin routes are wrapped with s.adminOnly; User routes stay behind the global
+// withAuth already applied around the whole mux. It is the only way plugin
+// registrars can add routes, so no plugin can bypass authorization.
+type pluginRouteAdapter struct {
+	mux       *http.ServeMux
+	adminOnly func(http.HandlerFunc) http.HandlerFunc
+}
+
+// Admin registers an admin-only route, failing closed to 403 for non-admins.
+func (a pluginRouteAdapter) Admin(method, path string, h http.HandlerFunc) {
+	a.mux.Handle(method+" "+path, a.adminOnly(h))
+}
+
+// User registers a route reachable by any authenticated caller.
+func (a pluginRouteAdapter) User(method, path string, h http.HandlerFunc) {
+	a.mux.Handle(method+" "+path, h)
+}
+
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, userStore user.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -82,6 +105,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		orchestrator:        orchestrator,
 		discoveryReg:        discoveryReg,
 		store:               store,
+		userStore:           userStore,
 		scanner:             scanner,
 		downloadSvc:         downloadSvc,
 		eventBus:            eventBus,
@@ -144,105 +168,13 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 	})))
 
 	// API routes.
-	mux.HandleFunc("GET /api/health", s.handleHealth)
-	mux.HandleFunc("GET /api/rate-limits", s.handleRateLimits)
-	mux.HandleFunc("DELETE /api/rate-limits/{provider}", s.handleClearRateLimit)
-	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
-	mux.Handle("POST /api/login", withRateLimit("login", s.rateLimiter, http.HandlerFunc(s.handleLogin)))
-	mux.HandleFunc("POST /api/logout", s.handleLogout)
-	mux.HandleFunc("GET /api/config", s.handleGetConfig)
-	mux.HandleFunc("PUT /api/config", s.handleUpdateConfig)
-	mux.HandleFunc("GET /api/config/sources", s.handleGetSources)
-	mux.HandleFunc("POST /api/config/test/{source}", s.handleTestConnection)
-	mux.Handle("POST /api/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleSearch)))
-	mux.Handle("POST /api/albums/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleAlbumSearch)))
-	mux.Handle("POST /api/albums/download-best", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleAlbumDownloadBest)))
-	mux.Handle("POST /api/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownload)))
-	mux.Handle("POST /api/download/match", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadBest)))
-	mux.HandleFunc("GET /api/downloads", s.handleGetDownloads)
-	mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
-	mux.Handle("POST /api/downloads/{id}/retry", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleRetryDownload)))
-	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
-	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
-	mux.HandleFunc("GET /api/library/artists/duplicates", s.handleLibraryArtistDuplicates)
-	mux.Handle("POST /api/library/artists/{artistID}/merge", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryArtistMerge)))
-	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
-	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
-	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
-	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
-	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
-	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
-	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
-	mux.Handle("POST /api/library/albums/{albumID}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownloadMissing)))
+	s.registerAPIRoutes(mux)
 
-	// Background jobs. Scan/enrich are rate-limited per client IP: both walk
-	// the whole library and enrich additionally hits external metadata providers.
-	mux.HandleFunc("GET /api/jobs", s.handleGetJob)
-	mux.HandleFunc("GET /api/jobs/activity", s.handleJobActivity)
-	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobScan)))
-	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, http.HandlerFunc(s.handleJobEnrich)))
-	mux.Handle("POST /api/jobs/duplicates", withRateLimit("duplicates", s.rateLimiter, http.HandlerFunc(s.handleJobDuplicates)))
-	mux.Handle("POST /api/jobs/organize", withRateLimit("scan", s.rateLimiter, http.HandlerFunc(s.handleJobOrganize)))
-	mux.HandleFunc("GET /api/jobs/organize/report", s.handleOrganizeReport)
-	mux.HandleFunc("POST /api/jobs/cancel", s.handleJobCancel)
-
-	// Playlist routes.
-	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
-	mux.HandleFunc("GET /api/playlists/sources/{source}", s.handlePlaylistSourceBrowse)
-	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
-	mux.HandleFunc("GET /api/playlists/{id}", s.handleGetPlaylist)
-	mux.HandleFunc("PATCH /api/playlists/{id}", s.handleUpdatePlaylist)
-	mux.Handle("POST /api/playlists/import", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleImportPlaylist)))
-	mux.Handle("POST /api/playlists/{id}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadMissing)))
-	mux.Handle("POST /api/playlists/{id}/sync", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleSyncPlaylist)))
-	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
-
-	// Artist tracking routes — tracked artists, their discographies, and the
-	// global wanted view. Refresh/search-missing go through the job Manager.
-	mux.HandleFunc("GET /api/tracking/artists", s.handleListTrackedArtists)
-	mux.HandleFunc("POST /api/tracking/artists", s.handleAddTrackedArtist)
-	mux.HandleFunc("GET /api/tracking/artists/{artistID}", s.handleGetTrackedArtist)
-	mux.HandleFunc("PATCH /api/tracking/artists/{artistID}", s.handleUpdateTrackedArtist)
-	mux.HandleFunc("DELETE /api/tracking/artists/{artistID}", s.handleDeleteTrackedArtist)
-	mux.HandleFunc("GET /api/tracking/artists/{artistID}/albums", s.handleListTrackedAlbums)
-	mux.HandleFunc("POST /api/tracking/artists/{artistID}/refresh", s.handleRefreshTrackedArtist)
-	mux.HandleFunc("POST /api/tracking/artists/{artistID}/search-missing", s.handleSearchMissingArtist)
-	mux.HandleFunc("POST /api/tracking/refresh", s.handleRefreshAllTracked)
-	mux.HandleFunc("GET /api/tracking/wanted", s.handleListAllWanted)
-	mux.HandleFunc("PATCH /api/tracking/albums/{albumID}", s.handleUpdateTrackedAlbum)
-
-	// Discovery routes — metadata-first album/track browsing.
-	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)
-	mux.Handle("GET /api/discover/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverSearch)))
-	mux.Handle("GET /api/discover/artists/resolve", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverResolveArtist)))
-	mux.Handle("GET /api/discover/artists/overview", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverArtistOverview)))
-	mux.HandleFunc("GET /api/discover/artists/{id}/albums", s.handleDiscoverArtistAlbums)
-	mux.HandleFunc("GET /api/discover/albums/{id}/tracks", s.handleDiscoverAlbumTracks)
-	mux.Handle("POST /api/discover/albums/{id}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDiscoverAlbumDownload)))
-
-	// Quality Profiles — presets MUST come before /{id} to avoid matching "presets" as id.
-	mux.HandleFunc("GET /api/quality-profiles/presets", s.handleQualityProfilePresets)
-	mux.HandleFunc("POST /api/quality-profiles/apply-preset", s.handleApplyQualityProfilePreset)
-	mux.HandleFunc("GET /api/quality-profiles", s.handleListQualityProfiles)
-	mux.HandleFunc("POST /api/quality-profiles", s.handleCreateQualityProfile)
-	mux.HandleFunc("GET /api/quality-profiles/{id}", s.handleGetQualityProfile)
-	mux.HandleFunc("PUT /api/quality-profiles/{id}", s.handleUpdateQualityProfile)
-	mux.HandleFunc("DELETE /api/quality-profiles/{id}", s.handleDeleteQualityProfile)
-	mux.HandleFunc("PUT /api/quality-profiles/{id}/default", s.handleSetDefaultQualityProfile)
-
-	// SSE endpoint for real-time download progress.
-	mux.HandleFunc("GET /api/events", s.handleEvents)
-
-	// Logs — snapshot of the on-disk log file backing the settings Log tab.
-	// Live log lines are streamed over GET /api/events as "log_line".
-	mux.HandleFunc("GET /api/logs", s.handleGetLogs)
-
-	// Debug endpoint — full download state for troubleshooting.
-	mux.HandleFunc("GET /api/debug/download/{id}", s.handleDebugDownload)
-
-	// Let plugins register their own routes.
+	// Let plugins register their own routes through the authorization-aware
+	// adapter — plugins never see the raw mux.
+	registrar := pluginRouteAdapter{mux: mux, adminOnly: s.adminOnly}
 	for _, register := range pluginRoutes {
-		register(mux)
+		register(registrar)
 	}
 
 	// Pass plain nil (not a typed-nil *Rotator) when the access log is
@@ -261,6 +193,139 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		IdleTimeout:  120 * time.Second,
 	}
 	return s
+}
+
+// registerAPIRoutes registers the /api route table on mux. The settings
+// surface (config, rate limits, jobs, tracking, quality profiles, logs, debug,
+// and user management) is gated with s.adminOnly; every other route stays open
+// to all authenticated callers. Authentication itself is performed once by
+// withAuth around the whole mux — adminOnly is authorization only and fails
+// closed when no identity is present.
+func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
+	mux.HandleFunc("GET /api/health", s.handleHealth)
+
+	// ── Settings surface: rate limits (admin-only) ─────────────────────
+	mux.HandleFunc("GET /api/rate-limits", s.adminOnly(s.handleRateLimits))
+	mux.HandleFunc("DELETE /api/rate-limits/{provider}", s.adminOnly(s.handleClearRateLimit))
+
+	// Setup status is the first-run probe and stays open. There are no setup
+	// mutations registered today; any future /api/setup/* mutation is part of
+	// the settings surface and must be wrapped with s.adminOnly.
+	mux.HandleFunc("GET /api/setup/status", s.handleSetupStatus)
+	mux.Handle("POST /api/login", withRateLimit("login", s.rateLimiter, http.HandlerFunc(s.handleLogin)))
+	mux.HandleFunc("POST /api/logout", s.handleLogout)
+	// Identity for the SPA auth check — any authenticated user, admin or not.
+	// Registered behind withAuth (the whole mux is wrapped); never exposes the
+	// API key and is not gated adminOnly.
+	mux.HandleFunc("GET /api/me", s.handleMe)
+
+	// ── Settings surface: config (admin-only) ──────────────────────────
+	mux.HandleFunc("GET /api/config", s.adminOnly(s.handleGetConfig))
+	mux.HandleFunc("PUT /api/config", s.adminOnly(s.handleUpdateConfig))
+	mux.HandleFunc("GET /api/config/sources", s.adminOnly(s.handleGetSources))
+	mux.HandleFunc("POST /api/config/test/{source}", s.adminOnly(s.handleTestConnection))
+
+	// ── Settings surface: user management (admin-only) ─────────────────
+	// Admin-only account CRUD. Passwords are always returned as an explicit
+	// userResponse DTO (never the stored hash); last-admin and self-delete
+	// guards are enforced in the store's transaction and here respectively.
+	mux.HandleFunc("GET /api/users", s.adminOnly(s.handleListUsers))
+	mux.HandleFunc("POST /api/users", s.adminOnly(s.handleCreateUser))
+	mux.HandleFunc("PATCH /api/users/{id}", s.adminOnly(s.handleUpdateUser))
+	mux.HandleFunc("DELETE /api/users/{id}", s.adminOnly(s.handleDeleteUser))
+
+	// ── Shared surface: search, albums, shared download queue ──────────
+	mux.Handle("POST /api/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleSearch)))
+	mux.Handle("POST /api/albums/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleAlbumSearch)))
+	mux.Handle("POST /api/albums/download-best", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleAlbumDownloadBest)))
+	mux.Handle("POST /api/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownload)))
+	mux.Handle("POST /api/download/match", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadBest)))
+	mux.HandleFunc("GET /api/downloads", s.handleGetDownloads)
+	mux.HandleFunc("DELETE /api/downloads/{id}", s.handleCancelDownload)
+	mux.Handle("POST /api/downloads/{id}/retry", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleRetryDownload)))
+
+	// ── Shared surface: library, covers, artist images ─────────────────
+	mux.HandleFunc("GET /api/library/tracks", s.handleLibraryTracks)
+	mux.HandleFunc("GET /api/library/artists", s.handleLibraryArtists)
+	mux.HandleFunc("GET /api/library/artists/duplicates", s.handleLibraryArtistDuplicates)
+	mux.Handle("POST /api/library/artists/{artistID}/merge", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryArtistMerge)))
+	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
+	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
+	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
+	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
+	mux.HandleFunc("GET /api/covers/{albumID}", s.handleCoverArt)
+	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
+	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
+	mux.Handle("POST /api/library/albums/{albumID}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownloadMissing)))
+
+	// ── Settings surface: background jobs (admin-only) ─────────────────
+	// Scan/enrich are rate-limited per client IP: both walk the whole library
+	// and enrich additionally hits external metadata providers.
+	mux.HandleFunc("GET /api/jobs", s.adminOnly(s.handleGetJob))
+	mux.HandleFunc("GET /api/jobs/activity", s.adminOnly(s.handleJobActivity))
+	mux.Handle("POST /api/jobs/scan", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobScan)))
+	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, s.adminOnly(s.handleJobEnrich)))
+	mux.Handle("POST /api/jobs/duplicates", withRateLimit("duplicates", s.rateLimiter, s.adminOnly(s.handleJobDuplicates)))
+	mux.Handle("POST /api/jobs/organize", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobOrganize)))
+	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
+	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))
+
+	// ── Shared surface: playlists ──────────────────────────────────────
+	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
+	mux.HandleFunc("GET /api/playlists/sources/{source}", s.handlePlaylistSourceBrowse)
+	mux.HandleFunc("GET /api/playlists", s.handleListPlaylists)
+	mux.HandleFunc("GET /api/playlists/{id}", s.handleGetPlaylist)
+	mux.HandleFunc("PATCH /api/playlists/{id}", s.handleUpdatePlaylist)
+	mux.Handle("POST /api/playlists/import", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleImportPlaylist)))
+	mux.Handle("POST /api/playlists/{id}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDownloadMissing)))
+	mux.Handle("POST /api/playlists/{id}/sync", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleSyncPlaylist)))
+	mux.HandleFunc("DELETE /api/playlists/{id}", s.handleDeletePlaylist)
+
+	// ── Settings surface: artist tracking (admin-only) ─────────────────
+	// Tracked artists, their discographies, and the global wanted view.
+	// Refresh/search-missing go through the job Manager.
+	mux.HandleFunc("GET /api/tracking/artists", s.adminOnly(s.handleListTrackedArtists))
+	mux.HandleFunc("POST /api/tracking/artists", s.adminOnly(s.handleAddTrackedArtist))
+	mux.HandleFunc("GET /api/tracking/artists/{artistID}", s.adminOnly(s.handleGetTrackedArtist))
+	mux.HandleFunc("PATCH /api/tracking/artists/{artistID}", s.adminOnly(s.handleUpdateTrackedArtist))
+	mux.HandleFunc("DELETE /api/tracking/artists/{artistID}", s.adminOnly(s.handleDeleteTrackedArtist))
+	mux.HandleFunc("GET /api/tracking/artists/{artistID}/albums", s.adminOnly(s.handleListTrackedAlbums))
+	mux.HandleFunc("POST /api/tracking/artists/{artistID}/refresh", s.adminOnly(s.handleRefreshTrackedArtist))
+	mux.HandleFunc("POST /api/tracking/artists/{artistID}/search-missing", s.adminOnly(s.handleSearchMissingArtist))
+	mux.HandleFunc("POST /api/tracking/refresh", s.adminOnly(s.handleRefreshAllTracked))
+	mux.HandleFunc("GET /api/tracking/wanted", s.adminOnly(s.handleListAllWanted))
+	mux.HandleFunc("PATCH /api/tracking/albums/{albumID}", s.adminOnly(s.handleUpdateTrackedAlbum))
+
+	// ── Shared surface: discovery ──────────────────────────────────────
+	mux.HandleFunc("GET /api/discover/providers", s.handleDiscoverProviders)
+	mux.Handle("GET /api/discover/search", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverSearch)))
+	mux.Handle("GET /api/discover/artists/resolve", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverResolveArtist)))
+	mux.Handle("GET /api/discover/artists/overview", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleDiscoverArtistOverview)))
+	mux.HandleFunc("GET /api/discover/artists/{id}/albums", s.handleDiscoverArtistAlbums)
+	mux.HandleFunc("GET /api/discover/albums/{id}/tracks", s.handleDiscoverAlbumTracks)
+	mux.Handle("POST /api/discover/albums/{id}/download", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleDiscoverAlbumDownload)))
+
+	// ── Settings surface: quality profiles (admin-only) ────────────────
+	// Presets MUST come before /{id} to avoid matching "presets" as id.
+	mux.HandleFunc("GET /api/quality-profiles/presets", s.adminOnly(s.handleQualityProfilePresets))
+	mux.HandleFunc("POST /api/quality-profiles/apply-preset", s.adminOnly(s.handleApplyQualityProfilePreset))
+	mux.HandleFunc("GET /api/quality-profiles", s.adminOnly(s.handleListQualityProfiles))
+	mux.HandleFunc("POST /api/quality-profiles", s.adminOnly(s.handleCreateQualityProfile))
+	mux.HandleFunc("GET /api/quality-profiles/{id}", s.adminOnly(s.handleGetQualityProfile))
+	mux.HandleFunc("PUT /api/quality-profiles/{id}", s.adminOnly(s.handleUpdateQualityProfile))
+	mux.HandleFunc("DELETE /api/quality-profiles/{id}", s.adminOnly(s.handleDeleteQualityProfile))
+	mux.HandleFunc("PUT /api/quality-profiles/{id}/default", s.adminOnly(s.handleSetDefaultQualityProfile))
+
+	// ── Shared surface: SSE for real-time download progress ────────────
+	// (log_line / job_* topics within the stream are filtered per role in the
+	// SSE hub, not at the router.)
+	mux.HandleFunc("GET /api/events", s.handleEvents)
+
+	// ── Settings surface: logs and debug (admin-only) ──────────────────
+	// Logs — snapshot of the on-disk log file backing the settings Log tab.
+	mux.HandleFunc("GET /api/logs", s.adminOnly(s.handleGetLogs))
+	// Debug endpoint — full download state for troubleshooting.
+	mux.HandleFunc("GET /api/debug/download/{id}", s.adminOnly(s.handleDebugDownload))
 }
 
 // SetProviderCooldown replaces the default (self-contained) cooldown with a

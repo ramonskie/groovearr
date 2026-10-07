@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -40,6 +39,8 @@ import (
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/tracking"
 	trackingsqlite "github.com/ramonskie/groovearr/internal/tracking/sqlite"
+	"github.com/ramonskie/groovearr/internal/user"
+	usersqlite "github.com/ramonskie/groovearr/internal/user/sqlite"
 )
 
 // App holds all initialized application components.
@@ -51,6 +52,7 @@ type App struct {
 	closeAccessLog func()
 	cfg            *config.Persistence
 	libStore       *sqlite.Store
+	userStore      user.Store
 	monitor        *download.MonitoringService
 	srv            *api.Server
 	bgCtx          context.Context
@@ -133,6 +135,21 @@ func NewApp(configPath string) (*App, error) {
 	pluginReg := plugin.NewRegistry()
 
 	currentCfg := cfg.Get()
+
+	// User store (SQLite — shares the library db connection) and first-run
+	// bootstrap. EnsureBootstrapAdmin promotes the existing single-user
+	// cfg.Auth credentials to the first admin when auth.method is "forms" and
+	// no accounts exist yet; it is a no-op on every subsequent start. The
+	// handle is retained on App for the API layer wiring in a later phase.
+	userStore, err := usersqlite.New(libStore.DB())
+	if err != nil {
+		log.Error("user store init failed", "error", err, "component", "main")
+		return nil, err
+	}
+	if err := user.EnsureBootstrapAdmin(context.Background(), userStore, currentCfg, log); err != nil {
+		log.Error("bootstrap admin failed", "error", err, "component", "main")
+		return nil, fmt.Errorf("bootstrap admin: %w", err)
+	}
 
 	// Ensure required directories exist.
 	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath, currentCfg.Library.PlaylistPath} {
@@ -327,10 +344,10 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, userStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
 		qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, healthChecker, logRot, accessLog, logPath, jobStatePath,
-		func(mux *http.ServeMux) {
-			spotify.RegisterOAuthRoutes(mux, cfg, log, func(name string, rawCfg json.RawMessage) error {
+		func(r plugin.RouteRegistrar) {
+			spotify.RegisterOAuthRoutes(r, cfg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
 				if err := registry.Rebuild(name, rawCfg, res); err != nil {
 					return err
@@ -346,7 +363,7 @@ func NewApp(configPath string) (*App, error) {
 					p.CheckConnection(ctx)
 				}
 			})
-			tidal.RegisterOAuthRoutes(mux, cfg, pluginReg, log, func(name string, rawCfg json.RawMessage) error {
+			tidal.RegisterOAuthRoutes(r, cfg, pluginReg, log, func(name string, rawCfg json.RawMessage) error {
 				res := plugin.PluginResources{DownloadPath: cfg.Get().Library.DownloadPath, Logger: log}
 				if err := registry.Rebuild(name, rawCfg, res); err != nil {
 					return err
@@ -419,6 +436,7 @@ func NewApp(configPath string) (*App, error) {
 		closeAccessLog:    closeAccessLog,
 		cfg:               cfg,
 		libStore:          libStore,
+		userStore:         userStore,
 		monitor:           monitor,
 		srv:               srv,
 		bgCtx:             bgCtx,

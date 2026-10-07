@@ -15,6 +15,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
 	"github.com/ramonskie/groovearr/internal/plugin"
+	"github.com/ramonskie/groovearr/internal/user"
 )
 
 // ─── Discover album-download handler test doubles ────────────────────
@@ -230,6 +231,38 @@ func TestHandleDiscoverAlbumDownload_TrackMode(t *testing.T) {
 	}
 	if r := store.records[0]; r.ISRC != "ISRC1" || r.TrackNumber != 1 || r.DiscNumber != 1 {
 		t.Errorf("track record metadata = %+v, want ISRC1 track 1 disc 1", r)
+	}
+}
+
+// TestHandleDiscoverAlbumDownload_CarriesRequester verifies the authenticated
+// caller's user id is threaded from Identity into the persisted per-track
+// records for DB-only attribution.
+func TestHandleDiscoverAlbumDownload_CarriesRequester(t *testing.T) {
+	cfg := testPersistence(t) // per-track path: no album source/client configured
+	reg := newDiscoverRegistry(t, &stubDiscoverProvider{name: "stubdisco", tracks: sampleDiscoverTracks()})
+	store := &stubDownloadStore{}
+	s := newDiscoverServer(t, reg, store, &stubAlbumSearcher{}, cfg)
+
+	req := newAlbumDownloadRequest("alb1", `{"artist_name":"A","album_name":"B"}`)
+	req = req.WithContext(contextWithIdentity(req.Context(), Identity{
+		UserID:   99,
+		Username: "bob",
+		Role:     user.RoleUser,
+	}))
+
+	rec := httptest.NewRecorder()
+	s.handleDiscoverAlbumDownload(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if len(store.records) != 2 {
+		t.Fatalf("stored %d records, want 2 per-track records", len(store.records))
+	}
+	for _, r := range store.records {
+		if r.RequestedByUserID != 99 {
+			t.Errorf("record %q RequestedByUserID = %d, want 99", r.ID, r.RequestedByUserID)
+		}
 	}
 }
 

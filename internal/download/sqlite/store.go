@@ -51,8 +51,9 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 			retry_count, retry_after, playlist_id, quality_profile_id,
 			isrc, library_track_id,
 			album_type, album_tracks, download_client, provider_id, magnet_uri, folder_path, imported_track_ids,
+			requested_by_user_id, requested_by_username,
 			created_at, updated_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ID, r.SourceName, r.Username, r.Filename, r.DisplayName,
 		string(download.StateQueued), 0.0,
 		r.Size, 0, 0, "", "",
@@ -62,6 +63,7 @@ func (s *Store) Insert(ctx context.Context, r *download.Record) error {
 		0, r.RetryAfter, r.PlaylistID, r.QualityProfileID,
 		r.ISRC, r.LibraryTrackID,
 		r.AlbumType, albumTracksJSON(r.AlbumTracks), r.DownloadClient, r.ProviderID, r.MagnetURI, r.FolderPath, int64sJSON(r.ImportedTrackIDs),
+		r.RequestedByUserID, r.RequestedByUsername,
 		now, now,
 	)
 	if err != nil {
@@ -332,6 +334,7 @@ const downloadSelect = `SELECT
 	retry_count, retry_after, playlist_id, quality_profile_id,
 	isrc, library_track_id,
 	album_type, album_tracks, download_client, provider_id, magnet_uri, folder_path, imported_track_ids,
+	requested_by_user_id, requested_by_username,
 	created_at, updated_at
 	FROM downloads`
 
@@ -349,6 +352,7 @@ func (s *Store) scanDownload(row *sql.Row) (*download.Record, error) {
 		&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 		&r.ISRC, &r.LibraryTrackID,
 		&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.ProviderID, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
+		&r.RequestedByUserID, &r.RequestedByUsername,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -386,6 +390,7 @@ func (s *Store) scanDownloads(rows *sql.Rows) ([]download.Record, error) {
 			&r.RetryCount, &retryAfter, &playlistID, &r.QualityProfileID,
 			&r.ISRC, &r.LibraryTrackID,
 			&r.AlbumType, &albumTracksJSON, &r.DownloadClient, &r.ProviderID, &r.MagnetURI, &r.FolderPath, &importedTrackIDsJSON,
+			&r.RequestedByUserID, &r.RequestedByUsername,
 			&createdAt, &updatedAt,
 		); err != nil {
 			s.log.Error("downloads scan failed", "error", err, "component", "dl_store")

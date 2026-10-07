@@ -32,6 +32,13 @@ type Album struct {
 
 	// Release date from external source.
 	ReleaseDate string `json:"release_date,omitempty"`
+
+	// AddedByUserID/AddedByUsername record who requested the download that
+	// imported this album. DB-only attribution — never written to audio tags.
+	// 0/"" means scanned or system-imported. Set on INSERT only; upserts never
+	// clobber it.
+	AddedByUserID   int64  `json:"added_by_user_id,omitempty"`
+	AddedByUsername string `json:"added_by_username,omitempty"`
 }
 
 // ExpectedTrack holds per-track metadata for album-level downloads.

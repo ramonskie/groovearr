@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
 	"io"
 	"log/slog"
+	"reflect"
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -544,9 +546,9 @@ func TestStore_CountPlaylistsByName(t *testing.T) {
 		source, name string
 		want         int64
 	}{
-		{"tidal", "My Mix", 2},       // same-name collision
-		{"tidal", "Solo Mix", 1},     // unique name
-		{"deezer", "My Mix", 1},      // same name, different source
+		{"tidal", "My Mix", 2},   // same-name collision
+		{"tidal", "Solo Mix", 1}, // unique name
+		{"deezer", "My Mix", 1},  // same name, different source
 		{"tidal", "Does Not Exist", 0},
 	}
 	for _, tc := range tests {
@@ -557,5 +559,723 @@ func TestStore_CountPlaylistsByName(t *testing.T) {
 		if got != tc.want {
 			t.Errorf("CountPlaylistsByName(%q, %q) = %d, want %d", tc.source, tc.name, got, tc.want)
 		}
+	}
+}
+
+// ─── Phase 9 attribution migration ───────────────────────────────────
+//
+// These tests pin the additive schema contract: New() must produce the same
+// attribution columns (and indexes) on a fresh database and on a database
+// created before the columns existed.
+
+type columnExpect struct {
+	notNull      bool
+	defaultValid bool
+	defaultValue string
+}
+
+type columnInfo struct {
+	notNull      bool
+	defaultValid bool
+	defaultValue string
+	primaryKey   bool
+}
+
+// attributionColumns is the Phase 9 schema contract every database must
+// satisfy after New(), whether created fresh or upgraded additively.
+var attributionColumns = map[string]map[string]columnExpect{
+	"downloads": {
+		"requested_by_user_id":  {notNull: true, defaultValid: true, defaultValue: "0"},
+		"requested_by_username": {notNull: true, defaultValid: true, defaultValue: "''"},
+	},
+	"tracks": {
+		"added_by_user_id":  {notNull: false},
+		"added_by_username": {notNull: true, defaultValid: true, defaultValue: "''"},
+	},
+	"albums": {
+		"added_by_user_id":  {notNull: false},
+		"added_by_username": {notNull: true, defaultValid: true, defaultValue: "''"},
+	},
+	"playlists": {
+		"added_by_user_id":  {notNull: false},
+		"added_by_username": {notNull: true, defaultValid: true, defaultValue: "''"},
+	},
+}
+
+var attributionIndexes = map[string]string{
+	"idx_downloads_requested_by_user_id": "downloads",
+	"idx_tracks_added_by_user_id":        "tracks",
+	"idx_albums_added_by_user_id":        "albums",
+	"idx_playlists_added_by_user_id":     "playlists",
+}
+
+func readColumns(t *testing.T, db *sql.DB, table string) map[string]columnInfo {
+	t.Helper()
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		t.Fatalf("PRAGMA table_info(%s): %v", table, err)
+	}
+	defer rows.Close()
+
+	cols := make(map[string]columnInfo)
+	for rows.Next() {
+		var (
+			cid     int
+			name    string
+			ctype   string
+			notNull int
+			dflt    sql.NullString
+			pk      int
+		)
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan table_info(%s): %v", table, err)
+		}
+		cols[name] = columnInfo{
+			notNull:      notNull == 1,
+			defaultValid: dflt.Valid,
+			defaultValue: dflt.String,
+			primaryKey:   pk == 1,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("table_info(%s) rows: %v", table, err)
+	}
+	return cols
+}
+
+func assertAttributionColumns(t *testing.T, db *sql.DB) {
+	t.Helper()
+	for table, wants := range attributionColumns {
+		cols := readColumns(t, db, table)
+		for name, want := range wants {
+			got, ok := cols[name]
+			if !ok {
+				t.Errorf("%s.%s missing after migration", table, name)
+				continue
+			}
+			if got.notNull != want.notNull {
+				t.Errorf("%s.%s notNull = %v, want %v", table, name, got.notNull, want.notNull)
+			}
+			if got.defaultValid != want.defaultValid ||
+				(want.defaultValid && got.defaultValue != want.defaultValue) {
+				t.Errorf("%s.%s default = (%v, %q), want (%v, %q)",
+					table, name, got.defaultValid, got.defaultValue, want.defaultValid, want.defaultValue)
+			}
+		}
+	}
+	for index, table := range attributionIndexes {
+		var count int
+		if err := db.QueryRow(
+			`SELECT COUNT(*) FROM sqlite_master WHERE type='index' AND name=? AND tbl_name=?`,
+			index, table,
+		).Scan(&count); err != nil {
+			t.Fatalf("lookup index %s: %v", index, err)
+		}
+		if count != 1 {
+			t.Errorf("index %s on %s missing", index, table)
+		}
+	}
+}
+
+// legacySchema is the pre-Phase-9 (but post earlier migrations) shape of the
+// four attributed tables, used to prove the additive migration upgrades an
+// existing database without error.
+var legacySchema = []string{
+	`CREATE TABLE IF NOT EXISTS albums (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		artist_id INTEGER NOT NULL,
+		title TEXT NOT NULL,
+		year INTEGER,
+		genres TEXT,
+		track_count INTEGER,
+		duration INTEGER,
+		thumb_url TEXT,
+		album_type TEXT DEFAULT 'album',
+		release_date TEXT,
+		external_ids TEXT DEFAULT '{}',
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS tracks (
+		id INTEGER PRIMARY KEY AUTOINCREMENT,
+		album_id INTEGER NOT NULL,
+		artist_id INTEGER NOT NULL,
+		title TEXT NOT NULL,
+		track_number INTEGER,
+		disc_number INTEGER DEFAULT 1,
+		duration INTEGER,
+		file_path TEXT,
+		bitrate INTEGER,
+		file_size INTEGER,
+		external_ids TEXT DEFAULT '{}',
+		acoustid TEXT,
+		isrc TEXT,
+		quality_profile_id INTEGER,
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	`CREATE TABLE IF NOT EXISTS playlists (
+		id                 INTEGER PRIMARY KEY AUTOINCREMENT,
+		source             TEXT NOT NULL,
+		source_playlist_id TEXT NOT NULL,
+		name               TEXT NOT NULL,
+		description        TEXT,
+		track_count        INTEGER,
+		cover_url          TEXT,
+		owner_name         TEXT,
+		is_public          INTEGER DEFAULT 1,
+		auto_sync          INTEGER DEFAULT 0,
+		sync_mode          TEXT DEFAULT 'mirror',
+		synced_at          TEXT,
+		created_at         TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at         TEXT NOT NULL DEFAULT (datetime('now')),
+		UNIQUE(source, source_playlist_id)
+	)`,
+	`CREATE TABLE IF NOT EXISTS downloads (
+		id TEXT PRIMARY KEY,
+		source_name TEXT NOT NULL DEFAULT '',
+		username TEXT NOT NULL DEFAULT '',
+		filename TEXT NOT NULL DEFAULT '',
+		display_name TEXT NOT NULL DEFAULT '',
+		state TEXT NOT NULL DEFAULT 'initializing',
+		progress REAL NOT NULL DEFAULT 0,
+		size INTEGER NOT NULL DEFAULT 0,
+		transferred INTEGER NOT NULL DEFAULT 0,
+		speed INTEGER NOT NULL DEFAULT 0,
+		file_path TEXT NOT NULL DEFAULT '',
+		error TEXT NOT NULL DEFAULT '',
+		track_id TEXT NOT NULL DEFAULT '',
+		cover_url TEXT NOT NULL DEFAULT '',
+		artist TEXT NOT NULL DEFAULT '',
+		album TEXT NOT NULL DEFAULT '',
+		title TEXT NOT NULL DEFAULT '',
+		track_number INTEGER NOT NULL DEFAULT 0,
+		disc_number INTEGER NOT NULL DEFAULT 0,
+		year INTEGER NOT NULL DEFAULT 0,
+		retry_count INTEGER NOT NULL DEFAULT 0,
+		retry_after TEXT NOT NULL DEFAULT '',
+		bitrate INTEGER NOT NULL DEFAULT 0,
+		format TEXT NOT NULL DEFAULT '',
+		playlist_id TEXT NOT NULL DEFAULT '',
+		quality_profile_id INTEGER,
+		isrc TEXT NOT NULL DEFAULT '',
+		library_track_id INTEGER NOT NULL DEFAULT 0,
+		album_type TEXT NOT NULL DEFAULT '',
+		album_tracks TEXT NOT NULL DEFAULT '',
+		download_client TEXT NOT NULL DEFAULT '',
+		provider_id TEXT NOT NULL DEFAULT '',
+		magnet_uri TEXT NOT NULL DEFAULT '',
+		folder_path TEXT NOT NULL DEFAULT '',
+		imported_track_ids TEXT NOT NULL DEFAULT '',
+		created_at TEXT NOT NULL DEFAULT (datetime('now')),
+		updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+	)`,
+	// Seed one row per attributed table to prove existing rows survive and
+	// keep NULL/0 attribution after the migration.
+	`INSERT INTO albums (artist_id, title) VALUES (1, 'Legacy Album')`,
+	`INSERT INTO tracks (album_id, artist_id, title) VALUES (1, 1, 'Legacy Track')`,
+	`INSERT INTO playlists (source, source_playlist_id, name) VALUES ('legacy', 'legacy-1', 'Legacy Playlist')`,
+	`INSERT INTO downloads (id) VALUES ('legacy-dl')`,
+}
+
+func createLegacyDB(t *testing.T, path string) {
+	t.Helper()
+	db, err := sql.Open("sqlite", path+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(30000)&_pragma=foreign_keys(1)")
+	if err != nil {
+		t.Fatalf("open legacy db: %v", err)
+	}
+	defer db.Close()
+
+	for _, stmt := range legacySchema {
+		if _, err := db.Exec(stmt); err != nil {
+			t.Fatalf("legacy exec failed: %v\nstmt: %s", err, stmt)
+		}
+	}
+}
+
+func TestStore_AttributionColumns_FreshDB(t *testing.T) {
+	store, err := New(t.TempDir()+"/fresh.db", testLogger())
+	if err != nil {
+		t.Fatalf("open fresh db: %v", err)
+	}
+	defer store.Close()
+
+	assertAttributionColumns(t, store.DB())
+}
+
+func TestStore_AttributionColumns_PreExistingDB(t *testing.T) {
+	path := t.TempDir() + "/legacy.db"
+	createLegacyDB(t, path)
+
+	// Opening the pre-Phase-9 database must apply the additive migration
+	// without error.
+	store, err := New(path, testLogger())
+	if err != nil {
+		t.Fatalf("open and migrate legacy db: %v", err)
+	}
+	defer store.Close()
+
+	assertAttributionColumns(t, store.DB())
+
+	// Existing rows must survive with system/unknown attribution defaults.
+	var requestedBy int64
+	if err := store.DB().QueryRow(`SELECT requested_by_user_id FROM downloads WHERE id='legacy-dl'`).Scan(&requestedBy); err != nil {
+		t.Fatalf("legacy download row: %v", err)
+	}
+	if requestedBy != 0 {
+		t.Errorf("legacy download requested_by_user_id = %d, want 0", requestedBy)
+	}
+
+	var (
+		addedByID   sql.NullInt64
+		addedByName string
+	)
+	if err := store.DB().QueryRow(`SELECT added_by_user_id, added_by_username FROM tracks WHERE title='Legacy Track'`).Scan(&addedByID, &addedByName); err != nil {
+		t.Fatalf("legacy track row: %v", err)
+	}
+	if addedByID.Valid {
+		t.Errorf("legacy track added_by_user_id = %d, want NULL", addedByID.Int64)
+	}
+	if addedByName != "" {
+		t.Errorf("legacy track added_by_username = %q, want empty", addedByName)
+	}
+}
+
+func TestStore_AttributionColumns_FreshAndMigratedSchemasMatch(t *testing.T) {
+	fresh, err := New(t.TempDir()+"/fresh.db", testLogger())
+	if err != nil {
+		t.Fatalf("open fresh db: %v", err)
+	}
+	defer fresh.Close()
+
+	legacyPath := t.TempDir() + "/legacy.db"
+	createLegacyDB(t, legacyPath)
+	migrated, err := New(legacyPath, testLogger())
+	if err != nil {
+		t.Fatalf("open and migrate legacy db: %v", err)
+	}
+	defer migrated.Close()
+
+	for _, table := range []string{"downloads", "tracks", "albums", "playlists"} {
+		freshCols := readColumns(t, fresh.DB(), table)
+		migratedCols := readColumns(t, migrated.DB(), table)
+		if !reflect.DeepEqual(freshCols, migratedCols) {
+			t.Errorf("%s schema mismatch between fresh and migrated paths:\n fresh    = %+v\n migrated = %+v",
+				table, freshCols, migratedCols)
+		}
+	}
+}
+
+// readTrackAttribution returns the raw added_by_* values for a track id.
+func readTrackAttribution(t *testing.T, db *sql.DB, id int64) (sql.NullInt64, string) {
+	t.Helper()
+	var uid sql.NullInt64
+	var name string
+	if err := db.QueryRow(`SELECT added_by_user_id, added_by_username FROM tracks WHERE id=?`, id).
+		Scan(&uid, &name); err != nil {
+		t.Fatalf("read track attribution: %v", err)
+	}
+	return uid, name
+}
+
+// readAlbumAttribution returns the raw added_by_* values for an album id.
+func readAlbumAttribution(t *testing.T, db *sql.DB, id int64) (sql.NullInt64, string) {
+	t.Helper()
+	var uid sql.NullInt64
+	var name string
+	if err := db.QueryRow(`SELECT added_by_user_id, added_by_username FROM albums WHERE id=?`, id).
+		Scan(&uid, &name); err != nil {
+		t.Fatalf("read album attribution: %v", err)
+	}
+	return uid, name
+}
+
+// readPlaylistAttribution returns the raw added_by_* values for a playlist id.
+func readPlaylistAttribution(t *testing.T, db *sql.DB, id int64) (sql.NullInt64, string) {
+	t.Helper()
+	var uid sql.NullInt64
+	var name string
+	if err := db.QueryRow(`SELECT added_by_user_id, added_by_username FROM playlists WHERE id=?`, id).
+		Scan(&uid, &name); err != nil {
+		t.Fatalf("read playlist attribution: %v", err)
+	}
+	return uid, name
+}
+
+// TestStore_ImportTrackStampsAttribution verifies a download.requester-carrying
+// track is stamped on both the new track row and the album created for it.
+func TestStore_ImportTrackStampsAttribution(t *testing.T) {
+	store, err := New(t.TempDir()+"/stamp.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	track := &domain.Track{
+		Title:           "Song",
+		FilePath:        "/music/song.flac",
+		AddedByUserID:   42,
+		AddedByUsername: "alice",
+	}
+	trackID, err := store.ImportTrack(ctx, track, "Artist", "Album", 2024, nil)
+	if err != nil {
+		t.Fatalf("ImportTrack: %v", err)
+	}
+
+	uid, name := readTrackAttribution(t, store.DB(), trackID)
+	if !uid.Valid || uid.Int64 != 42 || name != "alice" {
+		t.Errorf("track attribution = (%v, %q), want (42, alice)", uid, name)
+	}
+
+	uid, name = readAlbumAttribution(t, store.DB(), track.AlbumID)
+	if !uid.Valid || uid.Int64 != 42 || name != "alice" {
+		t.Errorf("album attribution = (%v, %q), want (42, alice)", uid, name)
+	}
+}
+
+// TestStore_ImportTrackSystemStoresNullBlank verifies the scanner/system path
+// (zero requester) leaves NULL id and blank username rather than a 0 user id.
+func TestStore_ImportTrackSystemStoresNullBlank(t *testing.T) {
+	store, err := New(t.TempDir()+"/system.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	track := &domain.Track{Title: "Scanned", FilePath: "/music/scanned.flac"}
+	trackID, err := store.ImportTrack(ctx, track, "Artist", "Album", 2024, nil)
+	if err != nil {
+		t.Fatalf("ImportTrack: %v", err)
+	}
+
+	uid, name := readTrackAttribution(t, store.DB(), trackID)
+	if uid.Valid || name != "" {
+		t.Errorf("system track attribution = (%v, %q), want (NULL, \"\")", uid, name)
+	}
+
+	uid, name = readAlbumAttribution(t, store.DB(), track.AlbumID)
+	if uid.Valid || name != "" {
+		t.Errorf("system album attribution = (%v, %q), want (NULL, \"\")", uid, name)
+	}
+}
+
+// TestStore_UpsertTrackAttributionInsertOnly proves a second upsert (the
+// UPDATE branch) never clobbers attribution written on insert.
+func TestStore_UpsertTrackAttributionInsertOnly(t *testing.T) {
+	store, err := New(t.TempDir()+"/track-upsert.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	artistID, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Artist"})
+	if err != nil {
+		t.Fatalf("UpsertArtist: %v", err)
+	}
+	albumID, err := store.UpsertAlbum(ctx, &domain.Album{ArtistID: artistID, Title: "Album"})
+	if err != nil {
+		t.Fatalf("UpsertAlbum: %v", err)
+	}
+
+	trackID, err := store.UpsertTrack(ctx, &domain.Track{
+		AlbumID: albumID, ArtistID: artistID, Title: "Song",
+		AddedByUserID: 7, AddedByUsername: "alice",
+	})
+	if err != nil {
+		t.Fatalf("UpsertTrack insert: %v", err)
+	}
+
+	// Update branch: same id, different (would-be) attribution.
+	if _, err := store.UpsertTrack(ctx, &domain.Track{
+		ID: trackID, AlbumID: albumID, ArtistID: artistID, Title: "Song Renamed",
+		AddedByUserID: 99, AddedByUsername: "bob",
+	}); err != nil {
+		t.Fatalf("UpsertTrack update: %v", err)
+	}
+
+	uid, name := readTrackAttribution(t, store.DB(), trackID)
+	if !uid.Valid || uid.Int64 != 7 || name != "alice" {
+		t.Errorf("attribution after update = (%v, %q), want (7, alice) insert-only", uid, name)
+	}
+}
+
+// TestStore_UpsertAlbumAttributionInsertOnly proves a second upsert (the
+// UPDATE branch) never clobbers album attribution written on insert.
+func TestStore_UpsertAlbumAttributionInsertOnly(t *testing.T) {
+	store, err := New(t.TempDir()+"/album-upsert.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	artistID, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Artist"})
+	if err != nil {
+		t.Fatalf("UpsertArtist: %v", err)
+	}
+
+	albumID, err := store.UpsertAlbum(ctx, &domain.Album{
+		ArtistID: artistID, Title: "Album", AddedByUserID: 5, AddedByUsername: "carol",
+	})
+	if err != nil {
+		t.Fatalf("UpsertAlbum insert: %v", err)
+	}
+
+	if _, err := store.UpsertAlbum(ctx, &domain.Album{
+		ID: albumID, ArtistID: artistID, Title: "Album Renamed",
+		AddedByUserID: 88, AddedByUsername: "dave",
+	}); err != nil {
+		t.Fatalf("UpsertAlbum update: %v", err)
+	}
+
+	uid, name := readAlbumAttribution(t, store.DB(), albumID)
+	if !uid.Valid || uid.Int64 != 5 || name != "carol" {
+		t.Errorf("attribution after update = (%v, %q), want (5, carol) insert-only", uid, name)
+	}
+}
+
+// TestStore_UpsertPlaylistAttributionInsertOnly proves playlist attribution is
+// stamped on INSERT only: the UPDATE branch (re-import / sync) must never
+// clobber the original importer.
+func TestStore_UpsertPlaylistAttributionInsertOnly(t *testing.T) {
+	store, err := New(t.TempDir()+"/playlist-upsert.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	playlistID, err := store.UpsertPlaylist(ctx, &domain.Playlist{
+		Source: "deezer", SourcePlaylistID: "pl-1", Name: "Mix",
+		AddedByUserID: 11, AddedByUsername: "erin",
+	})
+	if err != nil {
+		t.Fatalf("UpsertPlaylist insert: %v", err)
+	}
+
+	uid, name := readPlaylistAttribution(t, store.DB(), playlistID)
+	if !uid.Valid || uid.Int64 != 11 || name != "erin" {
+		t.Fatalf("insert attribution = (%v, %q), want (11, erin)", uid, name)
+	}
+
+	// Update branch: same id, different (would-be) attribution + a synced_at bump.
+	if _, err := store.UpsertPlaylist(ctx, &domain.Playlist{
+		ID: playlistID, Source: "deezer", SourcePlaylistID: "pl-1", Name: "Mix Renamed",
+		SyncedAt:      "2026-10-07T00:00:00Z",
+		AddedByUserID: 99, AddedByUsername: "bob",
+	}); err != nil {
+		t.Fatalf("UpsertPlaylist update: %v", err)
+	}
+
+	uid, name = readPlaylistAttribution(t, store.DB(), playlistID)
+	if !uid.Valid || uid.Int64 != 11 || name != "erin" {
+		t.Errorf("attribution after update = (%v, %q), want (11, erin) insert-only", uid, name)
+	}
+}
+
+// TestStore_UpsertPlaylistSystemStoresNullBlank verifies a system-created
+// playlist (zero actor) stores NULL/blank rather than a 0 user id.
+func TestStore_UpsertPlaylistSystemStoresNullBlank(t *testing.T) {
+	store, err := New(t.TempDir()+"/playlist-system.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	playlistID, err := store.UpsertPlaylist(ctx, &domain.Playlist{
+		Source: "deezer", SourcePlaylistID: "sys-1", Name: "Auto",
+	})
+	if err != nil {
+		t.Fatalf("UpsertPlaylist: %v", err)
+	}
+
+	uid, name := readPlaylistAttribution(t, store.DB(), playlistID)
+	if uid.Valid || name != "" {
+		t.Errorf("system playlist attribution = (%v, %q), want (NULL, \"\")", uid, name)
+	}
+}
+
+// findTrack returns the track with the given id from a slice.
+func findTrack(tracks []domain.Track, id int64) (domain.Track, bool) {
+	for _, tr := range tracks {
+		if tr.ID == id {
+			return tr, true
+		}
+	}
+	return domain.Track{}, false
+}
+
+// findAlbum returns the album with the given id from a slice.
+func findAlbum(albums []domain.Album, id int64) (domain.Album, bool) {
+	for _, al := range albums {
+		if al.ID == id {
+			return al, true
+		}
+	}
+	return domain.Album{}, false
+}
+
+// findPlaylist returns the playlist with the given id from a slice.
+func findPlaylist(playlists []domain.Playlist, id int64) (domain.Playlist, bool) {
+	for _, p := range playlists {
+		if p.ID == id {
+			return p, true
+		}
+	}
+	return domain.Playlist{}, false
+}
+
+// TestStore_ReadPathsExposeAttribution pins the Phase 9.5 read contract: every
+// read path that feeds the API selects added_by_user_id/added_by_username and
+// scans them onto the domain struct. A user-stamped row round-trips; a
+// system/scanned row reads back as zero/blank. No authorization is derived.
+func TestStore_ReadPathsExposeAttribution(t *testing.T) {
+	store, err := New(t.TempDir()+"/read-attribution.db", testLogger())
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	// User-requested track + album (attribution stamped on import).
+	stamped := &domain.Track{
+		Title: "Stamped", FilePath: "/music/stamped.flac", ISRC: "ISRC-STAMP",
+		AddedByUserID: 42, AddedByUsername: "alice",
+	}
+	stampedID, err := store.ImportTrack(ctx, stamped, "Artist", "Stamped Album", 2024, nil)
+	if err != nil {
+		t.Fatalf("ImportTrack stamped: %v", err)
+	}
+
+	// System/scanned track + album (no requester).
+	system := &domain.Track{Title: "System", FilePath: "/music/system.flac"}
+	systemID, err := store.ImportTrack(ctx, system, "Artist", "System Album", 2024, nil)
+	if err != nil {
+		t.Fatalf("ImportTrack system: %v", err)
+	}
+
+	// ── Track reads ──────────────────────────────────────────────────
+	if tr, err := store.GetTrack(ctx, stampedID); err != nil {
+		t.Fatalf("GetTrack: %v", err)
+	} else if tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("GetTrack attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
+	}
+
+	if tracks, err := store.GetTracksByAlbum(ctx, stamped.AlbumID); err != nil {
+		t.Fatalf("GetTracksByAlbum: %v", err)
+	} else if tr, ok := findTrack(tracks, stampedID); !ok {
+		t.Errorf("GetTracksByAlbum missing stamped track %d", stampedID)
+	} else if tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("GetTracksByAlbum attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
+	}
+
+	if tracks, err := store.GetTracksByArtist(ctx, stamped.ArtistID); err != nil {
+		t.Fatalf("GetTracksByArtist: %v", err)
+	} else if tr, ok := findTrack(tracks, stampedID); !ok {
+		t.Errorf("GetTracksByArtist missing stamped track %d", stampedID)
+	} else if tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("GetTracksByArtist attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
+	}
+
+	if tracks, err := store.SearchTracks(ctx, "Stamped", 10); err != nil {
+		t.Fatalf("SearchTracks: %v", err)
+	} else if tr, ok := findTrack(tracks, stampedID); !ok {
+		t.Errorf("SearchTracks missing stamped track %d", stampedID)
+	} else if tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("SearchTracks attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
+	}
+
+	if tr, err := store.GetTrackByFilePath(ctx, "/music/stamped.flac"); err != nil {
+		t.Fatalf("GetTrackByFilePath: %v", err)
+	} else if tr == nil || tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("GetTrackByFilePath attribution = %+v, want (42, alice)", tr)
+	}
+
+	if tracks, err := store.ListTracksWithQuality(ctx); err != nil {
+		t.Fatalf("ListTracksWithQuality: %v", err)
+	} else if tr, ok := findTrack(tracks, stampedID); !ok {
+		t.Errorf("ListTracksWithQuality missing stamped track %d", stampedID)
+	} else if tr.AddedByUserID != 42 || tr.AddedByUsername != "alice" {
+		t.Errorf("ListTracksWithQuality attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
+	}
+
+	// ── Album reads ──────────────────────────────────────────────────
+	if al, err := store.GetAlbum(ctx, stamped.AlbumID); err != nil {
+		t.Fatalf("GetAlbum: %v", err)
+	} else if al.AddedByUserID != 42 || al.AddedByUsername != "alice" {
+		t.Errorf("GetAlbum attribution = (%d, %q), want (42, alice)", al.AddedByUserID, al.AddedByUsername)
+	}
+
+	if albums, err := store.GetAlbumsByArtist(ctx, stamped.ArtistID); err != nil {
+		t.Fatalf("GetAlbumsByArtist: %v", err)
+	} else if al, ok := findAlbum(albums, stamped.AlbumID); !ok {
+		t.Errorf("GetAlbumsByArtist missing stamped album %d", stamped.AlbumID)
+	} else if al.AddedByUserID != 42 || al.AddedByUsername != "alice" {
+		t.Errorf("GetAlbumsByArtist attribution = (%d, %q), want (42, alice)", al.AddedByUserID, al.AddedByUsername)
+	}
+
+	if albums, err := store.SearchAlbums(ctx, "Stamped", 10); err != nil {
+		t.Fatalf("SearchAlbums: %v", err)
+	} else if al, ok := findAlbum(albums, stamped.AlbumID); !ok {
+		t.Errorf("SearchAlbums missing stamped album %d", stamped.AlbumID)
+	} else if al.AddedByUserID != 42 || al.AddedByUsername != "alice" {
+		t.Errorf("SearchAlbums attribution = (%d, %q), want (42, alice)", al.AddedByUserID, al.AddedByUsername)
+	}
+
+	// ── System rows read back blank ──────────────────────────────────
+	if tr, err := store.GetTrack(ctx, systemID); err != nil {
+		t.Fatalf("GetTrack system: %v", err)
+	} else if tr.AddedByUserID != 0 || tr.AddedByUsername != "" {
+		t.Errorf("system track attribution = (%d, %q), want (0, \"\")", tr.AddedByUserID, tr.AddedByUsername)
+	}
+	if al, err := store.GetAlbum(ctx, system.AlbumID); err != nil {
+		t.Fatalf("GetAlbum system: %v", err)
+	} else if al.AddedByUserID != 0 || al.AddedByUsername != "" {
+		t.Errorf("system album attribution = (%d, %q), want (0, \"\")", al.AddedByUserID, al.AddedByUsername)
+	}
+
+	// ── Playlist reads ───────────────────────────────────────────────
+	playlistID, err := store.UpsertPlaylist(ctx, &domain.Playlist{
+		Source: "deezer", SourcePlaylistID: "pl-a", Name: "Stamped Mix",
+		AddedByUserID: 11, AddedByUsername: "erin",
+	})
+	if err != nil {
+		t.Fatalf("UpsertPlaylist: %v", err)
+	}
+	systemPlaylistID, err := store.UpsertPlaylist(ctx, &domain.Playlist{
+		Source: "deezer", SourcePlaylistID: "pl-sys", Name: "Auto",
+	})
+	if err != nil {
+		t.Fatalf("UpsertPlaylist system: %v", err)
+	}
+
+	if p, err := store.GetPlaylist(ctx, playlistID); err != nil {
+		t.Fatalf("GetPlaylist: %v", err)
+	} else if p.AddedByUserID != 11 || p.AddedByUsername != "erin" {
+		t.Errorf("GetPlaylist attribution = (%d, %q), want (11, erin)", p.AddedByUserID, p.AddedByUsername)
+	}
+
+	if p, err := store.GetPlaylistBySourceID(ctx, "deezer", "pl-a"); err != nil {
+		t.Fatalf("GetPlaylistBySourceID: %v", err)
+	} else if p == nil || p.AddedByUserID != 11 || p.AddedByUsername != "erin" {
+		t.Errorf("GetPlaylistBySourceID attribution = %+v, want (11, erin)", p)
+	}
+
+	if pls, err := store.ListPlaylists(ctx); err != nil {
+		t.Fatalf("ListPlaylists: %v", err)
+	} else if p, ok := findPlaylist(pls, playlistID); !ok {
+		t.Errorf("ListPlaylists missing stamped playlist %d", playlistID)
+	} else if p.AddedByUserID != 11 || p.AddedByUsername != "erin" {
+		t.Errorf("ListPlaylists attribution = (%d, %q), want (11, erin)", p.AddedByUserID, p.AddedByUsername)
+	}
+
+	if p, err := store.GetPlaylist(ctx, systemPlaylistID); err != nil {
+		t.Fatalf("GetPlaylist system: %v", err)
+	} else if p.AddedByUserID != 0 || p.AddedByUsername != "" {
+		t.Errorf("system playlist attribution = (%d, %q), want (0, \"\")", p.AddedByUserID, p.AddedByUsername)
 	}
 }
