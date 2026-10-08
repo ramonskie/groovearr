@@ -1,12 +1,18 @@
 import { useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Music, Download, Check } from "lucide-react";
+import { ArrowLeft, Music, Check } from "lucide-react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import Badge from "../../components/Badge";
 import { useStartBestDownload } from "../../hooks/use-downloads";
 import { useLibraryAlbumDiscovery, useDownloadMissingForAlbum } from "../../hooks/use-library";
-import { libraryAlbumDownloadUrl } from "../../api/client";
+import { libraryAlbumDownloadUrl, libraryTrackDownloadUrl } from "../../api/client";
+import {
+  SaveToComputerIcon,
+  AddToLibraryIcon,
+  saveToComputerTitle,
+  addToLibraryTitle,
+} from "../../components/downloadActions";
 import type { Album, DiscoveryTrackEntry } from "../../api/types";
 
 interface AlbumDetailViewProps {
@@ -76,20 +82,36 @@ function TrackRow({
           <span className="text-slate-600">—</span>
         )}
       </td>
-      <td className="w-12 px-4 py-3 text-center">
-        {track.downloaded ? (
-          <Check size={16} className="mx-auto text-emerald-500" />
-        ) : (
-          <button
-            type="button"
-            onClick={() => onDownload(track)}
-            disabled={isDownloading || batchDownloading}
-            className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-400 transition-colors hover:border-purple-500 hover:text-purple-400 disabled:opacity-50"
-            title={`Download ${track.title}`}
-          >
-            <Download size={14} />
-          </button>
-        )}
+      <td className="w-24 px-4 py-3">
+        <div className="flex items-center justify-center gap-2">
+          {track.downloaded ? (
+            <>
+              <Check size={16} className="text-emerald-500" />
+              {track.library_track_id != null && (
+                <a
+                  href={libraryTrackDownloadUrl(track.library_track_id)}
+                  download
+                  title={saveToComputerTitle(track.title)}
+                  aria-label={saveToComputerTitle(track.title)}
+                  className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-400 transition-colors hover:border-purple-500 hover:text-purple-400"
+                >
+                  <SaveToComputerIcon size={14} />
+                </a>
+              )}
+            </>
+          ) : (
+            <button
+              type="button"
+              onClick={() => onDownload(track)}
+              disabled={isDownloading || batchDownloading}
+              className="flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-400 transition-colors hover:border-purple-500 hover:text-purple-400 disabled:opacity-50"
+              title={addToLibraryTitle(track.title)}
+              aria-label={addToLibraryTitle(track.title)}
+            >
+              <AddToLibraryIcon size={14} />
+            </button>
+          )}
+        </div>
       </td>
     </tr>
   );
@@ -255,12 +277,12 @@ export default function AlbumDetailView({
             <a
               href={libraryAlbumDownloadUrl(album.id)}
               download
-              title={`Download ${album.title}`}
-              aria-label={`Download ${album.title}`}
+              title={saveToComputerTitle(album.title)}
+              aria-label={saveToComputerTitle(album.title)}
               className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-purple-500 hover:text-purple-400"
             >
-              <Download size={14} />
-              Download
+              <SaveToComputerIcon size={14} />
+              Save album
             </a>
             {undownloadedTracks.length > 0 && (
               <button
@@ -269,10 +291,10 @@ export default function AlbumDetailView({
                 disabled={downloadMissing.isPending || startBestDownload.isPending}
                 className="flex items-center gap-2 rounded-lg bg-purple-600 px-4 py-2 text-sm font-medium text-white transition-colors hover:bg-purple-500 disabled:opacity-50"
               >
-                <Download size={14} />
+                <AddToLibraryIcon size={14} />
                 {downloadMissing.isPending
-                  ? "Queueing…"
-                  : `Download ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""}`}
+                  ? "Adding…"
+                  : `Add ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""} to library`}
               </button>
             )}
           </div>
@@ -314,7 +336,7 @@ export default function AlbumDetailView({
                   <th className="hidden w-14 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400 sm:table-cell">
                     Format
                   </th>
-                  <th className="w-12 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  <th className="w-24 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
                     Status
                   </th>
                 </tr>

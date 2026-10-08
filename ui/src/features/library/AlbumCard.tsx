@@ -1,6 +1,7 @@
 import { useState } from "react";
-import { Download, Music } from "lucide-react";
+import { Music } from "lucide-react";
 import { libraryAlbumDownloadUrl } from "../../api/client";
+import { SaveToComputerIcon, saveToComputerTitle } from "../../components/downloadActions";
 import type { Album } from "../../api/types";
 
 interface AlbumCardProps {
@@ -32,11 +33,11 @@ export default function AlbumCard({ album, artistName }: AlbumCardProps) {
           href={libraryAlbumDownloadUrl(album.id)}
           download
           onClick={(e) => e.stopPropagation()}
-          title={`Download ${album.title}`}
-          aria-label={`Download ${album.title}`}
+          title={saveToComputerTitle(album.title)}
+          aria-label={saveToComputerTitle(album.title)}
           className="absolute right-2 top-2 flex h-8 w-8 items-center justify-center rounded-full bg-slate-900/80 text-slate-300 transition-colors hover:bg-slate-900 hover:text-white"
         >
-          <Download size={15} />
+          <SaveToComputerIcon size={15} />
         </a>
       </div>
 

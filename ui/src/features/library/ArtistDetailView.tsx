@@ -1,11 +1,16 @@
 import { useState, useCallback, useMemo, useRef } from "react";
 import { useNavigate } from "react-router-dom";
-import { ArrowLeft, Music, Search, Disc3, Library, Download } from "lucide-react";
+import { ArrowLeft, Music, Search, Disc3, Library } from "lucide-react";
 import { toast } from "sonner";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import { useDiscoveryResolveArtist, useArtistOverview } from "../../hooks/use-discovery";
-import { downloadBest } from "../../api/client";
+import { downloadBest, libraryTrackDownloadUrl } from "../../api/client";
+import {
+  SaveToComputerIcon,
+  AddToLibraryIcon,
+  saveToComputerTitle,
+} from "../../components/downloadActions";
 import type { Artist, Album, Track } from "../../api/types";
 
 interface ArtistDetailViewProps {
@@ -113,7 +118,7 @@ function ArtistHeader({ artist, albums }: { artist: Artist; albums: Album[] }) {
         errors.push(`${t.artist_name} - ${t.title}: ${msg}`);
       }
     });
-    if (queued > 0) toast.success(`${queued}/${total} tracks queued`);
+    if (queued > 0) toast.success(`${queued}/${total} tracks added`);
     errors.slice(0, 3).forEach((e) => toast.error(e));
   }, [overview]);
 
@@ -228,8 +233,8 @@ function ArtistHeader({ artist, albums }: { artist: Artist; albums: Album[] }) {
             disabled={downloading}
             className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-purple-600/20 px-2 py-1.5 text-[11px] font-medium text-purple-400 transition-colors hover:bg-purple-600/30 disabled:opacity-50"
           >
-            <Download size={12} />
-            {downloading ? "Queuing…" : "Download Top Tracks"}
+            <AddToLibraryIcon size={12} />
+            {downloading ? "Adding…" : "Add Top Tracks"}
           </button>
         )}
       </div>
@@ -313,8 +318,8 @@ function ArtistHeader({ artist, albums }: { artist: Artist; albums: Album[] }) {
                 disabled={downloading}
                 className="mt-2 flex w-full items-center justify-center gap-1.5 rounded-md bg-purple-600/20 px-2 py-1.5 text-[11px] font-medium text-purple-400 transition-colors hover:bg-purple-600/30 disabled:opacity-50"
               >
-                <Download size={12} />
-                {downloading ? "Queuing…" : "Download Top Tracks"}
+                <AddToLibraryIcon size={12} />
+                {downloading ? "Adding…" : "Add Top Tracks"}
               </button>
             )}
           </div>
@@ -468,6 +473,9 @@ export default function ArtistDetailView({
                   <th className="w-24 px-4 py-3 text-right text-xs font-semibold uppercase tracking-wider text-slate-400">
                     Size
                   </th>
+                  <th className="w-12 px-4 py-3 text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
+                    <span className="sr-only">Save</span>
+                  </th>
                 </tr>
               </thead>
               <tbody>
@@ -489,6 +497,17 @@ export default function ArtistDetailView({
                     </td>
                     <td className="px-4 py-3 text-right text-xs text-slate-500 tabular-nums">
                       {formatSize(track.file_size)}
+                    </td>
+                    <td className="px-4 py-3 text-center">
+                      <a
+                        href={libraryTrackDownloadUrl(track.id)}
+                        download
+                        title={saveToComputerTitle(track.title)}
+                        aria-label={saveToComputerTitle(track.title)}
+                        className="mx-auto flex h-7 w-7 items-center justify-center rounded-md border border-slate-700 bg-slate-800 text-slate-400 transition-colors hover:border-purple-500 hover:text-purple-400"
+                      >
+                        <SaveToComputerIcon size={14} />
+                      </a>
                     </td>
                   </tr>
                 ))}

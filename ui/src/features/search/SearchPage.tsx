@@ -50,13 +50,13 @@ function SearchPage() {
         },
         {
           onSuccess: (data) => {
-            toast.success(`Download started: ${track.title || track.filename}`, {
+            toast.success(`Added to library: ${track.title || track.filename}`, {
               description: `ID: ${data.download_id}`,
             });
             navigate("/downloads");
           },
           onError: (err) => {
-            toast.error("Download failed", {
+            toast.error("Add failed", {
               description: err instanceof Error ? err.message : "Unknown error",
             });
           },
@@ -102,12 +102,12 @@ function SearchPage() {
       const failed = results.filter((r) => r.status === "rejected").length;
 
       if (failed === 0) {
-        toast.success(`Downloading album: ${_album.album_title}`, {
-          description: `${succeeded} track${succeeded !== 1 ? "s" : ""} queued`,
+        toast.success(`Adding album: ${_album.album_title}`, {
+          description: `${succeeded} track${succeeded !== 1 ? "s" : ""} added`,
         });
       } else {
-        toast.warning(`Album download incomplete`, {
-          description: `${succeeded} queued, ${failed} failed`,
+        toast.warning(`Album add incomplete`, {
+          description: `${succeeded} added, ${failed} failed`,
         });
       }
       navigate("/downloads");

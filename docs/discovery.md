@@ -34,7 +34,7 @@ with the next candidate.
 │                         UI: /discover                                 │
 │  Search "Dune" → [Dune (artist)] → [Albums] → [Tracks]               │
 │                          ↓                                            │
-│              User clicks "Download Album"                             │
+│              User clicks "Add album to library"                       │
 └──────────────────────────────────────────────────────────────────────┘
                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐

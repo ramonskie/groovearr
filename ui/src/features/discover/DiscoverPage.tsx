@@ -161,10 +161,10 @@ export default function DiscoverPage() {
       onSuccess: (data) => {
         if (data.mode === "album") {
           toast.success(
-            `Album download queued: ${data.artist} - ${data.album}`,
+            `Album added to library: ${data.artist} - ${data.album}`,
           );
         } else {
-          toast.success(`${data.queued}/${data.total} tracks queued`);
+          toast.success(`${data.queued}/${data.total} tracks added`);
           if (data.errors && data.errors.length > 0) {
             data.errors.slice(0, 3).forEach((e: string) => toast.error(e));
           }
@@ -373,8 +373,8 @@ export default function DiscoverPage() {
                   disabled={downloadAlbumMutation.isPending}
                 >
                   {downloadAlbumMutation.isPending
-                    ? "Downloading..."
-                    : "Download Album"}
+                    ? "Adding…"
+                    : "Add album to library"}
                 </Button>
               </div>
             </div>

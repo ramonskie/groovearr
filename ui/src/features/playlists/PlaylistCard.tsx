@@ -1,5 +1,5 @@
 import { useState, type FC } from "react";
-import { RefreshCw, Download, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown, Repeat, TriangleAlert } from "lucide-react";
+import { RefreshCw, Trash2, Music, Check, X, ArrowDown, Loader2, Clock, ChevronDown, Repeat, TriangleAlert } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { toast } from "sonner";
 import type { Playlist, PlaylistTrackDownloadStatus } from "../../api/types";
@@ -9,6 +9,7 @@ import { getProviderIcon } from "../settings/providerIcons";
 import Button from "../../components/Button";
 import Badge from "../../components/Badge";
 import Spinner from "../../components/Spinner";
+import { AddToLibraryIcon, addToLibraryTitle } from "../../components/downloadActions";
 
 interface PlaylistCardProps {
   playlist: Playlist;
@@ -64,9 +65,9 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
     e.stopPropagation();
     downloadMissingMutation.mutate(playlist.id, {
       onSuccess: (data) =>
-        toast.success(`${data.queued} tracks queued for download`),
+        toast.success(`${data.queued} tracks added to library`),
       onError: (err) =>
-        toast.error(err instanceof Error ? err.message : "Download failed"),
+        toast.error(err instanceof Error ? err.message : "Add failed"),
     });
   };
 
@@ -167,8 +168,8 @@ const PlaylistCard: FC<PlaylistCardProps> = ({ playlist }) => {
           <Button variant="ghost" size="sm" loading={syncMutation.isPending} onClick={handleSync} title="Sync playlist with source">
             <RefreshCw size={14} />
           </Button>
-          <Button variant="ghost" size="sm" loading={downloadMissingMutation.isPending} onClick={handleDownloadMissing} title="Download missing tracks">
-            <Download size={14} />
+          <Button variant="ghost" size="sm" loading={downloadMissingMutation.isPending} onClick={handleDownloadMissing} title={addToLibraryTitle("missing tracks")}>
+            <AddToLibraryIcon size={14} />
           </Button>
           <Button variant="ghost" size="sm" onClick={handleDelete} title="Remove playlist" loading={confirmDelete && deleteMutation.isPending}>
             <Trash2 size={14} className={confirmDelete ? "text-red-500" : "text-red-400"} />

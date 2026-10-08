@@ -25,12 +25,12 @@ const DownloadConfirmDialog: FC<DownloadConfirmDialogProps> = ({
         <AlertDialog.Overlay className="fixed inset-0 z-50 bg-black/60 data-[state=open]:animate-fadeIn" />
         <AlertDialog.Content className="fixed left-1/2 top-1/2 z-50 w-full max-w-md -translate-x-1/2 -translate-y-1/2 rounded-lg border border-slate-800 bg-slate-900 p-6 shadow-xl data-[state=open]:animate-scaleIn">
           <AlertDialog.Title className="text-lg font-semibold text-white">
-            Download Album
+            Add Album to Library
           </AlertDialog.Title>
 
           <AlertDialog.Description className="mt-3 space-y-2 text-sm text-slate-300">
             <p>
-              Download{" "}
+              Add{" "}
               <span className="font-medium text-white">
                 {album.album_title}
               </span>
@@ -42,8 +42,8 @@ const DownloadConfirmDialog: FC<DownloadConfirmDialogProps> = ({
                     {album.artist}
                   </span>
                 </>
-              )}
-              ?
+              )}{" "}
+              to your library?
             </p>
             <p>
               {album.track_count} track{album.track_count !== 1 ? "s" : ""}
@@ -69,7 +69,7 @@ const DownloadConfirmDialog: FC<DownloadConfirmDialogProps> = ({
                 loading={loading}
                 onClick={() => onConfirm(album, album.tracks)}
               >
-                Download
+                Add to Library
               </Button>
             </AlertDialog.Action>
           </div>
