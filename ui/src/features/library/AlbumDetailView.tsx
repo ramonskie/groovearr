@@ -111,6 +111,10 @@ export default function AlbumDetailView({
   const tracks = discovery.data?.tracks ?? [];
   const undownloadedTracks = tracks.filter((t) => !t.downloaded);
   const downloadedCount = tracks.length - undownloadedTracks.length;
+  const totalSize = tracks.reduce(
+    (sum, t) => sum + (t.downloaded ? (t.file_size ?? 0) : 0),
+    0
+  );
 
   const trackKey = (t: DiscoveryTrackEntry) => `${t.track_number}-${t.title}`;
 
@@ -240,6 +244,7 @@ export default function AlbumDetailView({
               ? `${tracks.length} track${tracks.length !== 1 ? "s" : ""}`
               : `${album.track_count} track${album.track_count !== 1 ? "s" : ""}`}
             {downloadedCount > 0 && ` · ${downloadedCount} downloaded`}
+            {totalSize > 0 && ` · ${formatSize(totalSize)}`}
           </p>
           {album.added_by_username && (
             <Badge variant="muted" className="w-fit">
