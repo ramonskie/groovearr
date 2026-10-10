@@ -1,9 +1,11 @@
-// Package soulseek implements a download plugin for slskd (Soulseek daemon REST API).
+// Package soulseek implements a download plugin for Soulseek daemons
+// (slskd or slskr) over their compatible REST API.
 package soulseek
 
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -35,6 +37,12 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 	if err := json.Unmarshal(rawCfg, &cfg); err != nil {
 		return err
 	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Daemon)) {
+	case "", daemonAuto, daemonSlskd, daemonSlskr:
+	default:
+		return fmt.Errorf("soulseek.daemon: must be one of %q, %q, %q (got %q)",
+			daemonAuto, daemonSlskd, daemonSlskr, cfg.Daemon)
+	}
 	if cfg.SearchTimeout < 0 {
 		return fmt.Errorf("soulseek.search_timeout: must be >= 0 (got %d)", cfg.SearchTimeout)
 	}
@@ -46,7 +54,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Soulseek configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"slskd_url":"","api_key":"","enabled":true,"download_path":"","slskd_download_path":"","search_timeout":90,"min_upload_speed":0}`)
+	return json.RawMessage(`{"slskd_url":"","api_key":"","daemon":"auto","enabled":true,"download_path":"","slskd_download_path":"","search_timeout":90,"min_upload_speed":0}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
@@ -59,10 +67,22 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Default: "true",
 		},
 		{
+			Name:    "daemon",
+			Type:    "select",
+			Label:   "Daemon",
+			Hint:    "Which Soulseek daemon you run. Auto-detected from the API on connect; override only if detection is wrong.",
+			Default: daemonAuto,
+			Options: []plugin.FieldOption{
+				{Value: daemonAuto, Label: "Auto-detect"},
+				{Value: daemonSlskd, Label: "slskd"},
+				{Value: daemonSlskr, Label: "slskr"},
+			},
+		},
+		{
 			Name:        "slskd_url",
 			Type:        "text",
-			Label:       "slskd URL",
-			Hint:        "Full URL to your slskd instance (e.g. https://slskd.example.com:5030).",
+			Label:       "Daemon URL",
+			Hint:        "Full URL to your slskd or slskr instance (e.g. https://slskd.example.com:5030 or http://slskr.example.com:5030).",
 			Required:    true,
 			Placeholder: "https://slskd.example.com:5030",
 			Validation:  &plugin.FieldValidation{Format: "url"},
@@ -71,7 +91,7 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Name:        "api_key",
 			Type:        "password",
 			Label:       "API Key",
-			Hint:        "Your slskd API key from the slskd web interface.",
+			Hint:        "Your daemon API key / token (from the slskd web interface or slskr config). Sent as the X-API-Key header.",
 			Secret:      true,
 			Placeholder: "Enter API key",
 		},
@@ -79,14 +99,14 @@ func (f *factory) ConfigSchema() []plugin.ConfigField {
 			Name:        "download_path",
 			Type:        "text",
 			Label:       "Download Path",
-			Hint:        "Groovearr-visible path where slskd downloads appear. Use a dedicated sibling directory (e.g. /downloads/slskd), NOT the general download root — the library never scans here and files outside this path are not imported. Leave empty to use library.download_path.",
+			Hint:        "Groovearr-visible path where daemon downloads appear. Use a dedicated sibling directory (e.g. /downloads/slskd), NOT the general download root — the library never scans here and files outside this path are not imported. Leave empty to use library.download_path.",
 			Placeholder: "/downloads/slskd",
 		},
 		{
 			Name:        "slskd_download_path",
 			Type:        "text",
-			Label:       "slskd Download Directory",
-			Hint:        "Download directory from slskd's perspective. Must match slskd's configured download root (SLSKD_SHARED_DIR). Defaults to /downloads.",
+			Label:       "Daemon Download Directory",
+			Hint:        "Download directory from the daemon's perspective. Must match the daemon's configured download root (slskd SLSKD_SHARED_DIR / slskr downloads dir). Defaults to /downloads.",
 			Placeholder: "/downloads",
 		},
 	}

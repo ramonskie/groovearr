@@ -34,7 +34,7 @@
 
 | Provider | Local limit | Notes |
 |---|---|---|
-| **Soulseek (slskd)** | none (limiter removed) | Requests go to our own slskd instance |
+| **Soulseek (slskd/slskr)** | none (limiter removed) | Requests go to our own daemon instance |
 | **Prowlarr** | none on own Torznab API | Per-indexer `Query Limit` / `Grab Limit` are configurable in Prowlarr. Note: prowlarr's `ResolveTracks` routes album track listings through the shared MusicBrainz client (1 req/s) — separate from its own API |
 | **qBittorrent** | none | Local API |
 

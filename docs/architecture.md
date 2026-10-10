@@ -257,7 +257,7 @@ type SearchPlugin interface {
 }
 ```
 
-**Current plugins:** Soulseek (slskd REST API), Deezer (ARL + Blowfish decrypt) — both implement `Plugin` + `MonitoredProvider`. Prowlarr implements `download.AlbumProvider` for full-album torrent search and MusicBrainz track resolution. qBittorrent implements `download.DownloadClient` for torrent execution.
+**Current plugins:** Soulseek (slskd/slskr REST API), Deezer (ARL + Blowfish decrypt) — both implement `Plugin` + `MonitoredProvider`. Prowlarr implements `download.AlbumProvider` for full-album torrent search and MusicBrainz track resolution. qBittorrent implements `download.DownloadClient` for torrent execution.
 
 ### Album Provider Interface
 

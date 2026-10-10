@@ -8,8 +8,8 @@
 
 ## Overview
 
-The plugin system lets any music source (Soulseek/slskd, Deezer, Tidal, Qobuz, YouTube,
-etc.) integrate with Groovearr's unified search, download, and playlist pipelines.
+The plugin system lets any music source (Soulseek via slskd/slskr, Deezer, Tidal, Qobuz,
+YouTube, etc.) integrate with Groovearr's unified search, download, and playlist pipelines.
 
 A plugin is a Go package under `internal/providers/<source>/` that implements
 `download.Plugin` and exposes a `plugin.PluginFactory` for self-registration.
@@ -423,7 +423,7 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 }
 
 func (f *factory) DefaultConfig() json.RawMessage {
-    return json.RawMessage(`{"slskd_url":"","api_key":"","search_timeout":60,"min_upload_speed":0}`)
+    return json.RawMessage(`{"slskd_url":"","api_key":"","daemon":"auto","search_timeout":90,"min_upload_speed":0}`)
 }
 ```
 
@@ -467,6 +467,7 @@ Use `registry.Inner()` to access the generic `plugin.Registry` from the type-saf
     "soulseek": {
       "slskd_url": "http://localhost:5030",
       "api_key": "abc123",
+      "daemon": "auto",
       "search_timeout": 60,
       "min_upload_speed": 0
     },
@@ -513,13 +514,14 @@ Each plugin defines its own config struct in its package:
 ```go
 // Soulseek
 type SoulseekConfig struct {
-    SlskdURL          string `json:"slskd_url"`
-    APIKey            string `json:"api_key"`
+    SlskdURL          string `json:"slskd_url"`            // slskd OR slskr base URL
+    APIKey            string `json:"api_key"`              // sent as X-API-Key
+    Daemon            string `json:"daemon"`               // "auto" (default), "slskd", or "slskr"
     SearchTimeout     int    `json:"search_timeout"`
     MinUploadSpeed    int    `json:"min_upload_speed"`
     Enabled           bool   `json:"enabled"`             // user-facing toggle (default true)
     DownloadPath      string `json:"download_path"`        // groovearr-visible path
-    SlskdDownloadPath string `json:"slskd_download_path"`  // slskd-internal path
+    SlskdDownloadPath string `json:"slskd_download_path"`  // daemon-internal path
 }
 
 // Deezer
@@ -1127,7 +1129,7 @@ internal/providers/<source>/
 
 | Source | Package | Lines | Capabilities |
 |--------|---------|-------|-------------|
-| Soulseek (slskd) | `internal/providers/soulseek` | ~680 | `["download"]` |
+| Soulseek (slskd/slskr) | `internal/providers/soulseek` | ~1000 | `["download"]` |
 | Deezer | `internal/providers/deezer` | ~1000 | `["download", "playlist"]` |
 | Prowlarr | `internal/providers/prowlarr` | ~500 | `["album_search"]` — implements `download.AlbumProvider` |
 | qBittorrent | `internal/providers/qbittorrent` | ~370 | `["download_client"]` — implements `download.DownloadClient` |
@@ -1135,3 +1137,23 @@ internal/providers/<source>/
 Read `internal/providers/soulseek/client.go` for the simplest HTTP-based plugin.
 Read `internal/providers/deezer/download.go` for a plugin with authentication and
 playlist integration.
+
+### Soulseek: slskd and slskr
+
+The `soulseek` provider speaks the **slskd v0 HTTP API** (`/api/v0/*`, auth via the
+`X-API-Key` header). The Rust daemon **slskr** implements the same API surface, so a
+single provider serves both — point `slskd_url` at either daemon and set `api_key` to
+the matching API key/token.
+
+The two daemons differ in a few response shapes; the provider parses both tolerantly
+and does not depend on which one is detected:
+
+- Search create: slskd returns `{"id":…}`, slskr returns `{"searchId":…}`.
+- Download enqueue: slskd returns `{"enqueued":[…]}`, slskr returns `{"transfers":[…],"queued":N}`.
+
+`daemon` pins the backend: `auto` (default) probes `GET /api/v0/application` — slskr
+reports a top-level `product` field that slskd omits — and caches the result in memory,
+logging it when it changes. Set it explicitly to `slskd`/`slskr` only if auto-detection
+is wrong (e.g. behind a rewriting proxy); an explicit value skips probing and is
+reported as-is. Detection is informational only — parsing accepts both wire shapes
+regardless, so a wrong guess never breaks a search.

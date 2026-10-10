@@ -1,5 +1,7 @@
-// Package soulseek implements a download plugin for slskd (Soulseek daemon REST API).
-// It communicates with a local slskd instance over HTTP, not the raw Soulseek protocol.
+// Package soulseek implements a download plugin for a Soulseek daemon.
+// groovearr speaks the slskd v0 HTTP API, and slskr (a Rust daemon) implements
+// the same API surface, so both backends are supported over HTTP — never the raw
+// Soulseek protocol.
 package soulseek
 
 import (
@@ -27,29 +29,55 @@ import (
 const pluginName = "soulseek"
 const displayName = "Soulseek"
 
-// SoulseekConfig holds slskd connection and search parameters.
+// Soulseek backend identifiers. groovearr speaks the slskd v0 HTTP API; slskr
+// implements the same API. The two daemons differ in a few response shapes
+// (see extractID / extractDownloadID), which are handled tolerantly regardless
+// of which backend is detected.
+const (
+	daemonAuto  = "auto"  // probe the daemon and remember which one answered
+	daemonSlskd = "slskd" // force the slskd wire shapes
+	daemonSlskr = "slskr" // force the slskr wire shapes
+)
+
+// SoulseekConfig holds Soulseek daemon connection and search parameters.
 type SoulseekConfig struct {
-	SlskdURL          string `json:"slskd_url"`
-	APIKey            string `json:"api_key"`
+	SlskdURL          string `json:"slskd_url"` // base URL of the slskd or slskr daemon
+	APIKey            string `json:"api_key"`   // API key / token sent as X-API-Key
+	Daemon            string `json:"daemon"`    // "auto" (default), "slskd", or "slskr"
 	SearchTimeout     int    `json:"search_timeout"`
 	MinUploadSpeed    int    `json:"min_upload_speed"`
 	Enabled           bool   `json:"enabled"`             // user-facing enable/disable toggle (default true)
 	DownloadPath      string `json:"download_path"`       // groovearr-visible path for record construction (falls back to library.download_path)
-	SlskdDownloadPath string `json:"slskd_download_path"` // slskd-internal download directory (defaults to "/downloads")
+	SlskdDownloadPath string `json:"slskd_download_path"` // daemon-internal download directory (defaults to "/downloads")
 }
 
-// Client implements download.Plugin for Soulseek via slskd REST API.
+// normalizeDaemon coerces a configured daemon value to a known identifier,
+// defaulting to "auto" for empty or unrecognized values.
+func normalizeDaemon(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case daemonSlskd:
+		return daemonSlskd
+	case daemonSlskr:
+		return daemonSlskr
+	default:
+		return daemonAuto
+	}
+}
+
+// Client implements download.Plugin for Soulseek via the slskd/slskr REST API.
 type Client struct {
 	cfg       SoulseekConfig
 	dlPath    string // groovearr-visible download staging directory (for record paths)
-	slskdPath string // slskd-internal download directory (sent to slskd API)
+	slskdPath string // daemon-internal download directory (sent to the API)
 	baseURL   string
 	apiKey    string
 	client    *http.Client
 	log       *slog.Logger
-	connected bool // set by health checker
 
-	mu                sync.Mutex
+	mu        sync.Mutex
+	connected bool   // set by health checker
+	daemon    string // last detected backend ("slskd"/"slskr"), guarded by mu
+
 	activeSearches    map[string]context.CancelFunc // searchID → cancel
 	downloadsMu       sync.RWMutex
 	downloads         map[string]*download.Record // downloadID → record
@@ -73,6 +101,7 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 	if slskdPath == "" {
 		slskdPath = "/downloads" // slskd default download root
 	}
+	sc.Daemon = normalizeDaemon(sc.Daemon)
 	return &Client{
 		cfg:               sc,
 		dlPath:            dlPath,
@@ -81,6 +110,7 @@ func New(cfg json.RawMessage, downloadPath string, logger *slog.Logger) (*Client
 		apiKey:            sc.APIKey,
 		client:            &http.Client{Timeout: 120 * time.Second},
 		log:               logger,
+		daemon:            sc.Daemon,
 		activeSearches:    make(map[string]context.CancelFunc),
 		downloads:         make(map[string]*download.Record),
 		downloadUsernames: make(map[string]string),
@@ -93,7 +123,7 @@ func (c *Client) Name() string { return pluginName }
 // DisplayName returns a human-readable label.
 func (c *Client) DisplayName() string { return displayName }
 
-// IsConfigured returns true if slskd URL and API key are both set.
+// IsConfigured returns true if the daemon URL and API key are both set.
 func (c *Client) IsConfigured() bool {
 	return c.baseURL != "" && c.apiKey != ""
 }
@@ -113,19 +143,57 @@ func (c *Client) CapabilityStatus() map[string]string {
 // IsEnabled returns false when the plugin has been explicitly disabled.
 func (c *Client) IsEnabled() bool { return c.cfg.Enabled }
 
-// CheckConnection probes the slskd API for reachability.
+// CheckConnection probes the daemon API for reachability and detects which
+// backend (slskd or slskr) answered. In "auto" mode the result is cached.
 func (c *Client) CheckConnection(ctx context.Context) error {
 	if !c.IsConfigured() {
-		return fmt.Errorf("soulseek: slskd URL not configured")
+		return fmt.Errorf("soulseek: daemon URL not configured")
 	}
-	_, err := c.doRequest(ctx, http.MethodGet, "application", nil)
+	resp, err := c.doRequest(ctx, http.MethodGet, "application", nil)
+	if err != nil {
+		c.mu.Lock()
+		c.connected = false
+		c.mu.Unlock()
+		return err
+	}
+
+	detected := detectDaemon(c.cfg.Daemon, resp)
 	c.mu.Lock()
-	c.connected = err == nil
+	c.connected = true
+	changed := detected != c.daemon
+	c.daemon = detected
 	c.mu.Unlock()
-	return err
+	if changed {
+		c.log.Info("soulseek daemon detected", "daemon", detected, "component", "soulseek")
+	}
+	return nil
 }
 
-// Search queries slskd and returns matching tracks and albums.
+// detectDaemon resolves the active backend. An explicit "slskd"/"slskr" config
+// is returned as-is; in "auto" mode the daemon is inferred from the application
+// state. slskr reports a top-level "product" field that slskd's state DTO lacks.
+func detectDaemon(configured string, appState json.RawMessage) string {
+	if configured == daemonSlskd || configured == daemonSlskr {
+		return configured
+	}
+	var probe struct {
+		Product string `json:"product"`
+	}
+	if json.Unmarshal(appState, &probe) == nil && probe.Product != "" {
+		return daemonSlskr
+	}
+	return daemonSlskd
+}
+
+// DaemonName returns the backend groovearr is talking to ("slskd" or "slskr"),
+// as resolved by the most recent successful connection check.
+func (c *Client) DaemonName() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.daemon
+}
+
+// Search queries the daemon and returns matching tracks and albums.
 func (c *Client) Search(ctx context.Context, query string) ([]domain.TrackResult, []domain.AlbumResult, error) {
 	return c.search(ctx, query, c.cfg.SearchTimeout, nil)
 }
@@ -176,10 +244,14 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 		c.mu.Unlock()
 	}()
 
-	// Poll for results.
+	// Poll for results. seenResponses tracks raw response groups consumed so we
+	// can slice newly arrived ones; usableResponses counts groups that carry a
+	// real peer and drives the progress callback, the completion check, and the
+	// early-termination cap — so non-downloadable responses (slskr local
+	// share-index hits) can neither fake a finished search nor trip the cap.
 	var allTracks []domain.TrackResult
 	var allAlbums []domain.AlbumResult
-	var responseCount int
+	var seenResponses, usableResponses int
 	ticker := time.NewTicker(1 * time.Second)
 	defer ticker.Stop()
 
@@ -188,37 +260,42 @@ func (c *Client) search(ctx context.Context, query string, timeoutSec int, cb fu
 		case <-searchCtx.Done():
 			return allTracks, allAlbums, nil
 		case <-ticker.C:
-			respData, err := c.doRequest(searchCtx, http.MethodGet, "searches/"+searchID+"/responses", nil)
+			respData, err := c.doRequest(searchCtx, http.MethodGet, "searches/"+url.PathEscape(searchID)+"/responses", nil)
 			if err != nil {
 				continue // keep polling
 			}
 
 			responses := parseSearchResponses(respData)
-			if len(responses) <= responseCount {
-				if responseCount > 0 {
+			if len(responses) <= seenResponses {
+				if usableResponses > 0 {
 					return allTracks, allAlbums, nil // search finished
 				}
-				continue
+				continue // no downloadable responses yet — keep polling
 			}
 
-			newResponses := responses[responseCount:]
-			responseCount = len(responses)
+			newResponses := responses[seenResponses:]
+			seenResponses = len(responses)
+			for _, r := range newResponses {
+				if usableResponse(r) {
+					usableResponses++
+				}
+			}
 			tracks, albums := processResponses(newResponses)
 			allTracks = append(allTracks, tracks...)
 			allAlbums = append(allAlbums, albums...)
 
 			if cb != nil {
-				cb(allTracks, allAlbums, responseCount)
+				cb(allTracks, allAlbums, usableResponses)
 			}
 
-			if responseCount >= 30 {
+			if usableResponses >= 30 {
 				return allTracks, allAlbums, nil // early termination
 			}
 		}
 	}
 }
 
-// StartDownload enqueues a file for download via slskd.
+// StartDownload enqueues a file for download via the daemon.
 // Implements download.MonitoredProvider.
 func (c *Client) StartDownload(ctx context.Context, meta download.Meta) (string, error) {
 	if !c.IsConfigured() {
@@ -276,7 +353,7 @@ func (c *Client) StartDownload(ctx context.Context, meta download.Meta) (string,
 	return downloadID, nil
 }
 
-// findDownloadIDByFilename queries slskd's download list and returns the UUID
+// findDownloadIDByFilename queries the daemon's download list and returns the UUID
 // of the first download matching the given filename.
 func (c *Client) findDownloadIDByFilename(ctx context.Context, filename string) string {
 	listResp, err := c.doRequest(ctx, http.MethodGet, "transfers/downloads", nil)
@@ -551,7 +628,7 @@ func (c *Client) MaxConcurrent() int { return 0 }
 // Implements download.MonitoredProvider.
 func (c *Client) DownloadTimeout() time.Duration { return 30 * time.Minute }
 
-// doRequest makes an HTTP request to slskd's /api/v0/ endpoint.
+// doRequest makes an HTTP request to the daemon's /api/v0/ endpoint.
 func (c *Client) doRequest(ctx context.Context, method, endpoint string, body io.Reader) (json.RawMessage, error) {
 	u := c.baseURL + "/api/v0/" + strings.TrimLeft(endpoint, "/")
 	req, err := http.NewRequestWithContext(ctx, method, u, body)
@@ -607,38 +684,73 @@ func slskdToAudioQuality(filename string, bitrate int) quality.AudioQuality {
 	}
 }
 
+// nonEmptyID returns the first of keys whose value is present, non-null and
+// non-empty, stringified. Guards against daemons that emit "id": null or "".
+// Numeric IDs are formatted without scientific notation — fmt.Sprint on a
+// float64 would render large values as e.g. "1e+06".
+func nonEmptyID(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		v, ok := m[key]
+		if !ok || v == nil {
+			continue
+		}
+		var s string
+		switch n := v.(type) {
+		case string:
+			s = n
+		case float64:
+			s = strconv.FormatFloat(n, 'f', -1, 64)
+		default:
+			s = fmt.Sprint(v)
+		}
+		if s = strings.TrimSpace(s); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
 func extractID(raw json.RawMessage) string {
-	// Try dict.
+	// Try dict. slskd returns {"id": "..."}; slskr (observed on 0.2.52) returns
+	// {"searchId": "...","query":...,"results":[...]}. Do NOT drop the searchId
+	// branch — it is verified against a live slskr daemon, not just its docs.
 	var m map[string]any
 	if json.Unmarshal(raw, &m) == nil {
-		if id, ok := m["id"]; ok {
-			return fmt.Sprint(id)
+		if id := nonEmptyID(m, "id", "searchId"); id != "" {
+			return id
 		}
 	}
 	// Try list.
 	var arr []map[string]any
 	if json.Unmarshal(raw, &arr) == nil && len(arr) > 0 {
-		if id, ok := arr[0]["id"]; ok {
-			return fmt.Sprint(id)
+		if id := nonEmptyID(arr[0], "id", "searchId"); id != "" {
+			return id
 		}
 	}
 	return ""
 }
 
 func extractDownloadID(raw json.RawMessage, fallback string) string {
-	// slskd returns: {"enqueued":[{"id":"...","filename":"..."}],"failed":[]}
+	// slskd returns {"enqueued":[{"id":"...","filename":"..."}],"failed":[]};
+	// slskr returns {"blocked":[],"queued":N,"transfers":[{"id":"...",...}]}.
 	var m map[string]any
 	if json.Unmarshal(raw, &m) == nil {
-		if enqueued, ok := m["enqueued"].([]any); ok && len(enqueued) > 0 {
-			if entry, ok := enqueued[0].(map[string]any); ok {
-				if id, ok := entry["id"]; ok {
-					return fmt.Sprint(id)
-				}
+		for _, key := range []string{"enqueued", "transfers"} {
+			entries, ok := m[key].([]any)
+			if !ok || len(entries) == 0 {
+				continue
+			}
+			entry, ok := entries[0].(map[string]any)
+			if !ok {
+				continue
+			}
+			if id := nonEmptyID(entry, "id"); id != "" {
+				return id
 			}
 		}
 		// Flat id field (some slskd versions).
-		if id, ok := m["id"]; ok {
-			return fmt.Sprint(id)
+		if id := nonEmptyID(m, "id"); id != "" {
+			return id
 		}
 	}
 	return fallback
@@ -706,6 +818,13 @@ func parseYearFromPath(filename string) string {
 	return ""
 }
 
+// usableResponse reports whether a search response carries a peer identity.
+// Responses without one (e.g. slskr local share-index hits) cannot be downloaded.
+func usableResponse(resp map[string]any) bool {
+	username, _ := resp["username"].(string)
+	return strings.TrimSpace(username) != ""
+}
+
 func processResponses(responses []map[string]any) ([]domain.TrackResult, []domain.AlbumResult) {
 	type albumKey struct {
 		username string
@@ -716,6 +835,11 @@ func processResponses(responses []map[string]any) ([]domain.TrackResult, []domai
 	albumsByPath := make(map[albumKey][]domain.TrackResult)
 
 	for _, resp := range responses {
+		if !usableResponse(resp) {
+			// A search response with no peer identity is not downloadable.
+			// slskr surfaces local share-index hits this way; skip them.
+			continue
+		}
 		username, _ := resp["username"].(string)
 		files, _ := resp["files"].([]any)
 

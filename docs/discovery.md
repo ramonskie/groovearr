@@ -57,7 +57,7 @@ with the next candidate.
 ┌──────────────────────────────────────────────────────────────────────┐
 │                    Download Orchestrator (existing)                   │
 │  For each track: query="Dune Are You Ready To Fly"                   │
-│  Searches: Soulseek (slskd), Deezer (ARL)                            │
+│  Searches: Soulseek (slskd/slskr), Deezer (ARL)                      │
 │  Matches against known duration ±5s                                  │
 │  Downloads to /downloads/                                            │
 └──────────────────────────────────────────────────────────────────────┘

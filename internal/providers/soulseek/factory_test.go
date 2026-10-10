@@ -32,6 +32,9 @@ func TestFactoryDefaultConfig(t *testing.T) {
 	if err := json.Unmarshal(def, &cfg); err != nil {
 		t.Fatalf("default config unmarshal: %v", err)
 	}
+	if cfg.Daemon != daemonAuto {
+		t.Errorf("default daemon = %q, want %q", cfg.Daemon, daemonAuto)
+	}
 }
 
 func TestFactoryName(t *testing.T) {
