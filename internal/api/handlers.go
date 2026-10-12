@@ -18,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/ramonskie/groovearr"
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
@@ -52,6 +53,8 @@ type Server struct {
 	albumColdFetch      albumColdFetcher
 	albumStaleAfter     func() time.Duration
 	catalogEnabled      func() bool
+	catalogStats        catalog.StatsStore
+	refreshStatus       refreshStatusReader
 	userStore           user.Store
 	scanner             *library.Scanner
 	downloadSvc         *download.Service
@@ -308,6 +311,10 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/jobs/warm-library", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobWarmLibrary)))
 	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
 	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))
+	// Read-only status of the materialized metadata catalog and its refresh
+	// engine. The engine is a service-owned loop, not a jobs.Manager job, so
+	// this is its only observability surface (AGENTS §2).
+	mux.HandleFunc("GET /api/catalog/status", s.adminOnly(s.handleCatalogStatus))
 
 	// ── Shared surface: playlists ──────────────────────────────────────
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -417,6 +424,23 @@ func (s *Server) isCatalogEnabled() bool {
 		return true
 	}
 	return s.catalogEnabled()
+}
+
+// SetCatalogStats injects the read-only catalog observability surface used by
+// GET /api/catalog/status. It is wired after construction (mirrors
+// SetAlbumRefresher) so NewServer's signature is unchanged and the api package
+// depends only on catalog.StatsStore, not the concrete store (AGENTS §3). Pass
+// nil to leave the endpoint unavailable (503).
+func (s *Server) SetCatalogStats(st catalog.StatsStore) {
+	s.catalogStats = st
+}
+
+// SetRefreshStatus injects the refresh engine's read-only status reader. The
+// engine is built after the server (so it can share the SSE completion hook), so
+// this is post-construction wiring like SetWarmRefresher. Pass nil to report the
+// engine block as its zero value.
+func (s *Server) SetRefreshStatus(r refreshStatusReader) {
+	s.refreshStatus = r
 }
 
 // SetWarmRefresher injects the refresh engine the opt-in bulk warm-library job

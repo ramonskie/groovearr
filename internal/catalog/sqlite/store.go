@@ -80,7 +80,11 @@ func (s *Store) migrate() error {
 			refresh_error       TEXT NOT NULL DEFAULT '',
 			updated_at          TEXT NOT NULL,
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
-		)`,
+		)		`,
+		// Supports the per-status rollup behind GET /api/catalog/status, which
+		// the settings card polls every few seconds on the shared single
+		// connection.
+		`CREATE INDEX IF NOT EXISTS idx_album_metadata_refresh_status ON album_metadata(refresh_status)`,
 		`CREATE TABLE IF NOT EXISTS artist_metadata (
 			artist_id           INTEGER PRIMARY KEY,
 			provider_name       TEXT NOT NULL DEFAULT '',

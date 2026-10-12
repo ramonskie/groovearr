@@ -193,6 +193,13 @@ type Service struct {
 	// fetch instead of duplicating it and clobbering each other's metadata.
 	inflightMu sync.Mutex
 	inflight   map[int64]*albumCall
+
+	// statusMu guards the observability fields below (the last drain's time and
+	// size) so a Status read never blocks Start/Stop or the item loop. It is
+	// separate from mu (lifecycle) and inflightMu (per-album coalescing).
+	statusMu       sync.Mutex
+	lastDrainAt    time.Time
+	lastDrainCount int
 }
 
 // New wires the engine's dependencies. providers is called on each drain so a
@@ -282,6 +289,63 @@ func (s *Service) AlbumStaleAfter() time.Duration {
 	return s.options().StaleAfter
 }
 
+// Status is a read-only snapshot of the engine's configuration and recent
+// activity, surfaced by GET /api/catalog/status for the settings status card.
+// It describes the engine only; queue depth and materialized counts come from
+// the catalog store.
+type Status struct {
+	// Running reports whether the drain loop goroutine is alive.
+	Running bool
+	// IntervalSeconds is the effective pause between drain ticks.
+	IntervalSeconds int
+	// BatchSize is the effective maximum rows claimed per tick.
+	BatchSize int
+	// LastDrainAt is when the most recent tick finished, or nil if none yet.
+	LastDrainAt *time.Time
+	// LastDrainCount is how many rows the most recent tick applied an outcome to.
+	LastDrainCount int
+}
+
+// Status returns a snapshot of the engine for observability. It takes only the
+// short lifecycle and status locks, so it never blocks Start/Stop or a drain. A
+// nil service returns the zero value.
+func (s *Service) Status() Status {
+	if s == nil {
+		return Status{}
+	}
+	o := s.options()
+
+	s.mu.Lock()
+	running := s.cancel != nil
+	s.mu.Unlock()
+
+	s.statusMu.Lock()
+	lastAt := s.lastDrainAt
+	lastCount := s.lastDrainCount
+	s.statusMu.Unlock()
+
+	st := Status{
+		Running:         running,
+		IntervalSeconds: int(o.Interval / time.Second),
+		BatchSize:       o.BatchSize,
+		LastDrainCount:  lastCount,
+	}
+	if !lastAt.IsZero() {
+		at := lastAt
+		st.LastDrainAt = &at
+	}
+	return st
+}
+
+// recordDrain stores the outcome of the most recent tick for Status. It is
+// called only from the loop goroutine.
+func (s *Service) recordDrain(applied int) {
+	s.statusMu.Lock()
+	s.lastDrainAt = s.now().UTC()
+	s.lastDrainCount = applied
+	s.statusMu.Unlock()
+}
+
 // Start launches the drain loop in its own goroutine. It returns immediately;
 // the loop exits when ctx is cancelled or Stop is called. Starting an already
 // running service is a no-op. A nil service is a no-op.
@@ -303,6 +367,16 @@ func (s *Service) Start(ctx context.Context) {
 	go func() {
 		defer close(done)
 		s.loop(runCtx)
+		// Clear the lifecycle handles when the loop exits without Stop (parent
+		// ctx cancelled), so Status() reports not-running and a later Start can
+		// restart. Stop() may have already cleared them; only clear the handles
+		// still owned by this run.
+		s.mu.Lock()
+		if s.done == done {
+			s.cancel = nil
+			s.done = nil
+		}
+		s.mu.Unlock()
 	}()
 }
 
@@ -340,7 +414,14 @@ func (s *Service) loop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-timer.C:
-			if _, err := s.processBatch(ctx); err != nil && ctx.Err() == nil {
+			n, err := s.processBatch(ctx)
+			// Record only ticks that could actually drain: a disabled catalog
+			// returns (0, nil) without touching the queue, so stamping it would
+			// show "0 items · Ns ago" activity that never happened.
+			if s.enabled() {
+				s.recordDrain(n)
+			}
+			if err != nil && ctx.Err() == nil {
 				s.logWarn("refresh drain failed", "error", err)
 			}
 			timer.Reset(s.options().Interval)

@@ -470,6 +470,10 @@ func NewApp(configPath string) (*App, error) {
 	// or write the catalog when catalog.enabled=false (AGENTS §9 — read from the
 	// closure, never cached).
 	srv.SetCatalogEnabled(func() bool { return cfg.Get().Catalog.IsEnabled() })
+	// Read-only catalog/refresh observability for GET /api/catalog/status: the
+	// same store the read paths use, plus the engine's live status snapshot.
+	srv.SetCatalogStats(catalogStore)
+	srv.SetRefreshStatus(refreshSvc)
 	refreshSvc.Start(bgCtx)
 
 	// One-time, best-effort backfill of the legacy JSON-blob metadata caches
