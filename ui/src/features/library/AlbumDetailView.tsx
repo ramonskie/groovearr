@@ -1,11 +1,16 @@
 import { useState, useCallback } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { ArrowLeft, Music, Check } from "lucide-react";
+import { ArrowLeft, Music, Check, RefreshCw } from "lucide-react";
 import Spinner from "../../components/Spinner";
 import StatusMessage from "../../components/StatusMessage";
 import Badge from "../../components/Badge";
 import { useStartBestDownload } from "../../hooks/use-downloads";
-import { useLibraryAlbumDiscovery, useDownloadMissingForAlbum } from "../../hooks/use-library";
+import {
+  useLibraryAlbumDiscovery,
+  useDownloadMissingForAlbum,
+  useRefreshAlbumMetadata,
+  type AlbumDiscoveryViewState,
+} from "../../hooks/use-library";
 import { libraryAlbumDownloadUrl, libraryTrackDownloadUrl } from "../../api/client";
 import {
   SaveToComputerIcon,
@@ -39,6 +44,69 @@ function formatDuration(ms: number): string {
   const min = Math.floor(totalSec / 60);
   const sec = totalSec % 60;
   return `${min}:${sec.toString().padStart(2, "0")}`;
+}
+
+// ─── Render decision (pure, unit-testable) ──────────────────────────
+
+/**
+ * What the album view should render for a discovery view state.
+ *
+ * - `spinner` — cold open: no materialized data yet (full-screen spinner).
+ * - `error`   — hard failure with nothing local to fall back to.
+ * - `content` — materialized tracks, or a partial local fallback while the
+ *               provider tracklist is still materializing.
+ */
+export type AlbumDetailRenderKind = "spinner" | "error" | "content";
+
+export interface AlbumDetailRenderPlan {
+  kind: AlbumDetailRenderKind;
+  /** Show the unobtrusive "Fetching full tracklist…" inline indicator. */
+  showPendingIndicator: boolean;
+  /** No tracks to show (used for the empty-state message). */
+  showEmptyTracks: boolean;
+}
+
+/**
+ * Pure mapping from the discovery view state to the render plan. Extracted from
+ * the component so the warm/cold/pending/error-fallback decisions can be
+ * unit-tested without a DOM (this repo's vitest has no renderer).
+ *
+ * A timeout/error that still carries local tracks renders those tracks — the
+ * hard error is reserved for the case where nothing came back at all.
+ */
+export function albumDetailRenderPlan(
+  view: AlbumDiscoveryViewState,
+  options: { refreshing?: boolean } = {},
+): AlbumDetailRenderPlan {
+  const hasTracks = view.tracks.length > 0;
+
+  // Cold open: no data yet → full-screen spinner.
+  if (view.status === "loading") {
+    return { kind: "spinner", showPendingIndicator: false, showEmptyTracks: false };
+  }
+
+  // Hard error only when the fallback has nothing to render.
+  if (view.status === "error" && !hasTracks) {
+    return { kind: "error", showPendingIndicator: false, showEmptyTracks: false };
+  }
+
+  return {
+    kind: "content",
+    showPendingIndicator:
+      view.metadataPending || view.status === "pending" || options.refreshing === true,
+    showEmptyTracks: !hasTracks,
+  };
+}
+
+/**
+ * Pure onClick seam for the manual "Refresh metadata" button. Kept out of the
+ * JSX so the click path is unit-testable without a DOM renderer.
+ */
+export function makeAlbumRefreshHandler(
+  mutate: (albumId: number) => void,
+  albumId: number,
+): () => void {
+  return () => mutate(albumId);
 }
 
 function TrackRow({
@@ -124,13 +192,16 @@ export default function AlbumDetailView({
 }: AlbumDetailViewProps) {
   const [imgError, setImgError] = useState(false);
   const discovery = useLibraryAlbumDiscovery(album.id);
+  const refreshMetadata = useRefreshAlbumMetadata();
   const startBestDownload = useStartBestDownload();
   const downloadMissing = useDownloadMissingForAlbum();
   const queryClient = useQueryClient();
   const [downloadingIds, setDownloadingIds] = useState<Set<string>>(new Set());
   const [batchError, setBatchError] = useState<string | null>(null);
 
-  const tracks = discovery.data?.tracks ?? [];
+  const view = discovery.view;
+  const plan = albumDetailRenderPlan(view, { refreshing: refreshMetadata.isPending });
+  const tracks = view.tracks;
   const undownloadedTracks = tracks.filter((t) => !t.downloaded);
   const downloadedCount = tracks.length - undownloadedTracks.length;
   const totalSize = tracks.reduce(
@@ -145,6 +216,11 @@ export default function AlbumDetailView({
       queryKey: ["library", "album", album.id, "discovery"],
     });
   }, [album.id, queryClient]);
+
+  const handleRefreshMetadata = makeAlbumRefreshHandler(
+    refreshMetadata.mutate,
+    album.id
+  );
 
   const handleDownloadTrack = useCallback((track: DiscoveryTrackEntry) => {
     const key = trackKey(track);
@@ -177,7 +253,7 @@ export default function AlbumDetailView({
     });
   };
 
-  if (discovery.isError) {
+  if (plan.kind === "error") {
     return (
       <div className="flex flex-col gap-0">
         <div className="mb-6 flex items-center gap-3">
@@ -198,7 +274,7 @@ export default function AlbumDetailView({
     );
   }
 
-  if (discovery.isLoading) {
+  if (plan.kind === "spinner") {
     return (
       <div className="flex flex-col gap-0">
         <div className="mb-6 flex items-center gap-3">
@@ -297,7 +373,30 @@ export default function AlbumDetailView({
                   : `Add ${undownloadedTracks.length} missing track${undownloadedTracks.length !== 1 ? "s" : ""} to library`}
               </button>
             )}
+            <button
+              type="button"
+              onClick={handleRefreshMetadata}
+              disabled={refreshMetadata.isPending}
+              title="Fetch the full tracklist from the metadata provider"
+              className="flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-800 px-4 py-2 text-sm font-medium text-slate-300 transition-colors hover:border-purple-500 hover:text-purple-400 disabled:opacity-50"
+            >
+              <RefreshCw
+                size={14}
+                className={refreshMetadata.isPending ? "animate-spin" : undefined}
+              />
+              {refreshMetadata.isPending ? "Refreshing…" : "Refresh metadata"}
+            </button>
           </div>
+          {plan.showPendingIndicator && (
+            <div
+              className="mt-2 flex items-center gap-2 text-xs text-slate-400"
+              role="status"
+              aria-live="polite"
+            >
+              <Spinner size="sm" />
+              <span>Fetching full tracklist…</span>
+            </div>
+          )}
           {batchError && (
             <StatusMessage variant="error" message={batchError} />
           )}

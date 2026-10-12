@@ -14,6 +14,7 @@ import { useDownloads } from "./hooks/use-downloads";
 import { useSetupStatus } from "./hooks/use-config";
 import { useJobWatcher } from "./hooks/use-job";
 import { useTrackingEvents } from "./hooks/use-tracking-events";
+import { useAlbumRefreshEvents } from "./hooks/use-album-refresh-events";
 import type { DownloadState } from "./api/types";
 
 const LoginPage = lazy(() => import("./features/auth/LoginPage"));
@@ -144,6 +145,12 @@ function AppShell() {
   // Refresh tracking views (wanted badge, album statuses) on import completion
   // app-wide — imports can be started from any page, not just Downloads.
   useTrackingEvents();
+
+  // Invalidate an album's discovery query when its provider tracklist finishes
+  // materializing (metadata_refresh SSE). App-wide, so a manual refresh started
+  // from a detail view refreshes that view (and any other open view) on
+  // completion. Mount exactly once, like useTrackingEvents.
+  useAlbumRefreshEvents();
 
   const activePage = pathToPage(location.pathname);
 

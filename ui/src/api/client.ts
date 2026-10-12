@@ -422,6 +422,30 @@ export function downloadMissingForAlbum(
   );
 }
 
+/**
+ * Response of the manual album metadata refresh endpoint. The handler enqueues
+ * a high-priority materialization and returns 202 Accepted immediately — the
+ * provider work happens in the background refresh engine, which later emits a
+ * `metadata_refresh` SSE event when the album is materialized.
+ */
+export interface RefreshAlbumMetadataResponse {
+  queued: boolean;
+}
+
+/**
+ * Enqueues a high-priority metadata refresh for one album (POST .../refresh).
+ * Never waits on a provider; the completion signal arrives over SSE
+ * (`metadata_refresh`).
+ */
+export function refreshAlbumMetadata(
+  albumId: number,
+): Promise<RefreshAlbumMetadataResponse> {
+  return request<RefreshAlbumMetadataResponse>(
+    `/api/library/albums/${albumId}/refresh`,
+    { method: "POST" },
+  );
+}
+
 // ─── Artist tracking ───────────────────────────────────────────────
 
 export function listTrackedArtists(): Promise<TrackedArtist[]> {
