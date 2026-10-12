@@ -7,8 +7,11 @@ import {
   useStartEnrichJob,
   useStartOrganizeJob,
   useStartDuplicatesJob,
+  useStartWarmLibraryJob,
   useCancelJob,
 } from "../../hooks/use-job";
+import { useCatalogStatus } from "../../hooks/use-catalog-status";
+import { describeCatalogStatus } from "./catalog-status";
 import {
   getOrganizeReport,
   getArtistDuplicates,
@@ -27,6 +30,8 @@ export default function JobsSettings() {
   const startEnrich = useStartEnrichJob();
   const startOrganize = useStartOrganizeJob();
   const startDuplicates = useStartDuplicatesJob();
+  const startWarm = useStartWarmLibraryJob();
+  const catalogQuery = useCatalogStatus(isAdmin);
   const cancel = useCancelJob();
 
   const reportQuery = useQuery({
@@ -69,6 +74,9 @@ export default function JobsSettings() {
 
   const job = jobQuery.data;
   const running = job?.state === "running";
+  const catalogView = catalogQuery.data
+    ? describeCatalogStatus(catalogQuery.data, new Date())
+    : null;
   const pct = Math.round(job?.progress ?? 0);
   const report = reportQuery.data;
   // Memoized so the reference is stable when no duplicates data is loaded
@@ -208,6 +216,54 @@ export default function JobsSettings() {
           )}
         </Card>
       )}
+
+      <Card title="Metadata Catalog">
+        <p className="text-sm text-slate-400">
+          Album and artist metadata is materialized into a local catalog on
+          demand, so the library stays fast and providers are only called when
+          something actually needs refreshing. This background engine drains the
+          refresh queue — it is not a job, so it never appears in the list above.
+        </p>
+
+        {catalogView ? (
+          <dl className="mt-3 grid grid-cols-[7rem_1fr] gap-x-3 gap-y-1 text-sm">
+            <dt className="text-slate-400">Status</dt>
+            <dd className="text-slate-200">{catalogView.enabledLabel}</dd>
+            <dt className="text-slate-400">Queue</dt>
+            <dd className="text-slate-200">{catalogView.queueLabel}</dd>
+            <dt className="text-slate-400">Albums</dt>
+            <dd className="text-slate-200">{catalogView.albumLabel}</dd>
+            <dt className="text-slate-400">Artists</dt>
+            <dd className="text-slate-200">{catalogView.artistLabel}</dd>
+            <dt className="text-slate-400">Engine</dt>
+            <dd className="text-slate-200">{catalogView.engineLabel}</dd>
+            <dt className="text-slate-400">Last drain</dt>
+            <dd className="text-slate-200">{catalogView.lastDrainLabel}</dd>
+          </dl>
+        ) : (
+          <p className="mt-3 text-sm text-slate-500">
+            {!isAdmin
+              ? "Admin access required."
+              : catalogQuery.isError
+                ? "Catalog status unavailable."
+                : "Loading catalog status…"}
+          </p>
+        )}
+
+        <div className="mt-4 flex flex-wrap items-center gap-3">
+          <Button
+            variant="primary"
+            onClick={() => startWarm.mutate()}
+            disabled={!isAdmin || running || startWarm.isPending}
+          >
+            Warm library
+          </Button>
+          <span className="text-xs text-slate-500">
+            Materializes a bounded batch of albums that need metadata. Re-run to
+            continue; there is no periodic sweep.
+          </span>
+        </div>
+      </Card>
 
       <Card title="Organize Report">
         <p className="text-sm text-slate-400">

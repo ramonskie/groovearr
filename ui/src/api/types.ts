@@ -719,7 +719,7 @@ export interface TrackingSearchResult {
 export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Job {
-  type: "scan" | "enrich" | "organize" | "duplicates" | "sync";
+  type: "scan" | "enrich" | "organize" | "duplicates" | "sync" | "warm-library" | "tracked-refresh";
   state: JobState;
   progress: number; // 0-100
   message?: string;
@@ -734,6 +734,42 @@ export interface StartJobResponse {
   job: Job;
   /** True when this request started the job; false when another was already running. */
   started: boolean;
+}
+
+// ─── Catalog status ─────────────────────────────────────────────────
+
+/**
+ * Read-only snapshot from GET /api/catalog/status: the materialized metadata
+ * catalog and its background refresh engine. The engine is a service-owned
+ * loop (not a job), so this endpoint is its only observability surface.
+ */
+export interface CatalogStatus {
+  /** Live catalog.enabled gate. */
+  enabled: boolean;
+  queue: {
+    queued: number;
+    due_now: number;
+    /** Rows waiting in the future (backoff or the stale TTL). */
+    scheduled: number;
+  };
+  /** Per-refresh-status album counts; every known status is present (zero-filled). */
+  albums: {
+    pending: number;
+    fresh: number;
+    stale: number;
+    unmatched: number;
+    failed: number;
+  };
+  artists: {
+    materialized: number;
+  };
+  engine: {
+    running: boolean;
+    interval_seconds: number;
+    batch_size: number;
+    last_drain_at: string | null;
+    last_drain_count: number;
+  };
 }
 
 // ─── Organize report ────────────────────────────────────────────────

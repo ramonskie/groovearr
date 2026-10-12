@@ -21,6 +21,7 @@ import type {
   Album,
   Job,
   StartJobResponse,
+  CatalogStatus,
   PaginationParams,
   PlaylistSourceItem,
   Playlist,
@@ -355,6 +356,20 @@ export function startOrganizeJob(dryRun: boolean): Promise<StartJobResponse> {
 
 export function startDuplicatesJob(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/jobs/duplicates", { method: "POST" });
+}
+
+/**
+ * Starts the opt-in bulk metadata warm (tier 3). Materializes a bounded batch of
+ * the albums that need warming and yields the job slot; re-running resumes with
+ * the remaining candidates. There is no periodic sweep.
+ */
+export function startWarmLibraryJob(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/jobs/warm-library", { method: "POST" });
+}
+
+/** Read-only snapshot of the materialized catalog and its refresh engine. */
+export function getCatalogStatus(): Promise<CatalogStatus> {
+  return request<CatalogStatus>("/api/catalog/status");
 }
 
 export function getOrganizeReport(): Promise<OrganizeReport | null> {

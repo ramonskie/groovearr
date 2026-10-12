@@ -7,6 +7,7 @@ import {
   startEnrichJob,
   startOrganizeJob,
   startDuplicatesJob,
+  startWarmLibraryJob,
   cancelJob,
 } from "../api/client";
 
@@ -61,6 +62,8 @@ export function useJobWatcher(enabled: boolean) {
       queryClient.invalidateQueries({ queryKey: ["organize"] });
       // A finished duplicate check refreshes the duplicates list.
       queryClient.invalidateQueries({ queryKey: ["artists", "duplicates"] });
+      // Any finished metadata job may have changed the catalog's queue/counts.
+      queryClient.invalidateQueries({ queryKey: ["catalog", "status"] });
       if (state === "completed") {
         toast.success(
           job?.message ||
@@ -70,7 +73,9 @@ export function useJobWatcher(enabled: boolean) {
                 ? "Duplicate check complete"
                 : job?.type === "sync"
                   ? "Playlist sync complete"
-                  : "Library enrichment complete"),
+                  : job?.type === "warm-library"
+                    ? "Metadata warm complete"
+                    : "Library enrichment complete"),
         );
       } else if (state === "failed") {
         toast.error(`Job failed: ${job?.error ?? "unknown error"}`);
@@ -196,6 +201,42 @@ export function useStartDuplicatesJob() {
     onError: (err) => {
       toast.error(
         `Failed to start duplicate check: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      );
+    },
+  });
+}
+
+/**
+ * Starts the opt-in bulk metadata warm (tier 3). It materializes a bounded batch
+ * of albums that need warming and yields the job slot; re-run to continue with
+ * the remaining candidates. There is no periodic sweep.
+ */
+export function useStartWarmLibraryJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: startWarmLibraryJob,
+    onSuccess: ({ job, started }) => {
+      queryClient.setQueryData(["jobs", "current"], job);
+      if (!started) return; // job already running
+      queryClient.invalidateQueries({ queryKey: ["catalog", "status"] });
+      if (job.state === "running") {
+        toast.info("Metadata warm started");
+        return;
+      }
+      // Finished before the response returned — report the outcome here.
+      if (job.state === "completed") {
+        toast.success(job.message || "Metadata warm complete");
+      } else if (job.state === "failed") {
+        toast.error(`Job failed: ${job.error ?? "unknown error"}`);
+      } else if (job.state === "cancelled") {
+        toast.info("Job cancelled");
+      }
+    },
+    onError: (err) => {
+      toast.error(
+        `Failed to start metadata warm: ${
           err instanceof Error ? err.message : "Unknown error"
         }`,
       );
