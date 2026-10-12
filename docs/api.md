@@ -515,6 +515,7 @@ Server-Sent Events stream for real-time download progress.
 | `download:completed` | `{"id":"...", "state":"importPending", "file_path":"/downloads/file.flac"}` |
 | `download:failed` | `{"id":"...", "state":"failed", "error":"..."}` |
 | `import:completed` | `{"id":"...", "state":"imported", "library_track_id":42}` |
+| `metadata_refresh` | `{"album_id": 42}` — an album's provider metadata finished materializing |
 
 ---
 
@@ -647,6 +648,115 @@ rather than queued.
   and `X-RateLimit-Bucket: download`.
 - `500` `{"error": "internal error"}` — the store could not be read.
 
+### `GET /api/library/albums/{albumID}/discovery`
+
+Return an album's **expected tracklist** merged with live local download state.
+Served from the durable metadata catalog — a materialized (warm) album is a pure
+SQLite read with **zero provider calls**. The first open of an album that has no
+materialized tracklist triggers one bounded, deduplicated cold fetch (Option A);
+if that does not resolve, the response falls back to the local library tracks.
+
+**Path**: `albumID` — integer library album ID
+
+**Response** `200`:
+```json
+{
+  "provider": "deezer",
+  "provider_album_id": "302127",
+  "tracks": [
+    {
+      "title": "Get Lucky",
+      "track_number": 7,
+      "duration_ms": 369000,
+      "downloaded": true,
+      "library_track_id": 42,
+      "file_path": "/music/Daft Punk/RAM (2013)/07 - Get Lucky.flac",
+      "file_size": 30123456,
+      "bitrate": 909,
+      "format": "flac"
+    }
+  ],
+  "metadata_pending": false
+}
+```
+
+- `tracks` rows come from the materialized provider tracklist merged with the
+  local library tracks (matched by ISRC, then disc/track number, then title).
+  `downloaded` is `true` and the `library_track_id` / file fields are present
+  when a local file matched; otherwise `downloaded` is `false` and those fields
+  are omitted.
+- `metadata_pending` — `false` for a warm read; `true` when the provider
+  tracklist is not yet materialized (cold, or a cold fetch that timed out,
+  errored, or found no match). When `true`, `tracks` carries the local library
+  tracks as a best-effort fallback and `provider` / `provider_album_id` may be
+  empty.
+- A matched album is served from the catalog **even when its metadata is older
+  than the soft TTL** (`catalog.album_refresh_days`, default 30d): the stale rows
+  are returned immediately and a low-priority refresh is enqueued behind the
+  response. An album parked `unmatched`/`failed` before its long retry elapses is
+  also served from the catalog — never re-searched on open.
+
+**Errors**:
+- `400` — invalid album ID.
+- `404` `{"error": "album not found"}` / `{"error": "artist not found"}` — the
+  album (or its artist row) is unknown.
+- `429` — shared `search` rate-limit bucket exhausted.
+
+### `POST /api/library/albums/{albumID}/refresh`
+
+Enqueue a **high-priority** background metadata refresh for one album
+(`reason=manual`, `priority=high`). The refresh engine materializes the album
+asynchronously; when it completes the server broadcasts a `metadata_refresh`
+SSE event (`{"album_id": <id>}`, see [SSE Streaming](#sse-streaming)). The
+request never waits on a provider.
+
+**Path**: `albumID` — integer library album ID
+
+**Response** `202`:
+```json
+{"queued": true}
+```
+
+The album is validated before enqueueing: an unknown `albumID` is a `404`, so a
+refresh cannot enqueue a permanent terminal no-match row for a missing album.
+
+**Errors**:
+- `400` — invalid album ID.
+- `404` `{"error": "album not found"}` — no such library album.
+- `429` — shared `download` rate-limit bucket exhausted (the same bucket as the
+  sibling library-album actions).
+- `503` `{"error": "refresh service not available"}` — no refresh engine wired.
+- `500` — the queue write failed.
+
+### `POST /api/library/albums/{albumID}/download-missing`
+
+Queue every not-yet-downloaded track of an album as pending downloads, resolving
+sources in the background via the monitor's `resolvePendingSources` (the same
+pattern as `POST /api/playlists/{id}/download-missing`). The expected tracklist is
+read from the materialized catalog via the discovery read path, so a warm album
+queues from SQLite.
+
+**Path**: `albumID` — integer library album ID
+
+**Response** `200` — tracks were queued (an `errors` array is added if some
+tracks failed to queue):
+```json
+{"queued": 9}
+```
+
+**Response** `202` — the album has **no materialized provider tracklist yet**
+(cold, or a terminal no-match awaiting its retry). A best-effort refresh is
+queued and the caller should retry rather than read a silent `{"queued":0}` as
+"nothing missing":
+```json
+{"queued": 0, "pending": true, "message": "album metadata is not materialized yet; a refresh was queued and the download will retry"}
+```
+
+**Errors**:
+- `400` — invalid album ID.
+- `404` `{"error": "album not found"}` / `{"error": "artist not found"}`.
+- `429` — shared `download` rate-limit bucket exhausted.
+
 ### `GET /api/jobs`
 
 **Admin only.**
@@ -705,6 +815,26 @@ provider rate limits) while serializing per album.
 **Response** `202`: `{ "job": {...}, "started": true }` as above.
 
 Rate-limited: 2 req/min per client IP (override via `RATE_ENRICH`).
+
+### `POST /api/jobs/warm-library`
+
+**Admin only.**
+
+Start the opt-in **bulk metadata warm** job. It materializes provider metadata
+for a bounded batch of albums that need warming, priority-ordered (new →
+never-materialized → incomplete; complete albums are skipped). There is **no
+periodic sweep** — this job is default off and must be triggered explicitly.
+Candidates are recomputed on every run, so an album materialized earlier drops
+out and re-triggering the job resumes with the remaining candidates. Progress
+and a pace-based ETA stream over SSE.
+
+**Response** `202` (or `200` when a job was already running):
+```json
+{"job": {"type": "warm-library", "state": "running"}, "started": true}
+```
+
+Rate-limited: shared `scan` bucket, 2 req/min per client IP (override via
+`RATE_SCAN`).
 
 ### `POST /api/jobs/cancel`
 

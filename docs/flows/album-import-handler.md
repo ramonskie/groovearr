@@ -37,8 +37,8 @@ flowchart TD
     end
 
     LOOP --> SYNC["record.ImportedTrackIDs = importedIDs<br/>dlStore.Update(parent)"]
-    SYNC --> CACHE["updateDiscoveryCache(trackIDs)<br/>rebuild album_discovery_cache with<br/>actual library tracks (provider='library')"]
-    CACHE --> DONE["done"]
+    SYNC --> REFRESH["enqueue high-priority metadata refresh<br/>EnqueueAlbum(albumID, ReasonEvent, PriorityHigh)<br/>best-effort: engine materializes the catalog"]
+    REFRESH --> DONE["done"]
 ```
 
 ## Step Details (code-verified)
@@ -60,9 +60,13 @@ flowchart TD
    `LibraryTrackID` during `LibraryImporterHandler.Handle()`.
 5. **Cleanup** — synthetic records are deleted from the downloads store after
    the chain; they never appear in the downloads list.
-6. **`updateDiscoveryCache`** — writes the actual library tracks under
-   `provider_name = 'library'`, overriding stale discovery-provider data
-   (e.g. 17-track "Ten Redux" instead of Deezer's 11-track standard edition).
+6. **`enqueueAlbumRefresh`** — the final step, and it only *enqueues* work: a
+   high-priority metadata refresh for the imported album
+   (`EnqueueAlbum(ctx, albumID, catalog.ReasonEvent, catalog.PriorityHigh)`, 5s
+   timeout, best-effort — a nil enqueuer or zero imported tracks is a no-op). It
+   never calls a provider and never writes cache tables; the refresh engine
+   materializes the album's provider tracklist into the durable catalog tables.
+   See [metadata-refresh.md](metadata-refresh.md).
 
 ## Key Facts
 

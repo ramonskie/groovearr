@@ -371,3 +371,87 @@ func (m *MonitoringService) startQueuedDownloads() {
 - `download_order` keeps serving as the per-track priority list; `album_sources` is added for album-capable providers
 - Default config matches current behavior (album_sources=[], download_order=["deezer","soulseek"])
 - No breaking changes until Phase 3 installs actual album providers
+
+## Metadata Catalog & Sweep-Free Refresh
+
+**Status:** implemented (2026-10-12, session `2026-10-12-metadata-materialization`).
+Flow chart: [flows/metadata-refresh.md](flows/metadata-refresh.md).
+
+Album-level provider metadata is **materialized** into durable SQLite tables
+(`internal/catalog`, impl in `internal/catalog/sqlite`) keyed by local library
+ids — replacing the old 24h JSON-blob caches (`album_discovery_cache`,
+`artist_overview_cache`), which are retained but no longer read or written.
+
+> **Backfill is temporary.** `internal/catalog/migrate` decodes the legacy blob
+> tables into the catalog once at startup. It is scheduled for removal after an
+> upgrade window (delete the package + its `cmd/groovearr/app.go` wiring; keep
+> the tables). Tracked in `living-notes.md`.
+
+
+Tables (additive, sharing the library DB connection):
+
+| Table | Purpose |
+|---|---|
+| `album_tracks` | Materialized expected tracklist per album (`origin='provider'` or `'library'`) |
+| `album_metadata` | Durable provider link (`provider_album_id`) + `refresh_status` / backoff bookkeeping |
+| `artist_metadata` | Durable artist overview (bio, image, genres) |
+| `artist_discography` | Discovered releases per artist (display-only) |
+| `metadata_refresh_queue` | Persisted, resumable refresh work queue (`UNIQUE(entity_type, entity_id)`) |
+
+`refresh_status ∈ {pending, fresh, stale, unmatched, failed}`. `unmatched` is
+retried on a long (90d) interval — reads, the warm pass, and the backfill skip it
+until that retry elapses — while `failed` (retries exhausted) is terminal. Both
+report `IsTerminal`, so a parked album is not re-searched on every open.
+
+**Read model.** `GET /api/library/albums/{albumID}/discovery` serves the
+materialized tracklist merged with live local tracks (`catalog.MergeTracksScoped`:
+ISRC matched artist-wide, then disc/track and title matched album-scoped) with
+zero provider calls. The first open of a *pending* album (no metadata row, or a
+cold fetch that has not resolved) triggers one bounded, deduplicated cold fetch
+(Option A), falling back to local tracks with `metadata_pending=true` on timeout
+/ error / no match. An album already matched (`fresh`/`stale`, even with zero
+rows) or parked terminal before its retry is served from the catalog and never
+re-fetched on open.
+
+**Sweep-free refresh.** There is **no periodic full-library sweep**. Freshness
+comes from: (0) lazy cold — one fetch on first open; (2) event — album import
+enqueues a high-priority refresh, and `POST /api/library/albums/{albumID}/refresh`
+enqueues a manual high-priority refresh; (3) opt-in bulk — the `warm-library`
+job materializes a bounded batch of albums that need warming (default off,
+resumable). The refresh engine (`internal/refresh`) drains the queue on a paced,
+cooldown-aware, service-owned loop (not a `jobs.Manager` job), reusing a stored
+provider link for a single provider call in steady state. Every provider call
+goes through `discovery.Provider` and the one shared
+`metadata.ProviderCooldown` bucket.
+
+> **Wired:** the lazy-staleness tier (a warm album past the soft TTL
+> `catalog.album_refresh_days`, default 30d) serves its materialized rows and
+> best-effort enqueues a low-priority `ReasonStale` refresh behind the response;
+> the read path consumes the live TTL via `Server.SetAlbumStaleAfter`. The album
+> import handler enqueues a refresh instead of writing `album_tracks`, so **only
+> the refresh engine and the one-time legacy backfill write catalog rows** —
+> `album_tracks` holds provider-expected rows and scan/import only enqueue.
+> Engine-side artist materialization remains deferred. See the *Known Gaps*
+> section of the flow chart.
+
+## Decision: `artist_discography` vs `tracked_albums`
+
+**Status:** decided (2026-10-12, session `2026-10-12-metadata-materialization`).
+
+The metadata catalog (`internal/catalog`) introduces an `artist_discography`
+table for discovered releases. The tracking feature already has `tracked_albums`
+(provider releases per *monitored* artist). They are **kept separate**.
+
+Rationale:
+
+- They model different concerns. `tracked_albums` is a monitored/wanted state
+  machine (user opted into tracking; carries `library_album_id`,
+  `last_searched_at`, search-on-add, monitoring state). `artist_discography` is a
+  display-only read-model for any library artist.
+- Different lifetimes and invalidation rules: tracking state is user intent;
+  discography is provider metadata with a soft TTL.
+- Unifying would entangle the tracking state machine with the catalog read-model
+  and expand scope into tracking's tests.
+
+Shared value types (a provider-release struct) may be factored out later. A true
+unification is deferred and would require its own design + migration.

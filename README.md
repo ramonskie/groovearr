@@ -17,6 +17,18 @@ Single Go binary with embedded frontend — no runtime dependencies except a sls
 - **Cover art** — fetched and cached per-album during import
 - **Single binary** — Go backend + vanilla JS SPA embedded via `go:embed`
 
+## Metadata catalog & refresh
+
+Album metadata is materialized into durable SQLite tables (`internal/catalog`)
+instead of the old 24h JSON-blob caches. Warm reads are pure SQLite, and there is
+**no periodic full-library sweep** — freshness comes from a lazy-on-read cold
+fetch, event enqueues (album import, manual refresh), and an opt-in
+`warm-library` bulk job. Every provider call goes through one shared cooldown
+bucket. Flow chart: [docs/flows/metadata-refresh.md](docs/flows/metadata-refresh.md).
+
+> The legacy `album_discovery_cache` / `artist_overview_cache` tables are
+> retained (additive schema) but deprecated — they are no longer read or written.
+
 ## Quick Start
 
 ### Prerequisites

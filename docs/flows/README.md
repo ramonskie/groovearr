@@ -1,19 +1,21 @@
 # Flow Charts
 
-Code-verified mermaid flow charts for Groovearr's core components. Each chart
-was verified against the working-tree source files listed at the top of the
-document (files are the source of truth; the old ASCII diagrams in
-`docs/architecture.md` contain drift noted inline).
+Code-verified flow charts for Groovearr's core components. Each chart was
+verified against the working-tree source files listed at the top of the document
+(files are the source of truth; the old ASCII diagrams in `docs/architecture.md`
+contain drift noted inline). Charts are mermaid unless noted — the metadata
+refresh chart uses ASCII.
 
 | Chart | Covers | Key files |
 |---|---|---|
 | [Download State Machine](download-state-machine.md) | 8-state lifecycle: queued / downloading / importPending / importing / imported / failedPending / failed / ignored | `internal/download/types.go`, `service.go`, `monitor_dispatch.go`, `monitor_retry.go`, `importer.go` |
 | [Monitoring Service](monitoring-service.md) | 1s tick loop, orphan reconciliation, dispatch (track vs album), status polling, retry + pending-source resolution | `internal/download/monitor_core.go`, `monitor_dispatch.go`, `monitor_retry.go` |
 | [Import Handler Chain](import-handler-chain.md) | 7-handler post-download chain, album vs track routing, terminal-state re-checks | `internal/download/importer.go`, `handler_*.go`, `cmd/groovearr/app.go` |
-| [Album Import Handler](album-import-handler.md) | Post-download folder scan → track resolution → file matching → synthetic records → discovery cache | `internal/download/handler_album_import.go` |
+| [Album Import Handler](album-import-handler.md) | Post-download folder scan → track resolution → file matching → synthetic records → event refresh enqueue | `internal/download/handler_album_import.go` |
 | [Metadata Enrichment](metadata-enrichment.md) | Provider loop, album/cover/track enrichment, cooldown handling, bulk vs per-download | `internal/download/handler_enrichment.go`, `internal/metadata/` |
 | [Queue-Time Resolution](queue-time-resolution.md) | Pre-queue album/cover lookup via `MetadataResolver.EnrichMetadata` (best-effort, no cooldown gating) | `internal/metadata/resolver.go` |
 | [Tracking Refresh & Search-Missing](tracking-refresh.md) | Tracked-artist discography refresh (scheduled + manual + sync `AddArtist`), reconcile/library-match rules, and the search-missing queue path (album-first, per-track fallback) | `internal/tracking/service_search.go`, `service_reconcile.go`, `internal/jobs/tracked.go`, `manager.go`, `internal/api/handlers_tracking.go`, `internal/tracking/sqlite/store.go` |
+| [Metadata Refresh (sweep-free catalog)](metadata-refresh.md) | Materialized catalog, warm/cold album reads (Option A), the paced refresh-engine loop, event enqueues, opt-in bulk warm; no periodic sweep | `internal/catalog/`, `internal/refresh/`, `internal/jobs/warm_library.go`, `internal/api/handlers_library.go`, `handlers_discover.go`, `handlers_jobs.go`, `cmd/groovearr/app.go` |
 
 ## Known Drift (old ASCII docs vs. current code)
 

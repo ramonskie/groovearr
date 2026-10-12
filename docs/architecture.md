@@ -499,7 +499,7 @@ Idempotent `CREATE TABLE IF NOT EXISTS` (no migration versioning).
 > track now raises a foreign-key constraint error instead of silently leaving a
 > dangling reference.
 
-Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache`, `tracked_artists`, `tracked_albums`, `users`.
+Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache` (deprecated, §Album Discovery Cache), `tracked_artists`, `tracked_albums`, `users`.
 
 The tracking store (`internal/tracking/sqlite`) is a dedicated store that does
 not own a database: it wraps the same `*sql.DB` as the library store (via
@@ -512,30 +512,25 @@ refresh and search-missing execution goes through `jobs.Manager` (single-flight,
 cancellable, SSE, persisted); the periodic loop is
 `Server.StartTrackedRefreshScheduler`.
 
-## Album Discovery Cache
+## Album Discovery Cache (deprecated)
 
-The `album_discovery_cache` table stores pre-loaded album data for the UI album-discovery
-endpoints. Each row maps an album to a provider's track listing.
+`album_discovery_cache` and `artist_overview_cache` were the old TTL JSON-blob
+caches for album-discovery and artist-overview reads. They are **deprecated and
+retained**: the additive-only schema rule (§5) forbids dropping them, but no live
+path reads or writes either table, and a guard test
+(`internal/api/legacy_cache_guard_test.go`) fails the build if a production file
+outside the schema and the one-time backfill mentions them. There is no
+`updateDiscoveryCache()` step any more.
 
-```
-album_discovery_cache
-  album_id          INTEGER  (FK → albums.id)
-  provider_name     TEXT     ("library" | "deezer" | future providers)
-  provider_album_id INTEGER  (provider-specific album identifier)
-  tracks_json       TEXT     (JSON array of {title, track_number, duration_ms})
-  cached_at         TEXT     (ISO 8601 timestamp)
-```
-
-**Write path**: Two providers currently populate the cache:
-- **Deezer** (queue-time): during `Orchestrator.SearchAlbums()`, Deezer album results
-  with tracks are inserted under `provider_name = 'deezer'`.
-- **Library** (post-import): after `AlbumImportHandler` finishes the import chain,
-  `updateDiscoveryCache()` queries the actual library tracks and writes them under
-  `provider_name = 'library'`. This overrides the Deezer cache so the UI reflects the
-  real downloaded release (e.g. 17 tracks for "Ten Redux" instead of Deezer's 11-track
-  standard edition).
-
-The UI queries cache by `album_id`, preferring `'library'` rows over `'deezer'`.
+Album and artist metadata now lives in the durable catalog tables
+(`internal/catalog`: `album_tracks`, `album_metadata`, `artist_metadata`,
+`artist_discography`), keyed by local library ids and materialized by the refresh
+engine. Warm reads are pure SQLite and never call a provider. After an album
+import the handler only enqueues a high-priority refresh
+(`EnqueueAlbum(ctx, albumID, ReasonEvent, PriorityHigh)`); the engine then writes
+the catalog. A one-time startup backfill
+(`internal/catalog/migrate/backfill.go`) decodes any existing legacy rows into the
+catalog. See [Metadata Refresh](flows/metadata-refresh.md).
 
 ## Cancel Flow
 
