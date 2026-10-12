@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,7 +10,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/discovery"
+	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/strutil"
 )
@@ -294,11 +295,20 @@ type artistOverviewResponse struct {
 	Artist      discovery.ArtistSummary `json:"artist"`
 	TopTracks   []discovery.TrackInfo   `json:"top_tracks"`
 	Discography map[string]int          `json:"discography"` // e.g. {"album":12,"single":5}
+	// MetadataPending is an additive hint: true when the artist overview is not
+	// yet materialized in the catalog (a cold read with no local artist, or a
+	// provider/cooldown fallback). The pre-existing fields keep their shape so
+	// the UI reads them unchanged.
+	MetadataPending bool `json:"metadata_pending"`
 }
 
-// handleDiscoverArtistOverview resolves an artist by name, fetches top tracks
-// and discography stats, and caches the result for 24h (same pattern as
-// album_discovery_cache).
+// handleDiscoverArtistOverview returns an artist overview (identity, top
+// tracks, discography) for a library artist name. It is served WARM from the
+// materialized catalog — artist_metadata + artist_discography — with zero
+// provider calls; only a cold artist (no catalog row) falls back to one bounded
+// provider fetch that is then materialized into the catalog — and only when the
+// catalog is enabled (a disabled catalog skips the fetch and the writes, serving
+// the pending shape). There is no TTL JSON cache.
 func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	s.log.Info("discover artist overview", "query", q, "component", "discover")
@@ -307,76 +317,53 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		return
 	}
 
+	ctx := r.Context()
+
+	// The catalog is keyed by the local artist id, so resolve the library
+	// artist first. A name not in the library has no warm row and is fetched
+	// lazily below (materialization is skipped when it cannot be keyed).
+	artist := s.lookupLibraryArtist(ctx, q)
+	var artistID int64
+	displayName := q
+	if artist != nil {
+		artistID = artist.ID
+		if artist.Name != "" {
+			displayName = artist.Name
+		}
+	}
+
+	// ── Warm read: catalog only, zero provider calls ──
+	if resp, ok := s.warmArtistOverview(ctx, artistID, displayName); ok {
+		writeJSON(w, http.StatusOK, resp)
+		return
+	}
+
+	// ── Cold read — catalog disabled: never fetch a provider or write ──
+	// A disabled catalog must not materialize anything, so the cold path skips
+	// the provider fetch and the artist_metadata/artist_discography writes. The
+	// warm read above already missed, so there is nothing materialized to
+	// serve; return the pending shape (local identity only) without error.
+	if !s.isCatalogEnabled() {
+		s.log.Info("discover artist overview: catalog disabled, skipping provider fetch",
+			"query", q, "component", "discover")
+		writeJSON(w, http.StatusOK, pendingArtistOverview(artist, q))
+		return
+	}
+
 	queryKey := normalizeKey(q)
 
-	// ── Check cache ──
-	var cachedName, cachedProvider, cachedArtistID, cachedImageURL, cachedGenresJSON, cachedTopTracksJSON, cachedDiscographyJSON, cachedAt string
-	if dbp, ok := s.store.(sqlDBProvider); ok {
-		err := dbp.DB().QueryRowContext(r.Context(),
-			`SELECT artist_name, provider_name, provider_artist_id, image_url, genres_json, top_tracks_json, discography_json, cached_at
-			 FROM artist_overview_cache WHERE normalized_name = ?`, queryKey,
-		).Scan(&cachedName, &cachedProvider, &cachedArtistID, &cachedImageURL, &cachedGenresJSON, &cachedTopTracksJSON, &cachedDiscographyJSON, &cachedAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			s.log.Warn("artist overview cache read failed", "query", q, "error", err, "component", "discover")
-		}
-	}
-
-	if cachedDiscographyJSON != "" && cachedDiscographyJSON != "null" && cachedAt != "" {
-		if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
-			if time.Since(t) <= 24*time.Hour {
-				// Cache hit — return cached data.
-				var topTracks []discovery.TrackInfo
-				if cachedTopTracksJSON != "" && cachedTopTracksJSON != "null" {
-					if uerr := json.Unmarshal([]byte(cachedTopTracksJSON), &topTracks); uerr != nil {
-						s.log.Warn("artist overview cache top_tracks corrupt", "query", q, "error", uerr, "component", "discover")
-						topTracks = nil
-					}
-				}
-				var discography map[string]int
-				if uerr := json.Unmarshal([]byte(cachedDiscographyJSON), &discography); uerr != nil {
-					s.log.Warn("artist overview cache discography corrupt", "query", q, "error", uerr, "component", "discover")
-					discography = nil
-				}
-				if discography != nil {
-					var cachedGenres []string
-					if cachedGenresJSON != "" && cachedGenresJSON != "null" {
-						_ = json.Unmarshal([]byte(cachedGenresJSON), &cachedGenres)
-					}
-					out := artistOverviewResponse{
-						Artist: discovery.ArtistSummary{
-							ProviderID:   cachedArtistID,
-							ProviderName: cachedProvider,
-							Name:         cachedName,
-							ImageURL:     cachedImageURL,
-							Genres:       cachedGenres,
-						},
-						TopTracks:   topTracks,
-						Discography: discography,
-					}
-					if len(out.TopTracks) == 0 {
-						out.TopTracks = []discovery.TrackInfo{}
-					}
-					writeJSON(w, http.StatusOK, out)
-					return
-				}
-			}
-		}
-	}
-
-	// ── Cache miss — resolve artist and fetch fresh data ──
+	// ── Cold read — resolve artist and fetch fresh data ──
 	if s.discoveryReg == nil || len(s.discoveryReg.Any()) == 0 {
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "no discovery providers configured"})
 		return
 	}
 
-	// 1. Resolve artist (same logic as handleDiscoverResolveArtist).
-	providers := s.discoveryReg.Configured()
-	if len(providers) == 0 {
-		providers = s.discoveryReg.Any()
-	}
+	// 1. Resolve artist (same logic as handleDiscoverResolveArtist). Providers
+	// parked in rate-limit cooldown are dropped — they would only fail again.
+	providers := s.activeDiscoveryProviders()
 
 	const searchTimeout = 5 * time.Second
-	ctx, cancel := context.WithTimeout(r.Context(), searchTimeout)
+	searchCtx, cancel := context.WithTimeout(r.Context(), searchTimeout)
 	defer cancel()
 
 	type providerResult struct {
@@ -390,8 +377,9 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		wg.Add(1)
 		go func(idx int, provider discovery.Provider) {
 			defer wg.Done()
-			a, err := provider.SearchArtists(ctx, q, 10)
+			a, err := provider.SearchArtists(searchCtx, q, 10)
 			if err != nil {
+				s.noteProviderRateLimit(provider.Name(), err)
 				s.log.Warn("discover artist overview: search failed",
 					"provider", provider.Name(), "error", err, "component", "discover")
 			}
@@ -412,13 +400,20 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	if resolved == nil {
-		s.log.Info("discover artist overview: artist not found", "query", q, "component", "discover")
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artist not found"})
+	if r.Context().Err() != nil {
 		return
 	}
 
-	if r.Context().Err() != nil {
+	if resolved == nil {
+		// No provider match. A known library artist still gets its local
+		// identity back as pending instead of a hard 404.
+		if artist != nil {
+			s.log.Info("discover artist overview: no provider match", "query", q, "component", "discover")
+			writeJSON(w, http.StatusOK, pendingArtistOverview(artist, q))
+			return
+		}
+		s.log.Info("discover artist overview: artist not found", "query", q, "component", "discover")
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "artist not found"})
 		return
 	}
 
@@ -438,6 +433,7 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		var err error
 		albums, err = fetchProvider.GetArtistAlbums(fetchCtx, resolved.ProviderID, 50)
 		if err != nil {
+			s.noteProviderRateLimit(fetchProvider.Name(), err)
 			s.log.Warn("discover artist overview: get albums failed", "query", q, "provider", resolved.ProviderName, "error", err, "component", "discover")
 		}
 	}
@@ -499,29 +495,13 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		}
 	}
 
-	// 4. Persist to cache (cache empty results too — avoids repeated lookups).
-	if dbp, ok := s.store.(sqlDBProvider); ok {
-		topJSON, _ := json.Marshal(topTracks)
-		discJSON, _ := json.Marshal(discography)
-		topStr := string(topJSON)
-		if topStr == "null" || topStr == "" {
-			topStr = "[]"
-		}
-		genresJSON, _ := json.Marshal(resolved.Genres)
-		if string(genresJSON) == "null" {
-			genresJSON = []byte("[]")
-		}
-		_, cerr := dbp.DB().ExecContext(r.Context(),
-			`INSERT OR REPLACE INTO artist_overview_cache
-			 (normalized_name, artist_name, provider_name, provider_artist_id, image_url, genres_json, top_tracks_json, discography_json, cached_at)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			queryKey, resolved.Name, resolved.ProviderName, resolved.ProviderID,
-			resolved.ImageURL, string(genresJSON),
-			topStr, string(discJSON),
-			time.Now().UTC().Format(time.RFC3339),
-		)
-		if cerr != nil {
-			s.log.Warn("artist overview cache write failed", "query", q, "error", cerr, "component", "discover")
+	// 4. Materialize into the catalog so the next read is warm and provider-free.
+	// The catalog is keyed by the local artist id, so this is skipped for a name
+	// that has no library artist. A write failure is logged, never fatal.
+	if artistID != 0 && s.artistCatalog != nil {
+		releases := buildArtistDiscography(artistID, resolved.ProviderName, albums, time.Now().UTC())
+		if merr := s.materializeArtistOverview(ctx, artistID, resolved, releases); merr != nil {
+			s.log.Warn("artist overview materialization failed", "query", q, "error", merr, "component", "discover")
 		}
 	}
 
@@ -543,6 +523,162 @@ func (s *Server) handleDiscoverArtistOverview(w http.ResponseWriter, r *http.Req
 		TopTracks:   topTracks,
 		Discography: discography,
 	})
+}
+
+// lookupLibraryArtist resolves the local artist row by name so the catalog —
+// keyed by the local artist id — can serve a warm read. A miss is a normal cold
+// state, not an error.
+func (s *Server) lookupLibraryArtist(ctx context.Context, name string) *domain.Artist {
+	if s.store == nil {
+		return nil
+	}
+	artist, err := s.store.GetArtistByName(ctx, name)
+	if err != nil {
+		s.log.Warn("discover artist overview: local artist lookup failed",
+			"query", name, "error", err, "component", "discover")
+		return nil
+	}
+	return artist
+}
+
+// activeDiscoveryProviders returns the configured discovery providers with any
+// parked in rate-limit cooldown dropped — they would only fail again.
+func (s *Server) activeDiscoveryProviders() []discovery.Provider {
+	if s.discoveryReg == nil {
+		return nil
+	}
+	providers := s.discoveryReg.Configured()
+	if len(providers) == 0 {
+		providers = s.discoveryReg.Any()
+	}
+	active := make([]discovery.Provider, 0, len(providers))
+	for _, p := range providers {
+		if s.providerCooldown.CoolingDown(p.Name()) {
+			continue
+		}
+		active = append(active, p)
+	}
+	return active
+}
+
+// warmArtistOverview serves the artist overview purely from the catalog
+// (artist_metadata + artist_discography). It returns ok=false when no
+// materialized artist_metadata row exists, so the caller can fall back to a
+// bounded provider fetch. A warm read makes zero provider calls. Top tracks are
+// not materialized in the catalog yet (artist refresh engine pending), so the
+// list is empty.
+func (s *Server) warmArtistOverview(ctx context.Context, artistID int64, displayName string) (*artistOverviewResponse, bool) {
+	if artistID == 0 || s.artistCatalog == nil {
+		return nil, false
+	}
+	meta, err := s.artistCatalog.GetArtistMetadata(ctx, artistID)
+	if err != nil {
+		s.log.Warn("catalog artist metadata read failed", "artist_id", artistID, "error", err, "component", "discover")
+		return nil, false
+	}
+	if meta == nil {
+		return nil, false
+	}
+	releases, err := s.artistCatalog.GetArtistDiscography(ctx, artistID)
+	if err != nil {
+		s.log.Warn("catalog artist discography read failed", "artist_id", artistID, "error", err, "component", "discover")
+		releases = nil
+	}
+	return &artistOverviewResponse{
+		Artist: discovery.ArtistSummary{
+			ProviderID:   meta.ProviderArtistID,
+			ProviderName: meta.ProviderName,
+			Name:         displayName,
+			ImageURL:     meta.ImageURL,
+			Genres:       meta.Genres,
+		},
+		TopTracks:   []discovery.TrackInfo{},
+		Discography: countArtistDiscography(releases),
+	}, true
+}
+
+// materializeArtistOverview writes the fetched artist overview and discography
+// into the durable catalog so the next read is warm. The two writes are short,
+// independent statements; the first error is returned so the caller can log it
+// without failing the response.
+func (s *Server) materializeArtistOverview(ctx context.Context, artistID int64, resolved *discovery.ArtistSummary, releases []catalog.ArtistDiscographyRelease) error {
+	now := time.Now().UTC()
+	if err := s.artistCatalog.UpsertArtistMetadata(ctx, catalog.ArtistMetadata{
+		ArtistID:         artistID,
+		ProviderName:     resolved.ProviderName,
+		ProviderArtistID: resolved.ProviderID,
+		ImageURL:         resolved.ImageURL,
+		Genres:           resolved.Genres,
+		RefreshStatus:    catalog.StatusFresh,
+		LastRefreshedAt:  now,
+		UpdatedAt:        now,
+	}); err != nil {
+		return fmt.Errorf("upsert artist metadata: %w", err)
+	}
+	if err := s.artistCatalog.ReplaceArtistDiscography(ctx, artistID, releases); err != nil {
+		return fmt.Errorf("replace artist discography: %w", err)
+	}
+	return nil
+}
+
+// buildArtistDiscography maps provider album results to catalog discography
+// releases for one artist. An empty album type defaults to "album".
+func buildArtistDiscography(artistID int64, providerName string, albums []discovery.AlbumResult, now time.Time) []catalog.ArtistDiscographyRelease {
+	releases := make([]catalog.ArtistDiscographyRelease, 0, len(albums))
+	for i := range albums {
+		a := albums[i]
+		pname := a.ProviderName
+		if pname == "" {
+			pname = providerName
+		}
+		releaseType := a.Type
+		if releaseType == "" {
+			releaseType = "album"
+		}
+		releases = append(releases, catalog.ArtistDiscographyRelease{
+			ArtistID:        artistID,
+			ProviderName:    pname,
+			ProviderAlbumID: a.ProviderID,
+			Title:           a.Title,
+			Year:            a.Year,
+			Type:            releaseType,
+			CoverURL:        a.CoverURL,
+			TrackCount:      a.TrackCount,
+			LastSeenAt:      now,
+		})
+	}
+	return releases
+}
+
+// countArtistDiscography counts materialized releases by type for the UI's
+// discography summary. An empty type defaults to "album".
+func countArtistDiscography(releases []catalog.ArtistDiscographyRelease) map[string]int {
+	out := make(map[string]int, len(releases))
+	for i := range releases {
+		t := releases[i].Type
+		if t == "" {
+			t = "album"
+		}
+		out[t]++
+	}
+	return out
+}
+
+// pendingArtistOverview is the additive "cold / not materialized" shape: it
+// carries whatever local identity is known so the UI can render the artist while
+// the catalog entry is still pending. Top tracks and discography are empty.
+func pendingArtistOverview(artist *domain.Artist, q string) artistOverviewResponse {
+	out := artistOverviewResponse{
+		Artist:          discovery.ArtistSummary{Name: q},
+		TopTracks:       []discovery.TrackInfo{},
+		Discography:     map[string]int{},
+		MetadataPending: true,
+	}
+	if artist != nil {
+		out.Artist.Name = artist.Name
+		out.Artist.Genres = artist.Genres
+	}
+	return out
 }
 
 // normalizeKey strips accents, lowercases, and removes non-alphanumeric for dedup.

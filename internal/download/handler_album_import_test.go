@@ -8,6 +8,7 @@ import (
 	"sort"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
@@ -116,7 +117,7 @@ func TestAlbumImport_LinksOnceForWholeAlbum(t *testing.T) {
 	}
 	linker := &fakeTrackingLinker{}
 	chain := []ImportHandler{NewTrackingLinkHandler(linker, testLogger())}
-	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, nil, testLogger())
+	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, testLogger())
 
 	record := &Record{
 		ID: "album-link-once", SourceName: "prowlarr", State: StateImporting,
@@ -144,7 +145,7 @@ func TestAlbumImport_HookErrorDoesNotFailImport(t *testing.T) {
 	}
 	linker := &fakeTrackingLinker{err: errors.New("tracking store down")}
 	chain := []ImportHandler{NewTrackingLinkHandler(linker, testLogger())}
-	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, nil, testLogger())
+	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), nil, testLogger())
 
 	record := &Record{
 		ID: "album-hook-err", SourceName: "prowlarr", State: StateImporting,
@@ -185,7 +186,7 @@ func TestAlbumImport_PropagatesRequesterToSyntheticRecords(t *testing.T) {
 		}, "", nil
 	}
 	capturer := &captureRecordHandler{}
-	h := NewAlbumImportHandler([]ImportHandler{capturer}, resolver, newMockAlbumStore(), nil, nil, testLogger())
+	h := NewAlbumImportHandler([]ImportHandler{capturer}, resolver, newMockAlbumStore(), nil, testLogger())
 
 	record := &Record{
 		ID: "album-attr", SourceName: "prowlarr", State: StateImporting,
@@ -203,6 +204,119 @@ func TestAlbumImport_PropagatesRequesterToSyntheticRecords(t *testing.T) {
 			t.Errorf("synth record %d attribution = (%d, %q), want (42, alice)",
 				i, r.RequestedByUserID, r.RequestedByUsername)
 		}
+	}
+}
+
+// importingChainHandler simulates the library importer: it stamps a library
+// track id on each synthetic record so AlbumImportHandler links the tracks and
+// can resolve the album id to enqueue.
+type importingChainHandler struct {
+	trackIDs []int64
+	next     int
+}
+
+func (c *importingChainHandler) Handle(_ context.Context, r *Record) error {
+	if c.next < len(c.trackIDs) {
+		r.LibraryTrackID = c.trackIDs[c.next]
+	}
+	c.next++
+	return nil
+}
+
+// stubLibraryStore is a minimal libraryStore backed by an in-memory map.
+// "Not found" returns (nil, nil) to match the store contract.
+type stubLibraryStore struct {
+	tracks map[int64]*domain.Track
+}
+
+func (s *stubLibraryStore) GetTrack(_ context.Context, id int64) (*domain.Track, error) {
+	return s.tracks[id], nil
+}
+
+// stubEnqueuer records EnqueueAlbum calls so a test can assert the import
+// requested a background metadata refresh.
+type stubEnqueuer struct {
+	calls []enqueueCall
+	err   error
+}
+
+type enqueueCall struct {
+	albumID  int64
+	reason   string
+	priority int
+}
+
+func (e *stubEnqueuer) EnqueueAlbum(_ context.Context, albumID int64, reason string, priority int) error {
+	e.calls = append(e.calls, enqueueCall{albumID: albumID, reason: reason, priority: priority})
+	return e.err
+}
+
+// albumEnqueueFixture builds a one-track album import backed by a stub library
+// store that resolves track 7 to album 55.
+func albumEnqueueFixture(t *testing.T, id string, enq Enqueuer) (*AlbumImportHandler, *Record) {
+	t.Helper()
+	tmp := t.TempDir()
+	createFile(t, filepath.Join(tmp, "01 - One.flac"))
+
+	resolver := func(context.Context, string, string, string, int, string) ([]domain.ExpectedTrack, string, error) {
+		return []domain.ExpectedTrack{{TrackNumber: 1, Title: "One"}}, "", nil
+	}
+	libStore := &stubLibraryStore{tracks: map[int64]*domain.Track{
+		7: {ID: 7, AlbumID: 55},
+	}}
+	chain := []ImportHandler{&importingChainHandler{trackIDs: []int64{7}}}
+	h := NewAlbumImportHandler(chain, resolver, newMockAlbumStore(), libStore, testLogger())
+	if enq != nil {
+		h.SetEnqueuer(enq)
+	}
+	record := &Record{
+		ID: id, SourceName: "prowlarr", State: StateImporting,
+		Artist: "Tool", Album: "Lateralus", AlbumType: "album", FilePath: tmp,
+	}
+	return h, record
+}
+
+// TestAlbumImport_EnqueuesHighPriorityRefresh proves a successful album import
+// asks the refresh engine to materialize the album with an event reason and
+// high priority, once, for the imported album's id.
+func TestAlbumImport_EnqueuesHighPriorityRefresh(t *testing.T) {
+	enq := &stubEnqueuer{}
+	h, record := albumEnqueueFixture(t, "album-enqueue", enq)
+
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle: %v", err)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("EnqueueAlbum calls = %d, want exactly 1", len(enq.calls))
+	}
+	got := enq.calls[0]
+	if got.albumID != 55 || got.reason != catalog.ReasonEvent || got.priority != catalog.PriorityHigh {
+		t.Fatalf("enqueue = %+v, want album 55 reason %q priority %d",
+			got, catalog.ReasonEvent, catalog.PriorityHigh)
+	}
+}
+
+// TestAlbumImport_NilEnqueuerDoesNotPanic proves enqueueing is optional: an
+// import with no enqueuer wired still succeeds.
+func TestAlbumImport_NilEnqueuerDoesNotPanic(t *testing.T) {
+	h, record := albumEnqueueFixture(t, "album-no-enqueuer", nil)
+
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle with nil enqueuer: %v", err)
+	}
+}
+
+// TestAlbumImport_EnqueueErrorDoesNotFailImport proves the enqueue is
+// best-effort: a queue write failure is swallowed and the import still succeeds.
+func TestAlbumImport_EnqueueErrorDoesNotFailImport(t *testing.T) {
+	enq := &stubEnqueuer{err: errors.New("queue write failed")}
+	h, record := albumEnqueueFixture(t, "album-enqueue-err", enq)
+
+	if err := h.Handle(context.Background(), record); err != nil {
+		t.Fatalf("Handle must swallow enqueue error, got: %v", err)
+	}
+	if len(enq.calls) != 1 {
+		t.Fatalf("EnqueueAlbum calls = %d, want 1", len(enq.calls))
 	}
 }
 

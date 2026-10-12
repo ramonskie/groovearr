@@ -12,6 +12,8 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/api"
+	"github.com/ramonskie/groovearr/internal/catalog/migrate"
+	catalogsqlite "github.com/ramonskie/groovearr/internal/catalog/sqlite"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -36,6 +38,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/spotify"
 	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
+	"github.com/ramonskie/groovearr/internal/refresh"
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/tracking"
 	trackingsqlite "github.com/ramonskie/groovearr/internal/tracking/sqlite"
@@ -54,6 +57,9 @@ type App struct {
 	libStore       *sqlite.Store
 	userStore      user.Store
 	monitor        *download.MonitoringService
+	refreshSvc     *refresh.Service
+	coldFetcher    *refresh.ColdFetcher
+	backfill       *migrate.Runner
 	srv            *api.Server
 	bgCtx          context.Context
 	bgCancel       context.CancelFunc
@@ -122,6 +128,15 @@ func NewApp(configPath string) (*App, error) {
 
 	// Download store (SQLite — shares the library db connection).
 	dlStore := dlsqlite.New(libStore.DB(), log)
+
+	// Metadata catalog (SQLite — shares the library db connection). Durable
+	// materialized provider metadata so warm album reads are pure SQLite and
+	// never call a discovery provider.
+	catalogStore, err := catalogsqlite.New(libStore.DB(), log)
+	if err != nil {
+		log.Error("catalog store init failed", "error", err, "component", "main")
+		return nil, err
+	}
 
 	// Metadata rate-limit store (SQLite — persists cooldowns + events so a
 	// long server-requested backoff survives a restart).
@@ -253,6 +268,48 @@ func NewApp(configPath string) (*App, error) {
 	sseHub.StartHeartbeat(bgCtx)
 	sseNotifier := sse.NewSSENotifier(sseHub, eventBus, log)
 
+	// Catalog metadata refresh engine. It drains the persisted refresh queue on
+	// a paced, cooldown-aware, service-owned loop (AGENTS §2 — not a jobs.Manager
+	// job, so a long materialization pass cannot monopolize the single-flight
+	// slot). Providers are read live from the discovery registry on every drain:
+	// configured providers, falling back to any discovery-capable plugin — the
+	// same selection the discover search handlers use — so a provider configured
+	// after startup is picked up without a restart.
+	refreshProviders := func() []discovery.Provider {
+		if providers := discoveryReg.Configured(); len(providers) > 0 {
+			return providers
+		}
+		return discoveryReg.Any()
+	}
+	refreshSvc := refresh.New(catalogStore, libStore, refreshProviders, providerCooldown, log, refresh.DefaultOptions())
+	// Live enable gate: a disabled catalog skips the drain loop's claiming and
+	// provider work entirely (AGENTS §9 — read from the closure, never cached).
+	refreshSvc.SetEnabledFunc(func() bool { return cfg.Get().Catalog.IsEnabled() })
+	// Read pacing/batch from the live config closure (AGENTS §9), never cached:
+	// the engine re-reads this on every tick and provider call, so a settings
+	// hot-reload is honored without a restart. A zero value means "use the
+	// engine's built-in default" (Interval -> 1m, BatchSize -> 8), which is how a
+	// legacy config preserves today's behavior. AlbumStaleAfter is the Tier-1
+	// soft TTL the api read path consumes via Service.AlbumStaleAfter();
+	// Concurrency is consumed by a future bounded worker pool, not the tick loop.
+	refreshSvc.SetOptionsFunc(func() refresh.Options {
+		c := cfg.Get().Catalog
+		return refresh.Options{
+			Interval:   time.Duration(c.IntervalMinutes) * time.Minute,
+			BatchSize:  c.BatchSize,
+			StaleAfter: c.AlbumStaleAfter(),
+		}
+	})
+	// Completion hook: broadcast a metadata_refresh event so the UI can
+	// invalidate an album's cached metadata once the engine materializes it.
+	refreshSvc.SetOnMaterialized(func(albumID int64) {
+		data, err := json.Marshal(map[string]int64{"album_id": albumID})
+		if err != nil {
+			return
+		}
+		sseHub.Broadcast(sse.SSEEvent{Type: "metadata_refresh", Data: data, Timestamp: time.Now()})
+	})
+
 	// Bridge new log file lines to the SSE hub so the Log tab streams live.
 	// The file is the source of truth: history comes from GET /api/logs
 	// (ReadTail), and this tailer only broadcasts new lines as they are
@@ -301,7 +358,12 @@ func NewApp(configPath string) (*App, error) {
 	}
 
 	trackResolver := newTrackResolver(pluginReg)
-	albumImportHandler := download.NewAlbumImportHandler(importChain, trackResolver, dlStore, libStore, libStore.DB(), log)
+	albumImportHandler := download.NewAlbumImportHandler(importChain, trackResolver, dlStore, libStore, log)
+	// Inject the refresh engine as the post-import metadata enqueuer
+	// (best-effort): a successful album import queues a high-priority refresh so
+	// the provider catalog is materialized without a warm read touching a
+	// provider (AGENTS §2/§8).
+	albumImportHandler.SetEnqueuer(refreshSvc)
 
 	download.NewCompletedDownloadService(dlStore, eventBus, log, albumImportHandler, importChain...)
 
@@ -344,7 +406,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, userStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, catalogStore, userStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
 		qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, healthChecker, logRot, accessLog, logPath, jobStatePath,
 		func(r plugin.RouteRegistrar) {
 			spotify.RegisterOAuthRoutes(r, cfg, log, func(name string, rawCfg json.RawMessage) error {
@@ -382,6 +444,44 @@ func NewApp(configPath string) (*App, error) {
 		},
 	)
 	srv.SetProviderCooldown(providerCooldown)
+
+	// Inject the refresh engine as the manual-refresh enqueuer and start its
+	// drain loop on the app background context. Stop() runs on shutdown below.
+	srv.SetAlbumRefresher(refreshSvc)
+	// Inject the refresh engine as the opt-in bulk warm-library job's
+	// materializer, so the warm pass drives the exact same per-album logic
+	// (provider-link reuse, shared cooldown) as the queue engine. The job itself
+	// is default off and triggered explicitly via POST /api/jobs/warm-library.
+	srv.SetWarmRefresher(refreshSvc)
+	// Cold lazy fetch (Option A): the first open of an unmaterialized album does
+	// one bounded, deduplicated provider fetch through the refresh engine, which
+	// reuses the shared cooldown and materializes the album. Its goroutines are
+	// tied to bgCtx and drained by Stop() on shutdown (below) before the DB
+	// closes, so cold work cannot outlive the store it writes through.
+	coldFetcher := refresh.NewColdFetcher(refreshSvc)
+	coldFetcher.Start(bgCtx)
+	srv.SetAlbumColdFetcher(coldFetcher)
+	// Tier-1 lazy staleness: the api read path compares a warm album's metadata
+	// age against this soft TTL and enqueues a low-priority refresh behind the
+	// response. Passing the method value (not its current result) keeps the TTL
+	// live — AlbumStaleAfter re-reads config on every call (AGENTS §9).
+	srv.SetAlbumStaleAfter(refreshSvc.AlbumStaleAfter)
+	// Live catalog gate: the discover artist cold path must not fetch a provider
+	// or write the catalog when catalog.enabled=false (AGENTS §9 — read from the
+	// closure, never cached).
+	srv.SetCatalogEnabled(func() bool { return cfg.Get().Catalog.IsEnabled() })
+	refreshSvc.Start(bgCtx)
+
+	// One-time, best-effort backfill of the legacy JSON-blob metadata caches
+	// (album_discovery_cache / artist_overview_cache) into the durable catalog,
+	// plus a low-priority enqueue of any album still unmaterialized. It runs on
+	// the app background context, off the startup path (Start returns
+	// immediately), is cancellable via bgCtx so it never delays Shutdown, and is
+	// idempotent + resumable so a partial or interrupted pass simply resumes.
+	// The live enabled gate means a disabled catalog skips it entirely. Stop() is
+	// called on shutdown below so it cannot outlive the store.
+	backfillRunner := migrate.Start(bgCtx, libStore.DB(), catalogStore, log,
+		func() bool { return cfg.Get().Catalog.IsEnabled() })
 
 	// Tracked-artist refresh: drive the existing "tracked-refresh" job on an
 	// interval through the job Manager (no bespoke worker). nil/0 or < 5 min
@@ -438,6 +538,9 @@ func NewApp(configPath string) (*App, error) {
 		libStore:          libStore,
 		userStore:         userStore,
 		monitor:           monitor,
+		refreshSvc:        refreshSvc,
+		coldFetcher:       coldFetcher,
+		backfill:          backfillRunner,
 		srv:               srv,
 		bgCtx:             bgCtx,
 		bgCancel:          bgCancel,
@@ -459,6 +562,16 @@ func (app *App) Run() {
 		app.log.Info("shutting down", "component", "main")
 		app.log.Info("background workers stopping", "component", "main")
 		app.bgCancel()
+		// Stop the cold fetcher first: it drains the in-flight cold-fetch
+		// goroutines (which call the refresh engine) before the engine, backfill,
+		// and eventually the store are torn down. Nil-safe.
+		app.coldFetcher.Stop()
+		// Stop the refresh engine and wait for its drain goroutine to exit so it
+		// does not outlive the store/socket it writes through. Nil-safe.
+		app.refreshSvc.Stop()
+		// Stop the one-time catalog backfill (cancels + waits) before the store
+		// is closed so its writes cannot race shutdown. Nil-safe.
+		app.backfill.Stop()
 		app.log.Info("monitoring service shutting down", "component", "main")
 		app.monitor.Shutdown()
 		// Bound the HTTP shutdown so a stuck connection (e.g. an SSE client

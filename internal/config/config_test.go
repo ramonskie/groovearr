@@ -641,3 +641,186 @@ func TestMergePreservesMaskedAPIKey(t *testing.T) {
 		t.Errorf("Merge clobbered the API key with a masked value: got %q, want %q", cfg.Auth.APIKey, rawKey)
 	}
 }
+
+// TestCatalogConfigDefaults pins the catalog defaults that preserve current
+// behavior for a legacy install with no "catalog" section: enabled with a 30-day
+// soft TTL. The int tuning knobs stay zero so each engine applies its own
+// documented default rather than 0.
+func TestCatalogConfigDefaults(t *testing.T) {
+	cfg := DefaultConfig()
+
+	if cfg.Catalog.Enabled == nil {
+		t.Fatal("catalog.enabled = nil, want a default pointer (true)")
+	}
+	if !*cfg.Catalog.Enabled {
+		t.Errorf("catalog.enabled = false, want true")
+	}
+	if cfg.Catalog.AlbumRefreshDays != 30 {
+		t.Errorf("catalog.album_refresh_days = %d, want 30", cfg.Catalog.AlbumRefreshDays)
+	}
+	if cfg.Catalog.ArtistRefreshDays != 30 {
+		t.Errorf("catalog.artist_refresh_days = %d, want 30", cfg.Catalog.ArtistRefreshDays)
+	}
+	if cfg.Catalog.BatchSize != 0 {
+		t.Errorf("catalog.batch_size = %d, want 0 (engine default)", cfg.Catalog.BatchSize)
+	}
+	if cfg.Catalog.IntervalMinutes != 0 {
+		t.Errorf("catalog.interval_minutes = %d, want 0 (engine default)", cfg.Catalog.IntervalMinutes)
+	}
+	if cfg.Catalog.Concurrency != 0 {
+		t.Errorf("catalog.concurrency = %d, want 0 (reserved/unset)", cfg.Catalog.Concurrency)
+	}
+}
+
+// TestCatalogConfigLegacyPreservesDefaults simulates an existing config file
+// with no "catalog" key (and a partial section) decoded onto DefaultConfig: the
+// defaults must survive for every omitted field.
+func TestCatalogConfigLegacyPreservesDefaults(t *testing.T) {
+	tests := []struct {
+		name         string
+		raw          string
+		wantEnabled  bool
+		wantAlbumDay int
+		wantArtist   int
+	}{
+		{name: "no catalog key", raw: `{"library":{"max_download_workers":4}}`, wantEnabled: true, wantAlbumDay: 30, wantArtist: 30},
+		{name: "empty catalog", raw: `{"catalog":{}}`, wantEnabled: true, wantAlbumDay: 30, wantArtist: 30},
+		{name: "partial catalog keeps other defaults", raw: `{"catalog":{"enabled":false}}`, wantEnabled: false, wantAlbumDay: 30, wantArtist: 30},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			if err := json.Unmarshal([]byte(tt.raw), &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if cfg.Catalog.Enabled == nil {
+				t.Fatal("catalog.enabled = nil after unmarshal, want a pointer")
+			}
+			if *cfg.Catalog.Enabled != tt.wantEnabled {
+				t.Errorf("catalog.enabled = %v, want %v", *cfg.Catalog.Enabled, tt.wantEnabled)
+			}
+			if cfg.Catalog.AlbumRefreshDays != tt.wantAlbumDay {
+				t.Errorf("catalog.album_refresh_days = %d, want %d", cfg.Catalog.AlbumRefreshDays, tt.wantAlbumDay)
+			}
+			if cfg.Catalog.ArtistRefreshDays != tt.wantArtist {
+				t.Errorf("catalog.artist_refresh_days = %d, want %d", cfg.Catalog.ArtistRefreshDays, tt.wantArtist)
+			}
+		})
+	}
+}
+
+// TestCatalogConfigJSONOverride verifies an explicit settings payload overrides
+// every field, including an explicit false on the Enabled pointer.
+func TestCatalogConfigJSONOverride(t *testing.T) {
+	raw := `{"catalog":{"enabled":false,"album_refresh_days":7,"artist_refresh_days":14,"batch_size":25,"interval_minutes":5,"concurrency":4}}`
+
+	cfg := DefaultConfig()
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+
+	if cfg.Catalog.Enabled == nil || *cfg.Catalog.Enabled {
+		t.Errorf("catalog.enabled = %v, want explicit false", cfg.Catalog.Enabled)
+	}
+	if cfg.Catalog.AlbumRefreshDays != 7 {
+		t.Errorf("catalog.album_refresh_days = %d, want 7", cfg.Catalog.AlbumRefreshDays)
+	}
+	if cfg.Catalog.ArtistRefreshDays != 14 {
+		t.Errorf("catalog.artist_refresh_days = %d, want 14", cfg.Catalog.ArtistRefreshDays)
+	}
+	if cfg.Catalog.BatchSize != 25 {
+		t.Errorf("catalog.batch_size = %d, want 25", cfg.Catalog.BatchSize)
+	}
+	if cfg.Catalog.IntervalMinutes != 5 {
+		t.Errorf("catalog.interval_minutes = %d, want 5", cfg.Catalog.IntervalMinutes)
+	}
+	if cfg.Catalog.Concurrency != 4 {
+		t.Errorf("catalog.concurrency = %d, want 4", cfg.Catalog.Concurrency)
+	}
+}
+
+// TestMergeCatalogConfig pins the partial-update semantics: Enabled is
+// pointer-aware (nil preserves, explicit false disables) and the int fields merge
+// only when positive so a partial update cannot silently zero a tuned value.
+func TestMergeCatalogConfig(t *testing.T) {
+	tests := []struct {
+		name             string
+		initial          CatalogConfig
+		partial          CatalogConfig
+		wantEnabled      *bool
+		wantAlbumDays    int
+		wantBatch        int
+		wantIntervalMins int
+	}{
+		{
+			name:        "nil enabled preserves existing true",
+			initial:     CatalogConfig{Enabled: boolPtr(true), AlbumRefreshDays: 30},
+			partial:     CatalogConfig{},
+			wantEnabled: boolPtr(true), wantAlbumDays: 30,
+		},
+		{
+			name:        "explicit false disables",
+			initial:     CatalogConfig{Enabled: boolPtr(true)},
+			partial:     CatalogConfig{Enabled: boolPtr(false)},
+			wantEnabled: boolPtr(false), wantAlbumDays: 0,
+		},
+		{
+			name:        "explicit true enables",
+			initial:     CatalogConfig{Enabled: boolPtr(false)},
+			partial:     CatalogConfig{Enabled: boolPtr(true)},
+			wantEnabled: boolPtr(true), wantAlbumDays: 0,
+		},
+		{
+			name:             "positive ints override",
+			initial:          CatalogConfig{AlbumRefreshDays: 30, BatchSize: 8, IntervalMinutes: 1},
+			partial:          CatalogConfig{AlbumRefreshDays: 7, BatchSize: 20, IntervalMinutes: 15},
+			wantAlbumDays:    7,
+			wantBatch:        20,
+			wantIntervalMins: 15,
+		},
+		{
+			name:             "zero ints do not clobber",
+			initial:          CatalogConfig{AlbumRefreshDays: 30, BatchSize: 8, IntervalMinutes: 1},
+			partial:          CatalogConfig{},
+			wantAlbumDays:    30,
+			wantBatch:        8,
+			wantIntervalMins: 1,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := Config{Catalog: tt.initial}
+			cfg.Merge(&Config{Catalog: tt.partial})
+
+			if (cfg.Catalog.Enabled == nil) != (tt.wantEnabled == nil) {
+				t.Fatalf("catalog.enabled = %v, want %v", cfg.Catalog.Enabled, tt.wantEnabled)
+			}
+			if cfg.Catalog.Enabled != nil && *cfg.Catalog.Enabled != *tt.wantEnabled {
+				t.Errorf("catalog.enabled = %v, want %v", *cfg.Catalog.Enabled, *tt.wantEnabled)
+			}
+			if cfg.Catalog.AlbumRefreshDays != tt.wantAlbumDays {
+				t.Errorf("catalog.album_refresh_days = %d, want %d", cfg.Catalog.AlbumRefreshDays, tt.wantAlbumDays)
+			}
+			if cfg.Catalog.BatchSize != tt.wantBatch {
+				t.Errorf("catalog.batch_size = %d, want %d", cfg.Catalog.BatchSize, tt.wantBatch)
+			}
+			if cfg.Catalog.IntervalMinutes != tt.wantIntervalMins {
+				t.Errorf("catalog.interval_minutes = %d, want %d", cfg.Catalog.IntervalMinutes, tt.wantIntervalMins)
+			}
+		})
+	}
+}
+
+// TestCloneCatalogEnabledIndependent guards that Clone deep-copies the Enabled
+// pointer so a trial-merge cannot mutate the live config.
+func TestCloneCatalogEnabledIndependent(t *testing.T) {
+	cfg := DefaultConfig()
+	cl := Clone(cfg)
+	if cl.Catalog.Enabled == nil {
+		t.Fatal("Clone dropped catalog.enabled")
+	}
+	*cl.Catalog.Enabled = false
+	if !*cfg.Catalog.Enabled {
+		t.Error("Clone shares the catalog.enabled pointer with the original")
+	}
+}

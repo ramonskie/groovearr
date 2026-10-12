@@ -3,8 +3,6 @@ package download
 
 import (
 	"context"
-	"database/sql"
-	"encoding/json"
 	"fmt"
 	"io/fs"
 	"log/slog"
@@ -15,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
@@ -37,15 +36,22 @@ type AlbumImportHandler struct {
 	trackResolver TrackResolver
 	dlStore       Store
 	libStore      libraryStore
-	db            *sql.DB
+	enqueuer      Enqueuer
 	log           *slog.Logger
+}
+
+// Enqueuer queues a background metadata refresh for one album. The refresh
+// engine (internal/refresh.Service) satisfies it; it is declared here as a
+// narrow interface so this package depends on behavior, not construction
+// (AGENTS §3) and never imports internal/refresh. It may be nil, in which case
+// enqueueing is a no-op.
+type Enqueuer interface {
+	EnqueueAlbum(ctx context.Context, albumID int64, reason string, priority int) error
 }
 
 // libraryStore is the minimal interface for querying library data.
 type libraryStore interface {
 	GetTrack(ctx context.Context, id int64) (*domain.Track, error)
-	GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error)
-	GetAlbum(ctx context.Context, id int64) (*domain.Album, error)
 }
 
 // TrackResolver resolves the expected track listing for an album release.
@@ -54,7 +60,7 @@ type TrackResolver func(ctx context.Context, sourceName, artist, album string, f
 
 // NewAlbumImportHandler creates an AlbumImportHandler that delegates all
 // per-track processing to the standard import handler chain.
-func NewAlbumImportHandler(chain []ImportHandler, resolver TrackResolver, dlStore Store, libStore libraryStore, db *sql.DB, logger *slog.Logger) *AlbumImportHandler {
+func NewAlbumImportHandler(chain []ImportHandler, resolver TrackResolver, dlStore Store, libStore libraryStore, logger *slog.Logger) *AlbumImportHandler {
 	if logger == nil {
 		logger = slog.Default()
 	}
@@ -63,9 +69,15 @@ func NewAlbumImportHandler(chain []ImportHandler, resolver TrackResolver, dlStor
 		trackResolver: resolver,
 		dlStore:       dlStore,
 		libStore:      libStore,
-		db:            db,
 		log:           logger,
 	}
+}
+
+// SetEnqueuer injects the background metadata-refresh enqueuer after
+// construction. Pass nil to disable enqueueing. Mirrors the post-construction
+// wiring used for other optional dependencies (api.Server.SetAlbumRefresher).
+func (h *AlbumImportHandler) SetEnqueuer(e Enqueuer) {
+	h.enqueuer = e
 }
 
 // Handle imports a completed album download by scanning the folder, matching
@@ -183,9 +195,12 @@ func (h *AlbumImportHandler) Handle(ctx context.Context, record *Record) error {
 		}
 	}
 
-	// 5. Update discovery cache so the UI shows the actual downloaded tracks,
-	// not stale discovery provider data (e.g., standard vs deluxe edition).
-	h.updateDiscoveryCache(ctx, importedIDs)
+	// 5. Ask the refresh engine to materialize this album's provider metadata.
+	// The import wrote the live library tracklist; the refresh fills the
+	// provider-expected catalog so warm reads never touch a provider. This is
+	// best-effort — the engine owns the background work, and a failed enqueue
+	// never fails the import.
+	h.enqueueAlbumRefresh(ctx, importedIDs)
 
 	h.log.Info("album import complete",
 		"album", record.Album,
@@ -409,67 +424,32 @@ func extractTrackNumber(name string) int {
 	return 0
 }
 
-// updateDiscoveryCache rebuilds the album_discovery_cache with the actual
-// library tracks so the UI shows what was really downloaded, not stale
-// discovery provider data (e.g., standard edition vs deluxe/redux).
-func (h *AlbumImportHandler) updateDiscoveryCache(ctx context.Context, trackIDs []int64) {
-	if len(trackIDs) == 0 || h.libStore == nil {
+// enqueueAlbumRefresh asks the refresh engine to materialize the imported
+// album's provider metadata. Best-effort: a nil enqueuer, a missing store, or
+// no imported tracks is a no-op, and any enqueue failure is logged and
+// swallowed so it can never fail the import. The write is bounded by its own
+// short timeout (AGENTS §7); the import context may be long-lived.
+func (h *AlbumImportHandler) enqueueAlbumRefresh(ctx context.Context, trackIDs []int64) {
+	if h.enqueuer == nil || h.libStore == nil || len(trackIDs) == 0 {
 		return
 	}
 
-	// Get the album ID from the first imported track.
+	// The album id lives on the library track row; the download record carries
+	// no album id of its own.
 	firstTrack, err := h.libStore.GetTrack(ctx, trackIDs[0])
-	if err != nil || firstTrack == nil {
+	if err != nil {
+		h.log.Warn("album import: refresh enqueue track lookup failed",
+			"track_id", trackIDs[0], "error", err, "component", "album_import")
 		return
 	}
-	album, err := h.libStore.GetAlbum(ctx, firstTrack.AlbumID)
-	if err != nil || album == nil {
+	if firstTrack == nil || firstTrack.AlbumID <= 0 {
 		return
 	}
 
-	// Get all tracks in the album from the library.
-	libTracks, err := h.libStore.GetTracksByAlbum(ctx, album.ID)
-	if err != nil {
-		h.log.Warn("album import: cache update failed to get tracks",
-			"album_id", album.ID, "error", err, "component", "album_import")
-		return
+	enqueueCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	if err := h.enqueuer.EnqueueAlbum(enqueueCtx, firstTrack.AlbumID, catalog.ReasonEvent, catalog.PriorityHigh); err != nil {
+		h.log.Warn("album import: metadata refresh enqueue failed",
+			"album_id", firstTrack.AlbumID, "error", err, "component", "album_import")
 	}
-
-	// Build discovery-compatible track entries.
-	type cacheTrack struct {
-		Title       string `json:"title"`
-		TrackNumber int    `json:"track_number"`
-		DurationMs  int64  `json:"duration_ms"`
-	}
-	cacheTracks := make([]cacheTrack, 0, len(libTracks))
-	for _, t := range libTracks {
-		cacheTracks = append(cacheTracks, cacheTrack{
-			Title:       t.Title,
-			TrackNumber: t.TrackNumber,
-			DurationMs:  int64(t.Duration),
-		})
-	}
-	tracksJSON, err := json.Marshal(cacheTracks)
-	if err != nil {
-		h.log.Warn("album import: cache update marshal failed", "error", err, "component", "album_import")
-		return
-	}
-
-	// Write to discovery cache via the download store's DB connection.
-	db := h.db
-	if db == nil {
-		return
-	}
-	_, err = db.ExecContext(ctx,
-		`INSERT OR REPLACE INTO album_discovery_cache (album_id, provider_name, provider_album_id, tracks_json, cached_at)
-		 VALUES (?, 'library', '', ?, ?)`,
-		album.ID, string(tracksJSON), time.Now().UTC().Format(time.RFC3339),
-	)
-	if err != nil {
-		h.log.Warn("album import: cache update write failed",
-			"album_id", album.ID, "error", err, "component", "album_import")
-		return
-	}
-	h.log.Info("album import: discovery cache updated",
-		"album_id", album.ID, "tracks", len(cacheTracks), "component", "album_import")
 }

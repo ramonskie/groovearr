@@ -14,12 +14,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/ramonskie/groovearr/internal/discovery"
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
+	"github.com/ramonskie/groovearr/internal/refresh"
 )
 
 // ─── Library handlers ────────────────────────────────────────────────
@@ -354,14 +355,53 @@ type discoveryTrackEntry struct {
 }
 
 // albumDiscoveryResponse is the JSON payload for the discovery endpoint.
+// metadata_pending is true when the album's provider tracklist has not been
+// materialized yet (a cold read); the response then carries the local library
+// fallback. The pre-existing fields keep their shape so the UI reads them
+// unchanged.
 type albumDiscoveryResponse struct {
 	Provider        string                `json:"provider"`
 	ProviderAlbumID string                `json:"provider_album_id"`
 	Tracks          []discoveryTrackEntry `json:"tracks"`
+	MetadataPending bool                  `json:"metadata_pending"`
 }
 
-// handleLibraryAlbumDiscovery searches discovery providers for an album's full
-// track list, caches the result, and returns tracks merged with library download status.
+// catalogReader is the subset of catalog.Store the album read path needs:
+// materialized album tracklists and the album provider link. Declared in the
+// api package so this layer depends only on the catalog capabilities it uses
+// (AGENTS §3) and never on the refresh queue it does not touch — which lets the
+// queue land independently.
+type catalogReader interface {
+	catalog.AlbumTrackStore
+	catalog.AlbumMetadataStore
+}
+
+// artistCatalogReader is the subset of catalog.Store the discover artist read
+// path needs: the durable artist overview and discography. It is kept separate
+// from catalogReader so each handler depends only on the catalog capabilities it
+// uses (AGENTS §3).
+type artistCatalogReader interface {
+	catalog.ArtistMetadataStore
+	catalog.ArtistDiscographyStore
+}
+
+// catalogDeps is the full catalog surface the server holds: the album read
+// path's reader plus the artist read path's reader. It is the constructor's
+// single catalog dependency (wired in cmd/groovearr/app.go) while each handler
+// keeps its own narrow slice.
+type catalogDeps interface {
+	catalogReader
+	artistCatalogReader
+}
+
+// handleLibraryAlbumDiscovery returns an album's expected tracklist merged with
+// live local download status. A warm album is a pure catalog + library read.
+// The first open of an unmaterialized (cold/pending) album performs one
+// bounded, deduplicated synchronous provider fetch (Option A) when a cold
+// fetcher is wired; on success the fresh rows are served, otherwise the request
+// falls back to the local tracks with metadata_pending. Albums already matched
+// (fresh, even with zero rows) or parked terminal (unmatched/failed before their
+// retry window) are never re-fetched on open — see buildAlbumDiscovery.
 func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Request) {
 	albumIDStr := r.PathValue("albumID")
 	albumID, err := strconv.ParseInt(albumIDStr, 10, 64)
@@ -392,204 +432,351 @@ func (s *Server) handleLibraryAlbumDiscovery(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	// Try the cache first (requires concrete DB access).
-	var cachedProvider, cachedAlbumID, cachedTracksJSON, cachedAt string
-	if dbp, ok := s.store.(sqlDBProvider); ok {
-		err := dbp.DB().QueryRowContext(ctx,
-			`SELECT provider_name, provider_album_id, tracks_json, cached_at FROM album_discovery_cache WHERE album_id = ?`, albumID,
-		).Scan(&cachedProvider, &cachedAlbumID, &cachedTracksJSON, &cachedAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			s.log.Warn("album discovery cache read failed", "album_id", albumID, "error", err, "component", "api")
+	writeJSON(w, http.StatusOK, s.buildAlbumDiscovery(ctx, albumID, artist.ID))
+}
+
+// coldFetchBudget bounds how long the first open of an unmaterialized album
+// waits on its one-time provider fetch before falling back to local tracks. The
+// fetcher enforces its own hard ceiling; this outer bound keeps the HTTP request
+// from ever outliving the UI's cold-open spinner.
+const coldFetchBudget = 20 * time.Second
+
+// albumColdFetcher is the narrow slice of the refresh engine's cold fetcher the
+// album read path needs: one bounded, deduplicated cold materialization attempt.
+// FetchMatched reports whether a provider album was resolved and materialized.
+// It is declared here (not as *refresh.ColdFetcher) so the api package depends
+// on behavior, not construction (AGENTS §3). Wired in cmd/groovearr/app.go via
+// Server.SetAlbumColdFetcher — mirrors SetAlbumRefresher.
+type albumColdFetcher interface {
+	FetchMatched(ctx context.Context, albumID int64) (bool, error)
+}
+
+// SetAlbumColdFetcher injects the cold-read fetcher after construction. Pass nil
+// to leave the cold path on its local-tracks fallback (the pre-subtask-10
+// behavior).
+func (s *Server) SetAlbumColdFetcher(f albumColdFetcher) {
+	s.albumColdFetch = f
+}
+
+// buildAlbumDiscovery assembles the album-detail response from the materialized
+// catalog tracklist merged with the live local library tracks. Every branch but
+// the one-time Option-A cold fetch is a pure catalog + library read; the request
+// never waits on a provider for an album that is already matched.
+//
+// Read policy:
+//
+//   - warm (materialized rows exist): pure SQLite read + scoped merge.
+//   - fresh matched-empty (StatusFresh with zero rows): warm, served as an empty
+//     materialized list; the album was matched and simply has no provider tracks.
+//   - stale (materialized metadata older than the soft TTL): serve the rows
+//     immediately and best-effort enqueue a low-priority refresh behind the
+//     response; no provider call in the request.
+//   - terminal (unmatched/failed) before its long retry elapses: do not
+//     re-search and do not re-enqueue; serve local tracks with metadata_pending
+//     (the parked queue row already carries the retry due_at).
+//   - pending / no metadata row: Option-A synchronous cold fetch (one bounded,
+//     deduplicated provider call when a fetcher is wired); on a timeout, error,
+//     no-match, or no fetcher, fall back to local tracks with metadata_pending.
+func (s *Server) buildAlbumDiscovery(ctx context.Context, albumID, artistID int64) *albumDiscoveryResponse {
+	materialized := s.materializedAlbumTracks(ctx, albumID)
+	meta := s.albumMetadata(ctx, albumID)
+
+	// Only an unmaterialized album that is not already definitively matched may
+	// trigger the synchronous cold fetch.
+	if len(materialized) == 0 && !isMaterializedStatus(meta) {
+		if s.terminalRetryParked(meta) {
+			// Terminal and not yet due: re-searching now would defeat the state
+			// that keeps the queue from churning, and re-enqueueing here would
+			// overwrite the parked row's 90-day due_at with now. Serve local
+			// tracks and leave the existing queue row untouched.
+			return s.localPendingResponse(ctx, albumID, meta)
+		}
+		if s.albumColdFetch != nil {
+			// Option A cold read: one synchronous, deduplicated provider fetch
+			// that materializes the album. The fetch details live in
+			// internal/refresh; this handler only names the narrow interface
+			// above and bounds the wait.
+			fetchCtx, cancel := context.WithTimeout(ctx, coldFetchBudget)
+			matched, err := s.albumColdFetch.FetchMatched(fetchCtx, albumID)
+			cancel()
+			if err != nil {
+				s.log.Warn("cold album fetch failed", "album_id", albumID, "error", err, "component", "api")
+			}
+			if err == nil && matched {
+				materialized = s.materializedAlbumTracks(ctx, albumID)
+				meta = s.albumMetadata(ctx, albumID)
+			}
 		}
 	}
 
-	var discoveryTracks []discovery.TrackInfo
-	if cachedTracksJSON != "" {
-		// Check cache TTL (24h).
-		if cachedAt != "" {
-			if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
-				if time.Since(t) > 24*time.Hour {
-					cachedTracksJSON = "" // expired
-				}
-			} else {
-				cachedTracksJSON = "" // unparseable timestamp = treat as expired
-			}
-		}
-	}
-	if cachedTracksJSON != "" {
-		// Cache hit — unmarshal cached tracks.
-		if uerr := json.Unmarshal([]byte(cachedTracksJSON), &discoveryTracks); uerr != nil {
-			s.log.Warn("album discovery cache corrupt, refetching", "album_id", albumID, "error", uerr, "component", "api")
-			discoveryTracks = nil
-			cachedProvider = ""
-			cachedAlbumID = ""
-		}
+	// Tier-1 lazy staleness: a matched album whose metadata is past the soft TTL
+	// is served as-is and refreshed behind the response. No provider call here.
+	if isMaterializedStatus(meta) && s.albumMetadataStale(meta) {
+		s.enqueueStaleRefresh(ctx, albumID)
 	}
 
-	// Cache miss — search discovery providers.
-	if discoveryTracks == nil && s.discoveryReg != nil {
-		providers := s.discoveryReg.Any()
-		query := artist.Name + " " + album.Title
-		for _, p := range providers {
-			// Skip a provider that recently rate-limited us — move on to the
-			// next one instead of re-hitting a throttled API per album.
-			if s.providerCooldown.CoolingDown(p.Name()) {
-				continue
-			}
-			albums, serr := p.SearchAlbums(ctx, query, 5)
-			if serr != nil {
-				s.noteProviderRateLimit(p.Name(), serr)
-				continue
-			}
-			if len(albums) == 0 {
-				continue
-			}
-			// Find the album that best matches our artist + title.
-			var matched *discovery.AlbumResult
-			for i := range albums {
-				a := &albums[i]
-				if strings.EqualFold(a.ArtistName, artist.Name) && strings.EqualFold(a.Title, album.Title) {
-					matched = a
-					break
-				}
-			}
-			// Fallback: use first result if title matches but artist differs slightly.
-			if matched == nil {
-				for i := range albums {
-					a := &albums[i]
-					if strings.EqualFold(a.Title, album.Title) {
-						matched = a
-						break
-					}
-				}
-			}
-			if matched == nil {
-				continue
-			}
+	providerName, providerAlbumID := providerLink(meta)
 
-			tracks, terr := p.GetAlbumTracks(ctx, matched.ProviderID)
-			if terr != nil || len(tracks) == 0 {
-				continue
-			}
-
-			discoveryTracks = tracks
-			cachedProvider = matched.ProviderName
-			cachedAlbumID = matched.ProviderID
-
-			// Persist to cache.
-			if dbp, ok := s.store.(sqlDBProvider); ok {
-				tracksJSON, jerr := json.Marshal(tracks)
-				if jerr == nil {
-					_, err := dbp.DB().ExecContext(ctx,
-						`INSERT OR REPLACE INTO album_discovery_cache (album_id, provider_name, provider_album_id, tracks_json, cached_at)
-						 VALUES (?, ?, ?, ?, ?)`,
-						albumID, matched.ProviderName, matched.ProviderID, string(tracksJSON),
-						time.Now().UTC().Format(time.RFC3339),
-					)
-					if err != nil {
-						s.log.Warn("album discovery cache write failed", "album_id", albumID, "error", err, "component", "api")
-					}
-				} else {
-					s.log.Warn("album discovery cache marshal failed", "album_id", albumID, "error", jerr, "component", "api")
-				}
-			}
-			break
-		}
+	if len(materialized) == 0 && !isMaterializedStatus(meta) {
+		// Still cold (no provider match, a timeout/error, no fetcher wired, or a
+		// pending row): serve the local library tracks as a best-effort fallback
+		// and tell the UI the provider tracklist is not materialized yet.
+		return s.localPendingResponse(ctx, albumID, meta)
 	}
 
-	if discoveryTracks == nil {
-		// No discovery data — return just library tracks as "downloaded".
-		libTracks, err := s.store.GetTracksByAlbum(ctx, albumID)
-		if err != nil {
-			s.log.Warn("get tracks by album failed", "album_id", albumID, "error", err, "component", "api")
-		}
-		entries := make([]discoveryTrackEntry, 0)
-		for _, t := range libTracks {
-			entries = append(entries, discoveryTrackEntry{
-				Title:          t.Title,
-				TrackNumber:    t.TrackNumber,
-				DurationMs:     int64(t.Duration),
-				Downloaded:     true,
-				LibraryTrackID: t.ID,
-				FilePath:       t.FilePath,
-				FileSize:       t.FileSize,
-				Bitrate:        t.Bitrate,
-				Format:         formatFromPath(t.FilePath),
-			})
-		}
-		writeJSON(w, http.StatusOK, albumDiscoveryResponse{Tracks: entries})
-		return
+	albumLocal, artistLocal := s.albumScopeTracks(ctx, albumID, artistID)
+	merged := catalog.MergeTracksScoped(materialized, albumLocal, artistLocal)
+	entries := make([]discoveryTrackEntry, 0, len(merged))
+	for i := range merged {
+		entries = append(entries, mergedTrackEntry(&merged[i]))
 	}
+	return &albumDiscoveryResponse{
+		Provider:        providerName,
+		ProviderAlbumID: providerAlbumID,
+		Tracks:          entries,
+		MetadataPending: false,
+	}
+}
 
-	// Build library track index for merge.
+// isMaterializedStatus reports whether the album has a definitive provider link
+// (fresh or stale), regardless of how many rows it materialized. A matched album
+// with zero rows is warm, not cold, and must not be re-fetched on every open.
+func isMaterializedStatus(meta *catalog.AlbumMetadata) bool {
+	return meta != nil && (meta.RefreshStatus == catalog.StatusFresh || meta.RefreshStatus == catalog.StatusStale)
+}
+
+// localPendingResponse serves the album's local library tracks with
+// metadata_pending=true: the fallback for an album with no materialized provider
+// tracklist.
+func (s *Server) localPendingResponse(ctx context.Context, albumID int64, meta *catalog.AlbumMetadata) *albumDiscoveryResponse {
+	providerName, providerAlbumID := providerLink(meta)
 	libTracks, err := s.store.GetTracksByAlbum(ctx, albumID)
 	if err != nil {
 		s.log.Warn("get tracks by album failed", "album_id", albumID, "error", err, "component", "api")
 	}
-	byTitle := make(map[string]*domain.Track, len(libTracks))
-	byISRC := make(map[string]*domain.Track, len(libTracks))
+	entries := make([]discoveryTrackEntry, 0, len(libTracks))
 	for i := range libTracks {
-		t := &libTracks[i]
-		byTitle[normalizeKey(t.Title)] = t
-		if t.ISRC != "" {
-			byISRC[t.ISRC] = t
-		}
+		entries = append(entries, localTrackEntry(&libTracks[i]))
 	}
-	// Also index all artist tracks for cross-album matching (title + ISRC).
-	artistTracks, err := s.store.GetTracksByArtist(ctx, album.ArtistID)
-	if err != nil {
-		s.log.Warn("get tracks by artist failed", "artist_id", album.ArtistID, "error", err, "component", "api")
-	}
-	for i := range artistTracks {
-		t := &artistTracks[i]
-		// Only add to title index if not already present (album tracks take precedence).
-		titleKey := normalizeKey(t.Title)
-		if _, exists := byTitle[titleKey]; !exists {
-			byTitle[titleKey] = t
-		}
-		if t.ISRC != "" {
-			if _, exists := byISRC[t.ISRC]; !exists {
-				byISRC[t.ISRC] = t
-			}
-		}
-	}
-
-	// Merge discovery tracks with library status.
-	var entries []discoveryTrackEntry
-	for _, dt := range discoveryTracks {
-		entry := discoveryTrackEntry{
-			Title:       dt.Title,
-			TrackNumber: dt.TrackNumber,
-			DurationMs:  dt.DurationMs,
-		}
-
-		// Match by ISRC first (most reliable).
-		if libTrack, ok := byISRC[dt.ISRC]; ok && dt.ISRC != "" {
-			entry.Downloaded = true
-			entry.LibraryTrackID = libTrack.ID
-			entry.FilePath = libTrack.FilePath
-			entry.FileSize = libTrack.FileSize
-			entry.Bitrate = libTrack.Bitrate
-			entry.Format = formatFromPath(libTrack.FilePath)
-		} else if libTrack, ok := byTitle[normalizeKey(dt.Title)]; ok {
-			// Fallback to normalized title matching.
-			entry.Downloaded = true
-			entry.LibraryTrackID = libTrack.ID
-			entry.FilePath = libTrack.FilePath
-			entry.FileSize = libTrack.FileSize
-			entry.Bitrate = libTrack.Bitrate
-			entry.Format = formatFromPath(libTrack.FilePath)
-		}
-
-		entries = append(entries, entry)
-	}
-
-	resp := albumDiscoveryResponse{
-		Provider:        cachedProvider,
-		ProviderAlbumID: cachedAlbumID,
+	return &albumDiscoveryResponse{
+		Provider:        providerName,
+		ProviderAlbumID: providerAlbumID,
 		Tracks:          entries,
+		MetadataPending: true,
 	}
-	writeJSON(w, http.StatusOK, resp)
+}
+
+// providerLink projects the persisted provider link from a metadata row. A nil
+// row (never materialized) yields empty strings, which is the normal cold state.
+func providerLink(meta *catalog.AlbumMetadata) (providerName, providerAlbumID string) {
+	if meta == nil {
+		return "", ""
+	}
+	return meta.ProviderName, meta.ProviderAlbumID
+}
+
+// terminalRetryParked reports whether a metadata row is a terminal
+// (unmatched/failed) album still inside its long retry window. Such a row must
+// neither be re-fetched nor re-enqueued: the parked queue row already carries
+// its 90-day due_at, and re-arming it at now would let the engine re-search the
+// provider within one interval. A nil row is not parked.
+func (s *Server) terminalRetryParked(meta *catalog.AlbumMetadata) bool {
+	return meta != nil && meta.RefreshStatus.IsTerminal() && !s.terminalRetryElapsed(meta)
+}
+
+// terminalRetryElapsed reports whether a terminal (unmatched/failed) album is due
+// for another provider attempt. It uses the same long interval the refresh queue
+// uses for unmatched rows, measured against the metadata's refresh/update time so
+// opening the album inside the window does not re-search the provider.
+func (s *Server) terminalRetryElapsed(meta *catalog.AlbumMetadata) bool {
+	t := meta.LastRefreshedAt
+	if t.IsZero() {
+		t = meta.UpdatedAt
+	}
+	if t.IsZero() {
+		return true // no timestamp: treat as due rather than park forever
+	}
+	return time.Since(t) >= catalog.UnmatchedRetry
+}
+
+// albumStaleThreshold returns the soft TTL after which a warm album read is
+// stale. It reads the injected live seam when present (app.go passes
+// refresh.Service.AlbumStaleAfter, so it tracks hot-reloaded config), otherwise
+// falls back to the engine default.
+func (s *Server) albumStaleThreshold() time.Duration {
+	if s.albumStaleAfter != nil {
+		if d := s.albumStaleAfter(); d > 0 {
+			return d
+		}
+	}
+	return refresh.DefaultAlbumStaleAfter
+}
+
+// albumMetadataStale reports whether a materialized album's metadata is older
+// than the soft TTL. The refresh time is preferred; a row with no refresh time
+// falls back to its update time. A row with neither is treated as not stale.
+func (s *Server) albumMetadataStale(meta *catalog.AlbumMetadata) bool {
+	t := meta.LastRefreshedAt
+	if t.IsZero() {
+		t = meta.UpdatedAt
+	}
+	if t.IsZero() {
+		return false
+	}
+	return time.Since(t) > s.albumStaleThreshold()
+}
+
+// enqueueStaleRefresh best-effort queues a low-priority background refresh behind
+// the read response. The enqueue is a single short queue write — never a provider
+// call and never a goroutine (AGENTS §2/§4) — so it does not block the read. A
+// missing engine or a queue-write error is logged and never fails the request.
+func (s *Server) enqueueStaleRefresh(ctx context.Context, albumID int64) {
+	s.enqueueRefresh(ctx, albumID, catalog.ReasonStale)
+}
+
+// enqueueRefresh is the shared best-effort low-priority enqueue behind a read.
+func (s *Server) enqueueRefresh(ctx context.Context, albumID int64, reason string) {
+	if s.albumRefresh == nil {
+		return
+	}
+	if err := s.albumRefresh.EnqueueAlbum(ctx, albumID, reason, catalog.PriorityLow); err != nil {
+		s.log.Warn("enqueue refresh failed", "album_id", albumID, "reason", reason, "error", err, "component", "api")
+	}
+}
+
+// materializedAlbumTracks reads the album's materialized expected rows from the
+// catalog. A nil catalog (bare test server) or a read error yields no rows so a
+// warm/cold decision never fails the request; the error is logged.
+func (s *Server) materializedAlbumTracks(ctx context.Context, albumID int64) []catalog.AlbumTrack {
+	if s.catalog == nil {
+		return nil
+	}
+	rows, err := s.catalog.GetAlbumTracks(ctx, albumID)
+	if err != nil {
+		s.log.Warn("catalog album tracks read failed", "album_id", albumID, "error", err, "component", "api")
+		return nil
+	}
+	return rows
+}
+
+// albumMetadata reads the album's metadata row (provider link + refresh
+// bookkeeping). A nil catalog (bare test server) or a read error yields nil, so
+// an absent row is indistinguishable from an unreadable one — both mean "not
+// materialized".
+func (s *Server) albumMetadata(ctx context.Context, albumID int64) *catalog.AlbumMetadata {
+	if s.catalog == nil {
+		return nil
+	}
+	meta, err := s.catalog.GetAlbumMetadata(ctx, albumID)
+	if err != nil {
+		s.log.Warn("catalog album metadata read failed", "album_id", albumID, "error", err, "component", "api")
+		return nil
+	}
+	return meta
+}
+
+// albumScopeTracks returns the album's own local tracks and the artist's wider
+// pool separately. The scoped merge uses the album set for (disc,track) and title
+// matching (so a track from another album cannot satisfy this album's position)
+// and the artist pool for globally unique ISRC matching (M9).
+func (s *Server) albumScopeTracks(ctx context.Context, albumID, artistID int64) (albumLocal, artistLocal []domain.Track) {
+	albumLocal, err := s.store.GetTracksByAlbum(ctx, albumID)
+	if err != nil {
+		s.log.Warn("get tracks by album failed", "album_id", albumID, "error", err, "component", "api")
+	}
+	artistLocal, err = s.store.GetTracksByArtist(ctx, artistID)
+	if err != nil {
+		s.log.Warn("get tracks by artist failed", "artist_id", artistID, "error", err, "component", "api")
+	}
+	return albumLocal, artistLocal
+}
+
+// localTrackEntry maps a local library track to a downloaded discovery entry.
+func localTrackEntry(t *domain.Track) discoveryTrackEntry {
+	return discoveryTrackEntry{
+		Title:          t.Title,
+		TrackNumber:    t.TrackNumber,
+		DurationMs:     t.Duration,
+		Downloaded:     true,
+		LibraryTrackID: t.ID,
+		FilePath:       t.FilePath,
+		FileSize:       t.FileSize,
+		Bitrate:        t.Bitrate,
+		Format:         formatFromPath(t.FilePath),
+	}
+}
+
+// mergedTrackEntry maps one merged catalog/local row to a discovery entry.
+func mergedTrackEntry(m *catalog.MergedTrack) discoveryTrackEntry {
+	entry := discoveryTrackEntry{
+		Title:       m.Title,
+		TrackNumber: m.TrackNumber,
+		DurationMs:  m.DurationMs,
+		Downloaded:  m.Downloaded,
+	}
+	if m.Local != nil {
+		entry.LibraryTrackID = m.Local.ID
+		entry.FilePath = m.Local.FilePath
+		entry.FileSize = m.Local.FileSize
+		entry.Bitrate = m.Local.Bitrate
+		entry.Format = formatFromPath(m.Local.FilePath)
+	}
+	return entry
+}
+
+// albumRefresher is the narrow slice of the catalog refresh engine the API
+// needs for a manual metadata refresh: enqueue one album for background
+// materialization. Declared here (not as the concrete *refresh.Service) so the
+// api package depends on behavior, not construction (AGENTS §3). The engine is
+// wired in cmd/groovearr/app.go via Server.SetAlbumRefresher.
+type albumRefresher interface {
+	EnqueueAlbum(ctx context.Context, albumID int64, reason string, priority int) error
+}
+
+// errRefreshUnavailable is returned (503) when no refresh engine is wired.
+// app.go always wires one; this is the defensive guard for a Server built
+// without it (e.g. in tests), so the endpoint degrades cleanly.
+var errRefreshUnavailable = errors.New("refresh service not available")
+
+// handleLibraryAlbumRefresh enqueues a high-priority metadata refresh for one
+// album and returns 202 Accepted. It is thin by contract (AGENTS §4):
+// parse/validate -> service -> writeJSON, with no goroutine and no direct store
+// mutation. The refresh engine owns the background provider work, so the request
+// never waits on a provider here; the queue is recorded and the response
+// returns immediately.
+//
+// The album must exist locally before it is queued: refreshing an unknown id
+// would enqueue a permanent terminal no-match row and churn the queue, so a
+// missing album is a 404. The route is rate limited with the same shared
+// "download" bucket as the sibling library-album actions (see handlers.go).
+func (s *Server) handleLibraryAlbumRefresh(w http.ResponseWriter, r *http.Request) {
+	albumID, err := strconv.ParseInt(r.PathValue("albumID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid album ID"))
+		return
+	}
+	// Validate the album exists before enqueueing. A nil store is only possible
+	// on a bare test server; production always wires the library store.
+	if s.store != nil {
+		album, err := s.store.GetAlbum(r.Context(), albumID)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, fmt.Errorf("get album: %w", err))
+			return
+		}
+		if album == nil {
+			writeError(w, http.StatusNotFound, fmt.Errorf("album not found"))
+			return
+		}
+	}
+	if s.albumRefresh == nil {
+		writeError(w, http.StatusServiceUnavailable, errRefreshUnavailable)
+		return
+	}
+	if err := s.albumRefresh.EnqueueAlbum(r.Context(), albumID, catalog.ReasonManual, catalog.PriorityHigh); err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]bool{"queued": true})
 }
 
 // handleLibraryAlbumDownloadMissing queues all undownloaded tracks for an album
@@ -625,10 +812,38 @@ func (s *Server) handleLibraryAlbumDownloadMissing(w http.ResponseWriter, r *htt
 		return
 	}
 
-	// Get discovery tracks to find which ones are missing.
-	discovery, err := getLibraryAlbumDiscoveryData(ctx, s, albumID, artist.Name, album.Title)
+	// Expected tracklist for the album, read from the materialized catalog merged
+	// with local tracks — no provider call except the one-time Option-A cold
+	// fetch buildAlbumDiscovery performs for a still-unmaterialized album.
+	discovery, pending, err := getLibraryAlbumDiscoveryData(ctx, s, albumID, artist.ID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, fmt.Errorf("failed to load discovery data: %w", err))
+		return
+	}
+	if pending {
+		// The album has no materialized provider tracklist yet (cold, or a
+		// terminal no-match awaiting its retry). A silent {"queued":0} would read
+		// as "nothing missing"; queue a best-effort refresh and return a
+		// distinguishable 202 so the UI can say the download will retry.
+		//
+		// A terminal album still inside its retry window is the one exception:
+		// its parked queue row already carries the 90-day due_at, so enqueueing
+		// here would overwrite that with now and let the engine re-search within
+		// one interval. Every other pending case (never materialized, or terminal
+		// with the retry elapsed) is genuinely due and is enqueued at now.
+		parked := s.terminalRetryParked(s.albumMetadata(ctx, albumID))
+		if !parked {
+			s.enqueueRefresh(ctx, albumID, catalog.ReasonCold)
+		}
+		message := "album metadata is not materialized yet; a refresh was queued and the download will retry"
+		if parked {
+			message = "album metadata is not materialized yet; a refresh is already scheduled for its retry window and the download will retry"
+		}
+		writeJSON(w, http.StatusAccepted, map[string]any{
+			"queued":  0,
+			"pending": true,
+			"message": message,
+		})
 		return
 	}
 
@@ -666,125 +881,28 @@ type discoveryTrackData struct {
 	Downloaded  bool
 }
 
-// getLibraryAlbumDiscoveryData returns discovery tracks for an album, reusing
-// the same logic as handleLibraryAlbumDiscovery but returning a simple struct.
-func getLibraryAlbumDiscoveryData(ctx context.Context, s *Server, albumID int64, artistName, albumTitle string) ([]discoveryTrackData, error) {
-	// Try cache first.
-	if dbp, ok := s.store.(sqlDBProvider); ok {
-		var tracksJSON, cachedAt string
-		err := dbp.DB().QueryRowContext(ctx,
-			`SELECT tracks_json, cached_at FROM album_discovery_cache WHERE album_id = ?`, albumID,
-		).Scan(&tracksJSON, &cachedAt)
-		if err != nil && !errors.Is(err, sql.ErrNoRows) {
-			s.log.Warn("album discovery cache read failed", "album_id", albumID, "error", err, "component", "api")
-		}
-		if err == nil && tracksJSON != "" {
-			// Check 24h TTL.
-			if t, parseErr := time.Parse(time.RFC3339, cachedAt); parseErr == nil {
-				if time.Since(t) > 24*time.Hour {
-					tracksJSON = "" // expired
-				}
-			}
-		}
-		if tracksJSON != "" {
-			var cached []struct {
-				Title       string `json:"title"`
-				TrackNumber int    `json:"track_number"`
-			}
-			if json.Unmarshal([]byte(tracksJSON), &cached) == nil {
-				// Get library tracks for merge.
-				libTracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
-				byTitle := make(map[string]bool, len(libTracks))
-				for _, t := range libTracks {
-					byTitle[normalizeKey(t.Title)] = true
-				}
-				var out []discoveryTrackData
-				for _, c := range cached {
-					out = append(out, discoveryTrackData{
-						Title:       c.Title,
-						TrackNumber: c.TrackNumber,
-						Downloaded:  byTitle[normalizeKey(c.Title)],
-					})
-				}
-				return out, nil
-			}
-		}
+// getLibraryAlbumDiscoveryData returns the expected-track list for an album for
+// the download-missing path, reusing buildAlbumDiscovery so there is a single
+// catalog read + scoped merge path. It reads only the materialized catalog and
+// the local library — no discovery provider is called beyond the one-time
+// Option-A cold fetch buildAlbumDiscovery performs. A still-unmaterialized album
+// (cold, or a terminal no-match) yields pending=true and no data, so the caller
+// can return a distinguishable "will retry" response instead of a silent
+// {"queued":0}.
+func getLibraryAlbumDiscoveryData(ctx context.Context, s *Server, albumID, artistID int64) (data []discoveryTrackData, pending bool, err error) {
+	resp := s.buildAlbumDiscovery(ctx, albumID, artistID)
+	if resp.MetadataPending {
+		return nil, true, nil
 	}
-
-	// Cache miss — do the full discovery.
-	if s.discoveryReg == nil {
-		return nil, fmt.Errorf("no discovery providers available")
+	out := make([]discoveryTrackData, 0, len(resp.Tracks))
+	for i := range resp.Tracks {
+		out = append(out, discoveryTrackData{
+			Title:       resp.Tracks[i].Title,
+			TrackNumber: resp.Tracks[i].TrackNumber,
+			Downloaded:  resp.Tracks[i].Downloaded,
+		})
 	}
-	providers := s.discoveryReg.Any()
-	query := artistName + " " + albumTitle
-	for _, p := range providers {
-		// Skip a provider that recently rate-limited us.
-		if s.providerCooldown.CoolingDown(p.Name()) {
-			continue
-		}
-		albums, serr := p.SearchAlbums(ctx, query, 5)
-		if serr != nil {
-			s.noteProviderRateLimit(p.Name(), serr)
-			continue
-		}
-		if len(albums) == 0 {
-			continue
-		}
-		var matched *discovery.AlbumResult
-		for i := range albums {
-			a := &albums[i]
-			if strings.EqualFold(a.ArtistName, artistName) && strings.EqualFold(a.Title, albumTitle) {
-				matched = a
-				break
-			}
-		}
-		if matched == nil {
-			// Fallback: title-only match when artist name differs slightly.
-			for i := range albums {
-				a := &albums[i]
-				if strings.EqualFold(a.Title, albumTitle) {
-					matched = a
-					break
-				}
-			}
-		}
-		if matched == nil {
-			continue
-		}
-		tracks, terr := p.GetAlbumTracks(ctx, matched.ProviderID)
-		if terr != nil || len(tracks) == 0 {
-			continue
-		}
-		libTracks, _ := s.store.GetTracksByAlbum(ctx, albumID)
-		byTitle := make(map[string]bool, len(libTracks))
-		for _, t := range libTracks {
-			byTitle[normalizeKey(t.Title)] = true
-		}
-		var out []discoveryTrackData
-		for _, t := range tracks {
-			out = append(out, discoveryTrackData{
-				Title:       t.Title,
-				TrackNumber: t.TrackNumber,
-				Downloaded:  byTitle[normalizeKey(t.Title)],
-			})
-		}
-
-		// Persist to cache so future calls hit cache.
-		if dbp, ok := s.store.(sqlDBProvider); ok {
-			tracksJSON, jerr := json.Marshal(tracks)
-			if jerr == nil {
-				_, _ = dbp.DB().ExecContext(ctx,
-					`INSERT OR REPLACE INTO album_discovery_cache (album_id, provider_name, provider_album_id, tracks_json, cached_at)
-					 VALUES (?, ?, ?, ?, ?)`,
-					albumID, matched.ProviderName, matched.ProviderID, string(tracksJSON),
-					time.Now().UTC().Format(time.RFC3339),
-				)
-			}
-		}
-
-		return out, nil
-	}
-	return nil, fmt.Errorf("no discovery data found for album %d", albumID)
+	return out, false, nil
 }
 
 func (s *Server) handleLibraryArtist(w http.ResponseWriter, r *http.Request) {

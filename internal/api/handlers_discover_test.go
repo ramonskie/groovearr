@@ -6,14 +6,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/user"
 )
@@ -375,5 +378,305 @@ func TestHandleDiscoverAlbumDownload_NoProviders(t *testing.T) {
 	}
 	if len(store.records) != 0 {
 		t.Errorf("stored %d records, want 0", len(store.records))
+	}
+}
+
+// ─── Discover artist-overview read path (catalog-backed) ─────────────
+
+// stubArtistCatalog implements the discover artist read slice of catalog.Store.
+// It serves canned warm data and records every materialization call so a test
+// can prove the cold path wrote the materialized result, not a JSON blob.
+type stubArtistCatalog struct {
+	catalog.ArtistMetadataStore
+	catalog.ArtistDiscographyStore
+	meta       *catalog.ArtistMetadata
+	releases   []catalog.ArtistDiscographyRelease
+	getMetaErr error
+	upserts    []catalog.ArtistMetadata
+	replaced   []catalog.ArtistDiscographyRelease
+	replacedID []int64
+}
+
+func (c *stubArtistCatalog) GetArtistMetadata(context.Context, int64) (*catalog.ArtistMetadata, error) {
+	return c.meta, c.getMetaErr
+}
+
+func (c *stubArtistCatalog) UpsertArtistMetadata(_ context.Context, m catalog.ArtistMetadata) error {
+	c.upserts = append(c.upserts, m)
+	return nil
+}
+
+func (c *stubArtistCatalog) GetArtistDiscography(context.Context, int64) ([]catalog.ArtistDiscographyRelease, error) {
+	return c.releases, nil
+}
+
+func (c *stubArtistCatalog) ReplaceArtistDiscography(_ context.Context, artistID int64, releases []catalog.ArtistDiscographyRelease) error {
+	c.replacedID = append(c.replacedID, artistID)
+	c.replaced = releases
+	return nil
+}
+
+var _ artistCatalogReader = (*stubArtistCatalog)(nil)
+
+// stubArtistLookupStore embeds the library.Store interface and overrides only
+// the name lookup the discover overview path calls. Any other method panics,
+// proving the handler touches nothing beyond GetArtistByName.
+type stubArtistLookupStore struct {
+	library.Store
+	artists []domain.Artist
+}
+
+func (s *stubArtistLookupStore) GetArtistByName(context.Context, string) (*domain.Artist, error) {
+	if len(s.artists) == 0 {
+		return nil, nil
+	}
+	return &s.artists[0], nil
+}
+
+var _ library.Store = (*stubArtistLookupStore)(nil)
+
+// recordingArtistProvider is a discovery.Provider + TopTrackProvider that
+// records its calls and returns canned artist/album/track data.
+type recordingArtistProvider struct {
+	name        string
+	searchCalls int
+	albumCalls  int
+	topCalls    int
+	artist      discovery.ArtistSummary
+	albums      []discovery.AlbumResult
+	tracks      []discovery.TrackInfo
+}
+
+func (p *recordingArtistProvider) Name() string                          { return p.name }
+func (p *recordingArtistProvider) DisplayName() string                   { return p.name }
+func (p *recordingArtistProvider) IsConfigured() bool                    { return true }
+func (p *recordingArtistProvider) CheckConnection(context.Context) error { return nil }
+func (p *recordingArtistProvider) Connected() bool                       { return true }
+func (p *recordingArtistProvider) CapabilityStatus() map[string]string {
+	return map[string]string{"discovery": "connected"}
+}
+func (p *recordingArtistProvider) SearchArtists(context.Context, string, int) ([]discovery.ArtistSummary, error) {
+	p.searchCalls++
+	a := p.artist
+	if a.ProviderName == "" {
+		a.ProviderName = p.name
+	}
+	return []discovery.ArtistSummary{a}, nil
+}
+func (p *recordingArtistProvider) GetArtistAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	p.albumCalls++
+	return p.albums, nil
+}
+func (p *recordingArtistProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	return nil, nil
+}
+func (p *recordingArtistProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
+	return nil, nil
+}
+func (p *recordingArtistProvider) GetArtistTopTracks(context.Context, string, int) ([]discovery.TrackInfo, error) {
+	p.topCalls++
+	return p.tracks, nil
+}
+
+var _ discovery.Provider = (*recordingArtistProvider)(nil)
+var _ discovery.TopTrackProvider = (*recordingArtistProvider)(nil)
+
+func newArtistOverviewServer(_ *testing.T, store library.Store, cat artistCatalogReader, reg *discovery.Registry) *Server {
+	return &Server{log: testAPILogger(), store: store, artistCatalog: cat, discoveryReg: reg}
+}
+
+func newArtistOverviewRequest(name string) *http.Request {
+	return httptest.NewRequest(http.MethodGet, "/api/discover/artists/overview?q="+name, nil)
+}
+
+// TestHandleDiscoverArtistOverviewWarmReadsCatalog covers the warm hit: the
+// response is built from artist_metadata + artist_discography and the provider
+// is never called. The registered provider fails the test if invoked.
+func TestHandleDiscoverArtistOverviewWarmReadsCatalog(t *testing.T) {
+	store := &stubArtistLookupStore{artists: []domain.Artist{{ID: 7, Name: "Artist", Genres: []string{"rock"}}}}
+	cat := &stubArtistCatalog{
+		meta: &catalog.ArtistMetadata{
+			ArtistID:         7,
+			ProviderName:     "deezer",
+			ProviderArtistID: "dz-art-7",
+			ImageURL:         "https://img/7.jpg",
+			Genres:           []string{"rock", "pop"},
+		},
+		releases: []catalog.ArtistDiscographyRelease{
+			{ArtistID: 7, Type: "album", Title: "A1"},
+			{ArtistID: 7, Type: "album", Title: "A2"},
+			{ArtistID: 7, Type: "single", Title: "S1"},
+		},
+	}
+	reg := newDiscoverRegistry(t, &failingDiscoverProvider{t: t, name: "deezer"})
+	s := newArtistOverviewServer(t, store, cat, reg)
+
+	rec := httptest.NewRecorder()
+	s.handleDiscoverArtistOverview(rec, newArtistOverviewRequest("Artist"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	var got artistOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if got.Artist.Name != "Artist" || got.Artist.ProviderID != "dz-art-7" || got.Artist.ProviderName != "deezer" {
+		t.Errorf("artist = %+v, want catalog identity", got.Artist)
+	}
+	if got.Discography["album"] != 2 || got.Discography["single"] != 1 {
+		t.Errorf("discography = %v, want album:2 single:1", got.Discography)
+	}
+	if got.MetadataPending {
+		t.Errorf("metadata_pending = true on a warm read, want false")
+	}
+	if len(cat.upserts) != 0 || len(cat.replacedID) != 0 {
+		t.Errorf("warm read must not materialize: upserts=%d replaced=%d", len(cat.upserts), len(cat.replacedID))
+	}
+}
+
+// TestHandleDiscoverArtistOverviewColdMaterializes covers the cold path: with
+// no artist_metadata row the handler fetches once from the provider and writes
+// the result into the catalog (UpsertArtistMetadata + ReplaceArtistDiscography).
+func TestHandleDiscoverArtistOverviewColdMaterializes(t *testing.T) {
+	store := &stubArtistLookupStore{artists: []domain.Artist{{ID: 7, Name: "Artist"}}}
+	cat := &stubArtistCatalog{} // no metadata → cold
+	prov := &recordingArtistProvider{
+		name:   "stubdisco",
+		artist: discovery.ArtistSummary{ProviderID: "art-1", Name: "Artist"},
+		albums: []discovery.AlbumResult{
+			{ProviderID: "al-1", Title: "Album One", Year: 2020, Type: "album", TrackCount: 10},
+			{ProviderID: "al-2", Title: "Single One", Year: 2021, Type: "single", TrackCount: 2},
+		},
+		tracks: []discovery.TrackInfo{{ProviderID: "t1", Title: "Hit", ArtistName: "Artist", AlbumTitle: "Album One"}},
+	}
+	reg := newDiscoverRegistry(t, prov)
+	s := newArtistOverviewServer(t, store, cat, reg)
+
+	rec := httptest.NewRecorder()
+	s.handleDiscoverArtistOverview(rec, newArtistOverviewRequest("Artist"))
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+	}
+	if prov.searchCalls != 1 {
+		t.Errorf("SearchArtists calls = %d, want 1", prov.searchCalls)
+	}
+	if len(cat.upserts) != 1 {
+		t.Fatalf("UpsertArtistMetadata calls = %d, want 1", len(cat.upserts))
+	}
+	if got := cat.upserts[0]; got.ArtistID != 7 || got.ProviderArtistID != "art-1" || got.ProviderName != "stubdisco" {
+		t.Errorf("materialized metadata = %+v, want artist 7 / art-1 / stubdisco", got)
+	}
+	if len(cat.replacedID) != 1 || cat.replacedID[0] != 7 {
+		t.Errorf("ReplaceArtistDiscography calls = %v, want [7]", cat.replacedID)
+	}
+	if len(cat.replaced) != 2 {
+		t.Errorf("materialized releases = %d, want 2", len(cat.replaced))
+	}
+	var got artistOverviewResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(got.TopTracks) != 1 {
+		t.Errorf("top_tracks = %d, want 1", len(got.TopTracks))
+	}
+	if got.Discography["album"] != 1 || got.Discography["single"] != 1 {
+		t.Errorf("discography = %v, want album:1 single:1", got.Discography)
+	}
+	if got.MetadataPending {
+		t.Errorf("metadata_pending = true after materialization, want false")
+	}
+}
+
+// TestHandleDiscoverArtistOverviewCatalogGate proves the catalog.enabled gate
+// on the artist cold path: with the live gate false, provider search/albums/top
+// are never called and the catalog is never written, and the read returns the
+// pending shape (200). With the gate true through the same seam, the provider is
+// called — proving the seam is actually consulted, not merely a default.
+func TestHandleDiscoverArtistOverviewCatalogGate(t *testing.T) {
+	newServer := func(t *testing.T) (*recordingArtistProvider, *stubArtistCatalog, *Server) {
+		t.Helper()
+		store := &stubArtistLookupStore{artists: []domain.Artist{{ID: 7, Name: "Artist"}}}
+		cat := &stubArtistCatalog{} // no metadata → cold
+		prov := &recordingArtistProvider{
+			name:   "stubdisco",
+			artist: discovery.ArtistSummary{ProviderID: "art-1", Name: "Artist"},
+			albums: []discovery.AlbumResult{{ProviderID: "al-1", Title: "Album One", Type: "album"}},
+			tracks: []discovery.TrackInfo{{ProviderID: "t1", Title: "Hit", ArtistName: "Artist"}},
+		}
+		reg := newDiscoverRegistry(t, prov)
+		return prov, cat, newArtistOverviewServer(t, store, cat, reg)
+	}
+
+	t.Run("disabled skips provider and catalog writes", func(t *testing.T) {
+		prov, cat, s := newServer(t)
+		s.SetCatalogEnabled(func() bool { return false })
+
+		rec := httptest.NewRecorder()
+		s.handleDiscoverArtistOverview(rec, newArtistOverviewRequest("Artist"))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if prov.searchCalls != 0 || prov.albumCalls != 0 || prov.topCalls != 0 {
+			t.Errorf("provider called with catalog disabled: search=%d albums=%d top=%d",
+				prov.searchCalls, prov.albumCalls, prov.topCalls)
+		}
+		if len(cat.upserts) != 0 || len(cat.replacedID) != 0 {
+			t.Errorf("catalog written with catalog disabled: upserts=%d replaced=%d",
+				len(cat.upserts), len(cat.replacedID))
+		}
+		var got artistOverviewResponse
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if !got.MetadataPending {
+			t.Errorf("disabled cold read must be metadata_pending")
+		}
+	})
+
+	t.Run("enabled via seam still materializes", func(t *testing.T) {
+		prov, cat, s := newServer(t)
+		s.SetCatalogEnabled(func() bool { return true })
+
+		rec := httptest.NewRecorder()
+		s.handleDiscoverArtistOverview(rec, newArtistOverviewRequest("Artist"))
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200: %s", rec.Code, rec.Body.String())
+		}
+		if prov.searchCalls != 1 {
+			t.Errorf("SearchArtists calls = %d, want 1 when enabled", prov.searchCalls)
+		}
+		if len(cat.upserts) != 1 {
+			t.Errorf("UpsertArtistMetadata calls = %d, want 1 when enabled", len(cat.upserts))
+		}
+	})
+}
+
+// TestHandleDiscoverArtistOverviewRequiresQuery preserves the 400 on a missing
+// query parameter.
+func TestHandleDiscoverArtistOverviewRequiresQuery(t *testing.T) {
+	s := newArtistOverviewServer(t, &stubArtistLookupStore{}, &stubArtistCatalog{}, nil)
+
+	rec := httptest.NewRecorder()
+	s.handleDiscoverArtistOverview(rec, httptest.NewRequest(http.MethodGet, "/api/discover/artists/overview", nil))
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+// TestHandlersDiscoverNoArtistOverviewCacheSQL guards acceptance criterion 2:
+// the old 24h JSON-blob cache read/write is removed from the file, not merely
+// bypassed. It reads the source from the package directory.
+func TestHandlersDiscoverNoArtistOverviewCacheSQL(t *testing.T) {
+	src, err := os.ReadFile("handlers_discover.go")
+	if err != nil {
+		t.Fatalf("read handlers_discover.go: %v", err)
+	}
+	if strings.Contains(string(src), "artist_overview_cache") {
+		t.Errorf("handlers_discover.go still references artist_overview_cache; the cache read/write must be removed")
 	}
 }

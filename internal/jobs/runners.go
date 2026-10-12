@@ -11,6 +11,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
+	"github.com/ramonskie/groovearr/internal/refresh"
 	"github.com/ramonskie/groovearr/internal/tracking"
 )
 
@@ -73,6 +74,19 @@ type RunnerDeps struct {
 	// before calling a provider and mark it on rate-limit responses (may be
 	// nil — the job then behaves as if no provider is ever cooling down).
 	RateLimit RateLimiter
+	// Catalog is the materialized metadata catalog the warm-library job reads
+	// for candidate selection (may be nil — the job then returns a clear error
+	// instead of panicking).
+	Catalog refresh.WarmStore
+	// Refresh is the paced refresh engine the warm-library job drives to
+	// materialize each candidate (may be nil — the job then returns a clear
+	// error). Wired post-construction via SetWarmRefresher, since the engine is
+	// built after the server.
+	Refresh WarmRefresher
+	// WarmOptions returns the bounds for the next warm-library pass. Nil means
+	// refresh.DefaultWarmOptions. It is a closure so subtask 14 can honor config
+	// hot-reload without caching config in a struct (AGENTS §9).
+	WarmOptions func() refresh.WarmOptions
 }
 
 // Runners implements every background job body. One instance is constructed
@@ -113,6 +127,15 @@ func (r *Runners) Logger() *slog.Logger { return r.deps.Log }
 // synchronized with running-job reads).
 func (r *Runners) SetRateLimiter(rl RateLimiter) {
 	r.deps.RateLimit = rl
+}
+
+// SetWarmRefresher wires (or swaps) the refresh engine the warm-library job
+// drives. The api layer calls this when the app-wide engine is installed
+// (mirrors SetRateLimiter), so the job shares the exact per-album
+// materialization path — provider-link reuse and the one shared cooldown
+// bucket — as the queue engine. Called once at startup, before any job runs.
+func (r *Runners) SetWarmRefresher(ref WarmRefresher) {
+	r.deps.Refresh = ref
 }
 
 // SetBootJob records the persisted job snapshot restored at startup. A job

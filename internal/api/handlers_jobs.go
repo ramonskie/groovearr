@@ -55,6 +55,16 @@ func (s *Server) handleJobOrganize(w http.ResponseWriter, r *http.Request) {
 	s.startJob(w, "organize", s.runners.Organize(dryRun))
 }
 
+// handleJobWarmLibrary starts the opt-in bulk metadata warm. It is default off
+// and user-triggered only — there is no periodic sweep. Each invocation
+// materializes a bounded batch of the albums that need warming and yields the
+// job slot; re-triggering resumes with the remaining candidates (candidates are
+// recomputed, so a restart loses no progress). Thin HTTP wrapper like the other
+// job handlers.
+func (s *Server) handleJobWarmLibrary(w http.ResponseWriter, r *http.Request) {
+	s.startJob(w, "warm-library", s.runners.WarmLibrary())
+}
+
 // handleJobCancel requests cancellation of the running job.
 func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Cancel()

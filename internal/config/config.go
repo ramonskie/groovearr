@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/logger"
 )
@@ -18,6 +19,7 @@ type Config struct {
 	Sources        map[string]json.RawMessage `json:"sources"`
 	Library        LibraryConfig              `json:"library"`
 	Tracking       TrackingConfig             `json:"tracking"` // artist-tracking refresh settings
+	Catalog        CatalogConfig              `json:"catalog"`  // materialized metadata catalog + refresh engine
 	Auth           AuthConfig                 `json:"auth"`
 	Logging        *LoggingConfig             `json:"logging"`         // log level, format, rotation policy
 	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
@@ -46,6 +48,43 @@ type TrackingConfig struct {
 	// "not sent" (nil, preserve) from an explicit false (disable). A plain
 	// bool could only ever be enabled by the true-overrides merge convention.
 	AutoSearchMissing *bool `json:"auto_search_missing"` // automatically search for missing tracked releases (default false)
+}
+
+// CatalogConfig controls materialized catalog metadata refresh: the paced
+// service-owned refresh engine and the opt-in bulk warm-library pass. It is read
+// at runtime through the live config closure (AGENTS §9) and is never cached in
+// a struct, so a settings update is honored without a restart.
+//
+// A zero/legacy config (no "catalog" key) preserves the current behavior: the
+// section defaults to enabled with a 30-day soft TTL, and the zero int fields
+// below mean "use the engine's own default" rather than "0".
+type CatalogConfig struct {
+	// Enabled gates metadata materialization refresh. Default true. It is a
+	// pointer so a partial settings update can distinguish "not sent" (nil,
+	// preserve the running state) from an explicit false (disable) — a plain
+	// bool could only ever be enabled by the true-overrides merge convention.
+	Enabled *bool `json:"enabled"`
+	// AlbumRefreshDays is the soft TTL (days) after which an album's
+	// materialized metadata is considered stale and eligible for a lazy
+	// background refresh. Default 30. Consumed by the read/refresh paths, not
+	// the engine's tick loop.
+	AlbumRefreshDays int `json:"album_refresh_days"`
+	// ArtistRefreshDays is the soft TTL (days) for artist metadata. Default 30.
+	// Reserved for the artist-metadata phase; not yet consumed by the engine.
+	ArtistRefreshDays int `json:"artist_refresh_days"`
+	// BatchSize is the maximum number of due queue rows the refresh engine claims
+	// per tick, reused as the bulk warm-library pass batch limit. Zero uses each
+	// engine's built-in default (refresh.DefaultOptions().BatchSize = 8;
+	// refresh.DefaultWarmOptions().Limit = 50).
+	BatchSize int `json:"batch_size"`
+	// IntervalMinutes is the refresh engine's pause between drain ticks. Zero
+	// uses the engine default (1 minute).
+	IntervalMinutes int `json:"interval_minutes"`
+	// Concurrency is reserved for a future bounded worker pool in the refresh
+	// engine. The engine currently drains serially, so this value has no effect
+	// yet; it is exposed so the settings UI can carry it forward. Zero means the
+	// engine default (serial drain).
+	Concurrency int `json:"concurrency"`
 }
 
 // AuthConfig holds authentication settings.
@@ -120,6 +159,41 @@ func DefaultLogging() *LoggingConfig {
 	}
 }
 
+// DefaultAlbumRefreshDays is the soft TTL (days) applied when
+// catalog.album_refresh_days is unset, so a legacy/zero config keeps the current
+// 30-day behavior.
+const DefaultAlbumRefreshDays = 30
+
+// IsEnabled resolves the catalog.enabled pointer: a nil value (a legacy config
+// with no catalog section) means enabled. It is the single place a caller reads
+// the gate, so the nil-vs-explicit-false distinction stays consistent.
+func (c CatalogConfig) IsEnabled() bool {
+	return c.Enabled == nil || *c.Enabled
+}
+
+// AlbumStaleAfter returns the soft TTL after which album metadata is stale,
+// defaulting to DefaultAlbumRefreshDays when unset so a zero value cannot
+// disable staleness. Consumed by the refresh options path.
+func (c CatalogConfig) AlbumStaleAfter() time.Duration {
+	days := c.AlbumRefreshDays
+	if days <= 0 {
+		days = DefaultAlbumRefreshDays
+	}
+	return time.Duration(days) * 24 * time.Hour
+}
+
+// DefaultCatalog returns the catalog-refresh defaults. A legacy install with no
+// "catalog" section keeps the current behavior: refresh enabled with a 30-day
+// soft TTL. The int fields stay zero so each engine falls back to its own
+// documented default (see CatalogConfig).
+func DefaultCatalog() CatalogConfig {
+	return CatalogConfig{
+		Enabled:           boolPtr(true),
+		AlbumRefreshDays:  DefaultAlbumRefreshDays,
+		ArtistRefreshDays: DefaultAlbumRefreshDays,
+	}
+}
+
 // PathIsUnder reports whether path is equal to or under root. Both are
 // cleaned first, and the comparison is case-insensitive: macOS and many
 // container volume mounts are case-insensitive, so a scan root spelled
@@ -171,6 +245,7 @@ func DefaultConfig() Config {
 			RefreshMins:       intPtr(720), // 12h
 			AutoSearchMissing: boolPtr(false),
 		},
+		Catalog: DefaultCatalog(),
 	}
 }
 
@@ -327,6 +402,7 @@ func Clone(c Config) Config {
 	out.Library.PlaylistAutoSyncMins = cloneInt(c.Library.PlaylistAutoSyncMins)
 	out.Tracking.RefreshMins = cloneInt(c.Tracking.RefreshMins)
 	out.Tracking.AutoSearchMissing = cloneBool(c.Tracking.AutoSearchMissing)
+	out.Catalog.Enabled = cloneBool(c.Catalog.Enabled)
 	return out
 }
 
@@ -406,6 +482,33 @@ func (c *Config) mergeFields(partial *Config) {
 		if c.Tracking.AutoSearchMissing == nil || v != *c.Tracking.AutoSearchMissing {
 			c.Tracking.AutoSearchMissing = &v
 		}
+	}
+
+	// Catalog materialization. Enabled is pointer-aware (nil preserves the
+	// running state, an explicit false disables). The int fields merge only when
+	// positive so a partial update cannot zero them; zero means "engine default"
+	// and a caller wanting to reset to default sends a value the engine treats as
+	// unset.
+	if partial.Catalog.Enabled != nil {
+		v := *partial.Catalog.Enabled
+		if c.Catalog.Enabled == nil || v != *c.Catalog.Enabled {
+			c.Catalog.Enabled = &v
+		}
+	}
+	if partial.Catalog.AlbumRefreshDays > 0 {
+		c.Catalog.AlbumRefreshDays = partial.Catalog.AlbumRefreshDays
+	}
+	if partial.Catalog.ArtistRefreshDays > 0 {
+		c.Catalog.ArtistRefreshDays = partial.Catalog.ArtistRefreshDays
+	}
+	if partial.Catalog.BatchSize > 0 {
+		c.Catalog.BatchSize = partial.Catalog.BatchSize
+	}
+	if partial.Catalog.IntervalMinutes > 0 {
+		c.Catalog.IntervalMinutes = partial.Catalog.IntervalMinutes
+	}
+	if partial.Catalog.Concurrency > 0 {
+		c.Catalog.Concurrency = partial.Catalog.Concurrency
 	}
 
 	// Auth — preserve password if partial has a masked (asterisk) value.

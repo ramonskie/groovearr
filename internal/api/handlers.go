@@ -30,6 +30,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/playlist"
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/quality"
+	"github.com/ramonskie/groovearr/internal/refresh"
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/user"
 )
@@ -45,6 +46,12 @@ type Server struct {
 	orchestrator        *download.Orchestrator
 	discoveryReg        *discovery.Registry
 	store               library.Store
+	catalog             catalogReader
+	artistCatalog       artistCatalogReader
+	albumRefresh        albumRefresher
+	albumColdFetch      albumColdFetcher
+	albumStaleAfter     func() time.Duration
+	catalogEnabled      func() bool
 	userStore           user.Store
 	scanner             *library.Scanner
 	downloadSvc         *download.Service
@@ -101,7 +108,7 @@ func (a pluginRouteAdapter) User(method, path string, h http.HandlerFunc) {
 	a.mux.Handle(method+" "+path, h)
 }
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, userStore user.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, catalogStore catalogDeps, userStore user.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -112,6 +119,8 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		orchestrator:        orchestrator,
 		discoveryReg:        discoveryReg,
 		store:               store,
+		catalog:             catalogStore,
+		artistCatalog:       catalogStore,
 		userStore:           userStore,
 		scanner:             scanner,
 		downloadSvc:         downloadSvc,
@@ -143,6 +152,17 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		Playlist:   playlistSvc,
 		Tracking:   trackingSvc,
 		RateLimit:  s.providerCooldown,
+		// The bulk warm-library job reads the catalog for candidate selection;
+		// its refresh engine is injected after construction (SetWarmRefresher),
+		// since the engine is built after the server.
+		Catalog: catalogStore,
+		// Warm-library pass bounds read from the live config closure so a
+		// settings change is honored on the next pass without a restart
+		// (AGENTS §9). Catalog.BatchSize is the shared batch knob; 0 falls back
+		// to refresh.DefaultWarmOptions().
+		WarmOptions: func() refresh.WarmOptions {
+			return refresh.WarmOptions{Limit: cfg.Get().Catalog.BatchSize}
+		},
 	})
 	s.restoreInterruptedJob()
 
@@ -267,6 +287,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/artist-image/{artistID}", s.handleArtistImage)
 	mux.Handle("GET /api/library/albums/{albumID}/discovery", withRateLimit("search", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDiscovery)))
 	mux.Handle("POST /api/library/albums/{albumID}/download-missing", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumDownloadMissing)))
+	// Manual metadata refresh: thin enqueue into the refresh queue (202). The
+	// engine owns the background provider work; no goroutine here (AGENTS §2).
+	// Wrapped in the same shared "download" bucket as the sibling library-album
+	// actions so a client cannot flood the refresh queue.
+	mux.Handle("POST /api/library/albums/{albumID}/refresh", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryAlbumRefresh)))
 
 	// ── Settings surface: background jobs (admin-only) ─────────────────
 	// Scan/enrich are rate-limited per client IP: both walk the whole library
@@ -277,6 +302,10 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.Handle("POST /api/jobs/enrich", withRateLimit("enrich", s.rateLimiter, s.adminOnly(s.handleJobEnrich)))
 	mux.Handle("POST /api/jobs/duplicates", withRateLimit("duplicates", s.rateLimiter, s.adminOnly(s.handleJobDuplicates)))
 	mux.Handle("POST /api/jobs/organize", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobOrganize)))
+	// Opt-in bulk metadata warm (tier 3). Default off, user-triggered only; no
+	// periodic sweep. Each invocation materializes a bounded batch and yields the
+	// job slot; re-triggering resumes with the remaining candidates.
+	mux.Handle("POST /api/jobs/warm-library", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobWarmLibrary)))
 	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
 	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))
 
@@ -349,6 +378,55 @@ func (s *Server) SetProviderCooldown(c *metadata.ProviderCooldown) {
 	s.providerCooldown = c
 	if s.runners != nil {
 		s.runners.SetRateLimiter(c)
+	}
+}
+
+// SetAlbumRefresher injects the manual-refresh enqueuer (the catalog refresh
+// engine) after construction, so the API depends only on the narrow
+// albumRefresher interface rather than a concrete service (AGENTS §3). Pass nil
+// to leave the endpoint unavailable (503). Mirrors SetProviderCooldown's
+// post-construction wiring.
+func (s *Server) SetAlbumRefresher(r albumRefresher) {
+	s.albumRefresh = r
+}
+
+// SetAlbumStaleAfter injects the soft TTL after which a warm album read is
+// considered stale and a low-priority refresh is enqueued behind the response
+// (Tier-1 lazy staleness). app.go passes refresh.Service.AlbumStaleAfter, whose
+// value is read live from config on every call, so a hot-reload is honored
+// without re-wiring (AGENTS §9). Pass nil to fall back to the engine default.
+func (s *Server) SetAlbumStaleAfter(fn func() time.Duration) {
+	s.albumStaleAfter = fn
+}
+
+// SetCatalogEnabled injects the live catalog.enabled gate. The discover artist
+// read path consults it before any provider fetch or catalog write, so a
+// disabled catalog serves only what is already materialized. app.go passes a
+// closure reading cfg.Get().Catalog.IsEnabled(), so a hot-reload is honored
+// without re-wiring (AGENTS §9 — never cached). Pass nil to leave the path
+// enabled by default.
+func (s *Server) SetCatalogEnabled(fn func() bool) {
+	s.catalogEnabled = fn
+}
+
+// isCatalogEnabled reports whether catalog materialization is allowed right now.
+// A nil gate (bare test server, or a build without the seam wired) means enabled,
+// mirroring config.CatalogConfig.IsEnabled's nil-means-enabled rule.
+func (s *Server) isCatalogEnabled() bool {
+	if s.catalogEnabled == nil {
+		return true
+	}
+	return s.catalogEnabled()
+}
+
+// SetWarmRefresher injects the refresh engine the opt-in bulk warm-library job
+// drives. It is wired after construction (mirrors SetAlbumRefresher) because the
+// engine is built after the server so it can share the SSE completion hook.
+// Pass nil to leave the job unavailable — its runner then fails with a clear
+// "refresh service not available" error rather than panicking.
+func (s *Server) SetWarmRefresher(r jobs.WarmRefresher) {
+	if s.runners != nil {
+		s.runners.SetWarmRefresher(r)
 	}
 }
 

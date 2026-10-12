@@ -14,8 +14,11 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
@@ -35,6 +38,8 @@ type stubLibraryStore struct {
 	artists      []domain.Artist
 	tracks       map[int64][]domain.Track
 	searchTracks []domain.Track
+	albums       map[int64]*domain.Album
+	albumTrks    map[int64][]domain.Track
 	merges       [][2]int64 // (keep, remove)
 	renames      []struct {
 		id   int64
@@ -67,6 +72,14 @@ func (s *stubLibraryStore) GetArtist(ctx context.Context, id int64) (*domain.Art
 
 func (s *stubLibraryStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
 	return s.tracks[artistID], nil
+}
+
+func (s *stubLibraryStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
+	return s.albums[id], nil
+}
+
+func (s *stubLibraryStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
+	return s.albumTrks[albumID], nil
 }
 
 func (s *stubLibraryStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
@@ -522,6 +535,841 @@ func TestArtistImageServesFromArtistDir(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// ─── Manual album refresh endpoint ───────────────────────────────────
+
+// stubAlbumRefresher records every EnqueueAlbum call so a test can assert the
+// handler forwarded exactly the right album id, reason, and priority. It is a
+// stand-in for the refresh engine (*refresh.Service), which the handler reaches
+// only through the narrow albumRefresher interface.
+type stubAlbumRefresher struct {
+	calls     []refreshEnqueue
+	returnErr error
+}
+
+type refreshEnqueue struct {
+	albumID  int64
+	reason   string
+	priority int
+}
+
+var _ albumRefresher = (*stubAlbumRefresher)(nil)
+
+func (r *stubAlbumRefresher) EnqueueAlbum(_ context.Context, albumID int64, reason string, priority int) error {
+	r.calls = append(r.calls, refreshEnqueue{albumID: albumID, reason: reason, priority: priority})
+	return r.returnErr
+}
+
+// TestHandleLibraryAlbumRefreshEnqueuesHighPriority covers the happy path: the
+// endpoint returns 202 and forwards exactly one high-priority manual enqueue for
+// the path's album id.
+func TestHandleLibraryAlbumRefreshEnqueuesHighPriority(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{albumRefresh: ref, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/42/refresh", nil)
+	req.SetPathValue("albumID", "42")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(ref.calls) != 1 {
+		t.Fatalf("enqueuer called %d times, want exactly 1", len(ref.calls))
+	}
+	if got := ref.calls[0]; got.albumID != 42 || got.reason != catalog.ReasonManual || got.priority != catalog.PriorityHigh {
+		t.Errorf("enqueue = %+v, want {albumID:42 reason:%q priority:%d}",
+			got, catalog.ReasonManual, catalog.PriorityHigh)
+	}
+	var body map[string]bool
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad response JSON: %v (%s)", err, rec.Body.String())
+	}
+	if !body["queued"] {
+		t.Errorf("body = %v, want queued:true", body)
+	}
+}
+
+// TestHandleLibraryAlbumRefreshInvalidID covers boundary validation: a
+// non-numeric album id is a 400 and the enqueuer is never touched.
+func TestHandleLibraryAlbumRefreshInvalidID(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{albumRefresh: ref, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/not-a-number/refresh", nil)
+	req.SetPathValue("albumID", "not-a-number")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	if len(ref.calls) != 0 {
+		t.Errorf("enqueuer must not be called on an invalid id, got %+v", ref.calls)
+	}
+}
+
+// TestHandleLibraryAlbumRefreshPropagatesServiceError proves the handler is thin
+// and synchronous: it calls the service inline and surfaces its error as a 500.
+// A handler that fired the enqueue in a goroutine could not observe or report
+// this error, so a 500 here is evidence of the no-goroutine contract.
+func TestHandleLibraryAlbumRefreshPropagatesServiceError(t *testing.T) {
+	ref := &stubAlbumRefresher{returnErr: errors.New("queue write failed")}
+	s := &Server{albumRefresh: ref, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/7/refresh", nil)
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(ref.calls) != 1 {
+		t.Errorf("enqueuer called %d times, want 1", len(ref.calls))
+	}
+}
+
+// TestHandleLibraryAlbumRefreshNoService covers the defensive guard: with no
+// engine wired the endpoint reports 503 instead of panicking.
+func TestHandleLibraryAlbumRefreshNoService(t *testing.T) {
+	s := &Server{log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/1/refresh", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+// TestRouteRegistrationAlbumRefresh proves the route is registered on the API
+// router and dispatched to the handler with {albumID} extracted — the
+// end-to-end router wiring, not just the handler in isolation. The real route
+// table needs the rate limiter production always wires.
+func TestRouteRegistrationAlbumRefresh(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{
+		store:        &stubLibraryStore{albums: map[int64]*domain.Album{7: {ID: 7, ArtistID: 1}}},
+		albumRefresh: ref,
+		log:          testAPILogger(),
+	}
+	limiter := newIPRateLimiter(roleTestBuckets(), testAPILogger())
+	t.Cleanup(limiter.Shutdown)
+	s.rateLimiter = limiter
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/7/refresh", nil)
+	rec := httptest.NewRecorder()
+	mux.ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(ref.calls) != 1 || ref.calls[0].albumID != 7 {
+		t.Errorf("route did not forward to the refresher: %+v", ref.calls)
+	}
+}
+
+// TestHandleLibraryAlbumRefreshUnknownAlbum covers the R2-HIGH validation: a
+// refresh for an id that does not resolve to a local album is a 404 and the
+// enqueuer is never touched (a queue row for an unknown album would only churn).
+func TestHandleLibraryAlbumRefreshUnknownAlbum(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{
+		store:        &stubLibraryStore{albums: map[int64]*domain.Album{1: {ID: 1}}},
+		albumRefresh: ref,
+		log:          testAPILogger(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/999/refresh", nil)
+	req.SetPathValue("albumID", "999")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(ref.calls) != 0 {
+		t.Errorf("enqueuer must not be called for an unknown album, got %+v", ref.calls)
+	}
+}
+
+// TestHandleLibraryAlbumRefreshKnownAlbum covers the happy path through the
+// existence validation: a known album is enqueued and returns 202.
+func TestHandleLibraryAlbumRefreshKnownAlbum(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{
+		store:        &stubLibraryStore{albums: map[int64]*domain.Album{5: {ID: 5}}},
+		albumRefresh: ref,
+		log:          testAPILogger(),
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/5/refresh", nil)
+	req.SetPathValue("albumID", "5")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumRefresh(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	if len(ref.calls) != 1 || ref.calls[0].albumID != 5 {
+		t.Errorf("known album not enqueued: %+v", ref.calls)
+	}
+}
+
+// TestAlbumRefreshRouteIsRateLimited proves the refresh route is wrapped in the
+// shared download bucket: with a max of one, a second request in the window is a
+// 429 carrying the bucket header. An unwrapped route would answer 202 both times.
+func TestAlbumRefreshRouteIsRateLimited(t *testing.T) {
+	ref := &stubAlbumRefresher{}
+	s := &Server{
+		store:        &stubLibraryStore{albums: map[int64]*domain.Album{7: {ID: 7}}},
+		albumRefresh: ref,
+		log:          testAPILogger(),
+	}
+	limiter := newIPRateLimiter(testBuckets(1), testAPILogger())
+	t.Cleanup(limiter.Shutdown)
+	s.rateLimiter = limiter
+
+	mux := http.NewServeMux()
+	s.registerAPIRoutes(mux)
+
+	post := func() *httptest.ResponseRecorder {
+		req := httptest.NewRequest(http.MethodPost, "/api/library/albums/7/refresh", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := post(); rec.Code != http.StatusAccepted {
+		t.Fatalf("first refresh = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	rec := post()
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("second refresh = %d, want 429 (refresh route must share the download bucket)", rec.Code)
+	}
+	if got := rec.Header().Get("X-RateLimit-Bucket"); got != "download" {
+		t.Errorf("X-RateLimit-Bucket = %q, want download", got)
+	}
+}
+
+// ─── Album discovery read path (catalog-backed) ──────────────────────
+
+// stubCatalogStore embeds the catalog read interfaces and overrides only the
+// two methods the album read path calls. Any other catalog method panics,
+// proving the handler touches nothing beyond the materialized tracklist and the
+// album provider link.
+type stubCatalogStore struct {
+	catalog.AlbumTrackStore
+	catalog.AlbumMetadataStore
+	tracks   []catalog.AlbumTrack
+	metadata *catalog.AlbumMetadata
+}
+
+func (c *stubCatalogStore) GetAlbumTracks(context.Context, int64) ([]catalog.AlbumTrack, error) {
+	return c.tracks, nil
+}
+
+func (c *stubCatalogStore) GetAlbumMetadata(context.Context, int64) (*catalog.AlbumMetadata, error) {
+	return c.metadata, nil
+}
+
+var _ catalogReader = (*stubCatalogStore)(nil)
+
+// failingDiscoverProvider fails the test if any discovery method is invoked. It
+// is registered in the discovery registry so a passing test proves the album
+// read path made zero provider calls.
+type failingDiscoverProvider struct {
+	t    *testing.T
+	name string
+}
+
+func (p *failingDiscoverProvider) Name() string {
+	if p.name != "" {
+		return p.name
+	}
+	return "failing"
+}
+func (p *failingDiscoverProvider) DisplayName() string { return p.Name() }
+func (p *failingDiscoverProvider) IsConfigured() bool  { return true }
+func (p *failingDiscoverProvider) CheckConnection(context.Context) error {
+	return nil
+}
+func (p *failingDiscoverProvider) Connected() bool { return true }
+func (p *failingDiscoverProvider) CapabilityStatus() map[string]string {
+	return map[string]string{"discovery": "connected"}
+}
+func (p *failingDiscoverProvider) fail(method string) {
+	p.t.Errorf("discovery provider %q called %s; the album read path must not call providers", p.Name(), method)
+}
+func (p *failingDiscoverProvider) SearchArtists(context.Context, string, int) ([]discovery.ArtistSummary, error) {
+	p.fail("SearchArtists")
+	return nil, errors.New("provider must not be called")
+}
+func (p *failingDiscoverProvider) GetArtistAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	p.fail("GetArtistAlbums")
+	return nil, errors.New("provider must not be called")
+}
+func (p *failingDiscoverProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+	p.fail("SearchAlbums")
+	return nil, errors.New("provider must not be called")
+}
+func (p *failingDiscoverProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
+	p.fail("GetAlbumTracks")
+	return nil, errors.New("provider must not be called")
+}
+
+var _ discovery.Provider = (*failingDiscoverProvider)(nil)
+
+// newAlbumDiscoveryServer wires a Server whose discovery registry contains a
+// provider that fails the test if touched.
+func newAlbumDiscoveryServer(t *testing.T, store library.Store, cat catalogReader, reg *discovery.Registry) *Server {
+	t.Helper()
+	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return &Server{cfg: cfg, store: store, catalog: cat, discoveryReg: reg, log: testAPILogger()}
+}
+
+func decodeAlbumDiscovery(t *testing.T, rec *httptest.ResponseRecorder) albumDiscoveryResponse {
+	t.Helper()
+	var resp albumDiscoveryResponse
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("bad response JSON: %v (%s)", err, rec.Body.String())
+	}
+	return resp
+}
+
+// TestHandleLibraryAlbumDiscoveryWarmMergesCatalogAndLocal covers the warm hit:
+// materialized rows are merged with live local tracks and the provider is never
+// called. The registered provider fails the test if invoked.
+func TestHandleLibraryAlbumDiscoveryWarmMergesCatalogAndLocal(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {{
+				ID: 10, Title: "T1", TrackNumber: 1, Duration: 1000,
+				FilePath: "/music/Artist/Album/01 - T1.mp3", FileSize: 111, Bitrate: 320,
+			}},
+		},
+	}
+	cat := &stubCatalogStore{
+		tracks: []catalog.AlbumTrack{
+			{DiscNumber: 1, TrackNumber: 1, Title: "T1", DurationMs: 1000},
+			{DiscNumber: 1, TrackNumber: 2, Title: "T2", DurationMs: 2000},
+		},
+		metadata: &catalog.AlbumMetadata{AlbumID: 1, ProviderName: "deezer", ProviderAlbumID: "dz-1"},
+	}
+	s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if resp.MetadataPending {
+		t.Errorf("warm read must not be metadata_pending")
+	}
+	if resp.Provider != "deezer" || resp.ProviderAlbumID != "dz-1" {
+		t.Errorf("provider link = (%q,%q), want (deezer, dz-1)", resp.Provider, resp.ProviderAlbumID)
+	}
+	if len(resp.Tracks) != 2 {
+		t.Fatalf("expected 2 merged tracks, got %d: %+v", len(resp.Tracks), resp.Tracks)
+	}
+	if !resp.Tracks[0].Downloaded || resp.Tracks[0].LibraryTrackID != 10 {
+		t.Errorf("track 1 not matched to its local file: %+v", resp.Tracks[0])
+	}
+	if resp.Tracks[0].FilePath != "/music/Artist/Album/01 - T1.mp3" || resp.Tracks[0].Format != "MP3" {
+		t.Errorf("track 1 local metadata = %+v", resp.Tracks[0])
+	}
+	if resp.Tracks[1].Downloaded || resp.Tracks[1].LibraryTrackID != 0 {
+		t.Errorf("track 2 should be undownloaded: %+v", resp.Tracks[1])
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryColdReturnsLocalPending covers the cold miss:
+// no materialized rows → local tracks with metadata_pending true, no provider
+// call.
+func TestHandleLibraryAlbumDiscoveryColdReturnsLocalPending(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {
+				{ID: 10, Title: "L1", TrackNumber: 1, Duration: 1000},
+				{ID: 11, Title: "L2", TrackNumber: 2, Duration: 2000},
+			},
+		},
+	}
+	s := newAlbumDiscoveryServer(t, store, &stubCatalogStore{}, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if !resp.MetadataPending {
+		t.Errorf("cold read must be metadata_pending")
+	}
+	if len(resp.Tracks) != 2 {
+		t.Fatalf("cold read should return 2 local tracks, got %d", len(resp.Tracks))
+	}
+	for _, tr := range resp.Tracks {
+		if !tr.Downloaded {
+			t.Errorf("cold-read local track must be downloaded: %+v", tr)
+		}
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryEmptyNoPanic covers empty local + empty
+// materialized: empty tracks, no panic, and an unchanged JSON shape.
+func TestHandleLibraryAlbumDiscoveryEmptyNoPanic(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+	}
+	s := newAlbumDiscoveryServer(t, store, &stubCatalogStore{}, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if !resp.MetadataPending || len(resp.Tracks) != 0 {
+		t.Errorf("empty album = pending=%v tracks=%d, want pending true / 0 tracks", resp.MetadataPending, len(resp.Tracks))
+	}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(rec.Body.Bytes(), &raw); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	for _, key := range []string{"provider", "provider_album_id", "tracks", "metadata_pending"} {
+		if _, ok := raw[key]; !ok {
+			t.Errorf("response missing key %q", key)
+		}
+	}
+	// tracks must serialize as [] (not null) so the UI can iterate it.
+	if string(raw["tracks"]) != "[]" {
+		t.Errorf("tracks JSON = %s, want []", raw["tracks"])
+	}
+}
+
+// TestGetLibraryAlbumDiscoveryDataReadsCatalogOnly verifies the download-missing
+// helper: warm = merged expected list, cold = nothing to diff, neither touches a
+// provider.
+func TestGetLibraryAlbumDiscoveryDataReadsCatalogOnly(t *testing.T) {
+	store := &stubLibraryStore{
+		albumTrks: map[int64][]domain.Track{1: {{ID: 10, Title: "T1", TrackNumber: 1}}},
+	}
+	reg := newDiscoverRegistry(t, &failingDiscoverProvider{t: t})
+	cat := &stubCatalogStore{tracks: []catalog.AlbumTrack{
+		{DiscNumber: 1, TrackNumber: 1, Title: "T1"},
+		{DiscNumber: 1, TrackNumber: 2, Title: "T2"},
+	}}
+	s := newAlbumDiscoveryServer(t, store, cat, reg)
+
+	got, pending, err := getLibraryAlbumDiscoveryData(context.Background(), s, 1, 2)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if pending {
+		t.Fatalf("warm read must not be pending")
+	}
+	if len(got) != 2 || !got[0].Downloaded || got[1].Downloaded {
+		t.Fatalf("expected T1 downloaded and T2 missing, got %+v", got)
+	}
+
+	// Cold: no materialized rows → pending with no data, and still no provider call.
+	cold := newAlbumDiscoveryServer(t, store, &stubCatalogStore{}, reg)
+	got, pending, err = getLibraryAlbumDiscoveryData(context.Background(), cold, 1, 2)
+	if err != nil {
+		t.Fatalf("cold unexpected error: %v", err)
+	}
+	if !pending {
+		t.Fatalf("cold should report pending")
+	}
+	if got != nil {
+		t.Fatalf("cold should return nil data, got %+v", got)
+	}
+}
+
+// stubColdFetcher records FetchMatched calls and can simulate a provider match.
+// onFetch runs after the call is recorded, letting a test materialize rows into
+// the stub catalog so the handler's re-read observes them.
+type stubColdFetcher struct {
+	calls   int
+	matched bool
+	err     error
+	onFetch func()
+}
+
+func (f *stubColdFetcher) FetchMatched(context.Context, int64) (bool, error) {
+	f.calls++
+	if f.onFetch != nil {
+		f.onFetch()
+	}
+	return f.matched, f.err
+}
+
+var _ albumColdFetcher = (*stubColdFetcher)(nil)
+
+// TestHandleLibraryAlbumDiscoveryUnmatchedDoesNotColdFetch covers H1/R1: an
+// album parked terminal (unmatched) inside its long retry window is served from
+// local tracks with metadata_pending. The cold fetcher (the only path to a
+// provider) is never called, AND the refresh enqueuer is never called — the
+// parked queue row already carries the correct 90-day due_at, so re-enqueueing
+// would overwrite it with now.
+func TestHandleLibraryAlbumDiscoveryUnmatchedDoesNotColdFetch(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {{ID: 10, Title: "L1", TrackNumber: 1, Duration: 1000}},
+		},
+	}
+	cat := &stubCatalogStore{metadata: &catalog.AlbumMetadata{
+		AlbumID: 1, RefreshStatus: catalog.StatusUnmatched, UpdatedAt: time.Now(),
+	}}
+	fetcher := &stubColdFetcher{matched: true}
+	ref := &stubAlbumRefresher{}
+	s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumColdFetch = fetcher
+	s.albumRefresh = ref
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if fetcher.calls != 0 {
+		t.Errorf("cold fetcher called %d times for an unmatched album, want 0", fetcher.calls)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if !resp.MetadataPending {
+		t.Errorf("unmatched album must be metadata_pending")
+	}
+	if len(resp.Tracks) != 1 || !resp.Tracks[0].Downloaded || resp.Tracks[0].LibraryTrackID != 10 {
+		t.Errorf("unmatched album should serve its local track: %+v", resp.Tracks)
+	}
+	if len(ref.calls) != 0 {
+		t.Errorf("terminal-unelapsed album must not be re-enqueued (would overwrite the parked due_at), got %+v", ref.calls)
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryTerminalUnelapsedDoesNotEnqueue is the R1
+// regression: for both terminal statuses (unmatched and failed) inside the
+// retry window, opening the album enqueues nothing, while a pending
+// (never-materialized) album still enqueues.
+func TestHandleLibraryAlbumDiscoveryTerminalUnelapsedDoesNotEnqueue(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:    map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists:   []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{1: {{ID: 10, Title: "L1", TrackNumber: 1}}},
+	}
+	cases := []struct {
+		name string
+		meta *catalog.AlbumMetadata
+	}{
+		{
+			name: "unmatched inside retry window",
+			meta: &catalog.AlbumMetadata{AlbumID: 1, RefreshStatus: catalog.StatusUnmatched, UpdatedAt: time.Now()},
+		},
+		{
+			name: "failed inside retry window",
+			meta: &catalog.AlbumMetadata{AlbumID: 1, RefreshStatus: catalog.StatusFailed, UpdatedAt: time.Now()},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cat := &stubCatalogStore{metadata: tc.meta}
+			// No cold fetcher wired: the pending branch is the fallback, which
+			// isolates the enqueue decision from cold-fetch behavior.
+			ref := &stubAlbumRefresher{}
+			s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+			s.albumRefresh = ref
+
+			req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+			req.SetPathValue("albumID", "1")
+			rec := httptest.NewRecorder()
+			s.handleLibraryAlbumDiscovery(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+			}
+			resp := decodeAlbumDiscovery(t, rec)
+			if !resp.MetadataPending {
+				t.Errorf("terminal-unelapsed album must be metadata_pending")
+			}
+			if len(ref.calls) != 0 {
+				t.Errorf("terminal-unelapsed album must not be re-enqueued, got %+v", ref.calls)
+			}
+		})
+	}
+}
+
+// TestHandleLibraryAlbumDownloadMissingTerminalUnelapsedDoesNotEnqueue is the
+// R1 regression for the download-missing pending path: an album parked terminal
+// inside its retry window returns the distinguishable 202 but queues nothing,
+// while a genuinely cold album still queues a refresh.
+func TestHandleLibraryAlbumDownloadMissingTerminalUnelapsedDoesNotEnqueue(t *testing.T) {
+	cases := []struct {
+		name        string
+		meta        *catalog.AlbumMetadata
+		wantEnqueue int
+	}{
+		{
+			name:        "terminal inside retry window does not enqueue",
+			meta:        &catalog.AlbumMetadata{AlbumID: 1, RefreshStatus: catalog.StatusUnmatched, UpdatedAt: time.Now()},
+			wantEnqueue: 0,
+		},
+		{
+			name:        "cold album still enqueues",
+			meta:        nil,
+			wantEnqueue: 1,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stubLibraryStore{
+				albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+				artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+			}
+			ref := &stubAlbumRefresher{}
+			s := newAlbumDiscoveryServer(t, store, &stubCatalogStore{metadata: tc.meta},
+				newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+			s.albumRefresh = ref
+
+			req := httptest.NewRequest(http.MethodPost, "/api/library/albums/1/download-missing", nil)
+			req.SetPathValue("albumID", "1")
+			rec := httptest.NewRecorder()
+			s.handleLibraryAlbumDownloadMissing(rec, req)
+
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+			}
+			if len(ref.calls) != tc.wantEnqueue {
+				t.Errorf("enqueue calls = %d (%+v), want %d", len(ref.calls), ref.calls, tc.wantEnqueue)
+			}
+		})
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryMatchedEmptyDoesNotColdFetch covers H1 for a
+// fresh album with zero materialized rows (matched-empty): it is warm, served as
+// an empty tracklist with metadata_pending=false, and never re-fetched.
+func TestHandleLibraryAlbumDiscoveryMatchedEmptyDoesNotColdFetch(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {{ID: 10, Title: "L1", TrackNumber: 1}},
+		},
+	}
+	cat := &stubCatalogStore{metadata: &catalog.AlbumMetadata{
+		AlbumID: 1, ProviderName: "deezer", ProviderAlbumID: "dz-1",
+		RefreshStatus: catalog.StatusFresh, LastRefreshedAt: time.Now(),
+	}}
+	fetcher := &stubColdFetcher{matched: true}
+	s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumColdFetch = fetcher
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if fetcher.calls != 0 {
+		t.Errorf("cold fetcher called %d times for a matched-empty album, want 0", fetcher.calls)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if resp.MetadataPending {
+		t.Errorf("matched-empty album must not be metadata_pending")
+	}
+	if len(resp.Tracks) != 0 {
+		t.Errorf("matched-empty album should serve 0 materialized rows, got %+v", resp.Tracks)
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryPendingColdFetches covers H1: an album with no
+// metadata row is cold and still triggers the one-time Option-A fetch.
+func TestHandleLibraryAlbumDiscoveryPendingColdFetches(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+	}
+	fetcher := &stubColdFetcher{matched: false}
+	s := newAlbumDiscoveryServer(t, store, &stubCatalogStore{}, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumColdFetch = fetcher
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if fetcher.calls != 1 {
+		t.Fatalf("cold fetcher called %d times for a pending album, want 1", fetcher.calls)
+	}
+	if resp := decodeAlbumDiscovery(t, rec); !resp.MetadataPending {
+		t.Errorf("pending album with no match must be metadata_pending")
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryColdFetchMaterializes covers F5: a wired cold
+// fetcher that reports a match forces the handler to re-read the catalog and
+// return the freshly materialized + merged tracks with metadata_pending=false.
+func TestHandleLibraryAlbumDiscoveryColdFetchMaterializes(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {{ID: 10, Title: "T1", TrackNumber: 1, Duration: 1000,
+				FilePath: "/music/Artist/Album/01 - T1.mp3", FileSize: 111, Bitrate: 320}},
+		},
+	}
+	cat := &stubCatalogStore{} // empty until the cold fetch runs
+	fetcher := &stubColdFetcher{matched: true, onFetch: func() {
+		cat.tracks = []catalog.AlbumTrack{
+			{DiscNumber: 1, TrackNumber: 1, Title: "T1", DurationMs: 1000},
+			{DiscNumber: 1, TrackNumber: 2, Title: "T2", DurationMs: 2000},
+		}
+		cat.metadata = &catalog.AlbumMetadata{
+			AlbumID: 1, ProviderName: "deezer", ProviderAlbumID: "dz-1",
+			RefreshStatus: catalog.StatusFresh, LastRefreshedAt: time.Now(),
+		}
+	}}
+	s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumColdFetch = fetcher
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if fetcher.calls != 1 {
+		t.Fatalf("cold fetcher called %d times, want 1", fetcher.calls)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if resp.MetadataPending {
+		t.Errorf("materialized cold fetch must clear metadata_pending")
+	}
+	if resp.Provider != "deezer" || resp.ProviderAlbumID != "dz-1" {
+		t.Errorf("provider link = (%q,%q), want (deezer, dz-1)", resp.Provider, resp.ProviderAlbumID)
+	}
+	if len(resp.Tracks) != 2 {
+		t.Fatalf("expected 2 merged tracks, got %d: %+v", len(resp.Tracks), resp.Tracks)
+	}
+	if !resp.Tracks[0].Downloaded || resp.Tracks[0].LibraryTrackID != 10 {
+		t.Errorf("track 1 not merged with its local file: %+v", resp.Tracks[0])
+	}
+	if resp.Tracks[1].Downloaded {
+		t.Errorf("track 2 should be undownloaded: %+v", resp.Tracks[1])
+	}
+}
+
+// TestHandleLibraryAlbumDiscoveryStaleServesAndEnqueues covers F2/Tier-1: a
+// materialized album whose metadata is past the soft TTL is served immediately
+// from its rows, with a low-priority refresh enqueued behind the response and no
+// provider call in the request.
+func TestHandleLibraryAlbumDiscoveryStaleServesAndEnqueues(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+	}
+	cat := &stubCatalogStore{
+		tracks: []catalog.AlbumTrack{{DiscNumber: 1, TrackNumber: 1, Title: "T1"}},
+		metadata: &catalog.AlbumMetadata{
+			AlbumID: 1, ProviderName: "deezer", ProviderAlbumID: "dz-1",
+			RefreshStatus:   catalog.StatusFresh,
+			LastRefreshedAt: time.Now().Add(-100 * 24 * time.Hour),
+		},
+	}
+	fetcher := &stubColdFetcher{matched: true}
+	ref := &stubAlbumRefresher{}
+	s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumColdFetch = fetcher
+	s.albumRefresh = ref
+	s.albumStaleAfter = func() time.Duration { return 24 * time.Hour }
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDiscovery(rec, req)
+
+	if fetcher.calls != 0 {
+		t.Errorf("stale read must not call the provider, fetcher calls = %d", fetcher.calls)
+	}
+	resp := decodeAlbumDiscovery(t, rec)
+	if resp.MetadataPending || len(resp.Tracks) != 1 {
+		t.Fatalf("stale read should serve materialized rows immediately: pending=%v tracks=%+v", resp.MetadataPending, resp.Tracks)
+	}
+	if len(ref.calls) != 1 {
+		t.Fatalf("stale read must enqueue exactly one refresh, got %+v", ref.calls)
+	}
+	if got := ref.calls[0]; got.reason != catalog.ReasonStale || got.priority != catalog.PriorityLow {
+		t.Errorf("stale enqueue = %+v, want reason=%q priority=%d", got, catalog.ReasonStale, catalog.PriorityLow)
+	}
+}
+
+// TestHandleLibraryAlbumDownloadMissingPending covers M8: a download-missing
+// request against a cold/pending album returns a distinguishable 202 with
+// pending=true (not a silent {"queued":0}) and queues a best-effort refresh.
+func TestHandleLibraryAlbumDownloadMissingPending(t *testing.T) {
+	store := &stubLibraryStore{
+		albums:  map[int64]*domain.Album{1: {ID: 1, ArtistID: 2, Title: "Album"}},
+		artists: []domain.Artist{{ID: 2, Name: "Artist"}},
+		albumTrks: map[int64][]domain.Track{
+			1: {{ID: 10, Title: "L1", TrackNumber: 1}},
+		},
+	}
+	ref := &stubAlbumRefresher{}
+	s := newAlbumDiscoveryServer(t, store, &stubCatalogStore{}, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+	s.albumRefresh = ref
+
+	req := httptest.NewRequest(http.MethodPost, "/api/library/albums/1/download-missing", nil)
+	req.SetPathValue("albumID", "1")
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbumDownloadMissing(rec, req)
+
+	if rec.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, want 202 (%s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("bad response JSON: %v (%s)", err, rec.Body.String())
+	}
+	if body["pending"] != true {
+		t.Errorf("pending = %v, want true", body["pending"])
+	}
+	if body["queued"] != float64(0) {
+		t.Errorf("queued = %v, want 0", body["queued"])
+	}
+	if msg, _ := body["message"].(string); msg == "" {
+		t.Errorf("pending response must carry a message, got %v", body["message"])
+	}
+	if len(ref.calls) != 1 || ref.calls[0].reason != catalog.ReasonCold {
+		t.Errorf("pending download-missing should enqueue a cold refresh, got %+v", ref.calls)
 	}
 }
 
