@@ -847,6 +847,52 @@ Request cancellation of the running job.
 Job progress is also streamed to SSE clients (`/api/events`) as `job_started`,
 `job_progress`, `job_completed`, `job_failed`, and `job_cancelled` events.
 
+### `GET /api/catalog/status`
+
+**Admin only.**
+
+Read-only snapshot of the materialized metadata catalog and its background
+refresh engine. The engine is a **service-owned loop**, not a `jobs.Manager`
+job, so it never appears in `GET /api/jobs` — this endpoint is its only
+observability surface. Settings → Jobs renders it as the "Metadata Catalog"
+card, whose **Warm library** button calls `POST /api/jobs/warm-library` above.
+
+**Response** `200`:
+```json
+{
+  "enabled": true,
+  "queue": {"queued": 3, "due_now": 1, "scheduled": 2},
+  "albums": {"pending": 0, "fresh": 12, "stale": 1, "unmatched": 2, "failed": 0},
+  "artists": {"materialized": 5},
+  "engine": {
+    "running": true,
+    "interval_seconds": 60,
+    "batch_size": 8,
+    "last_drain_at": "2026-10-12T12:00:00Z",
+    "last_drain_count": 3
+  }
+}
+```
+
+- `enabled` — the live `catalog.enabled` gate.
+- `queue` — refresh-queue depth; `scheduled` counts rows waiting in the future
+  (backoff or the stale TTL).
+- `albums` — how many materialized album rows carry each refresh status; every
+  status is always present (zero-filled) so the card is stable.
+- `artists.materialized` — materialized artist overviews.
+- `engine` — effective interval/batch (defaults applied when the config values
+  are zero), whether the drain loop is alive, and the most recent tick.
+  `last_drain_at` is `null` until the first tick, and the whole block is zero
+  (`interval_seconds`/`batch_size` `0`) when no engine is wired.
+
+The queue fills **on demand only** — a cold album open, a stale warm read, an
+album import, an explicit refresh, or the `warm-library` job. An idle engine
+with an empty queue on a freshly upgraded instance is expected, not a fault.
+
+**Errors**:
+- `500` — `{"error": "catalog status unavailable"}` when a catalog read fails.
+- `503` — `{"error": "catalog stats not available"}` when no catalog store is wired.
+
 ### `GET /api/covers/{albumID}`
 
 Serve the `cover.jpg` image for an album.

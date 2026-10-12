@@ -3,11 +3,13 @@
 > Source of truth: `internal/catalog/types.go`, `internal/catalog/store.go`,
 > `internal/catalog/queue.go`, `internal/catalog/merge.go`,
 > `internal/catalog/sqlite/store.go`, `internal/catalog/sqlite/queue.go`,
+> `internal/catalog/stats.go`, `internal/catalog/sqlite/stats.go`,
 > `internal/catalog/migrate/backfill.go`, `internal/refresh/service.go`,
 > `internal/refresh/enqueue.go`, `internal/refresh/cold.go`,
 > `internal/refresh/bulk.go`, `internal/jobs/warm_library.go`,
 > `internal/api/handlers_library.go`, `internal/api/handlers_discover.go`,
-> `internal/api/handlers_jobs.go`, `internal/config/config.go`,
+> `internal/api/handlers_jobs.go`, `internal/api/handlers_catalog.go`,
+> `internal/config/config.go`,
 > `cmd/groovearr/app.go`.
 
 Album metadata (a provider tracklist, the provider link, refresh bookkeeping)
@@ -315,6 +317,18 @@ empty pays no cost. Started in `cmd/groovearr/app.go`; `Stop()` runs on shutdown
 > package and its `cmd/groovearr/app.go` wiring. The legacy tables stay (never
 > dropped). Tracked in `.opencode/context/project-intelligence/living-notes.md`.
 
+
+## Observability
+
+The engine is a service-owned loop, not a `jobs.Manager` job, so it does **not**
+appear in `GET /api/jobs`. Its only status surface is **`GET /api/catalog/status`**
+(admin-only), assembled from the read-only `catalog.StatsStore` (`QueueStats`,
+`AlbumStatusCounts`, `CountArtistMetadata`) and the engine's
+`refresh.Service.Status()` snapshot. Settings → Jobs renders it as the
+"Metadata Catalog" card, whose **Warm library** button starts the opt-in
+`POST /api/jobs/warm-library` job. An idle engine with an empty queue is normal:
+the queue fills only on demand — a cold album open, a stale warm read, an album
+import, a manual refresh, or the warm job.
 
 ## Provider I/O & Rate Limiting
 
