@@ -13,10 +13,34 @@ Authentication is chosen by `auth.method`:
 - `forms` — username/password login backed by the `users` table. Log in with
   `POST /api/login`, which sets the `groovearr_sid` session cookie.
 
+Enabling `forms` is guarded so a live switch cannot lock you out of the
+admin-only settings it protects. When a save turns the method **from**
+`none`/empty **to** `forms`, the server:
+
+- **seeds the first admin** from the request's `auth.username` /
+  `auth.password` when the `users` table is empty. Only a password supplied in
+  that same request is used — a stored hash the request merely preserved (an
+  omitted/empty/masked password) is never re-seeded, because it may be a
+  credential the operator no longer knows. The password must meet the same
+  boundary as `POST /api/users` (at least 8 characters, at most 72 bytes); and
+- **refuses the switch** (`400`) when the store holds no *enabled admin*
+  account, because a store of regular users alone can never reach settings to
+  grant admin. Create or enable an admin in the **Users** tab first, then
+  switch.
+
+The guard is keyed on the transition, so ordinary saves made while `forms` is
+already active are neither re-checked nor refused. `auth.username` /
+`auth.password` are otherwise only a startup bootstrap and are never consulted
+by `POST /api/login`, which authenticates against the `users` table alone.
+
 With `forms`, every `/api/*` route requires an identity except `GET /api/health`
 and `POST /api/login`. Three transports resolve an identity:
 
 - **Session cookie** `groovearr_sid` — set by login; carries the account's role.
+  It is `HttpOnly`, `SameSite=Lax`, and `Secure` when the request arrived over
+  TLS directly or via a reverse proxy that set `X-Forwarded-Proto: https`
+  (`Secure` is only ever added, never removed, so a spoofed header cannot
+  downgrade it).
 - **API key** — a full **admin** credential, accepted as `X-Api-Key: <key>`,
   `?apikey=<key>`, or `Authorization: Bearer <key>`. The key itself is never
   returned by any endpoint and is masked in `GET /api/config`.
@@ -80,7 +104,9 @@ cookie. The bootstrap `auth.username` / `auth.password` are not consulted here.
 
 ### `POST /api/logout`
 
-Clear the `groovearr_sid` session cookie.
+Clear the `groovearr_sid` session cookie. The clearing cookie carries the same
+`HttpOnly` / `SameSite=Lax` treatment (and `Secure` when the request is TLS, per
+the same rule as login) so the browser matches and drops it.
 
 **Response** `200`:
 ```json
@@ -122,13 +148,13 @@ Create an account.
 ```
 
 - `username` — required
-- `password` — required, minimum 8 characters
+- `password` — required, minimum 8 characters, maximum 72 bytes
 - `role` — optional, `admin` | `user`; empty defaults to `user`
 
 **Response** `201`: the created `userResponse`.
 
 **Errors**:
-- `400` — invalid body, missing username, password shorter than 8, or invalid role
+- `400` — invalid body, missing username, password shorter than 8 or longer than 72 bytes, or invalid role
 - `409` — `{"error": "username already exists"}` (case-insensitive duplicate)
 - `500` — internal error
 
@@ -153,7 +179,7 @@ change logs the acting admin out on their next request (no fresh session is
 re-issued).
 
 **Errors**:
-- `400` — invalid user ID, invalid body, invalid role, or password shorter than 8
+- `400` — invalid user ID, invalid body, invalid role, or password shorter than 8 or longer than 72 bytes
 - `404` — user not found
 - `409` — `{"error": "cannot remove the last active admin"}` (demoting/disabling the last admin)
 - `500` — internal error
@@ -258,6 +284,12 @@ Merge partial config and persist. Triggers plugin reload and directory creation.
 
 **Errors**:
 - `400` — validation failed: `{"error": "validation failed", "errors": ["..."]}`
+- `400` — a switch to `auth.method=forms` was refused because no enabled admin
+  account exists, or because an empty user store was not given a first-admin
+  username and a strong enough password (>=8 chars, <=72 bytes); the previous
+  method is left in place.
+- `500` — `{"error": "internal error"}` when the user store could not be read
+  while checking/enabling `forms` (an infrastructure failure, not bad input).
 
 ### `GET /api/config/sources`
 

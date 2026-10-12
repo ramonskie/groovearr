@@ -1,11 +1,13 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/user"
@@ -230,9 +232,17 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Unknown user, disabled account, or bad password: one indistinguishable
-	// rejection. CheckPassword is only reached when the account exists and is
-	// enabled, so a disabled user can never authenticate.
-	if u == nil || u.Disabled || !config.CheckPassword(u.PasswordHash, req.Password) {
+	// rejection. A bcrypt comparison runs in every case — against a dummy hash
+	// when there is no usable stored one — so response time does not reveal
+	// whether a username exists or is disabled (username enumeration). Inputs
+	// longer than 72 bytes take bcrypt's fast internal reject path, but that is
+	// symmetric across accounts and reveals nothing.
+	hash := dummyLoginHash()
+	if u != nil && u.PasswordHash != "" {
+		hash = u.PasswordHash
+	}
+	passwordOK := config.CheckPassword(hash, req.Password)
+	if u == nil || u.Disabled || !passwordOK {
 		s.log.Warn("auth: login failed",
 			"username", username,
 			"remote_addr", r.RemoteAddr,
@@ -258,7 +268,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		Expires:  expires,
 		HttpOnly: true,
-		Secure:   r.TLS != nil,
+		Secure:   secureRequest(r),
 		SameSite: http.SameSiteLaxMode,
 	})
 
@@ -306,6 +316,8 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
+		Secure:   secureRequest(r),
+		SameSite: http.SameSiteLaxMode,
 	})
 
 	s.log.Info("auth: logout",
@@ -314,4 +326,86 @@ func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	)
 
 	writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// dummyLoginHash returns a bcrypt hash of a fixed throwaway string, computed
+// once. handleLogin compares against it when there is no usable stored hash, so
+// an unknown or disabled account costs the same bcrypt time as a wrong
+// password and cannot be told apart by response time.
+//
+// The error path returns "" (CheckPassword then short-circuits); it is
+// unreachable for the fixed 26-byte literal, and TestDummyLoginHashIsValid
+// fails loudly if that ever changes.
+var dummyLoginHash = sync.OnceValue(func() string {
+	h, err := config.HashPassword("groovearr-timing-equalizer")
+	if err != nil {
+		return ""
+	}
+	return h
+})
+
+// secureRequest reports whether the request reached the app over TLS, directly
+// or through a TLS-terminating reverse proxy (X-Forwarded-Proto: https).
+//
+// It is used only to add the Secure attribute to the session cookie. A direct
+// r.TLS is checked first and OR-ed in, so Secure can never be removed from a
+// direct-TLS request. Behind a proxy r.TLS is nil and X-Forwarded-Proto is the
+// only signal, so the proxy MUST overwrite it (nginx's
+// `proxy_set_header X-Forwarded-Proto $scheme;` does); a client-supplied header
+// can then only force Secure on for its own response, never off. The first
+// token of a comma-separated value is used, matching proxy conventions.
+func secureRequest(r *http.Request) bool {
+	if r.TLS != nil {
+		return true
+	}
+	proto := r.Header.Get("X-Forwarded-Proto")
+	if i := strings.IndexByte(proto, ','); i >= 0 {
+		proto = proto[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(proto), "https")
+}
+
+// ensureFormsTransition runs just before a config save that turns forms
+// authentication on (from none/empty). It delegates the domain rule to
+// user.EnsureFormsReady, which performs user-store I/O, so it MUST be called
+// outside the config write lock (see handleUpdateConfig) — the config lock is
+// held across every persistence mutation and blocking config readers on a DB
+// round trip would stall the whole API.
+//
+// It is gated on the transition so an ordinary settings save made while forms
+// is already active neither re-reads the store nor can be refused. The
+// effective method mirrors config.Merge: a non-empty partial method wins.
+//
+// The Username/Password in the auth config are consumed exactly once, by
+// EnsureBootstrapAdmin at startup, and only while the user store is empty. A
+// runtime switch to "forms" therefore used to land with no account to log in
+// with — and because PUT /api/config is adminOnly, the locked-out operator had
+// no route back in short of the API key or editing the config file.
+func (s *Server) ensureFormsTransition(ctx context.Context, base config.Config, partial config.Config) error {
+	effective := base.Auth.Method
+	if partial.Auth.Method != "" {
+		effective = partial.Auth.Method
+	}
+	if base.Auth.Method == "forms" || effective != "forms" {
+		return nil
+	}
+
+	username := base.Auth.Username
+	if partial.Auth.Username != "" {
+		username = partial.Auth.Username
+	}
+
+	// Only a password supplied in this request may seed the first admin. The
+	// UI sends "" for "unchanged"; an API client echoing GET /api/config sends
+	// the masked sentinel — both mean the stored hash, which is never re-seeded
+	// (it may be a credential the operator no longer knows).
+	var newPassword string
+	if partial.Auth.Password != "" && !config.IsMaskedString(partial.Auth.Password) {
+		newPassword = partial.Auth.Password
+	}
+
+	return user.EnsureFormsReady(ctx, s.userStore, user.FormsRequest{
+		Username:    username,
+		NewPassword: newPassword,
+	}, s.log)
 }

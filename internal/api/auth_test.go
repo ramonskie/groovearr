@@ -447,14 +447,18 @@ func decodeMe(t *testing.T, rec *httptest.ResponseRecorder) meResponse {
 // resolves case-insensitively (mirroring the SQLite COLLATE NOCASE contract)
 // and can be forced to fail so the error path is covered without a database.
 type fakeUserStore struct {
-	users  []user.User
-	getErr error
+	users   []user.User
+	getErr  error
+	listErr error
 }
 
 var _ user.Store = (*fakeUserStore)(nil)
 
-func (f *fakeUserStore) CreateUser(context.Context, *user.User) (int64, error) { return 0, nil }
-func (f *fakeUserStore) GetUser(context.Context, int64) (*user.User, error)    { return nil, nil }
+func (f *fakeUserStore) CreateUser(_ context.Context, u *user.User) (int64, error) {
+	f.users = append(f.users, *u)
+	return int64(len(f.users)), nil
+}
+func (f *fakeUserStore) GetUser(context.Context, int64) (*user.User, error) { return nil, nil }
 
 func (f *fakeUserStore) GetUserByUsername(_ context.Context, username string) (*user.User, error) {
 	if f.getErr != nil {
@@ -469,9 +473,14 @@ func (f *fakeUserStore) GetUserByUsername(_ context.Context, username string) (*
 	return nil, nil
 }
 
-func (f *fakeUserStore) ListUsers(context.Context) ([]user.User, error) { return f.users, nil }
-func (f *fakeUserStore) UpdateUser(context.Context, *user.User) error   { return nil }
-func (f *fakeUserStore) DeleteUser(context.Context, int64) error        { return nil }
+func (f *fakeUserStore) ListUsers(context.Context) ([]user.User, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	return f.users, nil
+}
+func (f *fakeUserStore) UpdateUser(context.Context, *user.User) error { return nil }
+func (f *fakeUserStore) DeleteUser(context.Context, int64) error      { return nil }
 func (f *fakeUserStore) UpdateUserGuarded(context.Context, int64, user.UserPatch) (*user.User, error) {
 	return nil, nil
 }

@@ -8,37 +8,16 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/user"
 )
 
-// minPasswordLength is the minimum accepted password length for account
-// creation and password changes. Deliberately small and explicit so the
-// boundary is easy to audit and test; it lives here, not in the store, because
-// it is an input-validation rule (AGENTS §4 validate at the boundary).
-const minPasswordLength = 8
-
-// maxPasswordBytes is bcrypt's hard input limit. bcrypt.GenerateFromPassword
-// returns an error for input longer than 72 bytes, so an over-long password
-// must be rejected at the boundary as a client error (400) instead of falling
-// through as a confusing 500. It is a byte limit, not a rune limit, because
-// that is the unit bcrypt enforces.
-const maxPasswordBytes = 72
-
-// validatePassword enforces both account-password boundaries at the API edge.
-// The minimum is counted in runes so a multibyte password is judged by how many
-// characters the user typed, not how many bytes it occupies; the maximum is
-// counted in bytes to match bcrypt's limit.
+// validatePassword enforces the account-password boundary at the API edge. The
+// rule itself lives in the user domain (user.ValidatePassword) so it cannot
+// drift from the first-admin seed path.
 func validatePassword(pw string) error {
-	if utf8.RuneCountInString(pw) < minPasswordLength {
-		return fmt.Errorf("password must be at least %d characters", minPasswordLength)
-	}
-	if len(pw) > maxPasswordBytes {
-		return fmt.Errorf("password must be at most %d bytes", maxPasswordBytes)
-	}
-	return nil
+	return user.ValidatePassword(pw)
 }
 
 // userResponse is the explicit wire shape for an account. It is a dedicated

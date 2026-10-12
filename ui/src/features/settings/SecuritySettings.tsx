@@ -1,7 +1,11 @@
 import { useFormContext } from "react-hook-form";
+import { useQuery } from "@tanstack/react-query";
+import { Link } from "react-router-dom";
 import Card from "../../components/Card";
 import FormGroup from "../../components/FormGroup";
 import Badge from "../../components/Badge";
+import StatusMessage from "../../components/StatusMessage";
+import { listUsers } from "../../api/client";
 import { useConfig } from "../../hooks/use-config";
 import type { SettingsFormValues } from "./settings-schema";
 
@@ -19,13 +23,31 @@ export default function SecuritySettings() {
   // from the derived `has_api_key` flag instead.
   const hasApiKey = config?.auth?.has_api_key ?? false;
 
+  // Login is backed by the user store, not by the fields on this page. Reading
+  // the account list lets this card tell the truth about what switching to
+  // Forms will do. Shares the ["users"] cache with the Users tab.
+  const {
+    data: users,
+    isLoading: usersLoading,
+    isError: usersError,
+  } = useQuery({ queryKey: ["users"], queryFn: listUsers });
+  const accounts = users ?? [];
+  // Don't assert "no accounts" from a loading/errored query — that would show
+  // false guidance while the admin-only list is still in flight.
+  const accountsKnown = !usersLoading && !usersError;
+  const hasAccounts = accounts.length > 0;
+  const activeAdmins = accounts.filter(
+    (u) => u.role === "admin" && !u.disabled,
+  ).length;
+  const hasActiveAdmin = activeAdmins > 0;
+
   return (
     <div>
       <Card title="Authentication">
         <FormGroup
           label="Authentication Method"
           htmlFor="auth_method"
-          hint="None: no authentication required. Forms: username + password login page."
+          hint="None: no login required (requests are treated as admin). Forms: username + password login, backed by the accounts in the Users tab."
           error={errors.auth_method?.message}
         >
           <select
@@ -39,11 +61,55 @@ export default function SecuritySettings() {
         </FormGroup>
 
         {authMethod === "forms" && (
+          <div className="mb-4">
+            {!accountsKnown && (
+              <StatusMessage variant="info">
+                Enable Forms only when an enabled admin account exists. Manage
+                accounts in the{" "}
+                <Link to="/settings?tab=users" className="underline">
+                  Users tab
+                </Link>
+                .
+              </StatusMessage>
+            )}
+            {accountsKnown && !hasAccounts && (
+              <StatusMessage variant="info">
+                No accounts yet. Saving Forms will create the first admin from
+                the username and password below (both required).
+              </StatusMessage>
+            )}
+            {accountsKnown && hasAccounts && !hasActiveAdmin && (
+              <StatusMessage variant="error">
+                <span className="font-medium">No enabled admin account.</span>{" "}
+                Forms login needs at least one active admin, otherwise nobody
+                can reach these settings.{" "}
+                <Link to="/settings?tab=users" className="underline">
+                  Create or enable an admin
+                </Link>{" "}
+                in the Users tab before switching.
+              </StatusMessage>
+            )}
+            {accountsKnown && hasAccounts && hasActiveAdmin && (
+              <StatusMessage variant="info">
+                {accounts.length} account{accounts.length === 1 ? "" : "s"} (
+                {activeAdmins} admin{activeAdmins === 1 ? "" : "s"}). Sign in
+                with one of them — the username and password below only create
+                the first admin, which already exists.{" "}
+                <Link to="/settings?tab=users" className="underline">
+                  Manage users
+                </Link>
+                .
+              </StatusMessage>
+            )}
+          </div>
+        )}
+
+        {authMethod === "forms" && (
           <>
             <FormGroup
-              label="Username"
+              label="First admin username"
               htmlFor="auth_username"
-              hint="Login username for forms authentication."
+              hint="Required whenever Forms is enabled. It creates the first admin only when no accounts exist; sign-in otherwise uses the Users list."
               error={errors.auth_username?.message}
             >
               <input
@@ -57,9 +123,9 @@ export default function SecuritySettings() {
             </FormGroup>
 
             <FormGroup
-              label="Password"
+              label="First admin password"
               htmlFor="auth_password"
-              hint="Set a new password (leave empty to keep current)."
+              hint="Required whenever Forms is enabled (8 characters minimum, 72 bytes maximum). Sets the credential used only to create the first admin; leave empty to keep the current value."
               error={errors.auth_password?.message}
             >
               <input

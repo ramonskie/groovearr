@@ -299,6 +299,60 @@ var validLogLevels = map[string]bool{
 	"debug": true, "info": true, "warn": true, "warning": true, "error": true,
 }
 
+// Clone returns a deep copy of c that can be safely mutated by Merge without
+// touching any map, slice, or pointer still shared with c.
+//
+// Config carries reference types (Sources map, Logging pointer, order slices,
+// and the tracking/library pointers), and Merge writes through all of them in
+// place. A caller that wants to trial-merge a partial for validation without
+// mutating the live config must merge into a Clone, not a shallow struct copy.
+func Clone(c Config) Config {
+	out := c
+	if c.Sources != nil {
+		out.Sources = make(map[string]json.RawMessage, len(c.Sources))
+		for k, v := range c.Sources {
+			cp := make([]byte, len(v))
+			copy(cp, v)
+			out.Sources[k] = cp
+		}
+	}
+	if c.Logging != nil {
+		lg := *c.Logging
+		out.Logging = &lg
+	}
+	out.MetadataOrder = cloneStrings(c.MetadataOrder)
+	out.DownloadOrder = cloneStrings(c.DownloadOrder)
+	out.AlbumSources = cloneStrings(c.AlbumSources)
+	out.Auth.LocalBypassSubnets = cloneStrings(c.Auth.LocalBypassSubnets)
+	out.Library.PlaylistAutoSyncMins = cloneInt(c.Library.PlaylistAutoSyncMins)
+	out.Tracking.RefreshMins = cloneInt(c.Tracking.RefreshMins)
+	out.Tracking.AutoSearchMissing = cloneBool(c.Tracking.AutoSearchMissing)
+	return out
+}
+
+func cloneStrings(s []string) []string {
+	if s == nil {
+		return nil
+	}
+	return append([]string(nil), s...)
+}
+
+func cloneInt(v *int) *int {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
+}
+
+func cloneBool(v *bool) *bool {
+	if v == nil {
+		return nil
+	}
+	cp := *v
+	return &cp
+}
+
 // Merge copies non-zero fields from partial into c, preserving original
 // values for sensitive fields (arl, token, secret, etc.) when partial
 // contains masked strings (i.e., came from Config.Mask()).
@@ -612,6 +666,11 @@ func isMaskedString(s string) bool {
 	}
 	return true
 }
+
+// IsMaskedString reports whether s is a masked sentinel as produced by
+// Config.Mask(). Exported so callers outside this package apply the same
+// "unchanged secret — do not overwrite or re-seed" rule.
+func IsMaskedString(s string) bool { return isMaskedString(s) }
 
 // mergeSourcesPreservingSecrets merges partial source configs into original,
 // skipping any sensitive key whose value in partial is a masked string.

@@ -24,6 +24,15 @@ type fakeStore struct {
 	createCalls int
 	countErr    error
 	createErr   error
+	listErr     error
+	// listCalls counts ListUsers invocations; usersAfter, when non-nil, is
+	// returned from the second call onward so a create-race can be modeled
+	// (first read empty, then a colliding row appears).
+	listCalls  int
+	usersAfter []User
+	// listErrAfter, when non-nil, makes ListUsers fail from the second call on,
+	// modeling a re-read failure on the create-race path.
+	listErrAfter error
 }
 
 var _ Store = (*fakeStore)(nil)
@@ -43,7 +52,21 @@ func (f *fakeStore) GetUser(context.Context, int64) (*User, error) { return nil,
 
 func (f *fakeStore) GetUserByUsername(context.Context, string) (*User, error) { return nil, nil }
 
-func (f *fakeStore) ListUsers(context.Context) ([]User, error) { return f.users, nil }
+func (f *fakeStore) ListUsers(context.Context) ([]User, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	f.listCalls++
+	if f.listCalls > 1 {
+		if f.listErrAfter != nil {
+			return nil, f.listErrAfter
+		}
+		if f.usersAfter != nil {
+			return f.usersAfter, nil
+		}
+	}
+	return f.users, nil
+}
 
 func (f *fakeStore) UpdateUser(context.Context, *User) error { return nil }
 

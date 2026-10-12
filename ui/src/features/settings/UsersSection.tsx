@@ -27,9 +27,9 @@ import { useAuth } from "../../context/AuthContext";
 
 /**
  * Mirrors the backend boundary: `handlers_users.go` requires at least 8
- * characters, and bcrypt caps the hash input at 72 bytes
- * (`bcrypt.ErrPasswordTooLong`). The backend returns 400 below the minimum and
- * 500 from the failed hash above the maximum, so we guard both client-side.
+ * characters and rejects more than 72 bytes (bcrypt.ErrPasswordTooLong) at the
+ * edge, so both are 400s. The server's failed-hash path is a defensive
+ * backstop only. We guard both client-side to avoid a round trip.
  */
 const MIN_PASSWORD_LENGTH = 8;
 const MAX_PASSWORD_BYTES = 72;

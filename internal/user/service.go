@@ -2,6 +2,7 @@ package user
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -70,4 +71,115 @@ func EnsureBootstrapAdmin(ctx context.Context, store Store, cfg config.Config, l
 
 	log.Info("bootstrap admin seeded", "username", username, "component", "user")
 	return nil
+}
+
+// Sentinel errors returned by EnsureFormsReady. The API layer maps these to a
+// 400 (the operator can act on them); every other error it surfaces as a 500.
+var (
+	// ErrFirstAdminRequired means forms was being enabled against an empty user
+	// store and the request did not carry a first-admin username and a new
+	// plaintext password.
+	ErrFirstAdminRequired = errors.New("cannot enable forms authentication: set a first admin username and password")
+	// ErrWeakFirstAdminPassword means the first-admin password failed the same
+	// boundary POST /api/users enforces (see ValidatePassword). The message is
+	// built from the shared bounds so it cannot drift from them.
+	ErrWeakFirstAdminPassword = fmt.Errorf(
+		"cannot enable forms authentication: first admin password must be at least %d characters and at most %d bytes",
+		MinPasswordRunes, MaxPasswordBytes,
+	)
+	// ErrNoEnabledAdmin means enabling forms would leave no account able to
+	// authenticate as an admin.
+	ErrNoEnabledAdmin = errors.New("cannot enable forms authentication: no enabled admin account")
+)
+
+// First-admin password bounds are the shared account boundary (see
+// password.go); EnsureFormsReady returns ErrWeakFirstAdminPassword rather than
+// the boundary's own error so the API layer can word the refusal in the
+// enable-forms context.
+
+// FormsRequest is the credential-relevant outcome of a config save that turns
+// forms authentication on. It is decoupled from config.Config so the readiness
+// rule is testable without a full config merge.
+type FormsRequest struct {
+	// Username is the effective first-admin username (the request value, else
+	// the existing config value).
+	Username string
+	// NewPassword is the plaintext password supplied in this request, or "" when
+	// the request reused the stored hash. A stored hash may be a credential the
+	// operator no longer knows, so it is never seeded as a new account.
+	NewPassword string
+}
+
+// EnsureFormsReady guarantees that turning on forms authentication leaves a
+// usable admin login, returning an actionable error when it would not:
+//
+//   - an empty user store is seeded with a first admin, but only from a
+//     password supplied in this request. A preserved config hash could be one
+//     the operator has forgotten, and seeding it would lock them out of the
+//     admin-only settings this guard exists to protect (ErrFirstAdminRequired);
+//   - a store holding accounts but no enabled admin is refused
+//     (ErrNoEnabledAdmin): a store of regular users alone can never reach
+//     settings to grant admin;
+//   - a store with an enabled admin passes unchanged.
+//
+// It performs user-store I/O, so callers must invoke it outside the config
+// write lock. log may be nil (falls back to slog.Default()).
+func EnsureFormsReady(ctx context.Context, store Store, req FormsRequest, log *slog.Logger) error {
+	if log == nil {
+		log = slog.Default()
+	}
+	if store == nil {
+		return fmt.Errorf("forms readiness: nil store")
+	}
+
+	users, err := store.ListUsers(ctx)
+	if err != nil {
+		return fmt.Errorf("forms readiness: list users: %w", err)
+	}
+
+	if len(users) == 0 {
+		username := strings.TrimSpace(req.Username)
+		if username == "" || req.NewPassword == "" {
+			return ErrFirstAdminRequired
+		}
+		if err := ValidatePassword(req.NewPassword); err != nil {
+			return ErrWeakFirstAdminPassword
+		}
+		hash, err := config.HashPassword(req.NewPassword)
+		if err != nil {
+			// Defensive backstop: ValidatePassword already rejects the only input
+			// bcrypt refuses (>72 bytes), so this is unreachable in practice.
+			return ErrWeakFirstAdminPassword
+		}
+		if _, cerr := store.CreateUser(ctx, &User{
+			Username:     username,
+			PasswordHash: hash,
+			Role:         RoleAdmin,
+		}); cerr != nil {
+			// A concurrent request may have created that username first. Do not
+			// assume the colliding row is a usable admin (it could be a regular
+			// user created via POST /api/users): re-read and let the scan below
+			// decide, so the switch is refused rather than locking the operator
+			// out.
+			if !errors.Is(cerr, ErrDuplicateUsername) {
+				return fmt.Errorf("forms readiness: seed first admin: %w", cerr)
+			}
+			users, err = store.ListUsers(ctx)
+			if err != nil {
+				return fmt.Errorf("forms readiness: verify users: %w", err)
+			}
+		} else {
+			log.Info("forms first admin seeded", "username", username, "component", "user")
+			return nil
+		}
+	}
+
+	for _, u := range users {
+		// Only a bcrypt hash can authenticate (config.CheckPassword), so a row
+		// with anything else does not count as a usable admin.
+		if u.Role == RoleAdmin && !u.Disabled && strings.HasPrefix(u.PasswordHash, "$2") {
+			return nil
+		}
+	}
+	return ErrNoEnabledAdmin
 }

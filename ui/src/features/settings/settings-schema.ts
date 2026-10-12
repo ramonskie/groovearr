@@ -56,7 +56,17 @@ export function buildFormSchema(sources: SourceInfo[]) {
     // Auth (Security)
     auth_method: z.enum(["none", "forms"]).optional(),
     auth_username: z.string().optional(),
-    auth_password: z.string().min(4, "Password must be at least 4 characters").or(z.literal("")).optional(),
+    // Mirrors the backend account boundary (user.ValidatePassword): at least 8
+    // characters, at most 72 bytes (bcrypt's input limit).
+    auth_password: z
+      .string()
+      .min(8, "Password must be at least 8 characters")
+      .refine(
+        (v) => new TextEncoder().encode(v).length <= 72,
+        "Password must be at most 72 bytes",
+      )
+      .or(z.literal(""))
+      .optional(),
     auth_local_bypass_subnets: z.string().optional(),
 
     // Metadata provider order

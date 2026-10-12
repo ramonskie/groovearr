@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"io/fs"
 	"log/slog"
@@ -651,6 +652,20 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate a new plaintext auth password at the edge. Merge hashes it with
+	// bcrypt and silently ignores a hashing error, so an over-long (>72 byte)
+	// value would otherwise save nothing yet report success; a too-short value
+	// would seed a weak first admin. Mirror the account boundary here.
+	if pw := partial.Auth.Password; pw != "" && !config.IsMaskedString(pw) {
+		if err := user.ValidatePassword(pw); err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":  "validation failed",
+				"errors": []string{err.Error()},
+			})
+			return
+		}
+	}
+
 	// Snapshot old sources before update to skip rebuilding unchanged plugins.
 	// Deep-copy — maps are reference types, and cfg.Merge mutates in-place,
 	// which would corrupt the old-vs-new comparison.
@@ -660,9 +675,45 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		oldSources[k] = append([]byte(nil), v...)
 	}
 
+	// Validate a trial merge on a deep copy BEFORE the guard so a rejected
+	// payload can never seed an account. Clone() keeps the trial merge off the
+	// live config's shared maps and pointers.
+	trial := config.Clone(cfgSnapshot)
+	trial.Merge(&partial)
+	if errs := trial.Validate(); len(errs) > 0 {
+		writeJSON(w, http.StatusBadRequest, map[string]any{
+			"error":  "validation failed",
+			"errors": errs,
+		})
+		return
+	}
+
+	// Turning forms auth on must never strip the only way back into the
+	// admin-only settings it protects. Resolve/seed the first admin BEFORE
+	// taking the config write lock: the user-store I/O and the first-admin
+	// bcrypt must not run while config readers are blocked. An actionable
+	// refusal is a 400; a store failure is a 500 (never misreported as bad
+	// input), and either way the previous method is left in place.
+	if err := s.ensureFormsTransition(r.Context(), cfgSnapshot, partial); err != nil {
+		if errors.Is(err, user.ErrFirstAdminRequired) ||
+			errors.Is(err, user.ErrWeakFirstAdminPassword) ||
+			errors.Is(err, user.ErrNoEnabledAdmin) {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"error":  "validation failed",
+				"errors": []string{err.Error()},
+			})
+			return
+		}
+		s.log.Error("config update: forms readiness failed", "error", err, "component", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+
 	err := s.cfg.Update(func(cfg *config.Config) error {
-		// Merge partial onto a copy first to validate, then apply to live config.
-		merged := *cfg
+		// Re-validate under the lock — authoritative if a concurrent writer
+		// changed the base since the trial. Merge into a clone so a failure
+		// cannot mutate the live config through shared maps/pointers.
+		merged := config.Clone(*cfg)
 		merged.Merge(&partial)
 
 		if errs := merged.Validate(); len(errs) > 0 {
@@ -681,7 +732,10 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 			})
 			return
 		}
-		writeError(w, http.StatusInternalServerError, err)
+		// Persistence failures can carry OS/path detail; log it and return a
+		// generic body rather than echoing it to the client.
+		s.log.Error("config update failed", "error", err, "component", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
 
