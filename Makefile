@@ -119,7 +119,7 @@ docker-setup:
 
 docker-build:
 	@echo "==> Building Docker image (--no-cache)..."
-	docker compose build --no-cache
+	GROOVEARR_VERSION=$(VERSION) docker compose build --no-cache
 
 docker-up:
 	@echo "==> Starting services..."

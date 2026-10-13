@@ -60,7 +60,13 @@ services:
     restart: unless-stopped
 
   groovearr:
-    build: .
+    build:
+      context: .
+      # Build-time version shown in the sidebar (GET /api/version). `make
+      # docker-build` passes it from `git describe`; a bare `docker compose
+      # build` falls back to "dev".
+      args:
+        VERSION: ${GROOVEARR_VERSION:-dev}
     container_name: groovearr
     environment:
       GROOVEARR_CONFIG: /config/config.json
