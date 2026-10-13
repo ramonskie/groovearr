@@ -254,6 +254,9 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 // closed when no identity is present.
 func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/health", s.handleHealth)
+	// Build version, shown in the UI sidebar. Authenticated (not admin-only):
+	// every signed-in user sees it. Cheap and side-effect free.
+	mux.HandleFunc("GET /api/version", s.handleVersion)
 
 	// ── Settings surface: rate limits (admin-only) ─────────────────────
 	mux.HandleFunc("GET /api/rate-limits", s.adminOnly(s.handleRateLimits))

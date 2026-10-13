@@ -4,6 +4,11 @@ BINARY := groovearr
 CMD    := ./cmd/groovearr
 BUILD  := ./build
 
+# Version stamped into the binary (shown in the UI via GET /api/version). Falls
+# back to "dev" when git metadata is unavailable (e.g. a source tarball).
+VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+LDFLAGS := -X github.com/ramonskie/groovearr/internal/version.Version=$(VERSION)
+
 # UI build
 UI_DIR := ./ui
 
@@ -29,14 +34,14 @@ all: vet test build
 
 build: build-ui
 	@echo "==> Building $(BINARY)..."
-	$(GO) build -o $(BUILD)/$(BINARY) $(CMD)
-	@echo "    Built: $(BUILD)/$(BINARY)"
+	$(GO) build -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
+	@echo "    Built: $(BUILD)/$(BINARY) ($(VERSION))"
 
 # Force rebuild (also replays go:embed when static files change)
 rebuild: build-ui
 	@echo "==> Rebuilding $(BINARY) (forced)..."
-	$(GO) build -a -o $(BUILD)/$(BINARY) $(CMD)
-	@echo "    Rebuilt: $(BUILD)/$(BINARY)"
+	$(GO) build -a -ldflags "$(LDFLAGS)" -o $(BUILD)/$(BINARY) $(CMD)
+	@echo "    Rebuilt: $(BUILD)/$(BINARY) ($(VERSION))"
 
 # ─── Test ─────────────────────────────────────────────────────
 

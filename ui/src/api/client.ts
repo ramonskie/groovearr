@@ -22,6 +22,7 @@ import type {
   Job,
   StartJobResponse,
   CatalogStatus,
+  VersionInfo,
   PaginationParams,
   PlaylistSourceItem,
   Playlist,
@@ -376,6 +377,11 @@ export function startWarmLibraryJob(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/jobs/warm-library", { method: "POST" });
 }
 
+
+/** Build version stamped into the binary, shown in the sidebar. */
+export function getVersion(): Promise<VersionInfo> {
+  return request<VersionInfo>("/api/version");
+}
 /** Read-only snapshot of the materialized catalog and its refresh engine. */
 export function getCatalogStatus(): Promise<CatalogStatus> {
   return request<CatalogStatus>("/api/catalog/status");

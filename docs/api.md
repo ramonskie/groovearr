@@ -213,6 +213,18 @@ Health check.
 {"status": "ok"}
 ```
 
+### `GET /api/version`
+
+Build version stamped into the binary at link time (`internal/version`, set via
+`-ldflags "-X .../internal/version.Version=..."` by the Makefile and Dockerfile).
+Authenticated but **not** admin-only — every signed-in user sees it in the
+sidebar, above the Settings tab.
+
+**Response** `200`:
+```json
+{"version": "v0.9.0"}
+```
+
 ### `GET /api/config`
 
 **Admin only.**

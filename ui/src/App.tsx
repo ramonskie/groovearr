@@ -13,6 +13,7 @@ import { useAuth } from "./context/AuthContext";
 import { useDownloads } from "./hooks/use-downloads";
 import { useSetupStatus } from "./hooks/use-config";
 import { useJobWatcher } from "./hooks/use-job";
+import { useVersion } from "./hooks/use-version";
 import { useTrackingEvents } from "./hooks/use-tracking-events";
 import { useAlbumRefreshEvents } from "./hooks/use-album-refresh-events";
 import type { DownloadState } from "./api/types";
@@ -142,6 +143,9 @@ function AppShell() {
   // `enabled` flag — a non-admin never issues the request.
   useJobWatcher(isAdmin);
 
+  // Build version shown above the Settings tab. Fetched once (cached forever).
+  const { data: versionInfo } = useVersion();
+
   // Refresh tracking views (wanted badge, album statuses) on import completion
   // app-wide — imports can be started from any page, not just Downloads.
   useTrackingEvents();
@@ -166,6 +170,7 @@ function AppShell() {
       downloadCount={activeDownloadCount}
       onLogout={isAuthEnabled ? () => logout() : undefined}
       isAdmin={isAdmin}
+      version={versionInfo?.version}
     />
   );
 

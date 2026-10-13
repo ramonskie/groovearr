@@ -736,6 +736,13 @@ export interface StartJobResponse {
   started: boolean;
 }
 
+// ─── Build version ──────────────────────────────────────────────────
+
+/** GET /api/version: the build version stamped into the binary at link time. */
+export interface VersionInfo {
+  version: string;
+}
+
 // ─── Catalog status ─────────────────────────────────────────────────
 
 /**

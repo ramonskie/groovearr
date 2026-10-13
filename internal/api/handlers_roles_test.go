@@ -68,6 +68,7 @@ var adminRoutes = []roleRoute{
 // anti-over-wrapping guard: a shared route accidentally gated would fail here.
 var sharedRoutes = []roleRoute{
 	{"health", http.MethodGet, "/api/health"},
+	{"version", http.MethodGet, "/api/version"},
 	{"setup", http.MethodGet, "/api/setup/status"},
 	{"identity", http.MethodGet, "/api/me"},
 	{"auth", http.MethodPost, "/api/login"},

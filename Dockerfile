@@ -19,8 +19,12 @@ COPY . .
 # Build embedded SPA.
 RUN cd ui && npm run build
 
+# Build-time version stamped into the binary (GET /api/version). CI passes the
+# git tag (v0.9.0) or the commit sha; local builds default to "dev".
+ARG VERSION=dev
+
 # Build Go binary (CGo-free — modernc.org/sqlite).
-RUN CGO_ENABLED=0 go build -ldflags="-s -w" -o /out/groovearr ./cmd/groovearr
+RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/ramonskie/groovearr/internal/version.Version=${VERSION}" -o /out/groovearr ./cmd/groovearr
 
 # ─── Runtime ───────────────────────────────────────────────
 FROM alpine:3.21

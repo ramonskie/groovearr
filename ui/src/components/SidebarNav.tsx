@@ -36,6 +36,11 @@ interface SidebarNavProps {
    * flash for a user whose role is still loading.
    */
   isAdmin?: boolean;
+  /**
+   * Build version shown above the Settings tab (from GET /api/version). Omitted
+   * until it loads, or when the endpoint is unavailable, so no empty row renders.
+   */
+  version?: string;
 }
 
 const DEFAULT_PAGES: NavPage[] = [
@@ -66,6 +71,7 @@ const SidebarNav: FC<SidebarNavProps> = ({
   className = "",
   onLogout,
   isAdmin = false,
+  version,
 }) => {
   // Derive the visible pages from the caller's role rather than branching in
   // JSX: non-admins simply never receive the admin-only entries (tracking).
@@ -114,6 +120,14 @@ const SidebarNav: FC<SidebarNavProps> = ({
 
       {/* Settings + logout footer */}
       <div className="border-t border-slate-800 px-2 py-3 space-y-1">
+        {version && (
+          <p
+            className="px-3 pb-1 text-[11px] font-medium text-slate-500"
+            title={`Groovearr ${version}`}
+          >
+            {version}
+          </p>
+        )}
         {isAdmin && (
           <button
             type="button"
