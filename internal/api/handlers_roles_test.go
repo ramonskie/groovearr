@@ -39,6 +39,8 @@ var adminRoutes = []roleRoute{
 	{"jobs", http.MethodPost, "/api/jobs/enrich"},
 	{"jobs", http.MethodPost, "/api/jobs/duplicates"},
 	{"jobs", http.MethodPost, "/api/jobs/organize"},
+	{"jobs", http.MethodPost, "/api/jobs/warm-library"},
+	{"jobs", http.MethodPost, "/api/jobs/recheck-unmatched"},
 	{"jobs", http.MethodGet, "/api/jobs/organize/report"},
 	{"jobs", http.MethodPost, "/api/jobs/cancel"},
 	{"tracking", http.MethodGet, "/api/tracking/artists"},

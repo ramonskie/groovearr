@@ -91,6 +91,10 @@ type RunnerDeps struct {
 	// refresh.DefaultWarmOptions. It is a closure so subtask 14 can honor config
 	// hot-reload without caching config in a struct (AGENTS §9).
 	WarmOptions func() refresh.WarmOptions
+	// Rearm re-arms parked terminal albums for the user-triggered
+	// recheck-unmatched job (may be nil — the job then returns a clear error).
+	// Wired post-construction via SetUnmatchedRearmer, like Refresh.
+	Rearm UnmatchedRearmer
 }
 
 // Runners implements every background job body. One instance is constructed
@@ -149,6 +153,15 @@ func (r *Runners) SetProviderOrder(order *metadata.ProviderOrder) {
 // bucket — as the queue engine. Called once at startup, before any job runs.
 func (r *Runners) SetWarmRefresher(ref WarmRefresher) {
 	r.deps.Refresh = ref
+}
+
+// SetUnmatchedRearmer wires (or swaps) the engine the recheck-unmatched job
+// drives to re-arm parked terminal albums. The api layer calls this when the
+// app-wide engine is installed (mirrors SetWarmRefresher), so the job shares the
+// exact queue policy the engine uses. Called once at startup, before any job
+// runs.
+func (r *Runners) SetUnmatchedRearmer(x UnmatchedRearmer) {
+	r.deps.Rearm = x
 }
 
 // SetBootJob records the persisted job snapshot restored at startup. A job

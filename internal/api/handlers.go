@@ -337,6 +337,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// periodic sweep. Each invocation materializes a bounded batch and yields the
 	// job slot; re-triggering resumes with the remaining candidates.
 	mux.Handle("POST /api/jobs/warm-library", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobWarmLibrary)))
+	// Explicit recheck of parked terminal (unmatched/failed) albums: re-arms
+	// their queue rows to due-now so the engine re-searches them with the current
+	// matcher, bypassing the 90-day park. The request does no provider I/O; the
+	// engine does the paced work on its next drain.
+	mux.Handle("POST /api/jobs/recheck-unmatched", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobRecheckUnmatched)))
 	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
 	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))
 	// Read-only status of the materialized metadata catalog and its refresh
@@ -563,6 +568,17 @@ func (s *Server) SetRefreshStatus(r refreshStatusReader) {
 func (s *Server) SetWarmRefresher(r jobs.WarmRefresher) {
 	if s.runners != nil {
 		s.runners.SetWarmRefresher(r)
+	}
+}
+
+// SetUnmatchedRearmer injects the engine the opt-in recheck-unmatched job drives
+// to re-arm parked terminal albums. It is wired after construction (mirrors
+// SetWarmRefresher) with the same app-wide refresh engine. Pass nil to leave the
+// job unavailable — its runner then fails with a clear "catalog re-arm not
+// available" error rather than panicking.
+func (s *Server) SetUnmatchedRearmer(x jobs.UnmatchedRearmer) {
+	if s.runners != nil {
+		s.runners.SetUnmatchedRearmer(x)
 	}
 }
 

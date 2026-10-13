@@ -904,6 +904,35 @@ and a pace-based ETA stream over SSE.
 Rate-limited: shared `scan` bucket, 2 req/min per client IP (override via
 `RATE_SCAN`).
 
+### `POST /api/jobs/recheck-unmatched`
+
+**Admin only.**
+
+Start the explicit **recheck of parked unmatched albums**. It re-arms the
+terminal (`unmatched`/`failed`) album queue rows to *due now*, so the background
+refresh engine re-searches them with the current matcher without waiting out the
+90-day `UnmatchedRetry` park. This is the user-triggered counterpart to that
+park — useful after a matching improvement (or a new provider) to re-attempt the
+backlog.
+
+The request performs **no provider I/O**: it moves the queue rows and returns
+immediately. The paced, cooldown-aware re-search happens on the engine's next
+drain, so progress shows on the catalog status card (`GET /api/catalog/status`
+— watch `queue.due_now` drain). The **Recheck unmatched** button on the settings
+catalog card calls this endpoint.
+
+**Response** `202` (or `200` when a job was already running):
+```json
+{"job": {"type": "recheck-unmatched", "state": "running"}, "started": true}
+```
+
+The pass is quick, so the runner usually completes within the request; the
+re-armed count then appears in the job's `message` (poll `GET /api/jobs` or watch
+the SSE `job_completed` event).
+
+Rate-limited: shared `scan` bucket, 2 req/min per client IP (override via
+`RATE_SCAN`).
+
 ### `POST /api/jobs/cancel`
 
 **Admin only.**
@@ -923,7 +952,8 @@ Read-only snapshot of the materialized metadata catalog and its background
 refresh engine. The engine is a **service-owned loop**, not a `jobs.Manager`
 job, so it never appears in `GET /api/jobs` — this endpoint is its only
 observability surface. Settings → Jobs renders it as the "Metadata Catalog"
-card, whose **Warm library** button calls `POST /api/jobs/warm-library` above.
+card, whose **Warm library** button calls `POST /api/jobs/warm-library` and
+whose **Recheck unmatched** button calls `POST /api/jobs/recheck-unmatched`.
 
 **Response** `200`:
 ```json

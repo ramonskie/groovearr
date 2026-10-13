@@ -498,6 +498,10 @@ func NewApp(configPath string) (*App, error) {
 	// (provider-link reuse, shared cooldown) as the queue engine. The job itself
 	// is default off and triggered explicitly via POST /api/jobs/warm-library.
 	srv.SetWarmRefresher(refreshSvc)
+	// Inject the same engine as the explicit recheck-unmatched job's re-armer,
+	// so POST /api/jobs/recheck-unmatched re-arms parked terminal albums through
+	// the exact queue policy the engine uses (bypassing the 90-day park).
+	srv.SetUnmatchedRearmer(refreshSvc)
 	// Cold lazy fetch (Option A): the first open of an unmaterialized album does
 	// one bounded, deduplicated provider fetch through the refresh engine, which
 	// reuses the shared cooldown and materializes the album. Its goroutines are

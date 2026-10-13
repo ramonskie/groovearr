@@ -8,6 +8,7 @@ import {
   useStartOrganizeJob,
   useStartDuplicatesJob,
   useStartWarmLibraryJob,
+  useStartRecheckUnmatchedJob,
   useCancelJob,
 } from "../../hooks/use-job";
 import { useCatalogStatus } from "../../hooks/use-catalog-status";
@@ -31,6 +32,7 @@ export default function JobsSettings() {
   const startOrganize = useStartOrganizeJob();
   const startDuplicates = useStartDuplicatesJob();
   const startWarm = useStartWarmLibraryJob();
+  const startRecheck = useStartRecheckUnmatchedJob();
   const catalogQuery = useCatalogStatus(isAdmin);
   const cancel = useCancelJob();
 
@@ -261,6 +263,21 @@ export default function JobsSettings() {
           <span className="text-xs text-slate-500">
             Materializes a bounded batch of albums that need metadata. Re-run to
             continue; there is no periodic sweep.
+          </span>
+        </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button
+            variant="ghost"
+            onClick={() => startRecheck.mutate()}
+            disabled={!isAdmin || running || startRecheck.isPending}
+          >
+            Recheck unmatched
+          </Button>
+          <span className="text-xs text-slate-500">
+            Re-arms albums that did not match, or failed to refresh, so the
+            engine retries them now instead of waiting out the retry window —
+            useful after a matching improvement.
           </span>
         </div>
       </Card>

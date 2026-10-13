@@ -7,6 +7,7 @@
 > `internal/catalog/migrate/backfill.go`, `internal/refresh/service.go`,
 > `internal/refresh/enqueue.go`, `internal/refresh/cold.go`,
 > `internal/refresh/bulk.go`, `internal/jobs/warm_library.go`,
+> `internal/jobs/recheck_unmatched.go`,
 > `internal/api/handlers_library.go`, `internal/api/handlers_discover.go`,
 > `internal/api/handlers_jobs.go`, `internal/api/handlers_catalog.go`,
 > `internal/config/config.go`,
@@ -351,6 +352,43 @@ empty pays no cost. Started in `cmd/groovearr/app.go`; `Stop()` runs on shutdown
 > dropped). Tracked in `.opencode/context/project-intelligence/living-notes.md`.
 
 
+## Chart 6 — Recheck Terminal Albums (On-Demand Park Override)
+
+```text
+POST /api/jobs/recheck-unmatched    (admin-only; rate-limit bucket: scan)
+    |
+    v
+startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.go)
+    |
+    v
+UnmatchedRearmer.ReArmTerminalAlbums(ctx, recheckUnmatchedCap)   (refresh/enqueue.go
+    |                                                             -> jobs/recheck_unmatched.go)
+    v
+catalog.Store.ReArmTerminalAlbums(now, limit)        (catalog/sqlite/queue.go)
+    |  INSERT ... SELECT 'album', m.album_id, 'manual', PriorityHigh, now, attempts 0 ...
+    |      FROM album_metadata m  WHERE refresh_status IN ('unmatched','failed')
+    |      ORDER BY m.album_id  LIMIT limit            (limit<=0 -> all)
+    |  ON CONFLICT(entity_type, entity_id) DO UPDATE SET
+    |      due_at = excluded.due_at, priority = MAX(priority, excluded.priority)
+    |
+    |  -> parked unmatched row (due_at=+90d): moved to due-now, priority raised
+    |  -> failed album (terminal transition DELETED its row): a fresh row is inserted
+    |  -> fresh/stale/pending album: never touched
+    v
+engine next drain: ClaimDueRefresh(now) -> processBatch -> RefreshAlbum (chart 3)
+    |  re-runs bestMatch/provider search with the CURRENT matcher
+    |  still-unmatched -> re-parks due_at=+90d (processItem); no-match again is expected
+    v
+the request itself does NO provider I/O -> progress is the card's queue.due_now draining
+```
+
+This is the explicit, user-triggered override of the two terminal parks: the
+90-day `UnmatchedRetry` due_at (`internal/refresh/service.go` `processItem`) and
+the failed-album row removal (`retryOrFail` → `FinishRefresh`). It exists so a
+matcher improvement can be applied to the whole backlog without waiting out the
+window; the provider-isolation (§1) and shared-cooldown (§8) rules are unchanged
+because the engine still performs the paced re-search.
+
 ## Observability
 
 The engine is a service-owned loop, not a `jobs.Manager` job, so it does **not**
@@ -359,9 +397,10 @@ appear in `GET /api/jobs`. Its only status surface is **`GET /api/catalog/status
 `AlbumStatusCounts`, `CountArtistMetadata`) and the engine's
 `refresh.Service.Status()` snapshot. Settings → Jobs renders it as the
 "Metadata Catalog" card, whose **Warm library** button starts the opt-in
-`POST /api/jobs/warm-library` job. An idle engine with an empty queue is normal:
-the queue fills only on demand — a cold album open, a stale warm read, an album
-import, a manual refresh, or the warm job.
+`POST /api/jobs/warm-library` job and whose **Recheck unmatched** button starts
+`POST /api/jobs/recheck-unmatched` (chart 6). An idle engine with an empty queue
+is normal: the queue fills only on demand — a cold album open, a stale warm read,
+an album import, a manual refresh, or the warm job.
 
 ## Provider I/O & Rate Limiting
 

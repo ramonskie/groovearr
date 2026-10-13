@@ -32,6 +32,12 @@ type fakeStore struct {
 	tracks   map[int64][]catalog.AlbumTrack
 	retries  []retryCall
 	finishes []finishCall
+	rearms   []rearmCall
+}
+
+type rearmCall struct {
+	now   time.Time
+	limit int
 }
 
 type retryCall struct {
@@ -127,6 +133,33 @@ func (s *fakeStore) CountQueuedRefresh(context.Context) (int, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return len(s.queue), nil
+}
+
+// ReArmTerminalAlbums mirrors the sqlite semantics: re-arm queued album rows
+// whose metadata is terminal and whose due_at is in the future.
+func (s *fakeStore) ReArmTerminalAlbums(_ context.Context, now time.Time, limit int) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.rearms = append(s.rearms, rearmCall{now: now, limit: limit})
+	n := 0
+	for _, it := range s.queue {
+		if limit > 0 && n >= limit {
+			break
+		}
+		if it.EntityType != catalog.EntityAlbum {
+			continue
+		}
+		meta, ok := s.meta[it.EntityID]
+		if !ok || !meta.RefreshStatus.IsTerminal() || !it.DueAt.After(now) {
+			continue
+		}
+		it.DueAt = now
+		if it.Priority < catalog.PriorityHigh {
+			it.Priority = catalog.PriorityHigh
+		}
+		n++
+	}
+	return n, nil
 }
 
 func (s *fakeStore) UpsertAlbumMetadata(_ context.Context, m catalog.AlbumMetadata) error {

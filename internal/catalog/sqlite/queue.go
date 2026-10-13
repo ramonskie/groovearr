@@ -168,3 +168,105 @@ func (s *Store) CountQueuedRefresh(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// ReArmTerminalAlbums makes every terminal (unmatched/failed) album due for a
+// refresh so the engine re-searches it on the next drain. It is the explicit,
+// user-triggered override of the two terminal parks — the 90-day
+// UnmatchedRetry due_at and the failed-album row removal — so a matcher
+// improvement can be applied to the whole backlog without waiting out the
+// window.
+//
+// Two statements in one transaction, because a failed album has no row to
+// update (the terminal transition deleted it via retryOrFail → FinishRefresh):
+//  1. move existing parked terminal rows to due-now and raise their priority;
+//  2. insert a fresh row (attempts reset to 0) for each failed album that has
+//     no row.
+//
+// Non-terminal albums are never touched. limit caps the total rows (limit <= 0 =
+// all), ordered by album id so a capped pass is deterministic. Returns the
+// number of albums re-armed.
+func (s *Store) ReArmTerminalAlbums(ctx context.Context, now time.Time, limit int) (int, error) {
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	nowStr := fmtTime(now.UTC())
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums begin: %w", err)
+	}
+	defer tx.Rollback() // no-op after Commit
+
+	// 1) Re-arm existing parked terminal rows (unmatched, or a failed row that a
+	//    later enqueue recreated).
+	update := `
+		UPDATE metadata_refresh_queue
+		SET due_at = ?, priority = MAX(priority, ?)
+		WHERE id IN (
+			SELECT q.id
+			FROM metadata_refresh_queue q
+			JOIN album_metadata m ON m.album_id = q.entity_id
+			WHERE q.entity_type = ?
+			  AND m.refresh_status IN (?, ?)
+			  AND q.due_at > ?
+			ORDER BY q.id`
+	updateArgs := []any{
+		nowStr, catalog.PriorityHigh, string(catalog.EntityAlbum),
+		string(catalog.StatusUnmatched), string(catalog.StatusFailed), nowStr,
+	}
+	if limit > 0 {
+		update += "\n\t\t\tLIMIT ?"
+		updateArgs = append(updateArgs, limit)
+	}
+	update += "\n\t\t)"
+
+	res, err := tx.ExecContext(ctx, update, updateArgs...)
+	if err != nil {
+		return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums: %w", err)
+	}
+	total, err := res.RowsAffected()
+	if err != nil {
+		return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums affected: %w", err)
+	}
+
+	// 2) Failed albums carry no queue row (deleted on the terminal transition);
+	//    insert one so they are recoverable too.
+	remaining := int64(-1) // -1 == unlimited
+	if limit > 0 {
+		remaining = int64(limit) - total
+	}
+	if remaining != 0 {
+		insert := `
+			INSERT INTO metadata_refresh_queue
+				(entity_type, entity_id, reason, priority, due_at, attempts, last_error, created_at)
+			SELECT ?, m.album_id, ?, ?, ?, 0, '', ?
+			FROM album_metadata m
+			WHERE m.refresh_status = ?
+			  AND NOT EXISTS (
+				SELECT 1 FROM metadata_refresh_queue q
+				WHERE q.entity_type = ? AND q.entity_id = m.album_id)`
+		insertArgs := []any{
+			string(catalog.EntityAlbum), catalog.ReasonManual, catalog.PriorityHigh,
+			nowStr, nowStr,
+			string(catalog.StatusFailed), string(catalog.EntityAlbum),
+		}
+		if remaining > 0 {
+			insert += "\n\t\t\tLIMIT ?"
+			insertArgs = append(insertArgs, remaining)
+		}
+		res2, err := tx.ExecContext(ctx, insert, insertArgs...)
+		if err != nil {
+			return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums insert: %w", err)
+		}
+		n2, err := res2.RowsAffected()
+		if err != nil {
+			return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums inserted: %w", err)
+		}
+		total += n2
+	}
+
+	if err := tx.Commit(); err != nil {
+		return 0, fmt.Errorf("catalog sqlite: re-arm terminal albums commit: %w", err)
+	}
+	return int(total), nil
+}

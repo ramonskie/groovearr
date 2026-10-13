@@ -74,3 +74,30 @@ func TestEnqueueNilServiceIsNoop(t *testing.T) {
 		t.Fatalf("nil service should be a no-op, got %v", err)
 	}
 }
+
+// TestService_ReArmTerminalAlbums covers the engine wrapper: it forwards the
+// caller's limit and its injected clock to the store, and a nil service is a
+// clear error rather than a panic.
+func TestService_ReArmTerminalAlbums(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(store, &fakeLibrary{}, Options{})
+
+	n, err := svc.ReArmTerminalAlbums(context.Background(), 7)
+	if err != nil {
+		t.Fatalf("re-arm: %v", err)
+	}
+	if n != 0 {
+		t.Errorf("re-armed = %d, want 0 (no terminal albums seeded)", n)
+	}
+	if len(store.rearms) != 1 {
+		t.Fatalf("store rearm calls = %d, want 1", len(store.rearms))
+	}
+	if got := store.rearms[0]; got.limit != 7 || !got.now.Equal(fixedNow) {
+		t.Errorf("re-arm call = %+v, want limit 7 and now %v", got, fixedNow)
+	}
+
+	var nilSvc *Service
+	if _, err := nilSvc.ReArmTerminalAlbums(context.Background(), 0); err == nil {
+		t.Error("nil service must return an error, not panic")
+	}
+}

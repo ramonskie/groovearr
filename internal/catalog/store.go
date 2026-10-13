@@ -92,4 +92,12 @@ type RefreshQueue interface {
 	BumpRefreshPriority(ctx context.Context, entityType EntityType, entityID int64, priority int) error
 	// CountQueuedRefresh returns how many items are currently queued.
 	CountQueuedRefresh(ctx context.Context) (int, error)
+	// ReArmTerminalAlbums makes every terminal (unmatched/failed) album due for a
+	// refresh so the engine re-searches it, bypassing the terminal parks (the
+	// 90-day UnmatchedRetry due_at and the failed-album row removal). It is the
+	// explicit, user-triggered counterpart to those parks: a parked unmatched row
+	// is moved to due-now, and a failed album whose row was removed gets a fresh
+	// one. Non-terminal albums are never touched. limit caps the rows (limit <= 0
+	// means no cap). Returns the number of albums re-armed.
+	ReArmTerminalAlbums(ctx context.Context, now time.Time, limit int) (int, error)
 }

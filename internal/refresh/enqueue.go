@@ -2,6 +2,7 @@ package refresh
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	"github.com/ramonskie/groovearr/internal/catalog"
@@ -53,4 +54,21 @@ func (s *Service) enqueue(ctx context.Context, entityType catalog.EntityType, en
 		return fmt.Errorf("refresh: enqueue %s %d: %w", entityType, entityID, err)
 	}
 	return nil
+}
+
+// ReArmTerminalAlbums makes every terminal (unmatched/failed) album due for a
+// refresh so the engine re-searches it on the next drain, bypassing the terminal
+// parks — the 90-day UnmatchedRetry due_at (catalog.UnmatchedRetry) and the
+// failed-album row removal. It is the explicit, user-triggered counterpart to
+// those parks: the way to re-attempt the backlog after a matcher improvement
+// without waiting out the window. limit caps how many albums are re-armed
+// (0 = all). Returns the number of albums re-armed.
+//
+// Declared on the engine (not on the job) so provider-adjacent queue policy
+// stays in this package: the job is a thin trigger, this is the rule.
+func (s *Service) ReArmTerminalAlbums(ctx context.Context, limit int) (int, error) {
+	if s == nil || s.store == nil {
+		return 0, errors.New("refresh: no store")
+	}
+	return s.store.ReArmTerminalAlbums(ctx, s.now(), limit)
 }

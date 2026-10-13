@@ -8,6 +8,7 @@ import {
   startOrganizeJob,
   startDuplicatesJob,
   startWarmLibraryJob,
+  startRecheckUnmatchedJob,
   cancelJob,
 } from "../api/client";
 
@@ -237,6 +238,42 @@ export function useStartWarmLibraryJob() {
     onError: (err) => {
       toast.error(
         `Failed to start metadata warm: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      );
+    },
+  });
+}
+
+/**
+ * Starts the explicit recheck of parked unmatched albums, then refreshes the
+ * catalog status so the "due now" count reflects the newly re-armed rows.
+ */
+export function useStartRecheckUnmatchedJob() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: startRecheckUnmatchedJob,
+    onSuccess: ({ job, started }) => {
+      queryClient.setQueryData(["jobs", "current"], job);
+      if (!started) return; // job already running
+      // Re-armed rows become due immediately, so re-read the card at once.
+      queryClient.invalidateQueries({ queryKey: ["catalog", "status"] });
+      if (job.state === "running") {
+        toast.info("Rechecking unmatched albums");
+        return;
+      }
+      // The pass is fast and usually finishes within the POST round-trip.
+      if (job.state === "completed") {
+        toast.success(job.message || "Unmatched albums re-armed");
+      } else if (job.state === "failed") {
+        toast.error(`Job failed: ${job.error ?? "unknown error"}`);
+      } else if (job.state === "cancelled") {
+        toast.info("Job cancelled");
+      }
+    },
+    onError: (err) => {
+      toast.error(
+        `Failed to recheck unmatched albums: ${
           err instanceof Error ? err.message : "Unknown error"
         }`,
       );

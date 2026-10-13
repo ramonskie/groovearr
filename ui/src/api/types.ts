@@ -719,7 +719,15 @@ export interface TrackingSearchResult {
 export type JobState = "idle" | "running" | "completed" | "failed" | "cancelled";
 
 export interface Job {
-  type: "scan" | "enrich" | "organize" | "duplicates" | "sync" | "warm-library" | "tracked-refresh";
+  type:
+    | "scan"
+    | "enrich"
+    | "organize"
+    | "duplicates"
+    | "sync"
+    | "warm-library"
+    | "recheck-unmatched"
+    | "tracked-refresh";
   state: JobState;
   progress: number; // 0-100
   message?: string;

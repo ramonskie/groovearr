@@ -65,6 +65,16 @@ func (s *Server) handleJobWarmLibrary(w http.ResponseWriter, r *http.Request) {
 	s.startJob(w, "warm-library", s.runners.WarmLibrary())
 }
 
+// handleJobRecheckUnmatched starts the explicit recheck of parked unmatched
+// albums: it re-arms their queue rows to "due now" so the background refresh
+// engine re-searches them with the current matcher, without waiting out the
+// 90-day UnmatchedRetry park. It is fast (no provider I/O in the request) — the
+// engine does the paced work on its next drain. Thin HTTP wrapper like the
+// other job handlers.
+func (s *Server) handleJobRecheckUnmatched(w http.ResponseWriter, r *http.Request) {
+	s.startJob(w, "recheck-unmatched", s.runners.RecheckUnmatched())
+}
+
 // handleJobCancel requests cancellation of the running job.
 func (s *Server) handleJobCancel(w http.ResponseWriter, r *http.Request) {
 	s.jobs.Cancel()

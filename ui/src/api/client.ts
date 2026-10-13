@@ -377,11 +377,23 @@ export function startWarmLibraryJob(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/jobs/warm-library", { method: "POST" });
 }
 
+/**
+ * Starts the explicit recheck of parked unmatched albums. Re-arms their queue
+ * rows to due-now so the background refresh engine re-searches them with the
+ * current matcher, bypassing the 90-day retry park. Fast — no provider I/O in
+ * the request; the engine does the paced work on its next drain.
+ */
+export function startRecheckUnmatchedJob(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/jobs/recheck-unmatched", {
+    method: "POST",
+  });
+}
 
 /** Build version stamped into the binary, shown in the sidebar. */
 export function getVersion(): Promise<VersionInfo> {
   return request<VersionInfo>("/api/version");
 }
+
 /** Read-only snapshot of the materialized catalog and its refresh engine. */
 export function getCatalogStatus(): Promise<CatalogStatus> {
   return request<CatalogStatus>("/api/catalog/status");

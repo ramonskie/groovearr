@@ -369,3 +369,112 @@ func TestClaimDueRefreshLimit(t *testing.T) {
 		t.Errorf("limit 0 = %v, want empty non-nil", got)
 	}
 }
+
+// TestStore_ReArmTerminalAlbums covers the explicit override of the terminal
+// parks: parked unmatched rows are moved to due-now, a failed album whose queue
+// row was deleted by the terminal transition gets a fresh one, a fresh album is
+// untouched, and limit caps the rows touched.
+func TestStore_ReArmTerminalAlbums(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	now := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	parked := now.Add(catalog.UnmatchedRetry)
+
+	artistID := insertArtist(t, db, "Aphex Twin")
+
+	albumWithStatus := func(title string, status catalog.RefreshStatus) int64 {
+		albumID := insertAlbum(t, db, artistID, title)
+		if err := s.UpsertAlbumMetadata(ctx, catalog.AlbumMetadata{
+			AlbumID:       albumID,
+			RefreshStatus: status,
+		}); err != nil {
+			t.Fatalf("upsert metadata %q: %v", title, err)
+		}
+		return albumID
+	}
+	park := func(albumID int64) {
+		enqueue(t, s, catalog.RefreshItem{
+			EntityType: catalog.EntityAlbum,
+			EntityID:   albumID,
+			Priority:   catalog.PriorityDefault,
+			DueAt:      parked,
+		})
+	}
+
+	unmatched1 := albumWithStatus("Drukqs", catalog.StatusUnmatched)
+	unmatched2 := albumWithStatus("Richard D. James Album", catalog.StatusUnmatched)
+	// A failed album has NO queue row: the terminal transition deletes it
+	// (retryOrFail → FinishRefresh). It must still be recoverable.
+	failed := albumWithStatus("Selected Ambient Works", catalog.StatusFailed)
+	fresh := albumWithStatus("Fresh Album", catalog.StatusFresh)
+
+	park(unmatched1)
+	park(unmatched2)
+	park(fresh)
+
+	n, err := s.ReArmTerminalAlbums(ctx, now, 0)
+	if err != nil {
+		t.Fatalf("re-arm: %v", err)
+	}
+	if n != 3 {
+		t.Fatalf("re-armed = %d, want 3 (2 unmatched rows + 1 failed insert)", n)
+	}
+
+	// The failed album now has a row; the fresh album stays scheduled.
+	st, err := s.QueueStats(ctx, now)
+	if err != nil {
+		t.Fatalf("queue stats: %v", err)
+	}
+	if st.DueNow != 3 {
+		t.Errorf("DueNow = %d, want 3", st.DueNow)
+	}
+	if st.Scheduled != 1 {
+		t.Errorf("Scheduled = %d, want 1 (the fresh album)", st.Scheduled)
+	}
+
+	due, err := s.ClaimDueRefresh(ctx, now, 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	duePriority := map[int64]int{}
+	for _, it := range due {
+		duePriority[it.EntityID] = it.Priority
+	}
+	for _, id := range []int64{unmatched1, unmatched2, failed} {
+		p, ok := duePriority[id]
+		if !ok {
+			t.Errorf("terminal album %d not due after re-arm", id)
+			continue
+		}
+		if p != catalog.PriorityHigh {
+			t.Errorf("album %d priority = %d, want %d", id, p, catalog.PriorityHigh)
+		}
+	}
+	if _, ok := duePriority[fresh]; ok {
+		t.Errorf("fresh album %d must not be re-armed", fresh)
+	}
+
+	// limit must cap the rows: re-park all three terminal albums, then re-arm one
+	// and confirm exactly one row moved to due-now.
+	for _, id := range []int64{unmatched1, unmatched2, failed} {
+		park(id)
+	}
+	before, err := s.QueueStats(ctx, now)
+	if err != nil {
+		t.Fatalf("queue stats before limit: %v", err)
+	}
+	n, err = s.ReArmTerminalAlbums(ctx, now, 1)
+	if err != nil {
+		t.Fatalf("re-arm limit: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("re-armed with limit 1 = %d, want 1", n)
+	}
+	after, err := s.QueueStats(ctx, now)
+	if err != nil {
+		t.Fatalf("queue stats after limit: %v", err)
+	}
+	if got := after.DueNow - before.DueNow; got != 1 {
+		t.Errorf("due-now delta = %d, want 1 (LIMIT must cap the rows)", got)
+	}
+}
