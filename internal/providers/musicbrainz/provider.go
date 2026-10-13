@@ -52,6 +52,21 @@ func (c *Client) DisplayName() string       { return displayName }
 func (c *Client) IsConfigured() bool        { return true } // no credentials required
 func (c *Client) IsMetadataAvailable() bool { return true }
 
+// logOpError logs an operation failure, choosing the level from the error. A
+// rate-limit error (metadata.ErrRateLimited) is a routine, self-healing
+// transient — the shared per-provider cooldown governs the retry — so it is
+// logged at WARN to keep ERROR meaningful for real faults. Any other error stays
+// at ERROR. Mirrors the API client's helper for the provider's own operations.
+func (c *Client) logOpError(msg string, args ...any) {
+	for _, a := range args {
+		if err, ok := a.(error); ok && errors.Is(err, metadata.ErrRateLimited) {
+			c.log.Warn(msg, args...)
+			return
+		}
+	}
+	c.log.Error(msg, args...)
+}
+
 // CapabilityStatus returns metadata + discovery status based on health check.
 func (c *Client) CapabilityStatus() map[string]string {
 	s := "configured"
@@ -67,7 +82,7 @@ func (c *Client) CheckConnection(ctx context.Context) error {
 	if err != nil {
 		c.connected = false
 		c.mu.Unlock()
-		c.log.Error("musicbrainz check connection failed", "error", err, "component", "musicbrainz")
+		c.logOpError("musicbrainz check connection failed", "error", err, "component", "musicbrainz")
 		if errors.Is(err, metadata.ErrRateLimited) {
 			return fmt.Errorf("musicbrainz: rate limited: %w", err)
 		}
@@ -92,7 +107,7 @@ func (c *Client) Connected() bool {
 func (c *Client) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
 	rg, err := c.api.SearchReleaseGroup(ctx, artist, album)
 	if err != nil {
-		c.log.Error("musicbrainz search cover failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz")
+		c.logOpError("musicbrainz search cover failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz")
 		return nil, err
 	}
 	if rg == nil {
@@ -350,7 +365,7 @@ func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]d
 		}
 		rg, err := c.api.SearchReleaseGroup(ctx, cand.artist, cand.title)
 		if err != nil {
-			c.log.Error("musicbrainz search albums failed", "error", err, "query", query, "component", "musicbrainz")
+			c.logOpError("musicbrainz search albums failed", "error", err, "query", query, "component", "musicbrainz")
 			return nil, err
 		}
 		if rg == nil || rg.MBID == "" || seen[rg.MBID] {
@@ -468,7 +483,7 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	}
 	releases, err := c.api.LookupReleaseGroup(ctx, providerAlbumID)
 	if err != nil {
-		c.log.Error("musicbrainz get album tracks release-group failed", "error", err, "releaseGroup", providerAlbumID, "component", "musicbrainz")
+		c.logOpError("musicbrainz get album tracks release-group failed", "error", err, "releaseGroup", providerAlbumID, "component", "musicbrainz")
 		return nil, fmt.Errorf("musicbrainz: release group %s: %w", providerAlbumID, err)
 	}
 	rep := representativeRelease(releases)
@@ -477,7 +492,7 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	}
 	info, err := c.api.LookupRelease(ctx, rep.ID)
 	if err != nil {
-		c.log.Error("musicbrainz get album tracks release failed", "error", err, "release", rep.ID, "component", "musicbrainz")
+		c.logOpError("musicbrainz get album tracks release failed", "error", err, "release", rep.ID, "component", "musicbrainz")
 		return nil, fmt.Errorf("musicbrainz: release %s: %w", rep.ID, err)
 	}
 	if info == nil {
@@ -510,7 +525,7 @@ func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz search artists failed", "error", err, "query", query, "component", "musicbrainz")
+		c.logOpError("musicbrainz search artists failed", "error", err, "query", query, "component", "musicbrainz")
 		return nil, err
 	}
 	if data == nil {
@@ -523,7 +538,7 @@ func (c *Client) SearchArtists(ctx context.Context, query string, limit int) ([]
 		} `json:"artists"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal search artists failed", "error", err, "component", "musicbrainz")
+		c.logOpError("musicbrainz unmarshal search artists failed", "error", err, "component", "musicbrainz")
 		return nil, err
 	}
 	out := make([]discovery.ArtistSummary, 0, len(resp.Artists))
@@ -553,7 +568,7 @@ func (c *Client) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz get artist albums failed", "error", err, "artist", providerArtistID, "component", "musicbrainz")
+		c.logOpError("musicbrainz get artist albums failed", "error", err, "artist", providerArtistID, "component", "musicbrainz")
 		return nil, err
 	}
 	if data == nil {
@@ -569,7 +584,7 @@ func (c *Client) GetArtistAlbums(ctx context.Context, providerArtistID string, l
 		} `json:"release-groups"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal get artist albums failed", "error", err, "component", "musicbrainz")
+		c.logOpError("musicbrainz unmarshal get artist albums failed", "error", err, "component", "musicbrainz")
 		return nil, err
 	}
 	out := make([]discovery.AlbumResult, 0, len(resp.ReleaseGroups))
@@ -737,7 +752,7 @@ func parseYear(date string) int {
 func (c *Client) enrichByRelease(ctx context.Context, releaseMBID string) (*metadata.TrackMetadata, error) {
 	info, err := c.api.LookupRelease(ctx, releaseMBID)
 	if err != nil {
-		c.log.Error("musicbrainz enrich by release failed", "error", err, "releaseMBID", releaseMBID, "component", "musicbrainz")
+		c.logOpError("musicbrainz enrich by release failed", "error", err, "releaseMBID", releaseMBID, "component", "musicbrainz")
 		return nil, err
 	}
 	if info == nil {

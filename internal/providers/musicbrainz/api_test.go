@@ -1,6 +1,7 @@
 package musicbrainz
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -730,4 +732,24 @@ func TestAPIClientRateLimitsConcurrentRequests(t *testing.T) {
 
 func itoa(n int) string {
 	return string(rune('0'+n%10)) + string(rune('0'+n/10%10))
+}
+
+// TestLogOpErrorLevel asserts a rate-limit error is downgraded to WARN while a
+// genuine fault stays ERROR — the level split that keeps the error log free of
+// routine, self-healing 503 noise.
+func TestLogOpErrorLevel(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewJSONHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	c := &APIClient{log: logger}
+
+	c.logOpError("rate limited op", "error", metadata.NewRateLimitError("musicbrainz", 0, "HTTP 503"))
+	if !strings.Contains(buf.String(), `"level":"WARN"`) {
+		t.Errorf("rate-limit log = %s, want WARN", buf.String())
+	}
+
+	buf.Reset()
+	c.logOpError("real fault", "error", errors.New("boom"))
+	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
+		t.Errorf("fault log = %s, want ERROR", buf.String())
+	}
 }

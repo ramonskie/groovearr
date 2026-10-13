@@ -3,6 +3,7 @@ package musicbrainz
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -110,7 +111,7 @@ func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -127,7 +128,7 @@ func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string
 		} `json:"release-groups"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if len(resp.ReleaseGroups) == 0 {
@@ -162,7 +163,7 @@ func (c *APIClient) SearchRecording(ctx context.Context, artist, title string) (
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz search recording failed", "error", err, "artist", artist, "title", title, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz search recording failed", "error", err, "artist", artist, "title", title, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -184,7 +185,7 @@ func (c *APIClient) SearchRecording(ctx context.Context, artist, title string) (
 		} `json:"recordings"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal search recording failed", "error", err, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal search recording failed", "error", err, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -261,7 +262,7 @@ func (c *APIClient) SearchArtist(ctx context.Context, name string) (*ArtistResul
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -277,7 +278,7 @@ func (c *APIClient) SearchArtist(ctx context.Context, name string) (*ArtistResul
 		} `json:"artists"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal search artist failed", "error", err, "artist", name, "component", "musicbrainz_api")
 		return nil, err
 	}
 	want := strutil.NormalizeName(name)
@@ -297,7 +298,7 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		"fmt": "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -341,7 +342,7 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		} `json:"genres"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal lookup release failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -432,7 +433,7 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 		"fmt": "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz lookup release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz lookup release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -450,7 +451,7 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal release group failed", "error", err, "mbid", rgMBID, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -478,7 +479,7 @@ func (c *APIClient) SearchReleasesByGroup(ctx context.Context, rgMBID string) ([
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.log.Error("musicbrainz search releases by group failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz search releases by group failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -494,7 +495,7 @@ func (c *APIClient) SearchReleasesByGroup(ctx context.Context, rgMBID string) ([
 		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.log.Error("musicbrainz unmarshal search releases failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal search releases failed", "error", err, "rgid", rgMBID, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -531,7 +532,7 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	u, err := url.Parse(c.baseURL)
 	if err != nil {
-		c.log.Error("musicbrainz URL parse failed", "error", err, "path", path, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz URL parse failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	u = u.JoinPath(path)
@@ -544,7 +545,7 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
-		c.log.Error("musicbrainz create request failed", "error", err, "path", path, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz create request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	req.Header.Set("User-Agent", c.userAgent)
@@ -552,14 +553,14 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	resp, err := c.httpClient.Do(req)
 	if err != nil {
-		c.log.Error("musicbrainz HTTP request failed", "error", err, "path", path, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz HTTP request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		c.log.Error("musicbrainz read response failed", "error", err, "path", path, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz read response failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 
@@ -573,11 +574,26 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 		return nil, metadata.NewRateLimitError("musicbrainz", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "HTTP 503")
 	}
 	if resp.StatusCode != http.StatusOK {
-		c.log.Error("musicbrainz non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "musicbrainz_api")
+		c.logOpError("musicbrainz non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "musicbrainz_api")
 		return nil, fmt.Errorf("musicbrainz: HTTP %d: %s", resp.StatusCode, string(body))
 	}
 
 	return json.RawMessage(body), nil
+}
+
+// logOpError logs an operation failure, choosing the level from the error. A
+// rate-limit error (metadata.ErrRateLimited) is a routine, self-healing
+// transient — the shared per-provider cooldown governs the retry — so it is
+// logged at WARN to keep ERROR meaningful for real faults. Any other error (a
+// transport, parse, or unexpected-status failure) stays at ERROR.
+func (c *APIClient) logOpError(msg string, args ...any) {
+	for _, a := range args {
+		if err, ok := a.(error); ok && errors.Is(err, metadata.ErrRateLimited) {
+			c.log.Warn(msg, args...)
+			return
+		}
+	}
+	c.log.Error(msg, args...)
 }
 
 // ─── Helpers ───────────────────────────────────────────────────────────
