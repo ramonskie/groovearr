@@ -18,7 +18,11 @@ if [ -n "${CHANGELOG_PREV:-}" ]; then
 else
   PREV="$(gh api "repos/${REPO}/releases/latest" --jq '.tag_name' 2>/dev/null || true)"
   if [ -z "$PREV" ] || [ "$PREV" = "$GITHUB_REF_NAME" ]; then
-    PREV="$(git rev-list --max-parents=0 HEAD)"
+    # The current tag already has a release (e.g. a workflow re-run). Fall back
+    # to the tag immediately before it — not the root commit, which would list
+    # the entire history.
+    PREV="$(git describe --tags --abbrev=0 "${GITHUB_REF_NAME}^" 2>/dev/null \
+      || git rev-list --max-parents=0 HEAD)"
   fi
 fi
 

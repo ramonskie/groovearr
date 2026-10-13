@@ -72,12 +72,19 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: ./.github/scripts/gen-changelog.sh /tmp/release-notes.md
 
-      - name: Create GitHub release
+      - name: Create or update GitHub release
         if: github.ref_type == 'tag'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
-            --title "Groovearr ${VERSION}" \
-            --notes-file /tmp/release-notes.md
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            echo "release ${GITHUB_REF_NAME} already exists — updating notes"
+            gh release edit "$GITHUB_REF_NAME" \
+              --title "Groovearr ${VERSION}" \
+              --notes-file /tmp/release-notes.md
+          else
+            gh release create "$GITHUB_REF_NAME" \
+              --title "Groovearr ${VERSION}" \
+              --notes-file /tmp/release-notes.md
+          fi
