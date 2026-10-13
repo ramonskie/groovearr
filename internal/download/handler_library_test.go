@@ -44,7 +44,7 @@ func TestLibraryImporterHandler_CreatesArtistAlbumTrack(t *testing.T) {
 	}
 
 	// Verify album was created.
-	albums, _ := libStore.SearchAlbums(context.Background(), "Test Album", 1)
+	albums, _ := libStore.SearchAlbums(context.Background(), "Test Album", 0, 1)
 	if len(albums) == 0 {
 		t.Fatal("album should be created")
 	}

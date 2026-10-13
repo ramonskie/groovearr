@@ -155,10 +155,10 @@ func (m *mockStore) SetArtistThumbURL(ctx context.Context, artistID int64, thumb
 }
 func (m *mockStore) UpsertAlbum(ctx context.Context, a *domain.Album) (int64, error) { return 0, nil }
 func (m *mockStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, error)   { return nil, nil }
-func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
+func (m *mockStore) GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
 	return nil, nil
 }
-func (m *mockStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
+func (m *mockStore) SearchAlbums(ctx context.Context, query string, offset, limit int) ([]domain.Album, error) {
 	return nil, nil
 }
 func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) { return 0, nil }
@@ -169,8 +169,16 @@ func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]doma
 func (m *mockStore) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error) {
 	return nil, nil
 }
-func (m *mockStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
-	return m.searchTracks, nil
+func (m *mockStore) SearchTracks(ctx context.Context, query string, offset, limit int) ([]domain.Track, error) {
+	tracks := m.searchTracks
+	if offset > len(tracks) {
+		offset = len(tracks)
+	}
+	tracks = tracks[offset:]
+	if limit > 0 && limit < len(tracks) {
+		tracks = tracks[:limit]
+	}
+	return tracks, nil
 }
 func (m *mockStore) GetTrackByFilePath(ctx context.Context, fp string) (*domain.Track, error) {
 	return nil, nil

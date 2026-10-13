@@ -79,16 +79,23 @@ func (m *mockLibStore) GetAlbum(ctx context.Context, id int64) (*domain.Album, e
 	return m.albums[id], nil
 }
 
-func (m *mockLibStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
+func (m *mockLibStore) GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
 	return nil, nil
 }
 
-func (m *mockLibStore) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
+func (m *mockLibStore) SearchAlbums(ctx context.Context, query string, offset, limit int) ([]domain.Album, error) {
 	var result []domain.Album
 	for _, a := range m.albums {
 		if a.Title == query || filepath.Base(a.Title) == query {
 			result = append(result, *a)
 		}
+	}
+	if offset > len(result) {
+		offset = len(result)
+	}
+	result = result[offset:]
+	if limit > 0 && limit < len(result) {
+		result = result[:limit]
 	}
 	return result, nil
 }
@@ -115,7 +122,7 @@ func (m *mockLibStore) GetTracksByArtist(ctx context.Context, artistID int64) ([
 	return nil, nil
 }
 
-func (m *mockLibStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
+func (m *mockLibStore) SearchTracks(ctx context.Context, query string, offset, limit int) ([]domain.Track, error) {
 	return nil, nil
 }
 
@@ -182,7 +189,7 @@ func (m *mockLibStore) ImportTrack(ctx context.Context, track *domain.Track, art
 		existingArtist, _ = m.GetArtistByName(ctx, artistName)
 	}
 	// Get or create album.
-	albums, _ := m.SearchAlbums(ctx, albumTitle, 10)
+	albums, _ := m.SearchAlbums(ctx, albumTitle, 0, 10)
 	var albumID int64
 	for _, al := range albums {
 		if al.Title == albumTitle && al.ArtistID == existingArtist.ID {
@@ -192,7 +199,7 @@ func (m *mockLibStore) ImportTrack(ctx context.Context, track *domain.Track, art
 	}
 	if albumID == 0 {
 		m.UpsertAlbum(ctx, &domain.Album{ArtistID: existingArtist.ID, Title: albumTitle, Year: albumYear, AlbumType: domain.AlbumTypeAlbum})
-		albums, _ = m.SearchAlbums(ctx, albumTitle, 10)
+		albums, _ = m.SearchAlbums(ctx, albumTitle, 0, 10)
 		for _, al := range albums {
 			if al.Title == albumTitle && al.ArtistID == existingArtist.ID {
 				albumID = al.ID

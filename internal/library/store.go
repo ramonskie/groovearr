@@ -7,6 +7,12 @@ import (
 	"github.com/ramonskie/groovearr/internal/domain"
 )
 
+// AllAlbumsLimit bounds album reads that must return an artist's complete
+// discography rather than one page (the organize and tracking flows). It is
+// far larger than any realistic discography, so the SQL LIMIT is a no-op;
+// UI-facing pagination uses parsePagination's 200-row default instead.
+const AllAlbumsLimit = 10000
+
 // Store is the interface for music library persistence.
 // Implementations: SQLite (current), potentially PostgreSQL in the future.
 type Store interface {
@@ -28,15 +34,15 @@ type Store interface {
 	// Albums.
 	UpsertAlbum(ctx context.Context, album *domain.Album) (int64, error)
 	GetAlbum(ctx context.Context, id int64) (*domain.Album, error)
-	GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error)
-	SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error)
+	GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error)
+	SearchAlbums(ctx context.Context, query string, offset, limit int) ([]domain.Album, error)
 
 	// Tracks.
 	UpsertTrack(ctx context.Context, track *domain.Track) (int64, error)
 	GetTrack(ctx context.Context, id int64) (*domain.Track, error)
 	GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error)
 	GetTracksByArtist(ctx context.Context, artistID int64) ([]domain.Track, error)
-	SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error)
+	SearchTracks(ctx context.Context, query string, offset, limit int) ([]domain.Track, error)
 	GetTrackByFilePath(ctx context.Context, filePath string) (*domain.Track, error)
 	GetTrackByISRC(ctx context.Context, isrc string) (*domain.Track, error)
 	DeleteTrack(ctx context.Context, id int64) error

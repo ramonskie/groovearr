@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useRef } from "react";
+import { useState, useCallback, useMemo, useRef, useEffect } from "react";
 import { useNavigate } from "react-router-dom";
 import { ArrowLeft, Music, Search, Disc3, Library } from "lucide-react";
 import { toast } from "sonner";
@@ -20,6 +20,12 @@ interface ArtistDetailViewProps {
   isLoadingArtist: boolean;
   isLoadingAlbums: boolean;
   isLoadingTracks: boolean;
+  /** Whether a further album page exists (infinite scroll). */
+  hasNextPage?: boolean;
+  /** True while the next album page is in flight. */
+  isFetchingNextPage?: boolean;
+  /** Load the next album page (`fetchNextPage`). */
+  onLoadMore?: () => void;
   onBack: () => void;
   onSelectAlbum: (albumId: number) => void;
 }
@@ -45,7 +51,15 @@ function formatSize(bytes?: number): string {
   return `${gb.toFixed(1)} GB`;
 }
 
-function AlbumCard({ album, onSelect }: { album: Album; onSelect: (id: number) => void }) {
+function AlbumCard({
+  album,
+  artistName,
+  onSelect,
+}: {
+  album: Album;
+  artistName?: string;
+  onSelect: (id: number) => void;
+}) {
   const [imgError, setImgError] = useState(false);
 
   return (
@@ -73,6 +87,11 @@ function AlbumCard({ album, onSelect }: { album: Album; onSelect: (id: number) =
         <p className="truncate text-sm font-medium text-white" title={album.title}>
           {album.title}
         </p>
+        {artistName && (
+          <p className="mt-0.5 truncate text-xs text-slate-400" title={artistName}>
+            {artistName}
+          </p>
+        )}
         {album.year && (
           <p className="mt-1 text-[11px] text-slate-500">{album.year}</p>
         )}
@@ -385,6 +404,45 @@ function formatDuration(ms: number): string {
   return `${m}:${s.toString().padStart(2, "0")}`;
 }
 
+/** Coarse render state for the artist album grid. */
+export type ArtistAlbumsRenderKind = "loading" | "empty" | "grid";
+
+export interface ArtistAlbumsRenderPlan {
+  kind: ArtistAlbumsRenderKind;
+  /** Render the infinite-scroll sentinel (only when a further page exists). */
+  showSentinel: boolean;
+  /** Show a spinner inside the sentinel while the next page is in flight. */
+  showSentinelSpinner: boolean;
+}
+
+/**
+ * Pure mapping from the album infinite-query surface to the grid render state
+ * (AGENTS §4 — the component switches on this). Extracted so it can be
+ * unit-tested without a DOM renderer.
+ *
+ * The sentinel is gated on `hasNextPage`; the spinner only appears while the
+ * next page is actually fetching.
+ */
+export function artistAlbumsRenderPlan(input: {
+  isLoading: boolean;
+  albums: Album[];
+  hasNextPage?: boolean;
+  isFetchingNextPage?: boolean;
+}): ArtistAlbumsRenderPlan {
+  if (input.isLoading) {
+    return { kind: "loading", showSentinel: false, showSentinelSpinner: false };
+  }
+  if (input.albums.length === 0) {
+    return { kind: "empty", showSentinel: false, showSentinelSpinner: false };
+  }
+  const showSentinel = input.hasNextPage === true;
+  return {
+    kind: "grid",
+    showSentinel,
+    showSentinelSpinner: showSentinel && input.isFetchingNextPage === true,
+  };
+}
+
 export default function ArtistDetailView({
   artist,
   albums,
@@ -392,10 +450,61 @@ export default function ArtistDetailView({
   isLoadingArtist,
   isLoadingAlbums,
   isLoadingTracks,
+  hasNextPage,
+  isFetchingNextPage,
+  onLoadMore,
   onBack,
   onSelectAlbum,
 }: ArtistDetailViewProps) {
   const albumMap = buildAlbumMap(albums);
+  const albumsPlan = artistAlbumsRenderPlan({
+    isLoading: isLoadingAlbums,
+    albums,
+    hasNextPage,
+    isFetchingNextPage,
+  });
+
+  // Infinite scroll: load the next album page when the sentinel scrolls into
+  // view. Mirrors ArtistsSection — the observer is created once and reads live
+  // values through refs, so a finished page load never re-triggers a chain of
+  // loads while the sentinel stays in view; the next load waits for a new
+  // scroll. `isLoadingAlbums` is the equivalent of ArtistsSection's `isError`
+  // rebuild trigger (the state that governs whether the sentinel exists).
+  const sentinelRef = useRef<HTMLDivElement | null>(null);
+  const observerRef = useRef<IntersectionObserver | null>(null);
+  const onLoadMoreRef = useRef(onLoadMore);
+  onLoadMoreRef.current = onLoadMore;
+  const hasNextPageRef = useRef(hasNextPage);
+  hasNextPageRef.current = hasNextPage;
+  const fetchingRef = useRef(false);
+
+  useEffect(() => {
+    const el = sentinelRef.current;
+    if (!el) return;
+    const observer = new IntersectionObserver(
+      (entries) => {
+        if (
+          entries[0]?.isIntersecting &&
+          hasNextPageRef.current &&
+          !fetchingRef.current &&
+          onLoadMoreRef.current
+        ) {
+          fetchingRef.current = true;
+          // Swallow the rejection — fetchNextPage failure is surfaced via the
+          // query's error state; unhandled rejections would spam the console.
+          Promise.resolve(onLoadMoreRef.current())
+            .catch(() => {})
+            .finally(() => {
+              fetchingRef.current = false;
+            });
+        }
+      },
+      { rootMargin: "300px" },
+    );
+    observer.observe(el);
+    observerRef.current = observer;
+    return () => observer.disconnect();
+  }, [isLoadingAlbums, hasNextPage]);
 
   return (
     <div className="flex flex-col gap-0">
@@ -430,18 +539,34 @@ export default function ArtistDetailView({
         <h2 className="mb-3 text-sm font-semibold uppercase tracking-wider text-slate-400">
           Albums
         </h2>
-        {isLoadingAlbums ? (
+        {albumsPlan.kind === "loading" ? (
           <div className="flex items-center justify-center py-8">
             <Spinner size="md" />
           </div>
-        ) : albums.length === 0 ? (
+        ) : albumsPlan.kind === "empty" ? (
           <p className="py-8 text-center text-sm text-slate-500">No albums found.</p>
         ) : (
-          <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
-            {albums.map((album) => (
-              <AlbumCard key={album.id} album={album} onSelect={onSelectAlbum} />
-            ))}
-          </div>
+          <>
+            <div className="grid grid-cols-[repeat(auto-fill,minmax(160px,1fr))] gap-4">
+              {albums.map((album) => (
+                <AlbumCard
+                  key={album.id}
+                  album={album}
+                  artistName={artist?.name}
+                  onSelect={onSelectAlbum}
+                />
+              ))}
+            </div>
+            {albumsPlan.showSentinel && (
+              <div
+                ref={sentinelRef}
+                data-testid="albums-sentinel"
+                className="flex items-center justify-center py-6"
+              >
+                {albumsPlan.showSentinelSpinner ? <Spinner size="sm" /> : null}
+              </div>
+            )}
+          </>
         )}
       </section>
 

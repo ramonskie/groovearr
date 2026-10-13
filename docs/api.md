@@ -597,17 +597,55 @@ Stream a single library track file. Available to any authenticated user
 
 List/search library artists.
 
-**Query params**: `q`, `offset`, `limit`
+**Query params**: `q` (search), `offset` (default 0), `limit` (default 200, max 1000)
 
 **Response** `200`: `[Artist, ...]`
+
+### `GET /api/library/artists/{artistID}/albums`
+
+List one artist's albums, **paginated**.
+
+**Path**: `artistID` — integer library artist ID
+
+**Query params**: `offset` (default 0), `limit` (default 200, max 1000). `q` is
+accepted for shape-compatibility but ignored — the artist scopes the result.
+
+**Response** `200`: `[Album, ...]`
+
+The artist album grid loads **progressively**: the SPA issues offset/limit pages
+(50 visible rows per page) as the user scrolls and appends them, so this endpoint
+is pagination-critical. For a cross-library album search use
+`GET /api/library/albums`.
 
 ### `GET /api/library/albums`
 
 List/search library albums.
 
-**Query params**: `q`, `offset`, `limit`
+**Query params**: `q` (search), `offset` (default 0), `limit` (default 200, max 1000)
 
 **Response** `200`: `[Album, ...]`
+
+This is the global, cross-library album list. It is **not surfaced in the UI** —
+the SPA only ever shows an artist's albums through
+`GET /api/library/artists/{artistID}/albums` (see above), so this endpoint is used
+by API clients and diagnostics only.
+
+### `GET /api/library/albums/{albumID}`
+
+Return one library album by ID.
+
+**Path**: `albumID` — integer library album ID
+
+**Response** `200`: `Album`
+
+Resolves a single album independently of the paginated artist-album listing, so
+the library page's deep link `?artist=X&album=Y` shows the album even when it is
+past the first loaded page of the artist's album grid.
+
+**Errors**:
+- `400` `{"error": "invalid album ID"}` — non-numeric `albumID`.
+- `404` `{"error": "album not found"}` — unknown `albumID`.
+- `500` — the store could not be read.
 
 ### `GET /api/library/albums/{albumID}/download`
 
@@ -655,6 +693,9 @@ Served from the durable metadata catalog — a materialized (warm) album is a pu
 SQLite read with **zero provider calls**. The first open of an album that has no
 materialized tracklist triggers one bounded, deduplicated cold fetch (Option A);
 if that does not resolve, the response falls back to the local library tracks.
+An album parked `unmatched`/`failed` before its long retry window is the one
+exception: it is served from the persisted metadata row with local library tracks
+and **no** provider call (see below).
 
 **Path**: `albumID` — integer library album ID
 
@@ -676,7 +717,9 @@ if that does not resolve, the response falls back to the local library tracks.
       "format": "flac"
     }
   ],
-  "metadata_pending": false
+  "metadata_pending": false,
+  "metadata_status": "fresh",
+  "metadata_terminal": false
 }
 ```
 
@@ -687,14 +730,27 @@ if that does not resolve, the response falls back to the local library tracks.
   are omitted.
 - `metadata_pending` — `false` for a warm read; `true` when the provider
   tracklist is not yet materialized (cold, or a cold fetch that timed out,
-  errored, or found no match). When `true`, `tracks` carries the local library
-  tracks as a best-effort fallback and `provider` / `provider_album_id` may be
-  empty.
+  errored, or found no match). A **terminal** album also reports
+  `metadata_pending=true` because its tracklist never materialized, so this flag
+  alone must not be read as "still working" — use `metadata_terminal` to tell a
+  cold/in-flight album apart from a parked one. When `true`, `tracks` carries the
+  local library tracks as a best-effort fallback and `provider` /
+  `provider_album_id` may be empty.
+- `metadata_status` — the album's persisted catalog refresh status:
+  `pending` | `fresh` | `stale` | `unmatched` | `failed` (empty string when the
+  album has no catalog metadata row yet).
+- `metadata_terminal` — `true` when `metadata_status` is `unmatched` or `failed`:
+  a terminal match failure that will not materialize again until its long retry
+  (90d, `catalog.UnmatchedRetry`) elapses. It is `false` for a cold/pending album
+  (still materializing) and for a warm `fresh`/`stale` read. The UI uses it to
+  render an accurate parked state instead of an indefinite "fetching" spinner.
 - A matched album is served from the catalog **even when its metadata is older
   than the soft TTL** (`catalog.album_refresh_days`, default 30d): the stale rows
   are returned immediately and a low-priority refresh is enqueued behind the
   response. An album parked `unmatched`/`failed` before its long retry elapses is
-  also served from the catalog — never re-searched on open.
+  also served without a provider call — its persisted metadata row plus local
+  library tracks, never re-searched on open, and **not** re-enqueued (the parked
+  queue row keeps its own 90-day `due_at`).
 
 **Errors**:
 - `400` — invalid album ID.

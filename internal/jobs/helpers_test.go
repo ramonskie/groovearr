@@ -28,8 +28,16 @@ func (s *organizeRunnerStore) ListArtists(ctx context.Context, offset, limit int
 	return s.artists[offset:end], nil
 }
 
-func (s *organizeRunnerStore) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
-	return s.albums[artistID], nil
+func (s *organizeRunnerStore) GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
+	albums := s.albums[artistID]
+	if offset > len(albums) {
+		offset = len(albums)
+	}
+	albums = albums[offset:]
+	if limit > 0 && limit < len(albums) {
+		albums = albums[:limit]
+	}
+	return albums, nil
 }
 
 func (s *organizeRunnerStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {

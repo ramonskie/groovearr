@@ -825,7 +825,7 @@ func (s *Service) findInLibrary(ctx context.Context, info TrackInfo) int64 {
 	if idx := strings.IndexAny(query, "(-["); idx > 0 {
 		query = strings.TrimSpace(query[:idx])
 	}
-	tracks, err := s.store.SearchTracks(ctx, query, 20)
+	tracks, err := s.store.SearchTracks(ctx, query, 0, 20)
 	if err != nil {
 		return 0
 	}

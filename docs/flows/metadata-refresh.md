@@ -29,7 +29,7 @@ goes through the single app-wide `metadata.ProviderCooldown` bucket (AGENTS §1,
 |---|---|---|---|
 | 0 — lazy cold | First open of an album that is *pending* (no metadata row, or a cold fetch that has not resolved) | One **synchronous**, deduplicated, bounded fetch (`ColdFetcher` → `Service.RefreshAlbum`), then materialized forever | Implemented; gated by `catalog.enabled` |
 | 1 — lazy stale | Warm album whose metadata is older than the soft TTL (default 30d) | Serve materialized rows, best-effort enqueue a low-priority refresh behind the response | Implemented (`Server.SetAlbumStaleAfter` ← `Catalog.AlbumStaleAfter()`; the read path enqueues `ReasonStale`) |
-| 2 — event | Album import; explicit user refresh; a read that finds the album pending/terminal | Enqueue a row on `metadata_refresh_queue` | Implemented (import = event, manual endpoint = manual, pending download-missing = cold) |
+| 2 — event | Album import; explicit user refresh; a stale warm read | Enqueue a row on `metadata_refresh_queue` | Implemented (import = event, manual endpoint = manual, stale warm read = stale, pending download-missing = cold) |
 | 3 — bulk | Opt-in "warm library" job | Bounded, resumable pass over albums that need warming | Implemented, default off |
 
 **Why no sweep:** a periodic full-library pass would issue one search per album
@@ -61,13 +61,13 @@ meta         = catalog.GetAlbumMetadata(albumID)    [SQLite only]
     |       |                                                                   |
     |       |  if isMaterializedStatus(meta) && metadata older than soft TTL:   |
     |       |     enqueueRefresh(ReasonStale, PriorityLow)   [behind response]  |
-    |       +-> response metadata_pending = false                               |
+    |       +-> response metadata_pending = false; metadata_terminal = false    |
     |
     +-- fresh matched-empty (StatusFresh, 0 rows) -> WARM, empty tracks list
     |
     +-- terminal (unmatched|failed) AND !terminalRetryElapsed -> local pending
-    |       |  enqueueRefresh(ReasonStale, PriorityLow)
-    |       +-> local tracks, metadata_pending = true
+    |       |  no re-search, no re-enqueue (parked queue row keeps its due_at)
+    |       +-> local tracks, metadata_pending = true, metadata_terminal = true
     |
     +-- pending / no metadata row -> COLD path (chart 2)
 ```
@@ -76,7 +76,10 @@ meta         = catalog.GetAlbumMetadata(albumID)    [SQLite only]
 rows is warm, not cold**, and is never re-fetched on open. `terminalRetryElapsed`
 compares the terminal row's refresh/update time against `catalog.UnmatchedRetry`
 (90d), so opening an `unmatched`/`failed` album inside the window does not
-re-search the provider.
+re-search the provider. That terminal-parked branch deliberately does **not**
+enqueue: the parked `metadata_refresh_queue` row already carries its 90-day
+`due_at`, and re-arming it here would let the engine re-search the provider within
+one interval (code: `terminalRetryParked` / `buildAlbumDiscovery`).
 
 `MergeTracksScoped` is a pure function (`internal/catalog/merge.go`): no IO, no
 globals. Local tracks are indexed once by ISRC (matched against the **artist-wide**
@@ -130,9 +133,10 @@ Notes (code-verified):
   touching a provider.
 - The pending cold open itself does **not** enqueue anything. (A *terminal* album
   opened before its retry is the different branch in chart 1: it serves local
-  tracks with `metadata_pending=true` and enqueues `ReasonStale`.) If the cold
-  fetch does not match, the album stays cold until the manual endpoint (chart 4)
-  or the bulk pass (chart 5) warms it.
+  tracks with `metadata_pending=true` / `metadata_terminal=true` and, likewise,
+  does **not** re-enqueue — the parked queue row keeps its 90-day `due_at`.) If
+  the cold fetch does not match, the album stays cold until the manual endpoint
+  (chart 4) or the bulk pass (chart 5) warms it.
 
 ## Chart 3 — Refresh Engine Loop
 
@@ -179,7 +183,21 @@ providers()                         live closure; empty -> ErrNoProviders
   | 2. else: resolve local artist name + album title
   | 3. query = "artist title"; for each provider (skip cooling):
   |       searchAlbums(query, SearchLimit) -> bestMatch
-  |          (exact case-insensitive artist+title, then title-only)
+  |          (bestMatch returns the FIRST acceptable match in that provider's
+  |           results — there is no cross-provider ranking. normalizeTitle drops
+  |           a DELIMITED trailing same-content edition/format suffix — markers
+  |           {deluxe, edition, expanded, anniversary, remaster, remastered,
+  |           bonus, explicit, clean} plus bare years — then normalizes case,
+  |           quotes, brackets and punctuation, then drops a `feat.` credit. A
+  |           suffix is dropped only when delimited (a trailing `(...)`/`[...]`
+  |           group, or after a dash/colon), so "New Edition", "First Edition"
+  |           and "The Single" are preserved. A same-title candidate is accepted
+  |           when its artist is equal, contains the library artist or vice-versa
+  |           (whole-token), or shares a significant token (>=3 chars) — so
+  |           collab credits ("Artist A" vs "Artist A & Artist B" / `feat.`)
+  |           match while a genuinely different artist is rejected; a title-only
+  |           match is also accepted when the library artist is unknown/empty or
+  |           the candidate omits the artist.)
   |       fetchTracks -> materialize -> Matched
   |
   + 4. classify no-match:
@@ -216,7 +234,7 @@ album import (post-download)             AlbumImportHandler.enqueueAlbumRefresh 
   internal/download/handler_album_import.go   (best-effort; 5s timeout)
 manual endpoint                          handleLibraryAlbumRefresh        manual / high
   POST /api/library/albums/{albumID}/refresh    -> EnqueueAlbum
-warm read (stale or terminal)            buildAlbumDiscovery -> enqueueStaleRefresh   stale / low
+warm read (stale)                        buildAlbumDiscovery -> enqueueStaleRefresh   stale / low
   internal/api/handlers_library.go
 download-missing on a pending album      handleLibraryAlbumDownloadMissing -> enqueueRefresh   cold / low
   POST /api/library/albums/{albumID}/download-missing

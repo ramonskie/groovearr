@@ -53,10 +53,35 @@ function formatDuration(ms: number): string {
  *
  * - `spinner` — cold open: no materialized data yet (full-screen spinner).
  * - `error`   — hard failure with nothing local to fall back to.
- * - `content` — materialized tracks, or a partial local fallback while the
- *               provider tracklist is still materializing.
+ * - `content` — materialized tracks, a partial local fallback while the
+ *               provider tracklist is still materializing, or a terminal album
+ *               (no match / failed) showing an accurate message.
  */
 export type AlbumDetailRenderKind = "spinner" | "error" | "content";
+
+/** Why a terminal album will never materialize a provider tracklist. */
+export type AlbumDetailTerminalReason = "unmatched" | "failed" | "unknown";
+
+/**
+ * The catalog `metadata_status` maps to a stable, user-facing explanation.
+ * Kept here (not in the hook) so the copy is testable without a DOM.
+ */
+const TERMINAL_MESSAGES: Record<AlbumDetailTerminalReason, string> = {
+  unmatched: "No provider match found",
+  failed: "Metadata refresh failed",
+  unknown: "Full tracklist unavailable",
+};
+
+/**
+ * The coarse view state plus the raw catalog flags the discovery endpoint
+ * carries. `metadata_terminal` is honoured directly (not only through the
+ * derived `status`) so the plan stays correct for a caller that still holds the
+ * raw payload; `metadata_status` supplies the terminal reason.
+ */
+export type AlbumDetailRenderInput = AlbumDiscoveryViewState & {
+  metadata_terminal?: boolean;
+  metadata_status?: string;
+};
 
 export interface AlbumDetailRenderPlan {
   kind: AlbumDetailRenderKind;
@@ -64,30 +89,76 @@ export interface AlbumDetailRenderPlan {
   showPendingIndicator: boolean;
   /** No tracks to show (used for the empty-state message). */
   showEmptyTracks: boolean;
+  /** The album is parked (no match / failed) — never spins, never polls. */
+  isTerminal: boolean;
+  /** Machine-readable terminal reason; undefined unless `isTerminal`. */
+  terminalReason?: AlbumDetailTerminalReason;
+  /** User-facing terminal explanation; undefined unless `isTerminal`. */
+  terminalMessage?: string;
+}
+
+/** Normalises the raw catalog status to a known terminal reason. */
+function terminalReasonFromStatus(
+  status?: string,
+): AlbumDetailTerminalReason {
+  switch (status?.toLowerCase()) {
+    case "unmatched":
+      return "unmatched";
+    case "failed":
+      return "failed";
+    default:
+      return "unknown";
+  }
 }
 
 /**
  * Pure mapping from the discovery view state to the render plan. Extracted from
- * the component so the warm/cold/pending/error-fallback decisions can be
- * unit-tested without a DOM (this repo's vitest has no renderer).
+ * the component so the warm/cold/pending/terminal/error-fallback decisions can
+ * be unit-tested without a DOM (this repo's vitest has no renderer).
  *
  * A timeout/error that still carries local tracks renders those tracks — the
- * hard error is reserved for the case where nothing came back at all.
+ * hard error is reserved for the case where nothing came back at all. A
+ * terminal album (unmatched/failed) renders its local fallback plus an accurate
+ * message: it is parked, so it must never show the perpetual pending indicator.
  */
 export function albumDetailRenderPlan(
-  view: AlbumDiscoveryViewState,
+  view: AlbumDetailRenderInput,
   options: { refreshing?: boolean } = {},
 ): AlbumDetailRenderPlan {
   const hasTracks = view.tracks.length > 0;
 
   // Cold open: no data yet → full-screen spinner.
   if (view.status === "loading") {
-    return { kind: "spinner", showPendingIndicator: false, showEmptyTracks: false };
+    return {
+      kind: "spinner",
+      showPendingIndicator: false,
+      showEmptyTracks: false,
+      isTerminal: false,
+    };
   }
 
   // Hard error only when the fallback has nothing to render.
   if (view.status === "error" && !hasTracks) {
-    return { kind: "error", showPendingIndicator: false, showEmptyTracks: false };
+    return {
+      kind: "error",
+      showPendingIndicator: false,
+      showEmptyTracks: false,
+      isTerminal: false,
+    };
+  }
+
+  // Terminal: no provider match / refresh failed. The tracklist will not
+  // materialize, so replace the perpetual spinner with an accurate message.
+  if (view.status === "terminal" || view.metadata_terminal === true) {
+    const terminalReason = terminalReasonFromStatus(view.metadata_status);
+    return {
+      kind: "content",
+      showPendingIndicator: false,
+      showEmptyTracks: !hasTracks,
+      isTerminal: true,
+      terminalReason,
+      terminalMessage: TERMINAL_MESSAGES[terminalReason],
+    };
   }
 
   return {
@@ -95,6 +166,7 @@ export function albumDetailRenderPlan(
     showPendingIndicator:
       view.metadataPending || view.status === "pending" || options.refreshing === true,
     showEmptyTracks: !hasTracks,
+    isTerminal: false,
   };
 }
 
@@ -200,7 +272,16 @@ export default function AlbumDetailView({
   const [batchError, setBatchError] = useState<string | null>(null);
 
   const view = discovery.view;
-  const plan = albumDetailRenderPlan(view, { refreshing: refreshMetadata.isPending });
+  // `view` only carries the coarse status; the terminal reason lives on the raw
+  // payload, so merge it in for the render plan's message selection.
+  const plan = albumDetailRenderPlan(
+    {
+      ...view,
+      metadata_terminal: discovery.data?.metadata_terminal,
+      metadata_status: discovery.data?.metadata_status,
+    },
+    { refreshing: refreshMetadata.isPending },
+  );
   const tracks = view.tracks;
   const undownloadedTracks = tracks.filter((t) => !t.downloaded);
   const downloadedCount = tracks.length - undownloadedTracks.length;
@@ -387,6 +468,15 @@ export default function AlbumDetailView({
               {refreshMetadata.isPending ? "Refreshing…" : "Refresh metadata"}
             </button>
           </div>
+          {plan.isTerminal && plan.terminalMessage && (
+            <div
+              className="mt-2 text-xs text-amber-400/90"
+              role="status"
+              aria-live="polite"
+            >
+              {plan.terminalMessage}
+            </div>
+          )}
           {plan.showPendingIndicator && (
             <div
               className="mt-2 flex items-center gap-2 text-xs text-slate-400"

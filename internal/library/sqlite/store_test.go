@@ -83,7 +83,7 @@ func TestStore_MergeArtists(t *testing.T) {
 		t.Fatal("removed artist still present")
 	}
 	// Its album now belongs to the surviving artist.
-	albums, err := store.GetAlbumsByArtist(ctx, keepID)
+	albums, err := store.GetAlbumsByArtist(ctx, keepID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ func TestStore_AlbumCRUD(t *testing.T) {
 	}
 
 	// GetByArtist.
-	albums, err := store.GetAlbumsByArtist(ctx, artistID)
+	albums, err := store.GetAlbumsByArtist(ctx, artistID, 0, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1181,7 +1181,7 @@ func TestStore_ReadPathsExposeAttribution(t *testing.T) {
 		t.Errorf("GetTracksByArtist attribution = (%d, %q), want (42, alice)", tr.AddedByUserID, tr.AddedByUsername)
 	}
 
-	if tracks, err := store.SearchTracks(ctx, "Stamped", 10); err != nil {
+	if tracks, err := store.SearchTracks(ctx, "Stamped", 0, 10); err != nil {
 		t.Fatalf("SearchTracks: %v", err)
 	} else if tr, ok := findTrack(tracks, stampedID); !ok {
 		t.Errorf("SearchTracks missing stamped track %d", stampedID)
@@ -1210,7 +1210,7 @@ func TestStore_ReadPathsExposeAttribution(t *testing.T) {
 		t.Errorf("GetAlbum attribution = (%d, %q), want (42, alice)", al.AddedByUserID, al.AddedByUsername)
 	}
 
-	if albums, err := store.GetAlbumsByArtist(ctx, stamped.ArtistID); err != nil {
+	if albums, err := store.GetAlbumsByArtist(ctx, stamped.ArtistID, 0, 100); err != nil {
 		t.Fatalf("GetAlbumsByArtist: %v", err)
 	} else if al, ok := findAlbum(albums, stamped.AlbumID); !ok {
 		t.Errorf("GetAlbumsByArtist missing stamped album %d", stamped.AlbumID)
@@ -1218,7 +1218,7 @@ func TestStore_ReadPathsExposeAttribution(t *testing.T) {
 		t.Errorf("GetAlbumsByArtist attribution = (%d, %q), want (42, alice)", al.AddedByUserID, al.AddedByUsername)
 	}
 
-	if albums, err := store.SearchAlbums(ctx, "Stamped", 10); err != nil {
+	if albums, err := store.SearchAlbums(ctx, "Stamped", 0, 10); err != nil {
 		t.Fatalf("SearchAlbums: %v", err)
 	} else if al, ok := findAlbum(albums, stamped.AlbumID); !ok {
 		t.Errorf("SearchAlbums missing stamped album %d", stamped.AlbumID)
@@ -1277,5 +1277,116 @@ func TestStore_ReadPathsExposeAttribution(t *testing.T) {
 		t.Fatalf("GetPlaylist system: %v", err)
 	} else if p.AddedByUserID != 0 || p.AddedByUsername != "" {
 		t.Errorf("system playlist attribution = (%d, %q), want (0, \"\")", p.AddedByUserID, p.AddedByUsername)
+	}
+}
+
+// TestStore_ListPagination verifies offset/limit slicing with a stable order for
+// the three paginated list reads. offset=0 must reproduce the pre-pagination
+// rows exactly (the complete list, in the documented order).
+func TestStore_ListPagination(t *testing.T) {
+	store, err := New(t.TempDir()+"/test.db", testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	ctx := context.Background()
+
+	artistID, err := store.UpsertArtist(ctx, &domain.Artist{Name: "Pagination Artist"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Albums ordered by (year, title). Distinct years keep the order obvious.
+	specs := []struct {
+		title string
+		year  int
+	}{{"Alpha", 2001}, {"Bravo", 2002}, {"Charlie", 2003}}
+	var albumIDs []int64
+	for _, s := range specs {
+		id, err := store.UpsertAlbum(ctx, &domain.Album{ArtistID: artistID, Title: s.title, Year: s.year})
+		if err != nil {
+			t.Fatal(err)
+		}
+		albumIDs = append(albumIDs, id)
+	}
+
+	// Tracks ordered by title, all under the first album.
+	for i, title := range []string{"Alpha Track", "Bravo Track", "Charlie Track"} {
+		if _, err := store.UpsertTrack(ctx, &domain.Track{
+			AlbumID: albumIDs[0], ArtistID: artistID, Title: title, TrackNumber: i + 1,
+			FilePath: "/music/pag/" + title + ".flac",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	albumTitles := func(as []domain.Album) []string {
+		out := make([]string, len(as))
+		for i := range as {
+			out[i] = as[i].Title
+		}
+		return out
+	}
+	trackTitles := func(ts []domain.Track) []string {
+		out := make([]string, len(ts))
+		for i := range ts {
+			out[i] = ts[i].Title
+		}
+		return out
+	}
+
+	// ── SearchAlbums: ORDER BY title, id ─────────────────────────────
+	allAlbums, err := store.SearchAlbums(ctx, "", 0, 100)
+	if err != nil {
+		t.Fatalf("SearchAlbums offset=0: %v", err)
+	}
+	if got := albumTitles(allAlbums); !reflect.DeepEqual(got, []string{"Alpha", "Bravo", "Charlie"}) {
+		t.Fatalf("SearchAlbums offset=0 = %v, want all three in order", got)
+	}
+	albumsPage, err := store.SearchAlbums(ctx, "", 1, 1)
+	if err != nil {
+		t.Fatalf("SearchAlbums offset=1: %v", err)
+	}
+	if got := albumTitles(albumsPage); !reflect.DeepEqual(got, []string{"Bravo"}) {
+		t.Fatalf("SearchAlbums offset=1 limit=1 = %v, want [Bravo]", got)
+	}
+
+	// ── GetAlbumsByArtist: ORDER BY year, title, id ──────────────────
+	allArtistAlbums, err := store.GetAlbumsByArtist(ctx, artistID, 0, 100)
+	if err != nil {
+		t.Fatalf("GetAlbumsByArtist offset=0: %v", err)
+	}
+	if got := albumTitles(allArtistAlbums); !reflect.DeepEqual(got, []string{"Alpha", "Bravo", "Charlie"}) {
+		t.Fatalf("GetAlbumsByArtist offset=0 = %v, want all three in order", got)
+	}
+	artistAlbumsPage, err := store.GetAlbumsByArtist(ctx, artistID, 2, 1)
+	if err != nil {
+		t.Fatalf("GetAlbumsByArtist offset=2: %v", err)
+	}
+	if got := albumTitles(artistAlbumsPage); !reflect.DeepEqual(got, []string{"Charlie"}) {
+		t.Fatalf("GetAlbumsByArtist offset=2 limit=1 = %v, want [Charlie]", got)
+	}
+	pastEnd, err := store.GetAlbumsByArtist(ctx, artistID, 99, 10)
+	if err != nil {
+		t.Fatalf("GetAlbumsByArtist past end: %v", err)
+	}
+	if len(pastEnd) != 0 {
+		t.Fatalf("GetAlbumsByArtist past end = %d rows, want 0", len(pastEnd))
+	}
+
+	// ── SearchTracks: ORDER BY title, id ─────────────────────────────
+	allTracks, err := store.SearchTracks(ctx, "", 0, 100)
+	if err != nil {
+		t.Fatalf("SearchTracks offset=0: %v", err)
+	}
+	if got := trackTitles(allTracks); !reflect.DeepEqual(got, []string{"Alpha Track", "Bravo Track", "Charlie Track"}) {
+		t.Fatalf("SearchTracks offset=0 = %v, want all three in order", got)
+	}
+	tracksPage, err := store.SearchTracks(ctx, "", 1, 1)
+	if err != nil {
+		t.Fatalf("SearchTracks offset=1: %v", err)
+	}
+	if got := trackTitles(tracksPage); !reflect.DeepEqual(got, []string{"Bravo Track"}) {
+		t.Fatalf("SearchTracks offset=1 limit=1 = %v, want [Bravo Track]", got)
 	}
 }

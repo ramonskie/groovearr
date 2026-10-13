@@ -320,6 +320,15 @@ export function getLibraryAlbums(params?: PaginationParams): Promise<Album[]> {
 }
 
 /**
+ * Resolve a single library album by ID (GET /api/library/albums/{albumID}).
+ * Independent of the paginated artist-album listing, so a deep link to an
+ * album that is not on a loaded page still resolves.
+ */
+export function getLibraryAlbum(albumId: number): Promise<Album> {
+  return request<Album>(`/api/library/albums/${albumId}`);
+}
+
+/**
  * Same-origin download URLs for the library stream endpoints.  Used as
  * `<a href={url} download>` — the browser sends the session cookie
  * automatically, so no `apikey` query is needed (the SPA never holds the
@@ -412,8 +421,13 @@ export function getLibraryArtist(artistId: number): Promise<Artist> {
   return request<Artist>(`/api/library/artists/${artistId}`);
 }
 
-export function getLibraryArtistAlbums(artistId: number): Promise<Album[]> {
-  return request<Album[]>(`/api/library/artists/${artistId}/albums`);
+export function getLibraryArtistAlbums(
+  artistId: number,
+  params?: PaginationParams,
+): Promise<Album[]> {
+  return request<Album[]>(
+    `/api/library/artists/${artistId}/albums${toQuery(params)}`,
+  );
 }
 
 export function getLibraryArtistTracks(artistId: number): Promise<Track[]> {

@@ -106,7 +106,7 @@ func (h *CoverArtHandler) updateAlbumThumb(ctx context.Context, albumDir string)
 		return nil
 	}
 
-	albums, err := h.libStore.SearchAlbums(ctx, albumTitle, 10)
+	albums, err := h.libStore.SearchAlbums(ctx, albumTitle, 0, 10)
 	if err != nil || len(albums) == 0 {
 		return fmt.Errorf("album not found: %s", albumTitle)
 	}

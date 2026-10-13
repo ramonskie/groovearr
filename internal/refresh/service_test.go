@@ -627,7 +627,7 @@ func TestBestMatch(t *testing.T) {
 		wantOK bool
 	}{
 		{name: "exact artist and title wins over title-only", artist: "Artist One", title: "Album One", wantID: "exact", wantOK: true},
-		{name: "title-only falls back when artist differs", artist: "Nobody", title: "Album One", wantID: "title-only", wantOK: true},
+		{name: "same title by a known different artist is a clash, not a match", artist: "Nobody", title: "Album One", wantOK: false},
 		{name: "case and whitespace insensitive", artist: " artist one ", title: " ALBUM ONE ", wantID: "exact", wantOK: true},
 		{name: "no match", artist: "Artist One", title: "Different", wantOK: false},
 		{name: "empty title never matches", artist: "Artist One", title: "", wantOK: false},
@@ -644,6 +644,336 @@ func TestBestMatch(t *testing.T) {
 			}
 			if ok && got.ProviderID != tc.wantID {
 				t.Fatalf("provider = %q, want %q", got.ProviderID, tc.wantID)
+			}
+		})
+	}
+}
+
+// TestBestMatch_TolerantTitleVariants proves the matcher accepts a library
+// title that differs from the provider title only by quotes, punctuation,
+// bracket style or a common version suffix. Each case fails against the old
+// ToLower(TrimSpace) normalize and passes after the tolerant normalization.
+func TestBestMatch_TolerantTitleVariants(t *testing.T) {
+	const providerID = "p"
+	tests := []struct {
+		name         string
+		libraryTitle string
+		provider     discovery.AlbumResult
+	}{
+		{
+			name:         "literal quotes in the library title",
+			libraryTitle: `"WOW"`,
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "DJ Antoine", Title: "WOW"},
+		},
+		{
+			name:         "bracket vs paren edition marker",
+			libraryTitle: "Album [Deluxe]",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Album (Deluxe)"},
+		},
+		{
+			name:         "feat credit suffix",
+			libraryTitle: "Song feat. X",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Song"},
+		},
+		{
+			name:         "dash remastered suffix",
+			libraryTitle: "Album - Remastered",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Album"},
+		},
+		{
+			name:         "year remaster parenthetical",
+			libraryTitle: "Album (2020 Remaster)",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Album"},
+		},
+		{
+			name:         "deluxe edition parenthetical",
+			libraryTitle: "Album (Deluxe Edition)",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Album"},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			// Act
+			got, ok := bestMatch([]discovery.AlbumResult{tc.provider}, tc.provider.ArtistName, tc.libraryTitle)
+
+			// Assert
+			if !ok {
+				t.Fatalf("bestMatch(%q, %q) = no match, want %q", tc.provider.ArtistName, tc.libraryTitle, providerID)
+			}
+			if got.ProviderID != providerID {
+				t.Fatalf("provider = %q, want %q", got.ProviderID, providerID)
+			}
+		})
+	}
+}
+
+// TestBestMatch_UnknownProviderArtistFallsBack proves a title-only match is
+// still accepted when the provider omitted the artist — "unknown" is not the
+// same as "different".
+func TestBestMatch_UnknownProviderArtistFallsBack(t *testing.T) {
+	results := []discovery.AlbumResult{{ProviderID: "p", ArtistName: "", Title: "Album One"}}
+
+	got, ok := bestMatch(results, "Artist One", "Album One")
+
+	if !ok || got.ProviderID != "p" {
+		t.Fatalf("bestMatch = %q/%v, want p/true", got.ProviderID, ok)
+	}
+}
+
+// TestBestMatch_RejectsFalsePositives guards against over-broad normalization:
+// a genuinely different title, and a same-titled release by a known different
+// artist, must both be rejected.
+func TestBestMatch_RejectsFalsePositives(t *testing.T) {
+	tests := []struct {
+		name    string
+		results []discovery.AlbumResult
+		artist  string
+		title   string
+	}{
+		{
+			name:    "genuinely different title",
+			results: []discovery.AlbumResult{{ProviderID: "p", ArtistName: "Artist One", Title: "Another Album"}},
+			artist:  "Artist One",
+			title:   "Album One",
+		},
+		{
+			name:    "same title by a genuinely different artist (audit: Remady) is a clash",
+			results: []discovery.AlbumResult{{ProviderID: "p", ArtistName: "Some Other Name", Title: "WOW"}},
+			artist:  "Remady",
+			title:   "WOW",
+		},
+		{
+			name:    "same artist but different title does not match on artist alone",
+			results: []discovery.AlbumResult{{ProviderID: "p", ArtistName: "Artist One", Title: "Album Two"}},
+			artist:  "Artist One",
+			title:   "Album One",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got, ok := bestMatch(tc.results, tc.artist, tc.title); ok {
+				t.Fatalf("bestMatch matched %q, want no match", got.ProviderID)
+			}
+		})
+	}
+}
+
+// TestNormalizeTitle locks the title comparison key: quotes, punctuation and
+// bracket style are ignored, a DELIMITED edition suffix is collapsed, and a
+// bare trailing descriptor word in a plain title is left intact.
+func TestNormalizeTitle(t *testing.T) {
+	tests := []struct {
+		in   string
+		want string
+	}{
+		{`"WOW"`, "wow"},
+		{"WOW", "wow"},
+		{"AC/DC", "ac dc"},
+		{"Album [Deluxe]", "album"},
+		{"Album (Deluxe)", "album"},
+		{"Album (Deluxe Edition)", "album"},
+		{"Album - Remastered", "album"},
+		{"Album: Remastered", "album"},
+		{"Album (2020 Remaster)", "album"},
+		{"Album (Remastered 2011)", "album"},
+		{"Song feat. X", "song"},
+		{"Album One", "album one"},
+		{"Albums", "albums"},
+		// A bare trailing descriptor word in a plain title must never be
+		// stripped: these stay distinct from `new` / `first` / `the`.
+		{"New Edition", "new edition"},
+		{"First Edition", "first edition"},
+		{"The Single", "the single"},
+		// Performance/format variants are different content, not collapsed.
+		{"Album (Live)", "album live"},
+		{"Album (Single)", "album single"},
+		{"Album (Radio Edit)", "album radio edit"},
+		{"", ""},
+	}
+
+	for _, tc := range tests {
+		if got := normalizeTitle(tc.in); got != tc.want {
+			t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+// TestBestMatch_EditionMatching locks the edition/format boundary of the
+// matcher: a delimited same-content edition suffix still binds to the plain
+// release, while a performance/format variant or a title whose trailing word is
+// a real word (not a delimited edition) must NOT bind to a different release.
+func TestBestMatch_EditionMatching(t *testing.T) {
+	const providerID = "p"
+	const artist = "Artist One"
+
+	matches := []struct {
+		name  string
+		title string
+	}{
+		{"deluxe edition parenthetical", "Album (Deluxe Edition)"},
+		{"dash remastered", "Album - Remastered"},
+		{"year remaster parenthetical", "Album (2020 Remaster)"},
+	}
+	for _, tc := range matches {
+		t.Run("match/"+tc.name, func(t *testing.T) {
+			got, ok := bestMatch([]discovery.AlbumResult{
+				{ProviderID: providerID, ArtistName: artist, Title: "Album"},
+			}, artist, tc.title)
+			if !ok || got.ProviderID != providerID {
+				t.Fatalf("bestMatch(%q) = %q/%v, want %s/true", tc.title, got.ProviderID, ok, providerID)
+			}
+		})
+	}
+
+	rejects := []struct {
+		name          string
+		libraryTitle  string
+		providerTitle string
+	}{
+		{"live is different content", "Album (Live)", "Album"},
+		{"single is different content", "Album (Single)", "Album"},
+		{"New Edition not collapsed to New", "New Edition", "New"},
+		{"First Edition not collapsed to First", "First Edition", "First"},
+		{"The Single not collapsed to The", "The Single", "The"},
+	}
+	for _, tc := range rejects {
+		t.Run("reject/"+tc.name, func(t *testing.T) {
+			got, ok := bestMatch([]discovery.AlbumResult{
+				{ProviderID: providerID, ArtistName: artist, Title: tc.providerTitle},
+			}, artist, tc.libraryTitle)
+			if ok {
+				t.Fatalf("bestMatch(%q) matched %q, want no match against %q", tc.libraryTitle, got.ProviderID, tc.providerTitle)
+			}
+		})
+	}
+}
+
+// TestBestMatch_CollaborationCredits proves a collaborator credit on the
+// provider side still matches the bare library artist for the same title, in
+// the "&", "feat." and "featuring" spellings.
+func TestBestMatch_CollaborationCredits(t *testing.T) {
+	const title = "Album One"
+	credits := []string{
+		"Artist A & Artist B",
+		"Artist A feat. Artist B",
+		"Artist A featuring Artist B",
+	}
+	for _, credit := range credits {
+		t.Run(credit, func(t *testing.T) {
+			got, ok := bestMatch([]discovery.AlbumResult{
+				{ProviderID: "p", ArtistName: credit, Title: title},
+			}, "Artist A", title)
+			if !ok || got.ProviderID != "p" {
+				t.Fatalf("bestMatch(%q, %q) = %q/%v, want p/true", credit, title, got.ProviderID, ok)
+			}
+		})
+	}
+}
+
+// TestBestMatch_ArticleAndTwoTokenArtistMatches proves the two non-collaboration
+// positives end-to-end: an article-only containment ("The Cure" ↔ "Cure") and a
+// reordered collaboration that shares two significant tokens
+// ("Simon & Garfunkel" ↔ "Garfunkel & Simon") both bind for the same title.
+func TestBestMatch_ArticleAndTwoTokenArtistMatches(t *testing.T) {
+	tests := []struct {
+		name     string
+		library  string
+		provider string
+	}{
+		{"article-only containment", "The Cure", "Cure"},
+		{"two shared significant tokens, reordered", "Simon & Garfunkel", "Garfunkel & Simon"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := bestMatch([]discovery.AlbumResult{
+				{ProviderID: "p", ArtistName: tc.provider, Title: "Same Title"},
+			}, tc.library, "Same Title")
+			if !ok || got.ProviderID != "p" {
+				t.Fatalf("bestMatch(%q vs %q) = %q/%v, want p/true", tc.library, tc.provider, got.ProviderID, ok)
+			}
+		})
+	}
+}
+
+// TestArtistCompatible locks the artist-credit boundary. A collaboration credit
+// and an article-only containment still match their bare artist, while a
+// genuinely different act that shares only one significant token, only a
+// stopword/joiner, or a bare containment of a longer name is rejected.
+func TestArtistCompatible(t *testing.T) {
+	compatible := []struct {
+		name string
+		want string
+		cand string
+	}{
+		{"exact equal", "Artist A", "Artist A"},
+		{"article-only containment (The Cure vs Cure)", "The Cure", "Cure"},
+		{"ampersand collaboration", "Artist A", "Artist A & Artist B"},
+		{"feat collaboration", "Artist A", "Artist A feat. Artist B"},
+		{"featuring collaboration", "Artist A", "Artist A featuring Artist B"},
+		{"two shared significant tokens, reversed (Simon & Garfunkel vs Garfunkel & Simon)", "Simon & Garfunkel", "Garfunkel & Simon"},
+	}
+	for _, tc := range compatible {
+		t.Run("compatible/"+tc.name, func(t *testing.T) {
+			if !artistCompatible(tc.want, tc.cand) {
+				t.Fatalf("artistCompatible(%q, %q) = false, want true", tc.want, tc.cand)
+			}
+		})
+	}
+
+	incompatible := []struct {
+		name string
+		want string
+		cand string
+	}{
+		{"shared stopword 'the' (The Cure vs The Beatles)", "The Cure", "The Beatles"},
+		{"bare containment (Air vs Air Supply)", "Air", "Air Supply"},
+		{"single shared token (King vs King Crimson)", "King", "King Crimson"},
+		{"single shared token (Rock vs Rock Band)", "Rock", "Rock Band"},
+		{"one shared token, different act (The Band vs Band of Gypsys)", "The Band", "Band of Gypsys"},
+		{"containment with a real extra word (New Order vs Order)", "New Order", "Order"},
+		{"compact slash is not a joiner (AC/DC vs AC)", "AC/DC", "AC"},
+		{"compact slash is not a joiner, reversed (AC vs AC/DC)", "AC", "AC/DC"},
+		{"shared stopword 'and' (Simon and Garfunkel vs Hall and Oates)", "Simon and Garfunkel", "Hall and Oates"},
+		{"audit clash (Remady vs a different name)", "Remady", "Some Other Name"},
+	}
+	for _, tc := range incompatible {
+		t.Run("incompatible/"+tc.name, func(t *testing.T) {
+			if artistCompatible(tc.want, tc.cand) {
+				t.Fatalf("artistCompatible(%q, %q) = true, want false", tc.want, tc.cand)
+			}
+		})
+	}
+}
+
+// TestBestMatch_RejectsWrongArtistSameTitle guards the reported false
+// positives end-to-end: a title match must not bind when the artists are
+// genuinely different — only a stopword/joiner or a bare containment overlaps.
+func TestBestMatch_RejectsWrongArtistSameTitle(t *testing.T) {
+	tests := []struct {
+		name     string
+		library  string
+		provider string
+		title    string
+	}{
+		{"shared stopword 'the'", "The Cure", "The Beatles", "Same Title"},
+		{"bare containment", "Air", "Air Supply", "Same Title"},
+		{"single shared token 'king'", "King", "King Crimson", "Same Title"},
+		{"single shared token 'rock'", "Rock", "Rock Band", "Same Title"},
+		{"one shared token, different act", "The Band", "Band of Gypsys", "Same Title"},
+		{"containment with a real extra word", "New Order", "Order", "Same Title"},
+		{"compact slash is not a joiner", "AC/DC", "AC", "Same Title"},
+		{"shared stopword 'and'", "Simon and Garfunkel", "Hall and Oates", "Same Title"},
+		{"audit WOW case", "Remady", "Some Other Name", "WOW"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := bestMatch([]discovery.AlbumResult{
+				{ProviderID: "p", ArtistName: tc.provider, Title: tc.title},
+			}, tc.library, tc.title)
+			if ok {
+				t.Fatalf("bestMatch matched %q, want no match", got.ProviderID)
 			}
 		})
 	}

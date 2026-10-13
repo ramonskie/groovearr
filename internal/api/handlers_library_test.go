@@ -38,6 +38,8 @@ type stubLibraryStore struct {
 	artists      []domain.Artist
 	tracks       map[int64][]domain.Track
 	searchTracks []domain.Track
+	searchAlbums []domain.Album
+	artistAlbums map[int64][]domain.Album
 	albums       map[int64]*domain.Album
 	albumTrks    map[int64][]domain.Track
 	merges       [][2]int64 // (keep, remove)
@@ -46,6 +48,23 @@ type stubLibraryStore struct {
 		name string
 	}
 	scan map[string]string // duplicate_scan: group_key → canonical
+}
+
+// paginateSlice applies offset/limit the same way the store does, so handler
+// tests can assert non-zero offsets end-to-end. A limit <= 0 means no upper
+// bound (the store's default is always positive through parsePagination).
+func paginateSlice[T any](items []T, offset, limit int) []T {
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > len(items) {
+		offset = len(items)
+	}
+	items = items[offset:]
+	if limit > 0 && limit < len(items) {
+		items = items[:limit]
+	}
+	return items
 }
 
 var _ jobs.DuplicateScanStore = (*stubLibraryStore)(nil)
@@ -82,8 +101,16 @@ func (s *stubLibraryStore) GetTracksByAlbum(ctx context.Context, albumID int64) 
 	return s.albumTrks[albumID], nil
 }
 
-func (s *stubLibraryStore) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
-	return s.searchTracks, nil
+func (s *stubLibraryStore) SearchTracks(ctx context.Context, query string, offset, limit int) ([]domain.Track, error) {
+	return paginateSlice(s.searchTracks, offset, limit), nil
+}
+
+func (s *stubLibraryStore) SearchAlbums(ctx context.Context, query string, offset, limit int) ([]domain.Album, error) {
+	return paginateSlice(s.searchAlbums, offset, limit), nil
+}
+
+func (s *stubLibraryStore) GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
+	return paginateSlice(s.artistAlbums[artistID], offset, limit), nil
 }
 
 func (s *stubLibraryStore) MergeArtists(ctx context.Context, keepID, removeID int64) error {
@@ -1332,6 +1359,107 @@ func TestHandleLibraryAlbumDiscoveryStaleServesAndEnqueues(t *testing.T) {
 	}
 }
 
+// TestHandleLibraryAlbumDiscoveryMetadataState is the UI-truthfulness
+// regression: the discovery response must distinguish a genuinely cold/pending
+// album from one parked terminal (unmatched/failed), while keeping the existing
+// metadata_pending field and its shape. Terminal rows report
+// metadata_pending=true (still unmaterialized) AND metadata_terminal=true with
+// the terminal status; a cold/pending row reports metadata_terminal=false; a warm
+// (fresh/stale) row reports its warm status and metadata_terminal=false. No
+// provider is called on any branch.
+func TestHandleLibraryAlbumDiscoveryMetadataState(t *testing.T) {
+	const albumID = 1
+	cases := []struct {
+		name         string
+		meta         *catalog.AlbumMetadata
+		materialized []catalog.AlbumTrack
+		wantPending  bool
+		wantTerminal bool
+		wantStatus   catalog.RefreshStatus
+	}{
+		{name: "cold nil row", meta: nil, materialized: nil, wantPending: true, wantTerminal: false, wantStatus: ""},
+		{
+			name:         "pending row",
+			meta:         &catalog.AlbumMetadata{AlbumID: albumID, RefreshStatus: catalog.StatusPending},
+			materialized: nil,
+			wantPending:  true,
+			wantTerminal: false,
+			wantStatus:   catalog.StatusPending,
+		},
+		{
+			name:         "terminal unmatched",
+			meta:         &catalog.AlbumMetadata{AlbumID: albumID, RefreshStatus: catalog.StatusUnmatched, UpdatedAt: time.Now()},
+			materialized: nil,
+			wantPending:  true,
+			wantTerminal: true,
+			wantStatus:   catalog.StatusUnmatched,
+		},
+		{
+			name:         "terminal failed",
+			meta:         &catalog.AlbumMetadata{AlbumID: albumID, RefreshStatus: catalog.StatusFailed, UpdatedAt: time.Now()},
+			materialized: nil,
+			wantPending:  true,
+			wantTerminal: true,
+			wantStatus:   catalog.StatusFailed,
+		},
+		{
+			name: "warm fresh",
+			meta: &catalog.AlbumMetadata{
+				AlbumID: albumID, ProviderName: "deezer", ProviderAlbumID: "dz-1",
+				RefreshStatus: catalog.StatusFresh, LastRefreshedAt: time.Now(),
+			},
+			materialized: []catalog.AlbumTrack{{DiscNumber: 1, TrackNumber: 1, Title: "T1"}},
+			wantPending:  false,
+			wantTerminal: false,
+			wantStatus:   catalog.StatusFresh,
+		},
+		{
+			name: "warm stale",
+			meta: &catalog.AlbumMetadata{
+				AlbumID: albumID, ProviderName: "deezer", ProviderAlbumID: "dz-1",
+				RefreshStatus: catalog.StatusStale, LastRefreshedAt: time.Now(),
+			},
+			materialized: []catalog.AlbumTrack{{DiscNumber: 1, TrackNumber: 1, Title: "T1"}},
+			wantPending:  false,
+			wantTerminal: false,
+			wantStatus:   catalog.StatusStale,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &stubLibraryStore{
+				albums:    map[int64]*domain.Album{albumID: {ID: albumID, ArtistID: 2, Title: "Album"}},
+				artists:   []domain.Artist{{ID: 2, Name: "Artist"}},
+				albumTrks: map[int64][]domain.Track{albumID: {{ID: 10, Title: "L1", TrackNumber: 1}}},
+			}
+			cat := &stubCatalogStore{metadata: tc.meta, tracks: tc.materialized}
+			// No cold fetcher and no refresher wired: the pending fallback is the
+			// path under test, isolating the metadata-state projection from any
+			// provider or queue side effect.
+			s := newAlbumDiscoveryServer(t, store, cat, newDiscoverRegistry(t, &failingDiscoverProvider{t: t}))
+
+			req := httptest.NewRequest(http.MethodGet, "/api/library/albums/1/discovery", nil)
+			req.SetPathValue("albumID", "1")
+			rec := httptest.NewRecorder()
+			s.handleLibraryAlbumDiscovery(rec, req)
+
+			if rec.Code != http.StatusOK {
+				t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+			}
+			resp := decodeAlbumDiscovery(t, rec)
+			if resp.MetadataPending != tc.wantPending {
+				t.Errorf("metadata_pending = %v, want %v", resp.MetadataPending, tc.wantPending)
+			}
+			if resp.MetadataTerminal != tc.wantTerminal {
+				t.Errorf("metadata_terminal = %v, want %v", resp.MetadataTerminal, tc.wantTerminal)
+			}
+			if resp.MetadataStatus != tc.wantStatus {
+				t.Errorf("metadata_status = %q, want %q", resp.MetadataStatus, tc.wantStatus)
+			}
+		})
+	}
+}
+
 // TestHandleLibraryAlbumDownloadMissingPending covers M8: a download-missing
 // request against a cold/pending album returns a distinguishable 202 with
 // pending=true (not a silent {"queued":0}) and queues a best-effort refresh.
@@ -1611,5 +1739,162 @@ func TestHandleLibraryTracks_ExposesAddedByAttribution(t *testing.T) {
 	}
 	if _, ok := got[1]["added_by_username"]; ok {
 		t.Errorf("system track should omit added_by_username, got %v", got[1]["added_by_username"])
+	}
+}
+
+// TestHandleLibraryAlbums_HonoursOffset asserts the albums handler threads
+// offset/limit straight through to the store: a non-zero offset returns the
+// sliced page, not the head of the list, while offset=0 is unchanged.
+func TestHandleLibraryAlbums_HonoursOffset(t *testing.T) {
+	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stubLibraryStore{
+		searchAlbums: []domain.Album{
+			{ID: 1, Title: "Alpha"},
+			{ID: 2, Title: "Bravo"},
+			{ID: 3, Title: "Charlie"},
+		},
+	}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/albums?offset=1&limit=1", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryAlbums(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var page []domain.Album
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(page) != 1 || page[0].Title != "Bravo" {
+		t.Fatalf("offset=1 limit=1 = %+v, want [Bravo]", page)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/api/library/albums?limit=2", nil)
+	rec = httptest.NewRecorder()
+	s.handleLibraryAlbums(rec, req)
+	var head []domain.Album
+	if err := json.Unmarshal(rec.Body.Bytes(), &head); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(head) != 2 || head[0].Title != "Alpha" || head[1].Title != "Bravo" {
+		t.Fatalf("offset=0 limit=2 = %+v, want [Alpha Bravo]", head)
+	}
+}
+
+// TestHandleLibraryArtistAlbums_HonoursOffset asserts the artist-albums handler
+// now parses and forwards offset/limit instead of ignoring offset entirely.
+func TestHandleLibraryArtistAlbums_HonoursOffset(t *testing.T) {
+	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stubLibraryStore{
+		artistAlbums: map[int64][]domain.Album{
+			7: {{ID: 1, Title: "Alpha"}, {ID: 2, Title: "Bravo"}, {ID: 3, Title: "Charlie"}},
+		},
+	}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/artists/7/albums?offset=1&limit=2", nil)
+	req.SetPathValue("artistID", "7")
+	rec := httptest.NewRecorder()
+	s.handleLibraryArtistAlbums(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var page []domain.Album
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(page) != 2 || page[0].Title != "Bravo" || page[1].Title != "Charlie" {
+		t.Fatalf("offset=1 limit=2 = %+v, want [Bravo Charlie]", page)
+	}
+}
+
+// TestHandleLibraryAlbum covers the single-album lookup: 200 with the domain
+// album for an existing id, 404 for an unknown id, and 400 for a non-numeric
+// id. This endpoint lets a deep link resolve an album that is not on a loaded
+// page of the paginated artist-album listing.
+func TestHandleLibraryAlbum(t *testing.T) {
+	store := &stubLibraryStore{
+		albums: map[int64]*domain.Album{
+			7: {ID: 7, ArtistID: 3, Title: "Discovery"},
+		},
+	}
+	s := &Server{store: store, log: testAPILogger()}
+
+	t.Run("existing album returns the domain album", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/albums/7", nil)
+		req.SetPathValue("albumID", "7")
+		rec := httptest.NewRecorder()
+		s.handleLibraryAlbum(rec, req)
+
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+		}
+		var got domain.Album
+		if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+			t.Fatalf("bad JSON: %v", err)
+		}
+		if got.ID != 7 || got.ArtistID != 3 || got.Title != "Discovery" {
+			t.Fatalf("album = %+v, want {ID:7 ArtistID:3 Title:Discovery}", got)
+		}
+	})
+
+	t.Run("missing album is 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/albums/999", nil)
+		req.SetPathValue("albumID", "999")
+		rec := httptest.NewRecorder()
+		s.handleLibraryAlbum(rec, req)
+
+		if rec.Code != http.StatusNotFound {
+			t.Fatalf("status = %d, want 404 (%s)", rec.Code, rec.Body.String())
+		}
+	})
+
+	t.Run("non-numeric album id is 400", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/albums/not-a-number", nil)
+		req.SetPathValue("albumID", "not-a-number")
+		rec := httptest.NewRecorder()
+		s.handleLibraryAlbum(rec, req)
+
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("status = %d, want 400 (%s)", rec.Code, rec.Body.String())
+		}
+	})
+}
+
+// TestHandleLibraryTracks_HonoursOffset asserts the tracks handler forwards
+// offset/limit to the store.
+func TestHandleLibraryTracks_HonoursOffset(t *testing.T) {
+	cfg, err := config.LoadOrCreate(t.TempDir() + "/config.json")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &stubLibraryStore{
+		searchTracks: []domain.Track{
+			{ID: 1, Title: "Alpha Track"},
+			{ID: 2, Title: "Bravo Track"},
+			{ID: 3, Title: "Charlie Track"},
+		},
+	}
+	s := &Server{cfg: cfg, store: store, log: testAPILogger()}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/library/tracks?offset=2&limit=1", nil)
+	rec := httptest.NewRecorder()
+	s.handleLibraryTracks(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	var page []domain.Track
+	if err := json.Unmarshal(rec.Body.Bytes(), &page); err != nil {
+		t.Fatalf("bad JSON: %v", err)
+	}
+	if len(page) != 1 || page[0].Title != "Charlie Track" {
+		t.Fatalf("offset=2 limit=1 = %+v, want [Charlie Track]", page)
 	}
 }

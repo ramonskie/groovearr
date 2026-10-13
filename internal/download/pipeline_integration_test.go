@@ -410,7 +410,7 @@ func TestFullPlaylistPipeline(t *testing.T) {
 	}
 
 	// ─── Step 5: Verify library tracks ──────────────────────────────
-	tracks, _ := libStore.SearchTracks(context.Background(), "", 50)
+	tracks, _ := libStore.SearchTracks(context.Background(), "", 0, 50)
 	t.Logf("library: %d tracks", len(tracks))
 	for _, tr := range tracks {
 		t.Logf("  library: id=%d %q", tr.ID, tr.Title)

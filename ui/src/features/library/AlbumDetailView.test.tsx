@@ -66,6 +66,28 @@ const warmView = (over: Partial<AlbumDiscoveryViewState> = {}): AlbumDiscoveryVi
   ...over,
 });
 
+/**
+ * A view state that also carries the raw catalog flags the discovery payload
+ * provides. Production derives `status` from these; tests set both so the
+ * render plan's terminal reason selection is driven deterministically.
+ */
+type ViewWithCatalogFlags = AlbumDiscoveryViewState & {
+  metadata_terminal?: boolean;
+  metadata_status?: string;
+};
+
+const terminalView = (
+  reason: "unmatched" | "failed",
+  over: Partial<AlbumDiscoveryViewState> = {},
+): ViewWithCatalogFlags => ({
+  status: "terminal",
+  tracks: [track({ downloaded: true })],
+  metadataPending: true,
+  metadata_terminal: true,
+  metadata_status: reason,
+  ...over,
+});
+
 // ─── Mock defaults ──────────────────────────────────────────────────
 
 const refreshMutate = vi.fn();
@@ -76,6 +98,9 @@ function stubHooks(
 ) {
   vi.mocked(useLibraryAlbumDiscovery).mockReturnValue({
     view,
+    // The component reads the raw terminal reason from the query payload; mirror
+    // the view so tests can drive unmatched/failed messaging deterministically.
+    data: view,
   } as unknown as ReturnType<typeof useLibraryAlbumDiscovery>);
   vi.mocked(useRefreshAlbumMetadata).mockReturnValue({
     mutate: refreshMutate,
@@ -138,6 +163,46 @@ describe("albumDetailRenderPlan", () => {
     });
     expect(plan.kind).toBe("content");
     expect(plan.showPendingIndicator).toBe(true);
+  });
+
+  it("terminal (unmatched): accurate message, no pending indicator", () => {
+    const plan = albumDetailRenderPlan(terminalView("unmatched"));
+    expect(plan.kind).toBe("content");
+    expect(plan.isTerminal).toBe(true);
+    expect(plan.showPendingIndicator).toBe(false);
+    expect(plan.terminalReason).toBe("unmatched");
+    expect(plan.terminalMessage).toBe("No provider match found");
+  });
+
+  it("terminal (failed): surfaces the refresh-failed reason", () => {
+    const plan = albumDetailRenderPlan(terminalView("failed"));
+    expect(plan.isTerminal).toBe(true);
+    expect(plan.showPendingIndicator).toBe(false);
+    expect(plan.terminalReason).toBe("failed");
+    expect(plan.terminalMessage).toBe("Metadata refresh failed");
+  });
+
+  it("terminal via metadata_terminal alone wins over a pending status", () => {
+    const plan = albumDetailRenderPlan({
+      status: "pending",
+      tracks: [track({ downloaded: true })],
+      metadataPending: true,
+      metadata_terminal: true,
+    });
+    expect(plan.isTerminal).toBe(true);
+    expect(plan.showPendingIndicator).toBe(false);
+  });
+
+  it("terminal without a known status still shows a safe message", () => {
+    const plan = albumDetailRenderPlan({
+      status: "terminal",
+      tracks: [],
+      metadataPending: true,
+    });
+    expect(plan.isTerminal).toBe(true);
+    expect(plan.showPendingIndicator).toBe(false);
+    expect(plan.terminalReason).toBe("unknown");
+    expect(plan.terminalMessage).toBe("Full tracklist unavailable");
   });
 
   it("error with no local tracks: hard error", () => {
@@ -219,6 +284,38 @@ describe("AlbumDetailView render", () => {
     expect(html).toContain("Fetching full tracklist…");
     expect(html).toContain("Get Lucky");
     expect(html).not.toContain("Failed to load album tracks");
+  });
+
+  it("pending: still shows the spinner indicator (regression guard)", () => {
+    const html = renderView({
+      status: "pending",
+      tracks: [track({ downloaded: true })],
+      metadataPending: true,
+    });
+    expect(html).toContain("Fetching full tracklist…");
+    expect(html).not.toContain("No provider match found");
+  });
+
+  it("terminal (unmatched): message + Refresh affordance, no pending spinner", () => {
+    const html = renderView(terminalView("unmatched"));
+    expect(html).toContain("No provider match found");
+    expect(html).not.toContain("Fetching full tracklist");
+    expect(html).not.toContain('aria-label="Loading"');
+    expect(html).toContain("Refresh metadata");
+  });
+
+  it("terminal (failed): refresh-failed message, no pending spinner", () => {
+    const html = renderView(terminalView("failed"));
+    expect(html).toContain("Metadata refresh failed");
+    expect(html).not.toContain("Fetching full tracklist");
+    expect(html).not.toContain('aria-label="Loading"');
+  });
+
+  it("warm: shows neither the terminal message nor the spinner", () => {
+    const html = renderView(warmView());
+    expect(html).not.toContain("No provider match found");
+    expect(html).not.toContain("Metadata refresh failed");
+    expect(html).not.toContain("Fetching full tracklist");
   });
 
   it("error with no local tracks: renders the hard error", () => {

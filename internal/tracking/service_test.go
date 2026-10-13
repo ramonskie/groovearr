@@ -280,9 +280,17 @@ func (m *mockLibraryStore) GetArtistByName(_ context.Context, name string) (*dom
 	return m.artistByName[name], nil
 }
 
-func (m *mockLibraryStore) GetAlbumsByArtist(_ context.Context, artistID int64) ([]domain.Album, error) {
+func (m *mockLibraryStore) GetAlbumsByArtist(_ context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
 	m.albumsByArtistCalls++
-	return m.albumsByArtist[artistID], nil
+	albums := m.albumsByArtist[artistID]
+	if offset > len(albums) {
+		offset = len(albums)
+	}
+	albums = albums[offset:]
+	if limit > 0 && limit < len(albums) {
+		albums = albums[:limit]
+	}
+	return albums, nil
 }
 
 // fakeDiscoveryProvider is a scriptable discovery.Provider.

@@ -11,6 +11,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/library"
 )
 
 // AddArtistOptions controls how a newly tracked artist is monitored. The zero
@@ -229,7 +230,7 @@ func (s *Service) resolveLibraryMatches(ctx context.Context, artist *domain.Trac
 		linked := libArtistID
 		artist.LibraryArtistID = &linked
 	}
-	candidates, err := s.libStore.GetAlbumsByArtist(ctx, libArtistID)
+	candidates, err := s.libStore.GetAlbumsByArtist(ctx, libArtistID, 0, library.AllAlbumsLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list library albums for artist %d: %w", libArtistID, err)
 	}
@@ -376,7 +377,7 @@ func (s *Service) resolveImportedLibraryLink(ctx context.Context, artistName, al
 	if libArtist == nil {
 		return nil, nil
 	}
-	candidates, err := s.libStore.GetAlbumsByArtist(ctx, libArtist.ID)
+	candidates, err := s.libStore.GetAlbumsByArtist(ctx, libArtist.ID, 0, library.AllAlbumsLimit)
 	if err != nil {
 		return nil, fmt.Errorf("list library albums for artist %d: %w", libArtist.ID, err)
 	}

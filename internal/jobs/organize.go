@@ -93,7 +93,7 @@ func (r *Runners) Organize(dryRun bool) Runner {
 					setReport()
 					return ctx.Err()
 				}
-				albums, err := r.deps.Store.GetAlbumsByArtist(ctx, a.ID)
+				albums, err := r.deps.Store.GetAlbumsByArtist(ctx, a.ID, 0, library.AllAlbumsLimit)
 				if err != nil {
 					failed++
 					r.deps.Log.Warn("organize: list albums failed", "artist_id", a.ID, "error", err, "component", "jobs")

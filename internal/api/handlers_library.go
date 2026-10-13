@@ -28,7 +28,7 @@ import (
 func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
 	q, offset, limit := parsePagination(r)
 	ctx := r.Context()
-	tracks, err := s.store.SearchTracks(ctx, q, limit)
+	tracks, err := s.store.SearchTracks(ctx, q, offset, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -45,7 +45,6 @@ func (s *Server) handleLibraryTracks(w http.ResponseWriter, r *http.Request) {
 		tracks = filterByPath(tracks, absPlaylist)
 	}
 
-	_ = offset
 	writeJSON(w, http.StatusOK, tracks)
 }
 
@@ -112,7 +111,7 @@ func (s *Server) handleLibraryArtists(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	q, offset, limit := parsePagination(r)
 	ctx := r.Context()
-	albums, err := s.store.SearchAlbums(ctx, q, limit)
+	albums, err := s.store.SearchAlbums(ctx, q, offset, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return
@@ -120,8 +119,31 @@ func (s *Server) handleLibraryAlbums(w http.ResponseWriter, r *http.Request) {
 	if albums == nil {
 		albums = []domain.Album{}
 	}
-	_ = offset
 	writeJSON(w, http.StatusOK, albums)
+}
+
+// handleLibraryAlbum returns one library album by ID. Thin per AGENTS §4:
+// parse/validate -> store read -> writeJSON. It exists so a client can resolve a
+// single album without depending on which page of the (now paginated)
+// artist-album listing happens to be loaded — the library page's deep link
+// `?artist=X&album=Y` must resolve Y even when it is past page one. An unknown
+// or unparsable ID is a 404/400; a store read failure is a 500.
+func (s *Server) handleLibraryAlbum(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("albumID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid album ID"))
+		return
+	}
+	album, err := s.store.GetAlbum(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err)
+		return
+	}
+	if album == nil {
+		writeError(w, http.StatusNotFound, fmt.Errorf("album not found"))
+		return
+	}
+	writeJSON(w, http.StatusOK, album)
 }
 
 // duplicateArtistEntry is one artist inside a duplicate-name group.
@@ -359,11 +381,20 @@ type discoveryTrackEntry struct {
 // materialized yet (a cold read); the response then carries the local library
 // fallback. The pre-existing fields keep their shape so the UI reads them
 // unchanged.
+//
+// metadata_status and metadata_terminal are additive: they carry the album's
+// persisted catalog RefreshStatus and whether it is terminal (unmatched/failed)
+// so the UI can present an accurate parked state instead of an indefinite
+// "fetching" spinner. metadata_pending remains true for a terminal album (its
+// provider tracklist is still unmaterialized) but metadata_terminal lets the UI
+// tell the two apart.
 type albumDiscoveryResponse struct {
-	Provider        string                `json:"provider"`
-	ProviderAlbumID string                `json:"provider_album_id"`
-	Tracks          []discoveryTrackEntry `json:"tracks"`
-	MetadataPending bool                  `json:"metadata_pending"`
+	Provider         string                `json:"provider"`
+	ProviderAlbumID  string                `json:"provider_album_id"`
+	Tracks           []discoveryTrackEntry `json:"tracks"`
+	MetadataPending  bool                  `json:"metadata_pending"`
+	MetadataStatus   catalog.RefreshStatus `json:"metadata_status"`
+	MetadataTerminal bool                  `json:"metadata_terminal"`
 }
 
 // catalogReader is the subset of catalog.Store the album read path needs:
@@ -530,11 +561,14 @@ func (s *Server) buildAlbumDiscovery(ctx context.Context, albumID, artistID int6
 	for i := range merged {
 		entries = append(entries, mergedTrackEntry(&merged[i]))
 	}
+	status, terminal := metadataState(meta)
 	return &albumDiscoveryResponse{
-		Provider:        providerName,
-		ProviderAlbumID: providerAlbumID,
-		Tracks:          entries,
-		MetadataPending: false,
+		Provider:         providerName,
+		ProviderAlbumID:  providerAlbumID,
+		Tracks:           entries,
+		MetadataPending:  false,
+		MetadataStatus:   status,
+		MetadataTerminal: terminal,
 	}
 }
 
@@ -547,7 +581,9 @@ func isMaterializedStatus(meta *catalog.AlbumMetadata) bool {
 
 // localPendingResponse serves the album's local library tracks with
 // metadata_pending=true: the fallback for an album with no materialized provider
-// tracklist.
+// tracklist. metadata_terminal is true when the album is parked terminal
+// (unmatched/failed) so the UI can show an accurate parked state; a nil or
+// pending metadata row is not terminal.
 func (s *Server) localPendingResponse(ctx context.Context, albumID int64, meta *catalog.AlbumMetadata) *albumDiscoveryResponse {
 	providerName, providerAlbumID := providerLink(meta)
 	libTracks, err := s.store.GetTracksByAlbum(ctx, albumID)
@@ -558,12 +594,26 @@ func (s *Server) localPendingResponse(ctx context.Context, albumID int64, meta *
 	for i := range libTracks {
 		entries = append(entries, localTrackEntry(&libTracks[i]))
 	}
+	status, terminal := metadataState(meta)
 	return &albumDiscoveryResponse{
-		Provider:        providerName,
-		ProviderAlbumID: providerAlbumID,
-		Tracks:          entries,
-		MetadataPending: true,
+		Provider:         providerName,
+		ProviderAlbumID:  providerAlbumID,
+		Tracks:           entries,
+		MetadataPending:  true,
+		MetadataStatus:   status,
+		MetadataTerminal: terminal,
 	}
+}
+
+// metadataState projects a persisted catalog metadata row onto the discovery
+// response: the raw RefreshStatus and whether it is terminal (unmatched/failed).
+// A nil row (never materialized) has no status and is not terminal — it is cold
+// and still materializing, which metadata_pending already conveys.
+func metadataState(meta *catalog.AlbumMetadata) (catalog.RefreshStatus, bool) {
+	if meta == nil {
+		return "", false
+	}
+	return meta.RefreshStatus, meta.RefreshStatus.IsTerminal()
 }
 
 // providerLink projects the persisted provider link from a metadata row. A nil
@@ -937,7 +987,8 @@ func (s *Server) handleLibraryArtistAlbums(w http.ResponseWriter, r *http.Reques
 		writeError(w, http.StatusBadRequest, fmt.Errorf("invalid artist ID"))
 		return
 	}
-	albums, err := s.store.GetAlbumsByArtist(r.Context(), id)
+	_, offset, limit := parsePagination(r)
+	albums, err := s.store.GetAlbumsByArtist(r.Context(), id, offset, limit)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, err)
 		return

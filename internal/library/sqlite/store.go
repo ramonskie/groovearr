@@ -680,8 +680,8 @@ func (s *Store) GetAlbum(ctx context.Context, id int64) (*domain.Album, error) {
 	return s.scanAlbum(row)
 }
 
-func (s *Store) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain.Album, error) {
-	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE artist_id=? ORDER BY year, title", artistID)
+func (s *Store) GetAlbumsByArtist(ctx context.Context, artistID int64, offset, limit int) ([]domain.Album, error) {
+	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE artist_id=? ORDER BY year, title, id LIMIT ? OFFSET ?", artistID, limit, offset)
 	if err != nil {
 		s.log.Error("get albums by artist failed", "error", err, "component", "lib_store")
 		return nil, err
@@ -690,9 +690,9 @@ func (s *Store) GetAlbumsByArtist(ctx context.Context, artistID int64) ([]domain
 	return s.scanAlbums(rows)
 }
 
-func (s *Store) SearchAlbums(ctx context.Context, query string, limit int) ([]domain.Album, error) {
-	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE title LIKE ? ORDER BY title LIMIT ?",
-		"%"+query+"%", limit)
+func (s *Store) SearchAlbums(ctx context.Context, query string, offset, limit int) ([]domain.Album, error) {
+	rows, err := s.db.QueryContext(ctx, albumSelect+" WHERE title LIKE ? ORDER BY title, id LIMIT ? OFFSET ?",
+		"%"+query+"%", limit, offset)
 	if err != nil {
 		s.log.Error("search albums failed", "error", err, "component", "lib_store")
 		return nil, err
@@ -767,9 +767,9 @@ func (s *Store) GetTracksByArtist(ctx context.Context, artistID int64) ([]domain
 	return s.scanTracks(rows)
 }
 
-func (s *Store) SearchTracks(ctx context.Context, query string, limit int) ([]domain.Track, error) {
-	rows, err := s.db.QueryContext(ctx, trackSelect+" WHERE title LIKE ? ORDER BY title LIMIT ?",
-		"%"+query+"%", limit)
+func (s *Store) SearchTracks(ctx context.Context, query string, offset, limit int) ([]domain.Track, error) {
+	rows, err := s.db.QueryContext(ctx, trackSelect+" WHERE title LIKE ? ORDER BY title, id LIMIT ? OFFSET ?",
+		"%"+query+"%", limit, offset)
 	if err != nil {
 		s.log.Error("search tracks failed", "error", err, "component", "lib_store")
 		return nil, err
@@ -891,7 +891,7 @@ func (s *Store) getOrCreateAlbum(ctx context.Context, artistID int64, title stri
 	}
 
 	// Fallback: fuzzy search via LIKE for near matches.
-	albums, err := s.SearchAlbums(ctx, title, 10)
+	albums, err := s.SearchAlbums(ctx, title, 0, 10)
 	if err != nil {
 		s.log.Error("getOrCreateAlbum: search fallback failed", "error", err, "component", "lib_store")
 		return 0, err
