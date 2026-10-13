@@ -165,9 +165,19 @@ func TestMergeAvailableProviders(t *testing.T) {
 		}
 	})
 
-	t.Run("drops stale entries", func(t *testing.T) {
+	t.Run("preserves unlisted entries", func(t *testing.T) {
+		// A provider not currently available must keep its position instead of
+		// being dropped from the order permanently (FIX C regressed here).
 		got := mergeAvailableProviders([]string{"soundcloud", "deezer"}, providers)
-		want := []string{"deezer", "spotify", "lastfm"}
+		want := []string{"soundcloud", "deezer", "spotify", "lastfm"}
+		if !stringSlicesEqual(got, want) {
+			t.Errorf("got %v, want %v", got, want)
+		}
+	})
+
+	t.Run("preserves unlisted entry between available entries", func(t *testing.T) {
+		got := mergeAvailableProviders([]string{"deezer", "soundcloud", "spotify"}, providers)
+		want := []string{"deezer", "soundcloud", "spotify", "lastfm"}
 		if !stringSlicesEqual(got, want) {
 			t.Errorf("got %v, want %v", got, want)
 		}

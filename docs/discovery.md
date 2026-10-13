@@ -1,6 +1,10 @@
 # Metadata-First Search & Download — Architecture Plan
 
-> **Status**: Draft — not yet implemented.
+> **Status**: Implemented. The discovery layer is live and is the catalog
+> engine's backbone (`discovery.Registry.Configured()`); Deezer, Spotify, Tidal,
+> Last.fm, Discogs and MusicBrainz all implement `discovery.Provider`. The
+> `ReleaseResolver` capability (`internal/discovery/resolver.go`) is implemented
+> by MusicBrainz and consumed by prowlarr.
 > **Goal**: Never parse artist/title from filenames. Metadata comes from authoritative
 > sources (Spotify, Deezer, MusicBrainz). Downloaders only provide the FILE.
 
@@ -39,10 +43,11 @@ with the next candidate.
                               ↓
 ┌──────────────────────────────────────────────────────────────────────┐
 │                    Discovery Providers                                │
-│  Spotify (dev mode)    Deezer (public API)    MusicBrainz (future)    │
-│  - SearchArtists()     - SearchArtists()      - SearchRelease()       │
-│  - GetArtistAlbums()   - GetArtistAlbums()    - GetRelease()          │
-│  - GetAlbumTracks()    - GetAlbumTracks()                             │
+│  Spotify (dev mode)    Deezer (public API)    MusicBrainz            │
+│  - SearchArtists()     - SearchArtists()      - SearchArtists()        │
+│  - GetArtistAlbums()   - GetArtistAlbums()    - GetArtistAlbums()      │
+│  - GetAlbumTracks()    - GetAlbumTracks()     - GetAlbumTracks()       │
+│  - SearchAlbums()      - SearchAlbums()       - SearchAlbums()         │
 │  Returns: structured {artist, album, title, year, cover, isrc}       │
 └──────────────────────────────────────────────────────────────────────┘
                               ↓
@@ -206,13 +211,47 @@ with next candidate (exclude_source). If all exhausted, stays "wanted" for retry
 
 ## Provider API Status
 
+The `discovery.Provider` interface (above) has four methods. All listed providers
+implement the full set (`internal/discovery/provider.go`; each provider's
+compile-time assertion or method set in its own package).
+
 | Method | Spotify | Deezer | MusicBrainz |
 |--------|---------|--------|-------------|
-| `SearchAlbums(query)` | ✅ `SearchAlbums` | ✅ `SearchAlbums` | ❌ |
-| `GetAlbumTracks(id)` | ✅ `GetAlbum` includes tracks | ✅ `GetAlbumTracks` | ❌ |
-| `SearchArtists(query)` | ❌ needs adding | ✅ `SearchArtists` | ❌ |
-| `GetArtist(id)` | ✅ `GetArtist` | ✅ `GetArtist` | ❌ |
-| `GetArtistAlbums(id)` | ❌ needs adding | ✅ `GetArtistAlbums` | ❌ |
+| `SearchAlbums(query)` | ✅ `Plugin.SearchAlbums` | ✅ `DownloadClient.SearchAlbums` | ✅ release-group search → `AlbumResult{ProviderID: rgMBID}` |
+| `GetAlbumTracks(id)` | ✅ `Plugin.GetAlbumTracks` | ✅ `DownloadClient.GetAlbumTracks` | ✅ `LookupReleaseGroup` → representative release → `LookupRelease` |
+| `SearchArtists(query)` | ✅ `Plugin.SearchArtists` | ✅ `DownloadClient.SearchArtists` | ✅ `Client.SearchArtists` |
+| `GetArtistAlbums(id)` | ✅ `Plugin.GetArtistAlbums` | ✅ `DownloadClient.GetArtistAlbums` | ✅ release-groups by artist |
+
+Other implementers expose the same four methods: Tidal (`*Client`), Last.fm
+(`*Plugin`), Discogs (`*Plugin`). `GetArtist(id)` is **not** part of
+`discovery.Provider`; the provider artist id returned by `SearchArtists` is the
+key callers pass back to `GetArtistAlbums`.
+
+### `ReleaseResolver` capability
+
+`internal/discovery/resolver.go` defines **`ReleaseResolver`** beside
+`discovery.Provider`:
+
+```go
+type ReleaseResolver interface {
+    plugin.BasePlugin
+    ResolveTracksForCount(ctx context.Context, artist, album string, fileCount int, torrentTitle string) ([]TrackInfo, string, error)
+}
+```
+
+It returns neutral `discovery.TrackInfo` values so no provider-specific type
+crosses the boundary. MusicBrainz's `*Client` implements it
+(`SearchReleaseGroup` → `(SearchReleasesByGroup | LookupReleaseGroup)` →
+`LookupRelease` → `TrackInfo`), picking the release closest to `fileCount` with
+`torrentTitle` word-overlap as tiebreaker.
+
+Consumption is by interface, never by concrete provider (AGENTS §1): a caller
+implements `discovery.ReleaseResolverConsumer` (`SetReleaseResolver`) and
+`cmd/groovearr/app.go` resolves one resolver from the configured providers and
+injects it after construction. `prowlarr` is the current consumer, so it imports
+no sibling provider and owns no second MusicBrainz client. After a config-update
+rebuild, `internal/api/handlers.go` re-injects the same resolver
+(`reinjectReleaseResolver`).
 
 ---
 
@@ -230,10 +269,16 @@ with next candidate (exclude_source). If all exhausted, stays "wanted" for retry
 | 8 | Delete filename parsing code | S | 5, 7 |
 | 9 | Wire playlist to use playlist metadata in DownloadMeta | S | 5 |
 | 10 | Deezer discovery plugin | M | 2 |
-| 11 | MusicBrainz discovery (free tier) | L | 2 |
+| 11 | MusicBrainz discovery (free tier) — **implemented** (D-001 Phase 3) | — | 2 |
 
 **MVP**: Steps 1-9. One discovery provider (Spotify), one UI page, tag validation,
 no more filename parsing.
+
+**Implemented beyond MVP:** MusicBrainz is now a discovery provider
+(capabilities `["metadata","discovery"]`), so the catalog refresh engine can
+materialize MusicBrainz-only albums; it also provides the `ReleaseResolver`
+capability consumed by prowlarr (see above). Additional discovery providers
+(Deezer, Tidal, Last.fm, Discogs) are live.
 
 ---
 

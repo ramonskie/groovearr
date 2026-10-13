@@ -65,6 +65,10 @@ type RunnerDeps struct {
 	// Metadata is the metadata provider registry used for canonical artist
 	// lookups in the duplicates job.
 	Metadata *metadata.Registry
+	// ProviderOrder is the one shared provider priority (D-001 §3) used by the
+	// duplicates canonical-name lookup so it iterates metadata providers in the
+	// configured order, not registration order. Nil keeps registration order.
+	ProviderOrder *metadata.ProviderOrder
 	// Playlist syncs playlists against upstream sources (may be nil).
 	Playlist PlaylistSyncer
 	// Tracking lists and refreshes tracked artists (may be nil — the
@@ -127,6 +131,15 @@ func (r *Runners) Logger() *slog.Logger { return r.deps.Log }
 // synchronized with running-job reads).
 func (r *Runners) SetRateLimiter(rl RateLimiter) {
 	r.deps.RateLimit = rl
+}
+
+// SetProviderOrder wires the one shared provider priority order (D-001 §3) so
+// the duplicates job iterates metadata providers in the configured order. The
+// api layer calls this at startup, mirroring SetRateLimiter. It is the same
+// closure-backed ProviderOrder every other path uses, so a settings change is
+// honored without a restart (AGENTS §9). A nil order keeps registration order.
+func (r *Runners) SetProviderOrder(order *metadata.ProviderOrder) {
+	r.deps.ProviderOrder = order
 }
 
 // SetWarmRefresher wires (or swaps) the refresh engine the warm-library job

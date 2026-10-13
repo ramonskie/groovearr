@@ -208,12 +208,15 @@ func NewApp(configPath string) (*App, error) {
 	mdRegistry := metadata.NewRegistryFrom(pluginReg)
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
-	// Single shared source of truth for metadata provider priority.
-	metadataOrder := metadata.NewProviderOrder(func() []string { return cfg.Get().MetadataOrder })
-
-	// Metadata resolver.
-	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
-	metadataResolver.SetProviderOrder(metadataOrder)
+	// Single shared source of truth for provider priority (D-001 §3).
+	// provider_order is canonical, with a fallback to the legacy metadata_order
+	// so existing configs keep working. The closure reads the live config on
+	// every call (AGENTS §9), and this ONE instance is injected into every path:
+	// the metadata resolver + enrichment handler, the discovery registry
+	// (discover search, catalog refresh, tracking), the refresh engine, and the
+	// background jobs.
+	providerOrder := metadata.NewProviderOrder(func() []string { return cfg.Get().EffectiveProviderOrder() })
+	discoveryReg.SetProviderOrder(providerOrder)
 
 	// Single shared provider rate-limit cooldown — one bucket for the whole
 	// app. A 429 observed by enrichment, discover search or album discovery
@@ -221,12 +224,38 @@ func NewApp(configPath string) (*App, error) {
 	// expires. The health checker consumes the same bucket — it skips
 	// cooling-down providers and re-marks it when its own probe is
 	// rate-limited — so it never probes a throttled API. Marks persist to the
-	// SQLite store so a long backoff survives a restart.
+	// SQLite store so a long backoff survives a restart. Created BEFORE the
+	// release-resolver wiring so the album-import→prowlarr→MusicBrainz resolver
+	// can be wrapped in the same bucket (D-001 §4 / AGENTS §8).
 	providerCooldown := metadata.NewProviderCooldown()
 	if mdRateStore != nil {
 		providerCooldown.SetStore(mdRateStore)
 		providerCooldown.Restore()
 	}
+
+	// Wire the shared release resolver (D-001 §3). The MusicBrainz plugin owns
+	// the process's ONE *APIClient; prowlarr (and any future album provider)
+	// consumes it through discovery.ReleaseResolver instead of importing a
+	// sibling provider concretely (AGENTS §1). This runs AFTER InitAll /
+	// InitRemaining so every consumer plugin already exists — construction stays
+	// resolver-free and the resolver is injected here, which is why provider
+	// build order can never leave a consumer with a nil resolver. The resolver is
+	// wrapped in the shared cooldown so the album-install resolve path honors a
+	// parked provider and marks a 429 app-wide like every other path.
+	//
+	// resolveReleaseResolver is a reusable closure: the SAME selection is handed
+	// to the API server as a live hook, so reconcileAfterConfigUpdate re-resolves
+	// after a plugin rebuild (picking up a fresh MusicBrainz *APIClient) instead
+	// of re-injecting a stale resolver.
+	resolveReleaseResolver := func() discovery.ReleaseResolver {
+		return discoverReleaseResolver(pluginReg, providerOrder, providerCooldown, log)
+	}
+	releaseResolver := resolveReleaseResolver()
+	injectReleaseResolver(pluginReg, releaseResolver)
+
+	// Metadata resolver.
+	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
+	metadataResolver.SetProviderOrder(providerOrder)
 
 	// Plugin health checker.
 	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, log)
@@ -282,6 +311,10 @@ func NewApp(configPath string) (*App, error) {
 		return discoveryReg.Any()
 	}
 	refreshSvc := refresh.New(catalogStore, libStore, refreshProviders, providerCooldown, log, refresh.DefaultOptions())
+	// The refresh engine tries providers in the one shared order, so catalog
+	// materialization honors the same priority as enrichment and discover.
+	// SetEnabledFunc below reads its gate live from the config closure.
+	refreshSvc.SetProviderOrder(providerOrder)
 	// Live enable gate: a disabled catalog skips the drain loop's claiming and
 	// provider work entirely (AGENTS §9 — read from the closure, never cached).
 	refreshSvc.SetEnabledFunc(func() bool { return cfg.Get().Catalog.IsEnabled() })
@@ -342,7 +375,7 @@ func NewApp(configPath string) (*App, error) {
 	// Import handler chain.
 	enrichmentHandler := download.NewMetadataEnrichmentHandler(mdRegistry, discoveryReg, libStore, log)
 	enrichmentHandler.SetProviderCooldown(providerCooldown)
-	enrichmentHandler.SetProviderOrder(metadataOrder)
+	enrichmentHandler.SetProviderOrder(providerOrder)
 
 	importChain := []download.ImportHandler{
 		download.NewFileRenamerHandler(renamer, dlStore, log),
@@ -444,6 +477,18 @@ func NewApp(configPath string) (*App, error) {
 		},
 	)
 	srv.SetProviderCooldown(providerCooldown)
+	// Inject the one shared provider order into the background jobs (the
+	// duplicates canonical-name lookup), so they iterate providers in the same
+	// order as every other path (D-001 §3).
+	srv.SetProviderOrder(providerOrder)
+	// Hand the same shared release resolver to the API server so a plugin it
+	// rebuilds on a config update is re-injected, rather than silently starting
+	// resolver-free. The live resolver hook lets reconcileAfterConfigUpdate
+	// RE-RESOLVE after a rebuild, so a rebuilt resolver provider (fresh
+	// *APIClient) is the one injected and the old one is dropped — no double
+	// rate-limit pacer, no stale credentials.
+	srv.SetReleaseResolver(releaseResolver)
+	srv.SetReleaseResolverResolver(resolveReleaseResolver)
 
 	// Inject the refresh engine as the manual-refresh enqueuer and start its
 	// drain loop on the app background context. Stop() runs on shutdown below.
@@ -617,6 +662,51 @@ func readRenamerConfig(cfg *config.Persistence) (template, compilationTemplate, 
 		root = c.Library.DownloadPath
 	}
 	return
+}
+
+// discoverReleaseResolver selects the shared discovery.ReleaseResolver from the
+// configured plugins in provider priority order and wraps it in the shared
+// rate-limit cooldown. Selection uses the one shared provider order, so the
+// user's provider_order decides which resolver wins when more than one provider
+// offers the capability. It is a no-op-with-warning when no resolver is
+// available, returning nil so the loud nil guard in each consumer surfaces the
+// misconfiguration on the first resolve. app.go is the composition root, so
+// resolving here names no provider: the consumer interface lives in
+// internal/discovery (AGENTS §1). The cooldown wrapper makes the album-install
+// resolve path honor the same bucket as every other path (D-001 §4 / AGENTS §8).
+//
+// The returned value is re-resolvable: callers wrap it in a closure so a
+// config-update plugin rebuild can obtain a fresh resolver (see
+// Server.SetReleaseResolverResolver).
+func discoverReleaseResolver(reg *plugin.Registry, order *metadata.ProviderOrder, cooldown discovery.Cooldown, log *slog.Logger) discovery.ReleaseResolver {
+	var resolver discovery.ReleaseResolver
+	for _, p := range metadata.Order(order, reg.Configured()) {
+		if r, ok := p.(discovery.ReleaseResolver); ok {
+			resolver = r
+			break
+		}
+	}
+	if resolver == nil {
+		log.Warn("no release resolver among configured providers; album track resolution will fail until one is enabled", "component", "main")
+		return nil
+	}
+	return discovery.NewCooldownReleaseResolver(resolver, cooldown)
+}
+
+// injectReleaseResolver hands the resolved shared resolver to every plugin that
+// consumes one (discovery.ReleaseResolverConsumer). app.go is the composition
+// root, so this names no provider — it type-asserts the consumer interface only
+// (AGENTS §1). A nil resolver is a no-op, leaving each consumer's loud nil
+// guard to surface the misconfiguration.
+func injectReleaseResolver(reg *plugin.Registry, resolver discovery.ReleaseResolver) {
+	if resolver == nil {
+		return
+	}
+	for _, p := range reg.All() {
+		if c, ok := p.(discovery.ReleaseResolverConsumer); ok {
+			c.SetReleaseResolver(resolver)
+		}
+	}
 }
 
 // newTrackResolver creates the track resolver closure used by AlbumImportHandler.

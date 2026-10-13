@@ -9,10 +9,11 @@ import (
 
 // Registry holds all registered plugins and factories with name/capability-based lookup.
 type Registry struct {
-	mu        sync.RWMutex
-	plugins   map[string]BasePlugin    // canonical name → plugin
-	names     []string                 // insertion order
-	factories map[string]PluginFactory // canonical name → factory
+	mu           sync.RWMutex
+	plugins      map[string]BasePlugin    // canonical name → plugin
+	names        []string                 // insertion order
+	factories    map[string]PluginFactory // canonical name → factory
+	factoryOrder []string                 // factory registration order (deterministic init base)
 }
 
 // NewRegistry creates an empty plugin registry.
@@ -90,20 +91,30 @@ func (r *Registry) Configured() []BasePlugin {
 	return out
 }
 
-// WithCapability returns plugins whose factory declares the given capability.
+// WithCapability returns plugins whose factory declares the given capability,
+// in registration order. Iterating r.names (not the r.factories map) keeps the
+// result deterministic across calls, so discovery/catalog provider order is
+// stable. A plugin is included only when it is registered AND its factory
+// declares the capability.
 // Useful for routing: download domain gets download-capable plugins,
 // metadata domain gets metadata-capable, etc.
 func (r *Registry) WithCapability(cap string) []BasePlugin {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var out []BasePlugin
-	for name, factory := range r.factories {
-		if p, ok := r.plugins[name]; ok {
-			for _, c := range factory.Capabilities() {
-				if c == cap {
-					out = append(out, p)
-					break
-				}
+	for _, name := range r.names {
+		p, ok := r.plugins[name]
+		if !ok {
+			continue
+		}
+		factory, ok := r.factories[name]
+		if !ok {
+			continue
+		}
+		for _, c := range factory.Capabilities() {
+			if c == cap {
+				out = append(out, p)
+				break
 			}
 		}
 	}
@@ -130,12 +141,16 @@ func (r *Registry) RegisterFactory(f PluginFactory) error {
 		return fmt.Errorf("plugin factory %q already registered", name)
 	}
 	r.factories[name] = f
+	r.factoryOrder = append(r.factoryOrder, name)
 	return nil
 }
 
 // InitAll creates and registers plugins from all registered factories using
 // the provided sources config map. Sources whose key does not match any
 // registered factory are skipped without error.
+// Instantiation follows factory registration order (not the sources map), so
+// r.names — and therefore every derived ordered list — is deterministic and
+// stable across restarts.
 // Individual factory failures are collected and returned as a joined error;
 // successful plugins continue to be registered.
 func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginResources) error {
@@ -143,7 +158,11 @@ func (r *Registry) InitAll(sources map[string]json.RawMessage, resources PluginR
 	defer r.mu.Unlock()
 
 	var errs []error
-	for name, rawCfg := range sources {
+	for _, name := range r.factoryOrder {
+		rawCfg, inSources := sources[name]
+		if !inSources {
+			continue
+		}
 		f, ok := r.factories[name]
 		if !ok {
 			continue
@@ -224,13 +243,18 @@ func (r *Registry) FillDefaults(sources map[string]json.RawMessage) map[string]j
 // InitRemaining creates plugins with their factory DefaultConfig() for any
 // registered factory that hasn't been instantiated yet (e.g., sources not
 // present in the config file). Useful for optional plugins that should be
-// available even without explicit configuration.
+// available even without explicit configuration. Iterating factory registration
+// order keeps r.names deterministic and stable across restarts.
 func (r *Registry) InitRemaining(resources PluginResources) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	for name, f := range r.factories {
+	for _, name := range r.factoryOrder {
 		if _, exists := r.plugins[name]; exists {
+			continue
+		}
+		f, ok := r.factories[name]
+		if !ok {
 			continue
 		}
 		p, err := f.Create(f.DefaultConfig(), resources)

@@ -23,6 +23,21 @@ Provider I/O happens only through `discovery.Provider`, and every provider call
 goes through the single app-wide `metadata.ProviderCooldown` bucket (AGENTS §1,
 §8). The engine never references a provider name.
 
+Provider iteration is **deterministic and configured**. `discovery.Registry`
+returns providers from `plugin.Registry.WithCapability("discovery")`, which
+iterates registration order (`r.names`), then sorts them into the one shared
+`metadata.ProviderOrder` — `provider_order` when set, falling back to the legacy
+`metadata_order` (`Config.EffectiveProviderOrder`). The same order instance is
+injected into the discovery registry, the engine
+(`refreshSvc.SetProviderOrder`), the metadata resolver/enrichment handler, and
+the background jobs, so catalog materialization, discover search, enrichment and
+the duplicates scan iterate providers in one order (`cmd/groovearr/app.go`).
+MusicBrainz is itself a discovery provider (factory capabilities
+`["metadata","discovery"]`; `*Client` implements `discovery.Provider`), so an
+album only MusicBrainz carries (the album-359 class) can materialize here. Its
+release-group/release lookups ride the same shared, rate-limited `*APIClient` as
+the metadata path (1 req/s pacer) and the same cooldown bucket.
+
 ## Sweep-Free Model
 
 | Tier | Trigger | Mechanism | Status in code |
@@ -181,7 +196,7 @@ providers()                         live closure; empty -> ErrNoProviders
   |       rate-limited -> return ErrRateLimited (link kept; not at fault)
   |
   | 2. else: resolve local artist name + album title
-  | 3. query = "artist title"; for each provider (skip cooling):
+  | 3. query = "artist title"; for each provider in shared order (skip cooling):
   |       searchAlbums(query, SearchLimit) -> bestMatch
   |          (bestMatch returns the FIRST acceptable match in that provider's
   |           results — there is no cross-provider ranking. normalizeTitle drops
@@ -352,6 +367,15 @@ import, a manual refresh, or the warm job.
 
 - All provider calls go through `discovery.Provider` (`SearchAlbums`,
   `GetAlbumTracks`); no provider name is referenced outside the provider package.
+- Providers are tried in the one shared order: `WithCapability("discovery")`
+  preserves registration order, then `metadata.Order` sorts by `provider_order`
+  (fallback `metadata_order`). `RefreshAlbum` has no cross-provider ranking —
+  `bestMatch` returns the first acceptable match within the current provider, and
+  the first provider with a match wins.
+- MusicBrainz is a discovery provider (`["metadata","discovery"]`); its search
+  and lookup calls share the single `*APIClient` (1 req/s pacer) with the
+  metadata path, so MB-only albums can materialize without a second client or a
+  second pacer.
 - Before a call: `coolingDown(name)` skips a parked provider. On
   `metadata.ErrRateLimited`: `markProviderError` marks the shared cooldown
   (`MarkAfter`, honoring a server `Retry-After`), so a bulk pass cannot push a

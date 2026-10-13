@@ -3,13 +3,15 @@ package prowlarr
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
-	"github.com/ramonskie/groovearr/internal/providers/musicbrainz"
 )
 
 // testServer creates an httptest server for Prowlarr + Torznab endpoints.
@@ -46,17 +48,16 @@ func (ts *testServer) close() { ts.srv.Close() }
 
 func (ts *testServer) newPlugin(t *testing.T) *Plugin {
 	t.Helper()
-	mb := musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, nil)
-	mb.SetMinInterval(0)
 	p, err := newPlugin(Config{
 		URL:        ts.srv.URL,
 		APIKey:     "test-key",
 		IndexerTag: "groovearr",
 		Categories: []int{3040},
-	}, mb, nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("newPlugin: %v", err)
 	}
+	p.SetReleaseResolver(&stubResolver{})
 	return p
 }
 
@@ -236,93 +237,101 @@ func TestSearchAlbumNoResults(t *testing.T) {
 	}
 }
 
-// ─── ResolveTracks tests (MusicBrainz via mock) ──────────────────────
+// ─── ResolveTracks tests (injected discovery.ReleaseResolver stub) ───
 
-func TestResolveTracks(t *testing.T) {
-	mbSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		path := r.URL.Path
-
-		switch {
-		case path == "/release-group/":
-			// Search release group
-			fmt.Fprint(w, `{"release-groups":[{"id":"rg-mbid-123","title":"Master of Puppets","primary-type":"Album"}]}`)
-
-		case path == "/release-group/rg-mbid-123":
-			// Lookup release group
-			fmt.Fprint(w, `{"releases":[{"id":"rel-mbid-456","title":"Master of Puppets"}]}`)
-
-		case path == "/release/rel-mbid-456":
-			// Lookup release
-			fmt.Fprint(w, `{
-				"id":"rel-mbid-456",
-				"title":"Master of Puppets",
-				"date":"1986-03-03",
-				"country":"US",
-				"release-group":{"id":"rg-mbid-123"},
-				"label-info":[{"label":{"name":"Elektra"}}],
-				"media":[{"tracks":[
-					{"number":"1","title":"Battery","length":312000,"recording":{"id":"r1","title":"Battery","artist-credit":[{"name":"Metallica","joinphrase":""}]}},
-					{"number":"2","title":"Master of Puppets","length":515000,"recording":{"id":"r2","title":"Master of Puppets","artist-credit":[{"name":"Metallica","joinphrase":""}]}}
-				]}],
-				"genres":[{"name":"thrash metal"}]
-			}`)
-
-		default:
-			w.WriteHeader(http.StatusNotFound)
-		}
-	}))
-	defer mbSrv.Close()
-
-	mbClient := musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, nil)
-	mbClient.SetBaseURL(mbSrv.URL)
-	mbClient.SetHTTPClient(mbSrv.Client())
-	mbClient.SetMinInterval(0)
-
-	p, err := newPlugin(Config{
-		URL:        "http://localhost:9696",
-		APIKey:     "key",
-		IndexerTag: "groovearr",
-		Categories: []int{3040},
-	}, mbClient, nil)
+func TestResolveTracksMapsResolverTracks(t *testing.T) {
+	p, err := newPlugin(Config{URL: "http://localhost:9696", APIKey: "key", IndexerTag: "groovearr"}, nil)
 	if err != nil {
 		t.Fatalf("newPlugin: %v", err)
 	}
-
-	ctx := context.Background()
-	release := domain.AlbumRelease{
-		Artist: "Metallica",
-		Album:  "Master of Puppets",
+	stub := &stubResolver{
+		tracks: []discovery.TrackInfo{
+			{ArtistName: "Metallica", Title: "Battery", TrackNumber: 1, DurationMs: 312000},
+			// Empty ArtistName must fall back to the album artist.
+			{Title: "Master of Puppets", TrackNumber: 2, DurationMs: 515000},
+		},
+		mbid: "rel-mbid-456",
 	}
+	p.SetReleaseResolver(stub)
 
-	tracks, err := p.ResolveTracks(ctx, release)
+	release := domain.AlbumRelease{Artist: "Metallica", Album: "Master of Puppets"}
+	tracks, mbid, err := p.ResolveTracksForCount(context.Background(), release, 2, "Metallica - Master of Puppets [FLAC]")
 	if err != nil {
-		t.Fatalf("ResolveTracks: %v", err)
+		t.Fatalf("ResolveTracksForCount: %v", err)
+	}
+	if mbid != "rel-mbid-456" {
+		t.Errorf("mbid = %q, want rel-mbid-456", mbid)
 	}
 	if len(tracks) != 2 {
 		t.Fatalf("expected 2 tracks, got %d", len(tracks))
 	}
-	if tracks[0].Title != "Battery" {
-		t.Errorf("track 0 title = %q, want Battery", tracks[0].Title)
+	if tracks[0].Title != "Battery" || tracks[0].Artist != "Metallica" || tracks[0].TrackNumber != 1 || tracks[0].Duration != 312 {
+		t.Errorf("track 0 = %+v, want Battery/Metallica/#1/312", tracks[0])
 	}
-	if tracks[0].Artist != "Metallica" {
-		t.Errorf("track 0 artist = %q, want Metallica", tracks[0].Artist)
+	if tracks[1].Artist != "Metallica" {
+		t.Errorf("track 1 artist = %q, want fallback to album artist Metallica", tracks[1].Artist)
 	}
-	if tracks[0].TrackNumber != 1 {
-		t.Errorf("track 0 number = %d, want 1", tracks[0].TrackNumber)
-	}
-	if tracks[0].Duration != 312 {
-		t.Errorf("track 0 duration = %d, want 312", tracks[0].Duration)
+	if tracks[1].Title != "Master of Puppets" || tracks[1].TrackNumber != 2 || tracks[1].Duration != 515 {
+		t.Errorf("track 1 = %+v, want Master of Puppets/#2/515", tracks[1])
 	}
 
-	if tracks[1].Title != "Master of Puppets" {
-		t.Errorf("track 1 title = %q, want Master of Puppets", tracks[1].Title)
+	// Hints must be passed through to the resolver unchanged.
+	if stub.calls != 1 {
+		t.Errorf("resolver calls = %d, want 1", stub.calls)
 	}
-	if tracks[1].TrackNumber != 2 {
-		t.Errorf("track 1 number = %d, want 2", tracks[1].TrackNumber)
+	if stub.gotArtist != "Metallica" || stub.gotAlbum != "Master of Puppets" {
+		t.Errorf("resolver artist/album = %q/%q, want Metallica/Master of Puppets", stub.gotArtist, stub.gotAlbum)
 	}
-	// Note: release.MBID/AlbumType/CoverURL are set internally but the
-	// AlbumProvider interface pass release by value, so caller won't see
-	// these mutations. The tracks themselves contain the resolved data.
+	if stub.gotFileCount != 2 || stub.gotTorrentTitle != "Metallica - Master of Puppets [FLAC]" {
+		t.Errorf("resolver hints = fileCount %d, torrentTitle %q", stub.gotFileCount, stub.gotTorrentTitle)
+	}
+}
+
+func TestResolveTracksNoCountPassesZeroHints(t *testing.T) {
+	p, err := newPlugin(Config{URL: "http://localhost:9696", APIKey: "key"}, nil)
+	if err != nil {
+		t.Fatalf("newPlugin: %v", err)
+	}
+	stub := &stubResolver{tracks: []discovery.TrackInfo{{Title: "One", TrackNumber: 1, DurationMs: 1000}}}
+	p.SetReleaseResolver(stub)
+
+	if _, err := p.ResolveTracks(context.Background(), domain.AlbumRelease{Artist: "A", Album: "B"}); err != nil {
+		t.Fatalf("ResolveTracks: %v", err)
+	}
+	if stub.gotFileCount != 0 || stub.gotTorrentTitle != "" {
+		t.Errorf("no-count call should pass empty hints, got fileCount %d, torrentTitle %q", stub.gotFileCount, stub.gotTorrentTitle)
+	}
+}
+
+func TestResolveTracksNilResolver(t *testing.T) {
+	p, err := newPlugin(Config{URL: "http://localhost:9696", APIKey: "key"}, nil)
+	if err != nil {
+		t.Fatalf("newPlugin: %v", err)
+	}
+	// No SetReleaseResolver call — a missing wiring must fail loudly.
+	_, _, err = p.ResolveTracksForCount(context.Background(), domain.AlbumRelease{Artist: "A", Album: "B"}, 0, "")
+	if err == nil {
+		t.Fatal("expected error when resolver is unset")
+	}
+	if !strings.Contains(err.Error(), "release resolver") {
+		t.Errorf("error = %v, want mention of release resolver", err)
+	}
+}
+
+func TestResolveTracksResolverErrorWrapped(t *testing.T) {
+	p, err := newPlugin(Config{URL: "http://localhost:9696", APIKey: "key"}, nil)
+	if err != nil {
+		t.Fatalf("newPlugin: %v", err)
+	}
+	p.SetReleaseResolver(&stubResolver{err: errors.New("boom")})
+
+	_, _, err = p.ResolveTracksForCount(context.Background(), domain.AlbumRelease{Artist: "A", Album: "B"}, 0, "")
+	if err == nil {
+		t.Fatal("expected error from resolver")
+	}
+	if !strings.Contains(err.Error(), "resolve tracks") || !strings.Contains(err.Error(), "boom") {
+		t.Errorf("error = %v, want wrapped resolver failure", err)
+	}
 }
 
 // ─── CheckConnection tests ───────────────────────────────────────────
@@ -356,10 +365,10 @@ func TestCheckConnection(t *testing.T) {
 
 func TestParseTitle(t *testing.T) {
 	tests := []struct {
-		name           string
-		title          string
-		wantArtist     string
-		wantAlbum      string
+		name       string
+		title      string
+		wantArtist string
+		wantAlbum  string
 	}{
 		{
 			"simple", "Artist - Album",

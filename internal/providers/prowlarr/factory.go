@@ -5,19 +5,18 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
-	"sync"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
-	"github.com/ramonskie/groovearr/internal/providers/musicbrainz"
 )
 
 // Factory is the plugin factory for Prowlarr.
 var Factory plugin.PluginFactory = &factory{}
 
-type factory struct {
-	mbOnce   sync.Once
-	mbClient *musicbrainz.APIClient
-}
+// factory builds prowlarr plugins. It holds no MusicBrainz state: track
+// resolution is injected into the constructed Plugin after registration via
+// discovery.ReleaseResolverConsumer (see app.go), so construction never depends
+// on provider build order and prowlarr imports no sibling provider (AGENTS §1).
+type factory struct{}
 
 func (f *factory) Name() string           { return pluginName }
 func (f *factory) DisplayName() string    { return displayName }
@@ -31,11 +30,7 @@ func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResource
 	if resources.Logger == nil {
 		resources.Logger = slog.Default()
 	}
-
-	f.mbOnce.Do(func() {
-		f.mbClient = musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, resources.Logger)
-	})
-	return newPlugin(cfg, f.mbClient, resources.Logger)
+	return newPlugin(cfg, resources.Logger)
 }
 
 func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {

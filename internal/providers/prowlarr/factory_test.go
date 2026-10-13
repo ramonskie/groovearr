@@ -1,11 +1,47 @@
 package prowlarr
 
 import (
+	"context"
 	"encoding/json"
 	"testing"
 
-	"github.com/ramonskie/groovearr/internal/providers/musicbrainz"
+	"github.com/ramonskie/groovearr/internal/discovery"
 )
+
+// stubResolver is a test double for discovery.ReleaseResolver. It records the
+// arguments passed to ResolveTracksForCount (so tests can assert fileCount /
+// torrentTitle passthrough) and returns canned discovery.TrackInfo data.
+type stubResolver struct {
+	tracks []discovery.TrackInfo
+	mbid   string
+	err    error
+
+	calls           int
+	gotArtist       string
+	gotAlbum        string
+	gotFileCount    int
+	gotTorrentTitle string
+}
+
+var _ discovery.ReleaseResolver = (*stubResolver)(nil)
+
+func (s *stubResolver) ResolveTracksForCount(_ context.Context, artist, album string, fileCount int, torrentTitle string) ([]discovery.TrackInfo, string, error) {
+	s.calls++
+	s.gotArtist = artist
+	s.gotAlbum = album
+	s.gotFileCount = fileCount
+	s.gotTorrentTitle = torrentTitle
+	return s.tracks, s.mbid, s.err
+}
+
+// ─── plugin.BasePlugin (no-ops — the stub is only ever used as a resolver) ───
+
+func (s *stubResolver) Name() string                          { return "stub-resolver" }
+func (s *stubResolver) DisplayName() string                   { return "Stub Resolver" }
+func (s *stubResolver) IsConfigured() bool                    { return true }
+func (s *stubResolver) CheckConnection(context.Context) error { return nil }
+func (s *stubResolver) Connected() bool                       { return false }
+func (s *stubResolver) CapabilityStatus() map[string]string   { return nil }
 
 func TestFactoryValidateConfig(t *testing.T) {
 	tests := []struct {
@@ -67,6 +103,8 @@ func hasCap(caps []string, want string) bool {
 	return false
 }
 
+// testPlugin builds a configured plugin with a stub resolver injected, matching
+// how app.go wires the real resolver after construction.
 func testPlugin(t *testing.T) *Plugin {
 	t.Helper()
 	p, err := newPlugin(Config{
@@ -74,10 +112,11 @@ func testPlugin(t *testing.T) *Plugin {
 		APIKey:     "test-key",
 		IndexerTag: "groovearr",
 		Categories: []int{3040},
-	}, musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, nil), nil)
+	}, nil)
 	if err != nil {
 		t.Fatalf("newPlugin: %v", err)
 	}
+	p.SetReleaseResolver(&stubResolver{})
 	return p
 }
 
@@ -99,10 +138,8 @@ func TestPluginBasics(t *testing.T) {
 }
 
 func TestPluginNotConfigured(t *testing.T) {
-	mb := musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, nil)
-
 	// Plugin should create successfully but report not configured.
-	p, err := newPlugin(Config{}, mb, nil)
+	p, err := newPlugin(Config{}, nil)
 	if err != nil {
 		t.Fatalf("newPlugin with empty config should succeed: %v", err)
 	}
@@ -113,8 +150,7 @@ func TestPluginNotConfigured(t *testing.T) {
 
 func TestDefaultConfigApplied(t *testing.T) {
 	cfg := Config{URL: "http://localhost:9696", APIKey: "key"}
-	mb := musicbrainz.NewAPIClient(musicbrainz.MusicBrainzConfig{}, nil)
-	p, err := newPlugin(cfg, mb, nil)
+	p, err := newPlugin(cfg, nil)
 	if err != nil {
 		t.Fatalf("newPlugin: %v", err)
 	}

@@ -73,10 +73,10 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Download lifecycle, album provider contract, import pipeline, monitoring | `Record`, `MonitoredProvider`, `DownloadClient`, `AlbumProvider`, `AlbumImportHandler`, import handler chain, `CompletedDownloadService`, `MonitoringService` |
 | `internal/metadata` | Metadata provider interface + resolver + registry + app-wide rate-limit cooldown | `Provider`, `MetadataResolver`, `Registry`, `ProviderCooldown`, `RateLimitError`, `CoverResult`, `TrackMetadata` |
-| `internal/providers/musicbrainz` | MusicBrainz metadata provider (recording search, release lookup, release-group batch search) | `Client` (implements `metadata.Provider`) |
+| `internal/providers/musicbrainz` | MusicBrainz metadata + discovery provider; release-group/release lookup and the `ReleaseResolver` capability | `Client` (implements `metadata.Provider`, `metadata.ArtistNameProvider`, `discovery.Provider`, `discovery.ReleaseResolver`) |
 | `internal/providers/coverartarchive` | Cover Art Archive (MBID-based cover lookup) | `Client` (implements `metadata.Provider`) |
 | `internal/providers/deezer` | Deezer plugin — download (ARL) + metadata (public API) | `DownloadClient` (implements `download.Plugin` + `metadata.Provider`), `Client` (API) |
-| `internal/providers/prowlarr` | Prowlarr album provider — searches RuTracker via Torznab, resolves tracks via MusicBrainz | `Plugin` (implements `download.AlbumProvider`) |
+| `internal/providers/prowlarr` | Prowlarr album provider — searches RuTracker via Torznab, resolves tracks via the injected `discovery.ReleaseResolver` (no MusicBrainz import) | `Plugin` (implements `download.AlbumProvider`, `discovery.ReleaseResolverConsumer`) |
 | `internal/providers/qbittorrent` | qBittorrent download client — torrent downloads via WebUI API v2 | `Plugin` (implements `download.DownloadClient`) |
 | `internal/download/sqlite` | SQLite download record store | `Store` (implements `DownloadStore`) |
 | `internal/events` | In-memory pub/sub event bus | `InMemoryEventBus`, 8 topic constants |
@@ -209,6 +209,31 @@ events (queue → state change → progress → completed/failed) and
 
 ## Plugin System
 
+**One inner registry, typed views.** All plugins register into a single
+`plugin.Registry` (`cmd/groovearr/app.go`: `pluginReg := plugin.NewRegistry()`);
+the domain registries are typed *views* over that same inner registry —
+`download.NewRegistryFrom`, `metadata.NewRegistryFrom`,
+`discovery.NewRegistry` — so membership, registration order and `Rebuild` are one
+source of truth. Capabilities are declared per factory
+(`PluginFactory.Capabilities()`) and queried with `WithCapability`; callers
+type-assert the result to the interface they need (`metadata.Provider`,
+`discovery.Provider`, `discovery.ReleaseResolver`) rather than looking up a
+provider by name. MusicBrainz, for example, declares
+`["metadata","discovery"]` and its `*Client` implements `metadata.Provider`,
+`discovery.Provider` and `discovery.ReleaseResolver`.
+
+**Shared runtime resources after (re)build.** A provider that needs a sibling's
+capability receives it by interface, not by import: the composition root resolves
+one `discovery.ReleaseResolver` from the configured providers and injects it into
+every `discovery.ReleaseResolverConsumer` after construction
+(`injectReleaseResolver`, `cmd/groovearr/app.go`). The MusicBrainz plugin owns the
+process's single shared, rate-limited `*APIClient` (1 req/s pacer) and satisfies
+the resolver; prowlarr is the consumer, so it imports no provider package and
+owns no MusicBrainz client — metadata enrichment and album-track resolution share
+one client and one bucket. A config-update rebuild re-injects the same resolver
+(`reinjectReleaseResolver`, `internal/api/handlers.go`) because a rebuilt factory
+constructs resolver-free.
+
 ### Download Plugin Interfaces
 
 Plugins implement two interfaces: `Plugin` for search/discovery and `MonitoredProvider` for the download lifecycle. The `Plugin` interface extends `plugin.BasePlugin` (name, connection check, configuration). `MonitoredProvider` replaces the download-specific methods that were previously on `Plugin`, giving each provider ownership of its own download goroutines.
@@ -257,7 +282,7 @@ type SearchPlugin interface {
 }
 ```
 
-**Current plugins:** Soulseek (slskd/slskr REST API), Deezer (ARL + Blowfish decrypt) — both implement `Plugin` + `MonitoredProvider`. Prowlarr implements `download.AlbumProvider` for full-album torrent search and MusicBrainz track resolution. qBittorrent implements `download.DownloadClient` for torrent execution.
+**Current plugins:** Soulseek (slskd/slskr REST API), Deezer (ARL + Blowfish decrypt) — both implement `Plugin` + `MonitoredProvider`. Prowlarr implements `download.AlbumProvider` for full-album torrent search and resolves tracks through the injected `discovery.ReleaseResolver` (no sibling-provider import). qBittorrent implements `download.DownloadClient` for torrent execution.
 
 ### Album Provider Interface
 
@@ -334,7 +359,8 @@ type Source interface {
 ### Queue-Time Resolution
 
 Before a download is queued, `MetadataResolver.EnrichMetadata()` queries configured
-providers in priority order (`metadata_order` config). It resolves a missing album
+providers in the shared provider order (`provider_order`, falling back to
+`metadata_order`). It resolves a missing album
 name, then finds cover art — see the
 [Queue-Time Resolution](flows/queue-time-resolution.md) flow chart. It is
 **best-effort**: errors are logged, empty fields are left empty, and the queue
@@ -366,12 +392,34 @@ cover art lookups via CoverArtArchive and MusicBrainz release metadata.
 
 ### Provider Order
 
-Configurable via `metadata_order` in config.json:
+**One order source for every path (D-001 §3).** The canonical key is
+`provider_order`; an install that only ever wrote the legacy `metadata_order`
+keeps working through a fallback (`Config.EffectiveProviderOrder`,
+`internal/config/config.go` — `provider_order` when non-empty, else
+`metadata_order`).
+
 ```json
-{"metadata_order": ["deezer", "musicbrainz", "coverartarchive"]}
+{"provider_order": ["deezer", "musicbrainz", "discogs"]}
 ```
 
-Deezer first (fast, 50 req/5s, better album resolution). Falls through to MusicBrainz (1 req/s, deep catalog). CoverArtArchive last (MBID-based only). Unlisted providers go to end.
+A single `metadata.ProviderOrder` (`internal/metadata/order.go`) is built in
+`cmd/groovearr/app.go` over a **live config closure** and injected into every
+consumer via `SetProviderOrder`: the metadata resolver + enrichment handler, the
+discovery registry (discover search, catalog refresh, tracking), the refresh
+engine, and the background jobs (duplicates canonical lookup). Registration-order
+selection is retired on those paths. `metadata.Order` is a stable sort: listed
+providers come first in order, unlisted providers follow in their original
+(registration) order; an unset/empty order yields registration order.
+
+The first-run seed is Deezer → MusicBrainz → Discogs. Deezer is fast (50 req/5s)
+with better album resolution; MusicBrainz is deep-catalog (1 req/s);
+CoverArtArchive (MBID-based only) sits last when configured. Unlisted providers
+go to the end.
+
+**Deterministic capability lookup.** `plugin.Registry.WithCapability(cap)`
+iterates the registry's insertion-order `names` slice (not the `factories` map),
+so capability queries return providers in a stable registration order on every
+call.
 
 ### Rate Limiting & Provider Cooldown
 
@@ -481,7 +529,8 @@ SQLite library record
 | `library.folder_template` | `{artist}/{album} ({year})/{track:02d} - {title}` | Rename pattern | — |
 | `library.playlist_path` | `./playlists` | Separate playlist downloads | No |
 | `library.playlist_template` | `{position:02d} {artist} - {title}` | Playlist filename pattern | — |
-| `metadata_order` | `["deezer", "musicbrainz", "coverartarchive"]` | Metadata provider priority | — |
+| `provider_order` | (unset → falls back) | Canonical provider priority; every path (enrichment, discover, catalog, tracking, duplicates) | — |
+| `metadata_order` | `["deezer", "musicbrainz", "discogs"]` | Legacy provider priority; fallback for `provider_order` | — |
 
 ## Database
 

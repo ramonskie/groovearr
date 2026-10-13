@@ -43,12 +43,13 @@ type ReleaseInfo struct {
 
 // ReleaseTrack represents a single track within a release lookup.
 type ReleaseTrack struct {
-	Position int    // 1-based track position (parsed from Number)
-	Number   string // display number from MusicBrainz (e.g. "1", "A1")
-	Title    string
-	Length   int64  // milliseconds
-	Artist   string // per-track artist credit (for compilations)
-	ISRCs    []string
+	Position   int    // 1-based track position (parsed from Number)
+	Number     string // display number from MusicBrainz (e.g. "1", "A1")
+	Title      string
+	Length     int64  // milliseconds
+	Artist     string // per-track artist credit (for compilations)
+	ISRCs      []string
+	DiscNumber int // 1-based medium/disc index within the release
 }
 
 // ─── API client ────────────────────────────────────────────────────────
@@ -319,7 +320,8 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 			} `json:"label"`
 		} `json:"label-info"`
 		Media []struct {
-			Tracks []struct {
+			Position int `json:"position"` // 1-based medium/disc index
+			Tracks   []struct {
 				Number    string `json:"number"`
 				Title     string `json:"title"`
 				Length    int64  `json:"length"` // milliseconds
@@ -363,8 +365,13 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		}
 	}
 
-	// Extract tracks and ISRCs.
-	for _, medium := range resp.Media {
+	// Extract tracks and ISRCs. MusicBrainz flattens tracks per medium, so the
+	// medium index is threaded onto every track to preserve the disc number.
+	for mediaIdx, medium := range resp.Media {
+		disc := medium.Position
+		if disc <= 0 {
+			disc = mediaIdx + 1 // fall back to the 1-based medium order
+		}
 		for _, t := range medium.Tracks {
 			pos := 0
 			if n, _ := fmt.Sscanf(t.Number, "%d", &pos); n != 1 {
@@ -387,12 +394,13 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 				artist += t.Recording.ArtistCredit[i].Name
 			}
 			track := ReleaseTrack{
-				Position: pos,
-				Number:   t.Number,
-				Title:    t.Title,
-				Length:   t.Length,
-				Artist:   artist,
-				ISRCs:    t.Recording.ISRCs,
+				Position:   pos,
+				Number:     t.Number,
+				Title:      t.Title,
+				Length:     t.Length,
+				Artist:     artist,
+				ISRCs:      t.Recording.ISRCs,
+				DiscNumber: disc,
 			}
 			info.Tracks = append(info.Tracks, track)
 			for _, isrc := range t.Recording.ISRCs {
@@ -411,7 +419,10 @@ type ReleaseGroupRelease struct {
 	ID             string
 	Title          string
 	Disambiguation string
-	TrackCount     int // total tracks across all media
+	Status         string // release status, e.g. "Official", "Bootleg"
+	Date           string // release date (YYYY, YYYY-MM, or YYYY-MM-DD)
+	PrimaryType    string // the release group's primary type (e.g. "Album")
+	TrackCount     int    // total tracks across all media
 }
 
 // LookupReleaseGroup retrieves all releases within a release group.
@@ -429,10 +440,13 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 	}
 
 	var resp struct {
-		Releases []struct {
+		PrimaryType string `json:"primary-type"`
+		Releases    []struct {
 			ID             string `json:"id"`
 			Title          string `json:"title"`
 			Disambiguation string `json:"disambiguation"`
+			Status         string `json:"status"`
+			Date           string `json:"date"`
 		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -442,7 +456,14 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 
 	releases := make([]ReleaseGroupRelease, len(resp.Releases))
 	for i, r := range resp.Releases {
-		releases[i] = ReleaseGroupRelease{ID: r.ID, Title: r.Title, Disambiguation: r.Disambiguation}
+		releases[i] = ReleaseGroupRelease{
+			ID:             r.ID,
+			Title:          r.Title,
+			Disambiguation: r.Disambiguation,
+			Status:         r.Status,
+			Date:           r.Date,
+			PrimaryType:    resp.PrimaryType,
+		}
 	}
 	return releases, nil
 }

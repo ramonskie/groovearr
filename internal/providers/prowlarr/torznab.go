@@ -1,5 +1,6 @@
 // Package prowlarr implements an AlbumProvider plugin that searches RuTracker
-// via Prowlarr's Torznab API and resolves track listings via MusicBrainz.
+// via Prowlarr's Torznab API and resolves track listings through an injected
+// discovery.ReleaseResolver.
 package prowlarr
 
 import (
@@ -229,8 +230,8 @@ type prowlarrTag struct {
 // ─── Title helpers ───────────────────────────────────────────────────
 
 // parseTitle extracts artist and album from a RuTracker torrent title.
-// Used for display metadata and MusicBrainz resolution.
-// The matching engine handles confidence scoring separately.
+// Used for display metadata and to build the release query passed to the
+// release resolver. The matching engine handles confidence scoring separately.
 func parseTitle(title string) (artist, album string) {
 	// Strip leading (Genre...) [Format...] prefixes.
 	cleaned := title

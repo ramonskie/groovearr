@@ -29,7 +29,13 @@ internal/plugin/           ← Shared framework: BasePlugin, PluginFactory, Regi
 **What the registry provides:**
 - Name-based lookup + capability-based routing (`WithCapability()`)
 - Automatic initialization from `config.json` `"sources"` map via `InitAll()`
-- Hot-reload via `Registry.Rebuild()` when config changes
+- Hot-reload via `Registry.Rebuild()` when config changes; a rebuilt plugin is
+  re-injected with the shared `discovery.ReleaseResolver` through
+  `SetReleaseResolver` on the `discovery.ReleaseResolverConsumer` interface —
+  injected at start-up by `injectReleaseResolver` (`cmd/groovearr/app.go`) and
+  re-injected after a config-update rebuild by `reinjectReleaseResolver`
+  (`internal/api/handlers.go`) — so a config update cannot silently leave a
+  consumer without one
 - Plugin queries (configured sources searched sequentially in `download_order` priority)
 
 **What a plugin gets for free:**

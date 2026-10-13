@@ -1352,3 +1352,46 @@ func TestService_AlbumStaleAfter(t *testing.T) {
 		t.Fatalf("nil service AlbumStaleAfter = %v, want default", got)
 	}
 }
+
+// TestService_RefreshAlbum_HonorsProviderOrder pins that the engine tries
+// providers in the one shared order (D-001 §3), not the order the injected
+// providers closure returned. Two providers can materialize the album; the
+// order says beta first, so alpha must never be consulted.
+func TestService_RefreshAlbum_HonorsProviderOrder(t *testing.T) {
+	// Arrange: two providers that both match "Artist One"/"Album One".
+	lib := &fakeLibrary{
+		albums:  map[int64]*domain.Album{42: {ID: 42, ArtistID: 7, Title: "Album One"}},
+		artists: map[int64]*domain.Artist{7: {ID: 7, Name: "Artist One"}},
+	}
+	alpha := &fakeProvider{
+		name:          "alpha",
+		searchResults: []discovery.AlbumResult{{ProviderID: "pa", ProviderName: "alpha", ArtistName: "Artist One", Title: "Album One"}},
+		tracks:        []discovery.TrackInfo{{ProviderID: "a1", DiscNumber: 1, TrackNumber: 1, Title: "A"}},
+	}
+	beta := &fakeProvider{
+		name:          "beta",
+		searchResults: []discovery.AlbumResult{{ProviderID: "pb", ProviderName: "beta", ArtistName: "Artist One", Title: "Album One"}},
+		tracks:        []discovery.TrackInfo{{ProviderID: "b1", DiscNumber: 1, TrackNumber: 1, Title: "B"}},
+	}
+	svc := newTestService(newFakeStore(), lib, Options{}, alpha, beta)
+	svc.SetProviderOrder(metadata.NewProviderOrder(func() []string {
+		return []string{"beta", "alpha"}
+	}))
+
+	// Act
+	outcome, err := svc.RefreshAlbum(context.Background(), 42)
+
+	// Assert
+	if err != nil {
+		t.Fatalf("RefreshAlbum: %v", err)
+	}
+	if !outcome.Matched || outcome.ProviderName != "beta" {
+		t.Fatalf("outcome = %+v, want beta to win by order", outcome)
+	}
+	if beta.searchCalls != 1 {
+		t.Errorf("beta search calls = %d, want 1", beta.searchCalls)
+	}
+	if alpha.searchCalls != 0 {
+		t.Errorf("alpha search calls = %d, want 0 (later in the shared order)", alpha.searchCalls)
+	}
+}

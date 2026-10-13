@@ -38,14 +38,34 @@ import (
 
 // Server holds all dependencies for HTTP handlers.
 type Server struct {
-	cfg                 *config.Persistence
-	registry            *download.Registry
-	mdRegistry          *metadata.Registry
-	metadataResolver    *metadata.MetadataResolver
-	enrichmentHandler   *download.MetadataEnrichmentHandler
-	providerCooldown    *metadata.ProviderCooldown
-	orchestrator        *download.Orchestrator
-	discoveryReg        *discovery.Registry
+	cfg               *config.Persistence
+	registry          *download.Registry
+	mdRegistry        *metadata.Registry
+	metadataResolver  *metadata.MetadataResolver
+	enrichmentHandler *download.MetadataEnrichmentHandler
+	providerCooldown  *metadata.ProviderCooldown
+	orchestrator      *download.Orchestrator
+	discoveryReg      *discovery.Registry
+	// releaseResolver is the one shared discovery.ReleaseResolver app.go already
+	// resolved for its own wiring. A plugin rebuilt by a config update is a fresh
+	// instance whose factory cannot name a sibling provider (AGENTS §1), so it
+	// starts resolver-free; reconcileAfterConfigUpdate re-injects the resolver
+	// into any rebuilt consumer (see resolveAndInjectReleaseResolver). When no
+	// live hook is set (tests, or a caller that wires only the value) this is
+	// used directly.
+	//
+	// rrMu guards releaseResolver + releaseResolverHook: reconcileAfterConfigUpdate
+	// writes releaseResolver and two concurrent config updates would otherwise
+	// race. The hook itself is set once before serving.
+	rrMu            sync.Mutex
+	releaseResolver discovery.ReleaseResolver
+	// releaseResolverHook is the LIVE re-resolve hook handed over by app.go:
+	// it re-selects the resolver from the current plugin registry (registry
+	// order) and returns it. reconcileAfterConfigUpdate calls it after rebuilding
+	// plugins so a rebuilt resolver provider (e.g. the MusicBrainz *APIClient)
+	// is picked up and every consumer is re-pointed at the CURRENT client,
+	// dropping the old one. Nil falls back to releaseResolver.
+	releaseResolverHook func() discovery.ReleaseResolver
 	store               library.Store
 	catalog             catalogReader
 	artistCatalog       artistCatalogReader
@@ -283,6 +303,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/library/artists/duplicates", s.handleLibraryArtistDuplicates)
 	mux.Handle("POST /api/library/artists/{artistID}/merge", withRateLimit("download", s.rateLimiter, http.HandlerFunc(s.handleLibraryArtistMerge)))
 	mux.HandleFunc("GET /api/library/albums", s.handleLibraryAlbums)
+	// Single-album lookup: resolves one album independent of the paginated
+	// artist-album listing, so a deep link / reload can show it even when it is
+	// past the first page. Distinct pattern from the .../{albumID}/<action>
+	// routes below (different segment count), so no ServeMux conflict.
+	mux.HandleFunc("GET /api/library/albums/{albumID}", s.handleLibraryAlbum)
 	mux.HandleFunc("GET /api/library/artists/{artistID}", s.handleLibraryArtist)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/albums", s.handleLibraryArtistAlbums)
 	mux.HandleFunc("GET /api/library/artists/{artistID}/tracks", s.handleLibraryArtistTracks)
@@ -385,6 +410,90 @@ func (s *Server) SetProviderCooldown(c *metadata.ProviderCooldown) {
 	s.providerCooldown = c
 	if s.runners != nil {
 		s.runners.SetRateLimiter(c)
+	}
+}
+
+// SetProviderOrder wires the one shared provider priority order (D-001 §3) into
+// the background jobs (the duplicates canonical-name lookup), so they iterate
+// providers in the configured order rather than registration order. app.go
+// builds the single closure-backed ProviderOrder and injects it here, mirroring
+// SetProviderCooldown. A nil order keeps registration order.
+func (s *Server) SetProviderOrder(order *metadata.ProviderOrder) {
+	if order == nil || s.runners == nil {
+		return
+	}
+	s.runners.SetProviderOrder(order)
+}
+
+// SetReleaseResolver injects the shared discovery.ReleaseResolver the
+// composition root (app.go) already resolved for its own start-up wiring. A
+// plugin rebuilt by a config update is recreated from its factory and therefore
+// starts resolver-free — its factory never names a sibling provider (AGENTS §1)
+// — so reconcileAfterConfigUpdate re-injects the resolver into any rebuilt
+// discovery.ReleaseResolverConsumer. Passing nil leaves rebuilt consumers
+// un-injected, so their own loud nil guard surfaces the misconfiguration on the
+// first resolve rather than failing silently. Pair it with
+// SetReleaseResolverResolver so a rebuild re-resolves the CURRENT provider.
+func (s *Server) SetReleaseResolver(r discovery.ReleaseResolver) {
+	s.rrMu.Lock()
+	defer s.rrMu.Unlock()
+	s.releaseResolver = r
+}
+
+// SetReleaseResolverResolver installs the LIVE re-resolve hook app.go builds
+// over the plugin registry. reconcileAfterConfigUpdate calls it after rebuilding
+// plugins to obtain the CURRENT resolver (a rebuilt MusicBrainz client, say) and
+// re-inject it into every consumer, so a stale resolver is never kept. Passing
+// nil falls back to the value from SetReleaseResolver (and to no re-injection
+// when that is nil too).
+func (s *Server) SetReleaseResolverResolver(fn func() discovery.ReleaseResolver) {
+	s.rrMu.Lock()
+	defer s.rrMu.Unlock()
+	s.releaseResolverHook = fn
+}
+
+// resolveAndInjectReleaseResolver re-resolves the shared release resolver from
+// the current plugin registry and injects it into every
+// discovery.ReleaseResolverConsumer. It is provider-agnostic: it type-asserts
+// only the consumer interface, so no provider name crosses this boundary
+// (AGENTS §1). Preferring the live hook over the stored value is what drops the
+// OLD resolver after a rebuild — a config-update rebuild of the resolver
+// provider constructs a fresh client, and re-injecting the previously stored
+// instance would leave consumers pointing at the dead one (double pacers, stale
+// credentials).
+//
+// When a live hook is wired it is authoritative even when it yields nil: a
+// config update that disables the resolver provider clears the consumers (their
+// own loud nil guard then surfaces it) instead of leaving them on a dead client.
+// With no hook the stored value is used and a nil stored value is a no-op, which
+// keeps a bare Server{} safe. A nil registry is always a no-op.
+func (s *Server) resolveAndInjectReleaseResolver() {
+	if s.registry == nil {
+		return
+	}
+	s.rrMu.Lock()
+	hook := s.releaseResolverHook
+	stored := s.releaseResolver
+	s.rrMu.Unlock()
+
+	var resolver discovery.ReleaseResolver
+	if hook != nil {
+		resolver = hook()
+	} else {
+		if stored == nil {
+			return
+		}
+		resolver = stored
+	}
+
+	s.rrMu.Lock()
+	s.releaseResolver = resolver
+	s.rrMu.Unlock()
+
+	for _, p := range s.registry.Inner().All() {
+		if c, ok := p.(discovery.ReleaseResolverConsumer); ok {
+			c.SetReleaseResolver(resolver)
+		}
 	}
 }
 
@@ -865,6 +974,18 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 		rebuilt = append(rebuilt, name)
 	}
 
+	// Re-resolve the shared release resolver AFTER all rebuilds and re-inject
+	// it into every consumer. A rebuilt resolver provider (e.g. MusicBrainz)
+	// starts with a brand-new *APIClient; the consumers must be re-pointed at
+	// that CURRENT client, and the previously resolved one dropped, or we run
+	// two rate-limit pacers and stale credentials. Resolving once here (not
+	// per-name inside the loop) means a rebuilt consumer sees the final
+	// registry state, and a rebuilt non-consumer resolver provider is still
+	// picked up. provider-agnostic — interface assertions only.
+	if len(rebuilt) > 0 {
+		s.resolveAndInjectReleaseResolver()
+	}
+
 	// Re-check connectivity on rebuilt plugins so badges reflect current
 	// state without waiting for the periodic health checker (every 5 min).
 	// The health checker owns the probe: it runs the check on its own loop
@@ -873,18 +994,26 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 		s.healthChecker.RequestCheck(rebuilt)
 	}
 
-	// Sync metadata order with available providers before applying.
+	// Sync the provider order with available providers before applying.
 	// This ensures newly-configured providers (like Spotify dev mode)
-	// appear in the order without manual UI reordering. The resolver and
-	// enrichment handler read the order live from config via the shared
-	// ProviderOrder, so persisting the synced order here propagates it.
-	syncedMdOrder := mergeAvailableProviders(updated.MetadataOrder, s.mdRegistry.Available())
-	if len(syncedMdOrder) > 0 && !stringSlicesEqual(syncedMdOrder, updated.MetadataOrder) {
+	// appear in the order without manual UI reordering. provider_order is
+	// canonical when an install has adopted it; otherwise the legacy
+	// metadata_order stays the live key, so a config that never wrote
+	// provider_order is not shadowed. Every consumer (resolver, enrichment,
+	// discovery registry, refresh engine, duplicates) reads the order live
+	// via the shared ProviderOrder, so persisting it here propagates it.
+	effectiveOrder := updated.EffectiveProviderOrder()
+	syncedOrder := mergeAvailableProviders(effectiveOrder, s.mdRegistry.Available())
+	if len(syncedOrder) > 0 && !stringSlicesEqual(syncedOrder, effectiveOrder) {
 		if err := s.cfg.Update(func(cfg *config.Config) error {
-			cfg.MetadataOrder = syncedMdOrder
+			if len(cfg.ProviderOrder) > 0 {
+				cfg.ProviderOrder = syncedOrder
+			} else {
+				cfg.MetadataOrder = syncedOrder
+			}
 			return nil
 		}); err != nil {
-			s.log.Warn("failed to persist synced metadata order", "error", err, "component", "api")
+			s.log.Warn("failed to persist synced provider order", "error", err, "component", "api")
 		}
 	}
 
@@ -1008,20 +1137,24 @@ func formatFromPath(path string) string {
 	}
 }
 
-// mergeAvailableProviders builds a provider order by keeping existing entries
-// that are still available and appending newly-available providers at the end.
+// mergeAvailableProviders builds a provider order that PRESERVES every entry in
+// order — including providers not currently available — and appends newly
+// available providers that are not yet listed. The prior version filtered order
+// down to only-available entries, so a provider that was temporarily
+// unavailable (missing credentials, health check not yet run) was silently
+// deleted from the order and lost its position permanently when it came back.
+// The user's existing order is therefore treated as authoritative: existing
+// entries keep their positions, and only genuinely new providers are added, at
+// the end.
 func mergeAvailableProviders(order []string, available []metadata.Provider) []string {
-	availNames := make(map[string]bool, len(available))
-	for _, p := range available {
-		availNames[p.Name()] = true
-	}
-	var merged []string
+	merged := make([]string, 0, len(order)+len(available))
 	seen := make(map[string]bool, len(order)+len(available))
 	for _, name := range order {
-		if availNames[name] && !seen[name] {
-			merged = append(merged, name)
-			seen[name] = true
+		if seen[name] {
+			continue
 		}
+		merged = append(merged, name)
+		seen[name] = true
 	}
 	for _, p := range available {
 		if !seen[p.Name()] {

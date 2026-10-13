@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -822,5 +823,108 @@ func TestCloneCatalogEnabledIndependent(t *testing.T) {
 	*cl.Catalog.Enabled = false
 	if !*cfg.Catalog.Enabled {
 		t.Error("Clone shares the catalog.enabled pointer with the original")
+	}
+}
+
+// TestEffectiveProviderOrder pins the fallback precedence: provider_order is
+// authoritative whenever it is set. An explicit empty provider_order means
+// "registration order" and must NOT fall back to metadata_order; only a
+// nil/unset provider_order falls back to the legacy metadata_order. Both
+// unset means "registration order" (nil). This is the no-config-breakage
+// contract for the D-001 §3 order unification.
+func TestEffectiveProviderOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		cfg  Config
+		want []string
+	}{
+		{
+			name: "provider_order wins over metadata_order",
+			cfg:  Config{ProviderOrder: []string{"musicbrainz", "deezer"}, MetadataOrder: []string{"deezer", "musicbrainz"}},
+			want: []string{"musicbrainz", "deezer"},
+		},
+		{
+			name: "unset provider_order falls back to legacy metadata_order",
+			cfg:  Config{ProviderOrder: nil, MetadataOrder: []string{"deezer", "musicbrainz"}},
+			want: []string{"deezer", "musicbrainz"},
+		},
+		{
+			name: "explicitly empty provider_order means registration order, no fallback",
+			cfg:  Config{ProviderOrder: []string{}, MetadataOrder: []string{"deezer"}},
+			want: []string{},
+		},
+		{
+			name: "both empty means registration order",
+			cfg:  Config{},
+			want: nil,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.cfg.EffectiveProviderOrder()
+			if !slices.Equal(got, tt.want) {
+				t.Errorf("EffectiveProviderOrder() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestDefaultConfigProviderOrderFallback pins that the first-run bootstrap seed
+// still reaches every path through the fallback while provider_order stays
+// unset, so DefaultConfig's behavior is unchanged by the unification.
+func TestDefaultConfigProviderOrderFallback(t *testing.T) {
+	cfg := DefaultConfig()
+	if cfg.ProviderOrder != nil {
+		t.Errorf("default provider_order = %v, want nil (legacy metadata_order is the fallback)", cfg.ProviderOrder)
+	}
+	want := []string{"deezer", "musicbrainz", "discogs"}
+	if got := cfg.EffectiveProviderOrder(); !slices.Equal(got, want) {
+		t.Errorf("default EffectiveProviderOrder() = %v, want the metadata_order seed %v", got, want)
+	}
+}
+
+// TestMergeProviderOrder pins presence-based merge semantics (matching
+// metadata_order/download_order): absent (nil) preserves, an explicit empty
+// array clears, a non-empty value replaces. metadata_order must remain
+// independently mergeable so a legacy client that still writes it works.
+func TestMergeProviderOrder(t *testing.T) {
+	cfg := Config{ProviderOrder: []string{"alpha"}, MetadataOrder: []string{"legacy"}}
+
+	// Absent provider_order leaves the canonical value untouched.
+	cfg.Merge(&Config{})
+	if !slices.Equal(cfg.ProviderOrder, []string{"alpha"}) {
+		t.Errorf("absent provider_order changed it: %v", cfg.ProviderOrder)
+	}
+
+	// Non-empty replaces.
+	cfg.Merge(&Config{ProviderOrder: []string{"beta", "gamma"}})
+	if !slices.Equal(cfg.ProviderOrder, []string{"beta", "gamma"}) {
+		t.Errorf("provider_order not replaced: %v", cfg.ProviderOrder)
+	}
+
+	// Explicit empty clears.
+	cfg.Merge(&Config{ProviderOrder: []string{}})
+	if len(cfg.ProviderOrder) != 0 {
+		t.Errorf("empty provider_order should clear, got %v", cfg.ProviderOrder)
+	}
+
+	// metadata_order still merges independently (legacy clients keep working).
+	cfg.Merge(&Config{MetadataOrder: []string{"deezer"}})
+	if !slices.Equal(cfg.MetadataOrder, []string{"deezer"}) {
+		t.Errorf("metadata_order not merged: %v", cfg.MetadataOrder)
+	}
+}
+
+// TestCloneProviderOrderIndependent guards that Clone deep-copies provider_order
+// so a trial-merge cannot mutate the live config's shared slice.
+func TestCloneProviderOrderIndependent(t *testing.T) {
+	cfg := Config{ProviderOrder: []string{"alpha"}}
+	cl := Clone(cfg)
+	if len(cl.ProviderOrder) != 1 {
+		t.Fatalf("Clone dropped provider_order: %v", cl.ProviderOrder)
+	}
+	cl.ProviderOrder[0] = "mutated"
+	if cfg.ProviderOrder[0] != "alpha" {
+		t.Errorf("Clone shares the provider_order slice with the original: %v", cfg.ProviderOrder)
 	}
 }

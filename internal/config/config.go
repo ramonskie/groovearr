@@ -22,7 +22,8 @@ type Config struct {
 	Catalog        CatalogConfig              `json:"catalog"`  // materialized metadata catalog + refresh engine
 	Auth           AuthConfig                 `json:"auth"`
 	Logging        *LoggingConfig             `json:"logging"`         // log level, format, rotation policy
-	MetadataOrder  []string                   `json:"metadata_order"`  // provider priority (e.g. ["deezer", "musicbrainz"])
+	MetadataOrder  []string                   `json:"metadata_order"`  // legacy provider priority; fallback for provider_order (e.g. ["deezer", "musicbrainz"])
+	ProviderOrder  []string                   `json:"provider_order"`  // canonical provider priority shared by every path — see EffectiveProviderOrder (D-001 §3)
 	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
 	AlbumSources   []string                   `json:"album_sources"`   // album-capable source order (e.g. ["prowlarr"])
 	DownloadClient string                     `json:"download_client"` // default download client (e.g. "qbittorrent")
@@ -249,6 +250,30 @@ func DefaultConfig() Config {
 	}
 }
 
+// EffectiveProviderOrder returns the canonical provider priority order shared
+// by every provider path (enrichment/queue-time resolve, discover search,
+// catalog refresh, tracking, and the duplicates canonical-name lookup).
+//
+// provider_order is authoritative whenever it is set — including an explicit
+// empty array, which means "registration order" and deliberately suppresses the
+// legacy fallback. Only a nil/unset provider_order falls back to metadata_order,
+// so an install that only ever wrote the legacy key keeps working and no
+// existing config is broken by the D-001 §3 unification.
+//
+// A nil/empty result means "registration order" — the unchanged
+// pre-unification behavior (metadata.Order treats a zero-length order as
+// registration order).
+//
+// It is a pure read of the live config (AGENTS §9): callers wire it behind a
+// metadata.ProviderOrder closure, so a settings change is honored without a
+// restart and the value is never cached in a struct.
+func (c Config) EffectiveProviderOrder() []string {
+	if c.ProviderOrder != nil {
+		return c.ProviderOrder
+	}
+	return c.MetadataOrder
+}
+
 // applyEnvPathDefaults overrides the default library paths from GROOVEARR_*
 // environment variables. Applied only when no config file exists yet — a
 // persisted config keeps whatever the user wrote. The Docker defaults are the
@@ -396,6 +421,7 @@ func Clone(c Config) Config {
 		out.Logging = &lg
 	}
 	out.MetadataOrder = cloneStrings(c.MetadataOrder)
+	out.ProviderOrder = cloneStrings(c.ProviderOrder)
 	out.DownloadOrder = cloneStrings(c.DownloadOrder)
 	out.AlbumSources = cloneStrings(c.AlbumSources)
 	out.Auth.LocalBypassSubnets = cloneStrings(c.Auth.LocalBypassSubnets)
@@ -567,7 +593,12 @@ func (c *Config) mergeFields(partial *Config) {
 
 	// Order/source arrays merge when present (non-nil), so an explicitly empty
 	// array from the UI clears the setting. JSON decodes an absent field to nil
-	// and "[]" to an empty non-nil slice.
+	// and "[]" to an empty non-nil slice. provider_order is the canonical key;
+	// metadata_order stays mergeable so a legacy client that still writes it
+	// keeps working through EffectiveProviderOrder's fallback.
+	if partial.ProviderOrder != nil {
+		c.ProviderOrder = partial.ProviderOrder
+	}
 	if partial.MetadataOrder != nil {
 		c.MetadataOrder = partial.MetadataOrder
 	}

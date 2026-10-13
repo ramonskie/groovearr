@@ -516,3 +516,64 @@ func TestLookupCanonicalArtistNilRateLimiter(t *testing.T) {
 		t.Errorf("canonical = %q, want empty", got)
 	}
 }
+
+// TestLookupCanonicalArtistHonorsProviderOrder pins D-004: the canonical-name
+// lookup iterates providers in the one shared order (D-001 §3), not
+// registration order. "aaa" is registered first but ordered last, so it must
+// never be consulted.
+func TestLookupCanonicalArtistHonorsProviderOrder(t *testing.T) {
+	aaa := &stubNameProvider{
+		name:  "aaa",
+		names: map[string]string{"tiësto": "AAA"},
+		err:   fmt.Errorf("aaa must not be consulted"),
+		fails: 1,
+	}
+	mb := &stubNameProvider{name: "musicbrainz", names: map[string]string{"tiësto": "Tiësto"}}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(aaa) // registration order: aaa, musicbrainz
+	_ = reg.Register(mb)
+
+	runners := NewRunners(RunnerDeps{
+		Log:           testLogger(),
+		Config:        func() config.Config { return config.Config{} },
+		Metadata:      reg,
+		ProviderOrder: metadata.NewProviderOrder(func() []string { return []string{"musicbrainz", "aaa"} }),
+	})
+
+	got, err := runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if err != nil {
+		t.Fatalf("LookupCanonicalArtist: %v", err)
+	}
+	if got != "Tiësto" {
+		t.Errorf("canonical = %q, want %q (musicbrainz first in the order)", got, "Tiësto")
+	}
+	if aaa.left.Load() != 0 {
+		t.Errorf("aaa consulted %d times, want 0 (last in the shared order)", aaa.left.Load())
+	}
+}
+
+// TestLookupCanonicalArtistRegistrationOrderWithoutOrder pins the no-order
+// fallback: with no ProviderOrder wired, the first registered provider is
+// still chosen, so the unification is a no-op for a build/test without the
+// shared order.
+func TestLookupCanonicalArtistRegistrationOrderWithoutOrder(t *testing.T) {
+	first := &stubNameProvider{name: "aaa", names: map[string]string{"tiësto": "AAA"}}
+	second := &stubNameProvider{name: "musicbrainz", names: map[string]string{"tiësto": "Tiësto"}}
+	reg := metadata.NewRegistry()
+	_ = reg.Register(first)
+	_ = reg.Register(second)
+
+	runners := NewRunners(RunnerDeps{
+		Log:      testLogger(),
+		Config:   func() config.Config { return config.Config{} },
+		Metadata: reg,
+	})
+
+	got, err := runners.LookupCanonicalArtist(context.Background(), "Tiësto")
+	if err != nil {
+		t.Fatalf("LookupCanonicalArtist: %v", err)
+	}
+	if got != "AAA" {
+		t.Errorf("canonical = %q, want %q (first registered wins with no order)", got, "AAA")
+	}
+}

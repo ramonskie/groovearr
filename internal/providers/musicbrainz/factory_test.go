@@ -43,13 +43,20 @@ func TestFactoryName(t *testing.T) {
 	}
 	caps := Factory.Capabilities()
 	hasMetadata := false
+	hasDiscovery := false
 	for _, c := range caps {
 		if c == "metadata" {
 			hasMetadata = true
 		}
+		if c == "discovery" {
+			hasDiscovery = true
+		}
 	}
 	if !hasMetadata {
 		t.Error("capabilities missing 'metadata'")
+	}
+	if !hasDiscovery {
+		t.Error("capabilities missing 'discovery'")
 	}
 }
 

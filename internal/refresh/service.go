@@ -165,6 +165,13 @@ type Service struct {
 	log       *slog.Logger
 	opts      Options
 
+	// order is the shared provider priority (D-001 §3). When set, the engine
+	// tries providers in that order rather than whatever order the injected
+	// providers closure returned; it is read live on every album, so a settings
+	// change is honored without a restart (AGENTS §9). Nil keeps the injected
+	// providers' own order (unchanged behavior).
+	order *metadata.ProviderOrder
+
 	// optsFn, when set, is re-read on every tick and every provider call so a
 	// config hot-reload changes pacing/batch without a restart. Nil falls back to
 	// the static opts passed to New (AGENTS §9 — config is never cached). Register
@@ -233,6 +240,19 @@ func (s *Service) SetOnMaterialized(fn func(albumID int64)) {
 		return
 	}
 	s.onMaterialized = fn
+}
+
+// SetProviderOrder wires the one shared provider priority order (D-001 §3) so
+// the engine tries providers in the configured order instead of the order the
+// providers closure happened to return. It is the same closure-backed
+// ProviderOrder every other path uses, read live on each album (AGENTS §9), so
+// a settings hot-reload is honored without a restart. A nil order (or a nil
+// service) keeps the injected providers' own order — unchanged behavior.
+func (s *Service) SetProviderOrder(order *metadata.ProviderOrder) {
+	if s == nil {
+		return
+	}
+	s.order = order
 }
 
 // SetOptionsFunc registers a live options provider that is re-read on every
@@ -602,7 +622,7 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 	if err != nil {
 		return AlbumOutcome{}, err
 	}
-	providers := s.providers()
+	providers := metadata.Order(s.order, s.providers())
 	if len(providers) == 0 {
 		return AlbumOutcome{}, ErrNoProviders
 	}

@@ -111,7 +111,10 @@ func (r *Runners) LookupCanonicalArtist(ctx context.Context, name string) (strin
 	if r.deps.Metadata == nil {
 		return "", nil
 	}
-	for _, p := range r.deps.Metadata.Available() {
+	// Iterate metadata providers in the one shared provider order (D-001 §3)
+	// rather than registration order. A nil ProviderOrder keeps registration
+	// order, so a build/test without the shared order is unchanged.
+	for _, p := range metadata.Order(r.deps.ProviderOrder, r.deps.Metadata.Available()) {
 		anp, ok := p.(metadata.ArtistNameProvider)
 		if !ok {
 			continue

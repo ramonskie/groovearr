@@ -23,7 +23,7 @@ type factory struct{}
 
 func (f *factory) Name() string           { return pluginName }
 func (f *factory) DisplayName() string    { return displayName }
-func (f *factory) Capabilities() []string { return []string{"metadata"} }
+func (f *factory) Capabilities() []string { return []string{"metadata", "discovery"} }
 
 // Create builds a MusicBrainz metadata provider from raw JSON config.
 func (f *factory) Create(rawCfg json.RawMessage, resources plugin.PluginResources) (plugin.BasePlugin, error) {
