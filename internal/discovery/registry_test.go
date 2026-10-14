@@ -35,7 +35,7 @@ func (p *fakeProvider) GetArtistAlbums(context.Context, string, int) ([]AlbumRes
 func (p *fakeProvider) GetAlbumTracks(context.Context, string) ([]TrackInfo, error) {
 	return nil, nil
 }
-func (p *fakeProvider) SearchAlbums(context.Context, string, int) ([]AlbumResult, error) {
+func (p *fakeProvider) SearchAlbums(context.Context, AlbumQuery, int) ([]AlbumResult, error) {
 	return nil, nil
 }
 

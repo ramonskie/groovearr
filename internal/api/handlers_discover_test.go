@@ -46,7 +46,7 @@ func (p *stubDiscoverProvider) SearchArtists(context.Context, string, int) ([]di
 func (p *stubDiscoverProvider) GetArtistAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
-func (p *stubDiscoverProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (p *stubDiscoverProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 func (p *stubDiscoverProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
@@ -467,7 +467,7 @@ func (p *recordingArtistProvider) GetArtistAlbums(context.Context, string, int) 
 	p.albumCalls++
 	return p.albums, nil
 }
-func (p *recordingArtistProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (p *recordingArtistProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 func (p *recordingArtistProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {

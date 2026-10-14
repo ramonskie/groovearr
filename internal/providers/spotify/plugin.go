@@ -20,6 +20,7 @@ import (
 // Compile-time interface checks.
 var _ download.Plugin = (*Plugin)(nil)
 var _ metadata.Provider = (*Plugin)(nil)
+var _ discovery.Provider = (*Plugin)(nil)
 
 // Plugin implements download.Plugin for Spotify metadata-only access.
 // Free mode resolves Spotify URLs via oEmbed. Dev mode uses the
@@ -373,11 +374,11 @@ func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	return spotifyAlbumTracks(p.api, ctx, providerAlbumID, p.log)
 }
 
-func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+func (p *Plugin) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
 	if p.api == nil {
 		return nil, fmt.Errorf("spotify: discovery requires dev mode")
 	}
-	page, err := p.api.SearchAlbums(ctx, query, limit, 0)
+	page, err := p.api.SearchAlbums(ctx, q.Query(), limit, 0)
 	if err != nil {
 		if p.log != nil {
 			p.log.Error("spotify search albums failed", "error", err, "component", "spotify")

@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"testing"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
 )
@@ -422,7 +423,7 @@ func TestPlugin_SearchAlbums(t *testing.T) {
 	p, cleanup := newTestPlugin(t, handler)
 	defer cleanup()
 
-	albums, err := p.SearchAlbums(context.Background(), "Random Access Memories", 10)
+	albums, err := p.SearchAlbums(context.Background(), discovery.AlbumQuery{Text: "Random Access Memories"}, 10)
 	if err != nil {
 		t.Fatalf("SearchAlbums: %v", err)
 	}
@@ -448,7 +449,7 @@ func TestPlugin_SearchAlbums_Empty(t *testing.T) {
 	p, cleanup := newTestPlugin(t, handler)
 	defer cleanup()
 
-	albums, err := p.SearchAlbums(context.Background(), "Nonexistent", 10)
+	albums, err := p.SearchAlbums(context.Background(), discovery.AlbumQuery{Text: "Nonexistent"}, 10)
 	if err != nil {
 		t.Fatalf("SearchAlbums: %v", err)
 	}

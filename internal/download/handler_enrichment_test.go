@@ -140,7 +140,7 @@ func (m *mockDiscoveryProvider) GetArtistAlbums(context.Context, string, int) ([
 func (m *mockDiscoveryProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
 	return nil, nil
 }
-func (m *mockDiscoveryProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (m *mockDiscoveryProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 

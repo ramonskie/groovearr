@@ -1283,7 +1283,8 @@ func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID str
 	return out, nil
 }
 
-func (d *DownloadClient) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+func (d *DownloadClient) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
+	query := q.Query()
 	albums, err := d.api.SearchAlbums(ctx, query, limit)
 	if err != nil {
 		d.log.Error("search albums failed", "error", err, "query", query, "component", "deezer")

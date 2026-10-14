@@ -175,7 +175,8 @@ func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 
 // SearchAlbums searches for albums via artist search since Last.fm doesn't
 // have a direct album search API.
-func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+func (p *Plugin) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
+	query := q.Query()
 	// Last.fm has no direct album search endpoint.
 	// Try searching for artist first, then get their top albums.
 	artists, err := p.client.SearchArtists(ctx, query, 1)

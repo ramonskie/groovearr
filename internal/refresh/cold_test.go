@@ -62,7 +62,7 @@ func (p *syncProvider) block(ctx context.Context) error {
 	}
 }
 
-func (p *syncProvider) SearchAlbums(ctx context.Context, _ string, _ int) ([]discovery.AlbumResult, error) {
+func (p *syncProvider) SearchAlbums(ctx context.Context, _ discovery.AlbumQuery, _ int) ([]discovery.AlbumResult, error) {
 	atomic.AddInt32(&p.searchN, 1)
 	p.signalEntered()
 	if err := p.block(ctx); err != nil {

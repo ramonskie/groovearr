@@ -12,6 +12,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/metadata"
 )
 
@@ -337,139 +338,124 @@ func firstISRC(isrcs []string) string {
 // and GetArtistAlbums issue those two queries directly through c.api.apiGet so
 // this subtask stays scoped to the MusicBrainz provider package.
 
-// maxAlbumSearchArtistWords bounds how many leading words are tried as the
-// artist when a free-form query has no explicit separator. The catalog engine
-// joins artist and album with a single space ("artist title"), so the boundary
-// is ambiguous; each split is tried shortest-artist-first and the first release
-// group wins.
-const maxAlbumSearchArtistWords = 3
+// SearchAlbums maps an album query to a MusicBrainz release-group search and
+// returns up to limit distinct results. The structured branch is taken whenever
+// the query carries an artist OR a title (see discovery.AlbumQuery); the
+// release-group MBID is the provider album id with its primary type as the album
+// type.
+//
+//   - Structured (a usable q.Title is present): the caller carries the
+//     artist/title boundary, so the fields are searched in ONE release-group
+//     query — no candidate splitting and no word cap. The releasegroup term is
+//     the title run through matching.TrimEditionSuffix, so a library title
+//     carrying a delimited format suffix ("Échame la culpa - Single") queries the
+//     bare release group the provider actually lists, while the title's case and
+//     punctuation ("Don't Stop", "AC/DC") are kept for MusicBrainz to tokenize.
+//     The artist:"…" term is included ONLY when q.Artist is non-empty, so a
+//     title-only query (an album with no/unknown artist) still sends
+//     releasegroup:"…" alone instead of an empty query. This is the path the
+//     catalog refresh engine uses, and it must not guess the boundary.
+//   - Free-text / no usable title: a single bare release-group search built from
+//     the rendered phrase (SearchReleaseGroupsQuery) — one request, no
+//     artist/title boundary guessing. The phrase is q.Query() (Artist, else
+//     Title, else Text), so an artist-only AlbumQuery still searches instead of
+//     no-oping. This replaces the old multi-request split heuristic, which cost
+//     several requests per query.
+func (c *Client) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
+	// Clamp before collectRankedAlbums pre-allocates its result slice, so a
+	// caller-supplied huge limit cannot force a huge allocation.
+	limit = clampAlbumSearchLimit(limit)
 
-// SearchAlbums maps a free-form "artist title" (or "artist - title") query to a
-// MusicBrainz release-group search and returns up to limit distinct results.
-// The release-group MBID is the provider album id and its primary type becomes
-// the album type. Each candidate split yields at most one release-group hit, so
-// remaining candidates are tried until limit distinct albums are collected.
-func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
-	query = strings.TrimSpace(query)
+	artist := strings.TrimSpace(q.Artist)
+	// Strip a trailing edition/format suffix without lowercasing or dropping
+	// punctuation: MusicBrainz tokenizes the term, and keeping the title
+	// verbatim ("Don't Stop", "AC/DC") improves recall.
+	if term := matching.TrimEditionSuffix(strings.TrimSpace(q.Title)); term != "" {
+		return c.collectRankedAlbums(ctx, artist, []string{term}, func(cctx context.Context, t string) ([]ReleaseGroupResult, error) {
+			return c.api.SearchReleaseGroupsByTitle(cctx, artist, t, limit)
+		}, limit)
+	}
+
+	// No usable title: fall back to the same rendered phrase every q.Query()
+	// provider uses (Artist, else Title, else Text) as a single bare query, so an
+	// artist-only AlbumQuery still searches instead of no-oping.
+	query := q.Query()
 	if query == "" {
 		return nil, nil
 	}
+	return c.collectRankedAlbums(ctx, "", []string{query}, func(cctx context.Context, t string) ([]ReleaseGroupResult, error) {
+		return c.api.SearchReleaseGroupsQuery(cctx, t, limit)
+	}, limit)
+}
+
+// clampAlbumSearchLimit bounds a caller-supplied album-search limit to
+// [1, maxReleaseGroupLimit]. It validates the limit before any slice is
+// pre-allocated from it (a huge limit must not allocate megabytes) and keeps the
+// eventual API request within MusicBrainz's response cap.
+func clampAlbumSearchLimit(limit int) int {
 	if limit <= 0 {
-		limit = 5
+		return defaultReleaseGroupLimit
 	}
+	if limit > maxReleaseGroupLimit {
+		return maxReleaseGroupLimit
+	}
+	return limit
+}
+
+// collectRankedAlbums runs one release-group search per term and merges the
+// ranked results in order, deduplicated by release-group MBID and capped at
+// limit. artist only fills a release group's missing artist credit.
+//
+// A rate-limit error (metadata.ErrRateLimited) ALWAYS propagates, even when some
+// results were already collected, so the caller can park the provider app-wide
+// through the sentinel (AGENTS §8). Any other transient error is best-effort:
+// accumulated results are returned with a nil error when there are any, and the
+// error propagates only when nothing was collected. Both current callers pass a
+// single term; the accumulation rule keeps a future multi-term caller from
+// losing earlier hits to a later transient failure.
+func (c *Client) collectRankedAlbums(
+	ctx context.Context,
+	artist string,
+	terms []string,
+	search func(context.Context, string) ([]ReleaseGroupResult, error),
+	limit int,
+) ([]discovery.AlbumResult, error) {
 	results := make([]discovery.AlbumResult, 0, limit)
 	seen := make(map[string]bool, limit)
-	for _, cand := range albumSearchCandidates(query) {
+	for _, term := range terms {
 		if len(results) >= limit {
 			break
 		}
-		rg, err := c.api.SearchReleaseGroup(ctx, cand.artist, cand.title)
+		rgs, err := search(ctx, term)
 		if err != nil {
-			c.logOpError("musicbrainz search albums failed", "error", err, "query", query, "component", "musicbrainz")
+			c.logOpError("musicbrainz search albums failed", "error", err, "term", term, "component", "musicbrainz")
+			if errors.Is(err, metadata.ErrRateLimited) {
+				// The sentinel must reach the caller so the shared cooldown can
+				// park the provider, partial results or not.
+				return results, err
+			}
+			if len(results) > 0 {
+				// Best-effort partial: a transient per-term failure must not
+				// discard the results already collected.
+				return results, nil
+			}
 			return nil, err
 		}
-		if rg == nil || rg.MBID == "" || seen[rg.MBID] {
-			continue
+		for i := range rgs {
+			if len(results) >= limit {
+				break
+			}
+			if rgs[i].MBID == "" || seen[rgs[i].MBID] {
+				continue
+			}
+			seen[rgs[i].MBID] = true
+			results = append(results, albumResultFromReleaseGroup(&rgs[i], artist))
 		}
-		seen[rg.MBID] = true
-		results = append(results, albumResultFromReleaseGroup(rg, cand.artist))
 	}
 	if len(results) == 0 {
 		return nil, nil
 	}
 	return results, nil
-}
-
-// albumQueryCandidate is one possible (artist, title) split of a free-form query.
-type albumQueryCandidate struct {
-	artist string
-	title  string
-}
-
-// albumSearchCandidates derives (artist, title) candidates from a free-form
-// query. An explicit spaced dash separator is authoritative; otherwise the
-// words are split at each boundary, shortest artist first (a single-word artist
-// is the common case and costs one search), then the longest sensible artist
-// split, and finally an unspaced separator ("Artist-Album").
-func albumSearchCandidates(query string) []albumQueryCandidate {
-	if artist, title, ok := splitAlbumQuery(query); ok {
-		return []albumQueryCandidate{{artist: artist, title: title}}
-	}
-
-	candidates := make([]albumQueryCandidate, 0, maxAlbumSearchArtistWords+2)
-	words := strings.Fields(query)
-	if len(words) >= 2 {
-		maxArtist := len(words) - 1
-		capped := maxArtist
-		if capped > maxAlbumSearchArtistWords {
-			capped = maxAlbumSearchArtistWords
-		}
-		for n := 1; n <= capped; n++ {
-			candidates = append(candidates, albumQueryCandidate{
-				artist: strings.Join(words[:n], " "),
-				title:  strings.Join(words[n:], " "),
-			})
-		}
-		// Also try the longest sensible artist split (every word but the last)
-		// when the word cap would otherwise skip it.
-		if maxArtist > capped {
-			candidates = append(candidates, albumQueryCandidate{
-				artist: strings.Join(words[:maxArtist], " "),
-				title:  words[maxArtist],
-			})
-		}
-	}
-
-	// Unspaced separator fallback: a query like "Artist-Album" has no word
-	// boundary, so the boundary splits above cannot find it. Tried last so a
-	// hyphenated artist name ("Jay-Z The Blueprint") keeps its correct
-	// word-boundary split.
-	if artist, title, ok := splitAlbumQueryCompact(query); ok {
-		candidates = append(candidates, albumQueryCandidate{artist: artist, title: title})
-	}
-	if len(candidates) == 0 {
-		return nil
-	}
-	return candidates
-}
-
-// splitAlbumQuery splits "Artist - Album" on an explicit spaced separator
-// (hyphen, en-dash, or em-dash). An explicit separator is authoritative.
-// Returns ok=false when there is no usable separator.
-func splitAlbumQuery(query string) (artist, title string, ok bool) {
-	for _, sep := range []string{" - ", " – ", " — "} {
-		if artist, title, ok := splitSeparated(query, sep); ok {
-			return artist, title, true
-		}
-	}
-	return "", "", false
-}
-
-// splitAlbumQueryCompact is the unspaced fallback for splitAlbumQuery: it
-// applies the same dash separators without requiring surrounding spaces
-// ("Artist-Album"). Returns ok=false when there is no usable separator.
-func splitAlbumQueryCompact(query string) (artist, title string, ok bool) {
-	for _, sep := range []string{"-", "–", "—"} {
-		if artist, title, ok := splitSeparated(query, sep); ok {
-			return artist, title, true
-		}
-	}
-	return "", "", false
-}
-
-// splitSeparated splits query on its first occurrence of sep, requiring
-// non-empty trimmed text on both sides. Returns ok=false otherwise.
-func splitSeparated(query, sep string) (artist, title string, ok bool) {
-	idx := strings.Index(query, sep)
-	if idx <= 0 || idx+len(sep) >= len(query) {
-		return "", "", false
-	}
-	artist = strings.TrimSpace(query[:idx])
-	title = strings.TrimSpace(query[idx+len(sep):])
-	if artist == "" || title == "" {
-		return "", "", false
-	}
-	return artist, title, true
 }
 
 // GetAlbumTracks returns a release group's tracklist from a representative
@@ -698,13 +684,18 @@ func releaseTrackID(t ReleaseTrack) string {
 }
 
 // albumResultFromReleaseGroup maps a release-group search hit to a neutral
-// album result. ReleaseGroupResult carries no artist, so the caller supplies the
-// artist it searched for.
+// album result. It prefers the release group's own artist credit (a tribute or
+// karaoke hit keeps its distinct artist) and falls back to the artist the caller
+// searched for when the release group carries no credit.
 func albumResultFromReleaseGroup(rg *ReleaseGroupResult, artist string) discovery.AlbumResult {
+	artistName := rg.ArtistName
+	if artistName == "" {
+		artistName = artist
+	}
 	return discovery.AlbumResult{
 		ProviderID:   rg.MBID,
 		ProviderName: pluginName,
-		ArtistName:   artist,
+		ArtistName:   artistName,
 		Title:        rg.Title,
 		Year:         parseYear(rg.FirstReleaseDate),
 		CoverURL:     releaseGroupCoverURL(rg.MBID),

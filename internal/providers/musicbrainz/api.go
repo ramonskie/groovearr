@@ -9,6 +9,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -19,6 +20,27 @@ import (
 
 const defaultBaseURL = "https://musicbrainz.org/ws/2"
 
+// defaultMinInterval paces requests to the MusicBrainz API. MusicBrainz
+// enforces a hard 1 request/second per source IP and answers an all-or-nothing
+// 503 above it, regardless of User-Agent. A pacer sitting at exactly 1s rides
+// that boundary, so any sub-millisecond clock or scheduling skew can trip the
+// limit; 1100ms keeps ~10% headroom. This is the client's own steady-state
+// pacing only — the shared, reactive provider cooldown (AGENTS §8) stays the
+// app-wide enforcement on top and is intentionally not weakened.
+const defaultMinInterval = 1100 * time.Millisecond
+
+// Release-group search window. MusicBrainz caps a single search response at
+// maxReleaseGroupLimit results; a caller that asks for none gets the smaller
+// defaultReleaseGroupLimit ranked window.
+const (
+	defaultReleaseGroupLimit = 5
+	maxReleaseGroupLimit     = 100
+)
+
+// maxResponseBytes bounds a single MusicBrainz response body so a malformed or
+// hostile upstream cannot stream unbounded bytes into memory.
+const maxResponseBytes = 16 << 20 // 16 MiB
+
 // ─── Public types ──────────────────────────────────────────────────────
 
 // ReleaseGroupResult holds the key fields from a release group search result.
@@ -27,6 +49,7 @@ type ReleaseGroupResult struct {
 	Title            string
 	FirstReleaseDate string
 	PrimaryType      string
+	ArtistName       string // release group's own artist credit ("" when absent)
 }
 
 // ReleaseInfo holds enriched release data from a lookup.
@@ -83,35 +106,88 @@ func NewAPIClient(cfg MusicBrainzConfig, logger *slog.Logger) *APIClient {
 		userAgent:   ua,
 		baseURL:     defaultBaseURL,
 		log:         logger,
-		minInterval: time.Second, // 1 req/sec
+		minInterval: defaultMinInterval, // MB limit is 1 req/sec per IP; see const for the margin
 	}
 }
 
 // SetBaseURL overrides the API base URL. Intended for testing.
-func (c *APIClient) SetBaseURL(u string) { c.baseURL = u }
+func (c *APIClient) SetBaseURL(u string) { c.mu.Lock(); c.baseURL = u; c.mu.Unlock() }
 
 // SetHTTPClient overrides the HTTP client. Intended for testing.
-func (c *APIClient) SetHTTPClient(client *http.Client) { c.httpClient = client }
+func (c *APIClient) SetHTTPClient(client *http.Client) {
+	c.mu.Lock()
+	c.httpClient = client
+	c.mu.Unlock()
+}
 
 // SetMinInterval overrides the rate-limit interval. Intended for testing.
 func (c *APIClient) SetMinInterval(d time.Duration) { c.mu.Lock(); c.minInterval = d; c.mu.Unlock() }
 
-// SearchReleaseGroup returns the first MusicBrainz result for the given artist and album.
-// MusicBrainz orders results by relevance score (descending), so the first result is
-// typically the best match.
-// Returns nil, nil if no match found.
-func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string) (*ReleaseGroupResult, error) {
+// SearchReleaseGroups returns the ranked MusicBrainz release-group results for
+// artist+album, best match first (MusicBrainz scores results by relevance,
+// descending). A limit <= 0 defaults to defaultReleaseGroupLimit, and larger
+// requests are clamped to maxReleaseGroupLimit. Returns nil, nil when there is
+// no match.
+func (c *APIClient) SearchReleaseGroups(ctx context.Context, artist, album string, limit int) ([]ReleaseGroupResult, error) {
 	if artist == "" || album == "" {
 		return nil, nil
 	}
 	query := fmt.Sprintf(`artist:"%s" AND releasegroup:"%s"`, escapeLucene(artist), escapeLucene(album))
+	return c.searchReleaseGroupQuery(ctx, query, limit)
+}
+
+// SearchReleaseGroupsByTitle runs a ranked release-group search by title with an
+// OPTIONAL artist constraint, for callers that hold a structured title but may
+// not have an artist. When artist is empty the query is a bare
+// releasegroup:"…" term; when it is non-empty an artist:"…" term is ANDed in.
+// This is what lets a library album with no/unknown artist still search its
+// title instead of issuing an empty query. A blank album returns nil, nil
+// without a request; limit follows the same default/clamp rule as
+// SearchReleaseGroups.
+func (c *APIClient) SearchReleaseGroupsByTitle(ctx context.Context, artist, album string, limit int) ([]ReleaseGroupResult, error) {
+	album = strings.TrimSpace(album)
+	if album == "" {
+		return nil, nil
+	}
+	query := fmt.Sprintf(`releasegroup:"%s"`, escapeLucene(album))
+	if artist = strings.TrimSpace(artist); artist != "" {
+		query = fmt.Sprintf(`artist:"%s" AND %s`, escapeLucene(artist), query)
+	}
+	return c.searchReleaseGroupQuery(ctx, query, limit)
+}
+
+// SearchReleaseGroupsQuery runs a single ranked release-group search for a
+// caller-supplied free-text term. Unlike SearchReleaseGroups it applies no
+// artist/title field structure: the text is trimmed, escaped, and used as a bare
+// general query term, so a free-text caller (e.g. the Discover UI) costs exactly
+// one request instead of guessing an artist/title split. A blank term returns
+// nil, nil without a request. Returns nil, nil when there is no match.
+func (c *APIClient) SearchReleaseGroupsQuery(ctx context.Context, rawQuery string, limit int) ([]ReleaseGroupResult, error) {
+	rawQuery = strings.TrimSpace(rawQuery)
+	if rawQuery == "" {
+		return nil, nil
+	}
+	return c.searchReleaseGroupQuery(ctx, escapeLucene(rawQuery), limit)
+}
+
+// searchReleaseGroupQuery issues one /release-group/ search for an already-built,
+// already-escaped Lucene query and parses the ranked result window. A limit <= 0
+// defaults to defaultReleaseGroupLimit and larger requests are clamped to
+// maxReleaseGroupLimit. Returns nil, nil when there is no match.
+func (c *APIClient) searchReleaseGroupQuery(ctx context.Context, query string, limit int) ([]ReleaseGroupResult, error) {
+	if limit <= 0 {
+		limit = defaultReleaseGroupLimit
+	}
+	if limit > maxReleaseGroupLimit {
+		limit = maxReleaseGroupLimit
+	}
 	data, err := c.apiGet(ctx, "/release-group/", map[string]string{
 		"query": query,
-		"limit": "5",
+		"limit": strconv.Itoa(limit),
 		"fmt":   "json",
 	})
 	if err != nil {
-		c.logOpError("musicbrainz search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz search release group failed", "error", err, "query", query, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if data == nil {
@@ -121,27 +197,60 @@ func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string
 	var resp struct {
 		Count         int `json:"count"`
 		ReleaseGroups []struct {
-			ID               string `json:"id"`
-			Title            string `json:"title"`
-			FirstReleaseDate string `json:"first-release-date"`
-			PrimaryType      string `json:"primary-type"`
+			ID               string              `json:"id"`
+			Title            string              `json:"title"`
+			FirstReleaseDate string              `json:"first-release-date"`
+			PrimaryType      string              `json:"primary-type"`
+			ArtistCredit     []artistCreditEntry `json:"artist-credit"`
 		} `json:"release-groups"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
-		c.logOpError("musicbrainz unmarshal search release group failed", "error", err, "artist", artist, "album", album, "component", "musicbrainz_api")
+		c.logOpError("musicbrainz unmarshal search release group failed", "error", err, "query", query, "component", "musicbrainz_api")
 		return nil, err
 	}
 	if len(resp.ReleaseGroups) == 0 {
 		return nil, nil
 	}
 
-	rg := resp.ReleaseGroups[0]
-	return &ReleaseGroupResult{
-		MBID:             rg.ID,
-		Title:            rg.Title,
-		FirstReleaseDate: rg.FirstReleaseDate,
-		PrimaryType:      rg.PrimaryType,
-	}, nil
+	out := make([]ReleaseGroupResult, 0, len(resp.ReleaseGroups))
+	for _, rg := range resp.ReleaseGroups {
+		out = append(out, ReleaseGroupResult{
+			MBID:             rg.ID,
+			Title:            rg.Title,
+			FirstReleaseDate: rg.FirstReleaseDate,
+			PrimaryType:      rg.PrimaryType,
+			ArtistName:       firstArtistCreditName(rg.ArtistCredit),
+		})
+	}
+	return out, nil
+}
+
+// SearchReleaseGroup returns the first (best-ranked) MusicBrainz result for the
+// given artist and album. MusicBrainz orders results by relevance score
+// (descending), so the first result is typically the best match.
+// Returns nil, nil if no match found.
+//
+// It is a thin wrapper over SearchReleaseGroups for callers that need only the
+// top hit.
+func (c *APIClient) SearchReleaseGroup(ctx context.Context, artist, album string) (*ReleaseGroupResult, error) {
+	results, err := c.SearchReleaseGroups(ctx, artist, album, 0)
+	if err != nil {
+		return nil, err
+	}
+	if len(results) == 0 {
+		return nil, nil
+	}
+	return &results[0], nil
+}
+
+// firstArtistCreditName returns the first artist-credit entry's name, or "" when
+// the release group carries no credit. MusicBrainz lists the primary artist
+// first, so credit[0] identifies the release group's real artist.
+func firstArtistCreditName(credit []artistCreditEntry) string {
+	if len(credit) == 0 {
+		return ""
+	}
+	return credit[0].Name
 }
 
 // SearchRecording finds the album title for a track by searching MusicBrainz
@@ -293,7 +402,7 @@ func (c *APIClient) SearchArtist(ctx context.Context, name string) (*ArtistResul
 
 // LookupRelease fetches full release info including ISRCs, genres, and labels.
 func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInfo, error) {
-	data, err := c.apiGet(ctx, "/release/"+mbid, map[string]string{
+	data, err := c.apiGet(ctx, "/release/"+url.PathEscape(mbid), map[string]string{
 		"inc": "recordings+isrcs+labels+genres+artist-credits",
 		"fmt": "json",
 	})
@@ -428,7 +537,7 @@ type ReleaseGroupRelease struct {
 
 // LookupReleaseGroup retrieves all releases within a release group.
 func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]ReleaseGroupRelease, error) {
-	data, err := c.apiGet(ctx, "/release-group/"+rgMBID, map[string]string{
+	data, err := c.apiGet(ctx, "/release-group/"+url.PathEscape(rgMBID), map[string]string{
 		"inc": "releases",
 		"fmt": "json",
 	})
@@ -474,7 +583,7 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 // Limited to 100 results; groups larger than this are truncated.
 func (c *APIClient) SearchReleasesByGroup(ctx context.Context, rgMBID string) ([]ReleaseGroupRelease, error) {
 	data, err := c.apiGet(ctx, "/release/", map[string]string{
-		"query": `rgid:` + rgMBID,
+		"query": `rgid:` + escapeLucene(rgMBID),
 		"limit": "100",
 		"fmt":   "json",
 	})
@@ -528,9 +637,14 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 		c.mu.Lock()
 	}
 	c.lastCall = time.Now()
+	// Snapshot the configurable fields under the same lock so a concurrent
+	// SetBaseURL/SetHTTPClient (test-only setters) cannot race the request.
+	baseURL := c.baseURL
+	httpClient := c.httpClient
+	userAgent := c.userAgent
 	c.mu.Unlock()
 
-	u, err := url.Parse(c.baseURL)
+	u, err := url.Parse(baseURL)
 	if err != nil {
 		c.logOpError("musicbrainz URL parse failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
@@ -548,17 +662,17 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 		c.logOpError("musicbrainz create request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
-	req.Header.Set("User-Agent", c.userAgent)
+	req.Header.Set("User-Agent", userAgent)
 	req.Header.Set("Accept", "application/json")
 
-	resp, err := c.httpClient.Do(req)
+	resp, err := httpClient.Do(req)
 	if err != nil {
 		c.logOpError("musicbrainz HTTP request failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes))
 	if err != nil {
 		c.logOpError("musicbrainz read response failed", "error", err, "path", path, "component", "musicbrainz_api")
 		return nil, err

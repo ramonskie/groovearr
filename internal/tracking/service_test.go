@@ -332,7 +332,7 @@ func (f *fakeDiscoveryProvider) GetAlbumTracks(context.Context, string) ([]disco
 	f.trackCalls++
 	return f.albumTracks, f.tracksErr
 }
-func (f *fakeDiscoveryProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (f *fakeDiscoveryProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 

@@ -804,8 +804,8 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 }
 
 // SearchAlbums searches Tidal for albums by name.
-func (c *Client) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
-	return c.searchAlbumsInternal(ctx, query, limit)
+func (c *Client) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
+	return c.searchAlbumsInternal(ctx, q.Query(), limit)
 }
 
 // ─── discovery.TopTrackProvider ─────────────────────────────────────────

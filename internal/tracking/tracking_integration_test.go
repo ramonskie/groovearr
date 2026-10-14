@@ -62,7 +62,7 @@ func (f *extFakeDiscoveryProvider) GetArtistAlbums(context.Context, string, int)
 func (f *extFakeDiscoveryProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
 	return nil, nil
 }
-func (f *extFakeDiscoveryProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (f *extFakeDiscoveryProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 

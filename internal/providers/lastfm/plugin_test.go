@@ -608,7 +608,7 @@ func TestPlugin_SearchAlbums(t *testing.T) {
 	p, cleanup := newTestPlugin(t, h)
 	defer cleanup()
 
-	albums, err := p.SearchAlbums(context.Background(), "Daft Punk", 10)
+	albums, err := p.SearchAlbums(context.Background(), discovery.AlbumQuery{Text: "Daft Punk"}, 10)
 	if err != nil {
 		t.Fatalf("SearchAlbums: %v", err)
 	}
@@ -647,7 +647,7 @@ func TestPlugin_SearchAlbums_NoArtist(t *testing.T) {
 	p, cleanup := newTestPlugin(t, h)
 	defer cleanup()
 
-	albums, err := p.SearchAlbums(context.Background(), "Nonexistent", 10)
+	albums, err := p.SearchAlbums(context.Background(), discovery.AlbumQuery{Text: "Nonexistent"}, 10)
 	if err != nil {
 		t.Fatalf("SearchAlbums: %v", err)
 	}

@@ -177,7 +177,8 @@ func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 }
 
 // SearchAlbums searches for releases by query on Discogs.
-func (p *Plugin) SearchAlbums(ctx context.Context, query string, limit int) ([]discovery.AlbumResult, error) {
+func (p *Plugin) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
+	query := q.Query()
 	releases, err := p.client.SearchAlbums(ctx, query, limit)
 	if err != nil {
 		p.log.Error("discogs search albums failed", "error", err, "query", query, "component", "discogs")

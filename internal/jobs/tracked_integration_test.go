@@ -55,7 +55,7 @@ func (f *jobFakeDiscoveryProvider) GetArtistAlbums(context.Context, string, int)
 func (f *jobFakeDiscoveryProvider) GetAlbumTracks(context.Context, string) ([]discovery.TrackInfo, error) {
 	return f.tracks, nil
 }
-func (f *jobFakeDiscoveryProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (f *jobFakeDiscoveryProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	return nil, nil
 }
 

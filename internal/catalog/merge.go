@@ -28,8 +28,16 @@ type discTrackKey struct {
 }
 
 // normalize lowercases, trims and collapses internal whitespace so titles that
-// differ only in spacing or case compare equal. It is deliberately local to the
-// catalog package (no dependency on internal/strutil or internal/api).
+// differ only in spacing or case compare equal.
+//
+// It stays local instead of reusing matching.NormalizeTitle: the two serve
+// different matching domains. This is a faithful tag key for the merge — it
+// keeps punctuation ("don't stop" != "don t stop") and keeps featuring credits
+// and delimited edition suffixes, so "Song (Deluxe)" and "Song" stay distinct.
+// matching.NormalizeTitle deliberately drops all non-alphanumerics plus the
+// featuring credit and known edition suffixes to fuzzy-match provider release
+// titles. Collapsing them would change which library file satisfies a
+// materialized track, so they are kept separate (AGENTS §1, §3).
 func normalize(s string) string {
 	return strings.ToLower(strings.Join(strings.Fields(s), " "))
 }

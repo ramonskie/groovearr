@@ -8,6 +8,7 @@ package discovery
 
 import (
 	"context"
+	"strings"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -26,8 +27,34 @@ type Provider interface {
 	// GetAlbumTracks returns all tracks on an album.
 	GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]TrackInfo, error)
 
-	// SearchAlbums searches for albums by name.
-	SearchAlbums(ctx context.Context, query string, limit int) ([]AlbumResult, error)
+	// SearchAlbums searches for albums. Callers supply a structured
+	// AlbumQuery — Artist+Title (the catalog path) or Text (the Discover
+	// free-text path) — and render the phrase with AlbumQuery.Query() rather
+	// than guessing an artist/title boundary themselves.
+	SearchAlbums(ctx context.Context, q AlbumQuery, limit int) ([]AlbumResult, error)
+}
+
+// AlbumQuery is a structured album search. Callers set Artist+Title (the
+// catalog carries the boundary it already has) or Text (the Discover free-text
+// path). Query() renders the phrase with a defined precedence so no provider has
+// to re-derive it.
+type AlbumQuery struct {
+	Artist string
+	Title  string
+	Text   string
+}
+
+// Query renders the search phrase. Structured Artist+Title wins; otherwise the
+// bare Title; otherwise the free-text Text. Artist and Title are trimmed and
+// whitespace-collapsed when joined. Returns "" only when every field is blank.
+func (q AlbumQuery) Query() string {
+	if artist := strings.TrimSpace(q.Artist); artist != "" {
+		return strings.Join(strings.Fields(artist+" "+strings.TrimSpace(q.Title)), " ")
+	}
+	if title := strings.TrimSpace(q.Title); title != "" {
+		return title
+	}
+	return strings.TrimSpace(q.Text)
 }
 
 // TopTrackProvider is an optional extension for discovery providers that

@@ -680,6 +680,28 @@ func TestSearchArtist_EmptyName(t *testing.T) {
 	}
 }
 
+// TestNewAPIClientDefaultIntervalHasMargin locks the MB pacing margin: the
+// client must pace strictly slower than MusicBrainz's hard 1 request/second
+// per-IP limit (an all-or-nothing 503 above it, regardless of User-Agent), so
+// the default interval stays at or above 1100ms. A regression back to exactly
+// 1s would ride the boundary and can trip the limit under clock or scheduling
+// skew. Tests that need real pacing set minInterval explicitly via
+// SetMinInterval; the shared provider cooldown (AGENTS §8) is unchanged.
+//
+// It builds the client through NewClient (the provider constructor) rather
+// than naming the API client constructor directly: the module-wide guard
+// TestExactlyOneMusicBrainzAPIClientConstruction counts every textual
+// construction reference, so a test must not add a second one.
+func TestNewAPIClientDefaultIntervalHasMargin(t *testing.T) {
+	c := NewClient(MusicBrainzConfig{}, testLogger())
+	if c.api.minInterval <= time.Second {
+		t.Fatalf("default minInterval = %v, want > 1s (must not ride MB's 1 req/sec per-IP boundary)", c.api.minInterval)
+	}
+	if c.api.minInterval < 1100*time.Millisecond {
+		t.Fatalf("default minInterval = %v, want >= 1100ms", c.api.minInterval)
+	}
+}
+
 func TestAPIClientRateLimitsConcurrentRequests(t *testing.T) {
 	// Record when requests arrive; concurrent callers must be paced one
 	// minInterval apart (token bucket), not burst through together.
@@ -751,5 +773,194 @@ func TestLogOpErrorLevel(t *testing.T) {
 	c.logOpError("real fault", "error", errors.New("boom"))
 	if !strings.Contains(buf.String(), `"level":"ERROR"`) {
 		t.Errorf("fault log = %s, want ERROR", buf.String())
+	}
+}
+
+// ─── Release-group search ──────────────────────────────────────────────
+
+type releaseGroupSearchResp struct {
+	Count         int               `json:"count"`
+	ReleaseGroups []releaseGroupHit `json:"release-groups"`
+}
+
+type releaseGroupHit struct {
+	ID               string              `json:"id"`
+	Title            string              `json:"title"`
+	FirstReleaseDate string              `json:"first-release-date"`
+	PrimaryType      string              `json:"primary-type"`
+	ArtistCredit     []artistCreditEntry `json:"artist-credit"`
+}
+
+func newReleaseGroupTestClient(t *testing.T, rgs []releaseGroupHit) (*APIClient, func()) {
+	t.Helper()
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/release-group/" {
+			t.Errorf("unexpected path %q", r.URL.Path)
+		}
+		resp := releaseGroupSearchResp{Count: len(rgs), ReleaseGroups: rgs}
+		w.Header().Set("Content-Type", "application/json")
+		if err := json.NewEncoder(w).Encode(resp); err != nil {
+			t.Errorf("mock encode error: %v", err)
+		}
+	})
+	srv := httptest.NewServer(handler)
+	client := &APIClient{
+		cfg:         MusicBrainzConfig{},
+		httpClient:  srv.Client(),
+		userAgent:   "groovearr-test",
+		baseURL:     srv.URL,
+		log:         testLogger(),
+		minInterval: 0,
+	}
+	return client, srv.Close
+}
+
+func TestSearchReleaseGroups_ParsesAllInOrder(t *testing.T) {
+	// A karaoke hit is ranked first; the real release group sits at rank 2. Both
+	// must come back, in order, each with its own artist credit.
+	client, cleanup := newReleaseGroupTestClient(t, []releaseGroupHit{
+		{
+			ID:               "rg-karaoke",
+			Title:            "Unconditionally (Karaoke Version)",
+			FirstReleaseDate: "2013",
+			PrimaryType:      "Single",
+			ArtistCredit:     []artistCreditEntry{{Name: "Karaoke Star"}},
+		},
+		{
+			ID:               "rg-kp",
+			Title:            "Unconditionally",
+			FirstReleaseDate: "2013-10-22",
+			PrimaryType:      "Single",
+			ArtistCredit:     []artistCreditEntry{{Name: "Katy Perry"}},
+		},
+	})
+	defer cleanup()
+
+	rgs, err := client.SearchReleaseGroups(context.Background(), "Katy Perry", "Unconditionally", 5)
+	if err != nil {
+		t.Fatalf("SearchReleaseGroups: %v", err)
+	}
+	if len(rgs) != 2 {
+		t.Fatalf("results = %d, want 2", len(rgs))
+	}
+	if rgs[0].MBID != "rg-karaoke" || rgs[1].MBID != "rg-kp" {
+		t.Errorf("order = [%s %s], want [rg-karaoke rg-kp] (ranked order preserved)", rgs[0].MBID, rgs[1].MBID)
+	}
+	if rgs[0].ArtistName != "Karaoke Star" {
+		t.Errorf("rgs[0].ArtistName = %q, want Karaoke Star (own credit, not the query)", rgs[0].ArtistName)
+	}
+	if rgs[1].Title != "Unconditionally" {
+		t.Errorf("rgs[1].Title = %q, want Unconditionally", rgs[1].Title)
+	}
+	if rgs[1].ArtistName != "Katy Perry" {
+		t.Errorf("rgs[1].ArtistName = %q, want Katy Perry (parsed from artist-credit)", rgs[1].ArtistName)
+	}
+	if rgs[1].FirstReleaseDate != "2013-10-22" {
+		t.Errorf("rgs[1].FirstReleaseDate = %q, want 2013-10-22", rgs[1].FirstReleaseDate)
+	}
+	if rgs[1].PrimaryType != "Single" {
+		t.Errorf("rgs[1].PrimaryType = %q, want Single", rgs[1].PrimaryType)
+	}
+}
+
+func TestSearchReleaseGroup_ReturnsFirst(t *testing.T) {
+	// The legacy single-result helper must keep returning the top hit for its
+	// existing callers (cover art, track resolution, connection check).
+	client, cleanup := newReleaseGroupTestClient(t, []releaseGroupHit{
+		{ID: "rg-1", Title: "First", PrimaryType: "Album", ArtistCredit: []artistCreditEntry{{Name: "Artist One"}}},
+		{ID: "rg-2", Title: "Second", PrimaryType: "Album"},
+	})
+	defer cleanup()
+
+	rg, err := client.SearchReleaseGroup(context.Background(), "Artist One", "First")
+	if err != nil {
+		t.Fatalf("SearchReleaseGroup: %v", err)
+	}
+	if rg == nil {
+		t.Fatal("expected a result, got nil")
+	}
+	if rg.MBID != "rg-1" || rg.Title != "First" {
+		t.Errorf("got %+v, want rg-1/First (first ranked result)", rg)
+	}
+	if rg.ArtistName != "Artist One" {
+		t.Errorf("ArtistName = %q, want Artist One", rg.ArtistName)
+	}
+}
+
+func TestSearchReleaseGroup_EmptyReturnsNil(t *testing.T) {
+	client, cleanup := newReleaseGroupTestClient(t, nil)
+	defer cleanup()
+
+	rg, err := client.SearchReleaseGroup(context.Background(), "Nobody", "Nothing")
+	if err != nil {
+		t.Fatalf("SearchReleaseGroup: %v", err)
+	}
+	if rg != nil {
+		t.Errorf("got %+v, want nil", rg)
+	}
+}
+
+func TestSearchReleaseGroups_EmptyReturnsNil(t *testing.T) {
+	client, cleanup := newReleaseGroupTestClient(t, nil)
+	defer cleanup()
+
+	rgs, err := client.SearchReleaseGroups(context.Background(), "Nobody", "Nothing", 5)
+	if err != nil {
+		t.Fatalf("SearchReleaseGroups: %v", err)
+	}
+	if rgs != nil {
+		t.Errorf("results = %+v, want nil", rgs)
+	}
+}
+
+func TestSearchReleaseGroups_EmptyInputSkipsServer(t *testing.T) {
+	client, cleanup := newReleaseGroupTestClient(t, nil)
+	defer cleanup()
+
+	if rgs, err := client.SearchReleaseGroups(context.Background(), "", "Nothing", 5); err != nil || rgs != nil {
+		t.Errorf("empty artist: got (%+v, %v), want (nil, nil)", rgs, err)
+	}
+	if rgs, err := client.SearchReleaseGroups(context.Background(), "Nobody", "", 5); err != nil || rgs != nil {
+		t.Errorf("empty album: got (%+v, %v), want (nil, nil)", rgs, err)
+	}
+}
+
+func TestSearchReleaseGroups_ClampsAndDefaultsLimit(t *testing.T) {
+	var sawLimit string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawLimit = r.URL.Query().Get("limit")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(releaseGroupSearchResp{})
+	})
+	srv := httptest.NewServer(handler)
+	defer srv.Close()
+	client := &APIClient{
+		cfg:         MusicBrainzConfig{},
+		httpClient:  srv.Client(),
+		userAgent:   "groovearr-test",
+		baseURL:     srv.URL,
+		log:         testLogger(),
+		minInterval: 0,
+	}
+
+	cases := []struct {
+		name  string
+		limit int
+		want  string
+	}{
+		{"default when zero", 0, "5"},
+		{"default when negative", -3, "5"},
+		{"passthrough", 20, "20"},
+		{"clamped to MB max", 5000, "100"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := client.SearchReleaseGroups(context.Background(), "a", "b", tc.limit); err != nil {
+				t.Fatalf("SearchReleaseGroups: %v", err)
+			}
+			if sawLimit != tc.want {
+				t.Errorf("limit param = %q, want %q", sawLimit, tc.want)
+			}
+		})
 	}
 }

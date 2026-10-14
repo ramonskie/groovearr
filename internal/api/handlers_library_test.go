@@ -843,7 +843,7 @@ func (p *failingDiscoverProvider) GetArtistAlbums(context.Context, string, int) 
 	p.fail("GetArtistAlbums")
 	return nil, errors.New("provider must not be called")
 }
-func (p *failingDiscoverProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (p *failingDiscoverProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	p.fail("SearchAlbums")
 	return nil, errors.New("provider must not be called")
 }

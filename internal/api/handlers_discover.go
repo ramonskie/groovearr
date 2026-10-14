@@ -121,7 +121,7 @@ func (s *Server) handleDiscoverSearch(w http.ResponseWriter, r *http.Request) {
 				results[idx].artists = a
 			}
 			if searchType == "" || searchType == "album" {
-				a, err := provider.SearchAlbums(ctx, q, 10)
+				a, err := provider.SearchAlbums(ctx, discovery.AlbumQuery{Text: q}, 10)
 				if err != nil {
 					s.noteProviderRateLimit(provider.Name(), err)
 					s.log.Warn("discover search albums error",

@@ -241,7 +241,7 @@ func (p *fakeProvider) GetArtistAlbums(context.Context, string, int) ([]discover
 	return nil, nil
 }
 
-func (p *fakeProvider) SearchAlbums(context.Context, string, int) ([]discovery.AlbumResult, error) {
+func (p *fakeProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
 	p.searchCalls++
 	if p.searchErr != nil {
 		return nil, p.searchErr
@@ -723,6 +723,11 @@ func TestBestMatch_TolerantTitleVariants(t *testing.T) {
 			libraryTitle: "Album (Deluxe Edition)",
 			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Artist One", Title: "Album"},
 		},
+		{
+			name:         "separator single suffix now tolerated",
+			libraryTitle: "Échame la culpa - Single",
+			provider:     discovery.AlbumResult{ProviderID: providerID, ArtistName: "Luis Fonsi", Title: "Échame La Culpa"},
+		},
 	}
 
 	for _, tc := range tests {
@@ -790,46 +795,6 @@ func TestBestMatch_RejectsFalsePositives(t *testing.T) {
 				t.Fatalf("bestMatch matched %q, want no match", got.ProviderID)
 			}
 		})
-	}
-}
-
-// TestNormalizeTitle locks the title comparison key: quotes, punctuation and
-// bracket style are ignored, a DELIMITED edition suffix is collapsed, and a
-// bare trailing descriptor word in a plain title is left intact.
-func TestNormalizeTitle(t *testing.T) {
-	tests := []struct {
-		in   string
-		want string
-	}{
-		{`"WOW"`, "wow"},
-		{"WOW", "wow"},
-		{"AC/DC", "ac dc"},
-		{"Album [Deluxe]", "album"},
-		{"Album (Deluxe)", "album"},
-		{"Album (Deluxe Edition)", "album"},
-		{"Album - Remastered", "album"},
-		{"Album: Remastered", "album"},
-		{"Album (2020 Remaster)", "album"},
-		{"Album (Remastered 2011)", "album"},
-		{"Song feat. X", "song"},
-		{"Album One", "album one"},
-		{"Albums", "albums"},
-		// A bare trailing descriptor word in a plain title must never be
-		// stripped: these stay distinct from `new` / `first` / `the`.
-		{"New Edition", "new edition"},
-		{"First Edition", "first edition"},
-		{"The Single", "the single"},
-		// Performance/format variants are different content, not collapsed.
-		{"Album (Live)", "album live"},
-		{"Album (Single)", "album single"},
-		{"Album (Radio Edit)", "album radio edit"},
-		{"", ""},
-	}
-
-	for _, tc := range tests {
-		if got := normalizeTitle(tc.in); got != tc.want {
-			t.Errorf("normalizeTitle(%q) = %q, want %q", tc.in, got, tc.want)
-		}
 	}
 }
 
@@ -925,56 +890,6 @@ func TestBestMatch_ArticleAndTwoTokenArtistMatches(t *testing.T) {
 			}, tc.library, "Same Title")
 			if !ok || got.ProviderID != "p" {
 				t.Fatalf("bestMatch(%q vs %q) = %q/%v, want p/true", tc.library, tc.provider, got.ProviderID, ok)
-			}
-		})
-	}
-}
-
-// TestArtistCompatible locks the artist-credit boundary. A collaboration credit
-// and an article-only containment still match their bare artist, while a
-// genuinely different act that shares only one significant token, only a
-// stopword/joiner, or a bare containment of a longer name is rejected.
-func TestArtistCompatible(t *testing.T) {
-	compatible := []struct {
-		name string
-		want string
-		cand string
-	}{
-		{"exact equal", "Artist A", "Artist A"},
-		{"article-only containment (The Cure vs Cure)", "The Cure", "Cure"},
-		{"ampersand collaboration", "Artist A", "Artist A & Artist B"},
-		{"feat collaboration", "Artist A", "Artist A feat. Artist B"},
-		{"featuring collaboration", "Artist A", "Artist A featuring Artist B"},
-		{"two shared significant tokens, reversed (Simon & Garfunkel vs Garfunkel & Simon)", "Simon & Garfunkel", "Garfunkel & Simon"},
-	}
-	for _, tc := range compatible {
-		t.Run("compatible/"+tc.name, func(t *testing.T) {
-			if !artistCompatible(tc.want, tc.cand) {
-				t.Fatalf("artistCompatible(%q, %q) = false, want true", tc.want, tc.cand)
-			}
-		})
-	}
-
-	incompatible := []struct {
-		name string
-		want string
-		cand string
-	}{
-		{"shared stopword 'the' (The Cure vs The Beatles)", "The Cure", "The Beatles"},
-		{"bare containment (Air vs Air Supply)", "Air", "Air Supply"},
-		{"single shared token (King vs King Crimson)", "King", "King Crimson"},
-		{"single shared token (Rock vs Rock Band)", "Rock", "Rock Band"},
-		{"one shared token, different act (The Band vs Band of Gypsys)", "The Band", "Band of Gypsys"},
-		{"containment with a real extra word (New Order vs Order)", "New Order", "Order"},
-		{"compact slash is not a joiner (AC/DC vs AC)", "AC/DC", "AC"},
-		{"compact slash is not a joiner, reversed (AC vs AC/DC)", "AC", "AC/DC"},
-		{"shared stopword 'and' (Simon and Garfunkel vs Hall and Oates)", "Simon and Garfunkel", "Hall and Oates"},
-		{"audit clash (Remady vs a different name)", "Remady", "Some Other Name"},
-	}
-	for _, tc := range incompatible {
-		t.Run("incompatible/"+tc.name, func(t *testing.T) {
-			if artistCompatible(tc.want, tc.cand) {
-				t.Fatalf("artistCompatible(%q, %q) = true, want false", tc.want, tc.cand)
 			}
 		})
 	}
