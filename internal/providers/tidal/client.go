@@ -662,21 +662,24 @@ func (c *Client) SearchArtistImage(ctx context.Context, artist string) (*metadat
 }
 
 // SearchAlbum finds the album title for a track via Tidal's search API.
-func (c *Client) SearchAlbum(ctx context.Context, artist, title string) string {
+// Returns ("", nil) when no match is found; a failure (including
+// metadata.ErrRateLimited) is propagated so the caller can park the provider on
+// the shared cooldown bucket (AGENTS §8).
+func (c *Client) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	if artist == "" || title == "" {
-		return ""
+		return "", nil
 	}
 	tracks, err := c.api.SearchTracks(ctx, title+" "+artist, 3, 0)
 	if err != nil {
 		c.log.Warn("tidal search album failed", "error", err, "artist", artist, "title", title, "component", "tidal")
-		return ""
+		return "", err
 	}
 	for _, t := range tracks {
 		if t.Album.Title != "" {
-			return t.Album.Title
+			return t.Album.Title, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // EnrichTrack fetches metadata (ISRC, release date) by searching Tidal's API

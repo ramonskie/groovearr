@@ -103,8 +103,11 @@ type Provider interface {
 	SearchArtistImage(ctx context.Context, artist string) (*ArtistImageResult, error)
 
 	// SearchAlbum finds the album title for a track given artist+title.
-	// Returns empty string if no match found.
-	SearchAlbum(ctx context.Context, artist, title string) string
+	// Returns ("", nil) when no match is found. A provider-call failure is
+	// returned as an error so the caller can observe metadata.ErrRateLimited
+	// and park the provider on the shared cooldown bucket (AGENTS §8);
+	// enrichment stays best-effort either way.
+	SearchAlbum(ctx context.Context, artist, title string) (string, error)
 
 	// EnrichTrack fetches metadata (ISRC, genres, release date, etc.) for a track.
 	// The returned TrackMetadata describes what was found; the caller decides

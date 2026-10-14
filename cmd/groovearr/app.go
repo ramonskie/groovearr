@@ -253,9 +253,12 @@ func NewApp(configPath string) (*App, error) {
 	releaseResolver := resolveReleaseResolver()
 	injectReleaseResolver(pluginReg, releaseResolver)
 
-	// Metadata resolver.
+	// Metadata resolver. Shares the ONE app-wide provider cooldown bucket so a
+	// rate-limited provider is skipped and never re-probed from the resolver
+	// path (AGENTS §8).
 	metadataResolver := metadata.NewMetadataResolver(mdRegistry, log)
 	metadataResolver.SetProviderOrder(providerOrder)
+	metadataResolver.SetCooldown(providerCooldown)
 
 	// Plugin health checker.
 	healthChecker := plugin.NewHealthChecker(pluginReg, 5*time.Minute, log)

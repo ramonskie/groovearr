@@ -258,12 +258,18 @@ func (p *Plugin) SearchCover(ctx context.Context, artist, album string) (*metada
 }
 
 // SearchAlbum finds an album title for a track via Discogs release search.
-func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) string {
+// Returns ("", nil) when no match is found; a failure (including
+// metadata.ErrRateLimited) is propagated so the caller can park the provider on
+// the shared cooldown bucket (AGENTS §8).
+func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	releases, err := p.client.SearchAlbums(ctx, artist+" "+title, 1)
-	if err != nil || len(releases) == 0 {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return releases[0].Title
+	if len(releases) == 0 {
+		return "", nil
+	}
+	return releases[0].Title, nil
 }
 
 // EnrichTrack fetches release metadata (release year) via Discogs release lookup.

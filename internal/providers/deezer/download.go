@@ -1346,23 +1346,27 @@ func (d *DownloadClient) GetArtistTopTracks(ctx context.Context, providerArtistI
 // Compile-time checks.
 var _ metadata.Provider = (*DownloadClient)(nil)
 var _ download.MonitoredProvider = (*DownloadClient)(nil)
+var _ discovery.Provider = (*DownloadClient)(nil)
 
 // SearchAlbum finds the album title for a track via Deezer's public search API.
-func (c *DownloadClient) SearchAlbum(ctx context.Context, artist, title string) string {
+// Returns ("", nil) when no match is found; a failure (including
+// metadata.ErrRateLimited) is propagated so the caller can park the provider on
+// the shared cooldown bucket (AGENTS §8).
+func (c *DownloadClient) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	if artist == "" || title == "" {
-		return ""
+		return "", nil
 	}
 	tracks, err := c.api.SearchTracksAdvanced(ctx, title, artist, "", 3)
 	if err != nil {
 		c.log.Warn("deezer search album failed", "error", err, "artist", artist, "title", title, "component", "deezer")
-		return ""
+		return "", err
 	}
 	for _, t := range tracks {
 		if t.Album.Title != "" {
-			return t.Album.Title
+			return t.Album.Title, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // SearchCover looks up album cover art via Deezer's public search API.

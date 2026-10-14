@@ -126,8 +126,8 @@ func (m *mockProvider) IsMetadataAvailable() bool             { return true }
 func (m *mockProvider) CheckConnection(context.Context) error { return nil }
 func (m *mockProvider) Connected() bool                       { return true }
 func (m *mockProvider) CapabilityStatus() map[string]string   { return nil }
-func (m *mockProvider) SearchAlbum(ctx context.Context, artist, title string) string {
-	return ""
+func (m *mockProvider) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
+	return "", nil
 }
 func (m *mockProvider) SearchCover(ctx context.Context, artist, album string) (*metadata.CoverResult, error) {
 	return nil, nil

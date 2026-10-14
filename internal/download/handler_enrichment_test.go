@@ -24,13 +24,16 @@ func testLogger() *slog.Logger {
 
 // mockMetadataProvider implements metadata.Provider for testing.
 type mockMetadataProvider struct {
-	name       string
-	cover      *metadata.CoverResult
-	trackMeta  *metadata.TrackMetadata
-	configured bool
-	connected  bool
-	enrichErr  error
-	calls      *int
+	name             string
+	cover            *metadata.CoverResult
+	trackMeta        *metadata.TrackMetadata
+	configured       bool
+	connected        bool
+	enrichErr        error
+	calls            *int
+	album            string
+	albumErr         error
+	searchAlbumCalls *int
 }
 
 func (m *mockMetadataProvider) Name() string              { return m.name }
@@ -55,8 +58,11 @@ func (m *mockMetadataProvider) SearchArtistImage(ctx context.Context, artist str
 	return nil, nil
 }
 
-func (m *mockMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) string {
-	return "" // default: no album found
+func (m *mockMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
+	if m.searchAlbumCalls != nil {
+		*m.searchAlbumCalls++
+	}
+	return m.album, m.albumErr // default: no album found, no error
 }
 
 func (m *mockMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
@@ -401,8 +407,8 @@ func (m *blockingMetadataProvider) SearchArtistImage(ctx context.Context, artist
 	return nil, nil
 }
 
-func (m *blockingMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) string {
-	return ""
+func (m *blockingMetadataProvider) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
+	return "", nil
 }
 
 func (m *blockingMetadataProvider) EnrichTrack(ctx context.Context, track *domain.Track) (*metadata.TrackMetadata, error) {
@@ -701,6 +707,63 @@ func TestBulkEnrichSkipsRateLimitedProvider(t *testing.T) {
 	}
 	if backupCalls != 2 {
 		t.Errorf("backup provider calls = %d, want 2 (still consulted on 2nd track)", backupCalls)
+	}
+}
+
+// TestBulkEnrichRateLimitsOnAlbumSearch verifies the SearchAlbum path also
+// participates in the shared cooldown (AGENTS §8): a provider that returns
+// metadata.ErrRateLimited from the album lookup is marked cooling down, and
+// subsequent tracks skip it entirely.
+func TestBulkEnrichRateLimitsOnAlbumSearch(t *testing.T) {
+	trackPath := filepath.Join(t.TempDir(), "test.mp3")
+
+	reg := metadata.NewRegistry()
+	rlAlbumCalls := 0
+	rl := &mockMetadataProvider{
+		name:             "ratelimited",
+		configured:       true,
+		connected:        true,
+		albumErr:         fmt.Errorf("wrapped: %w", metadata.ErrRateLimited),
+		searchAlbumCalls: &rlAlbumCalls,
+	}
+	backupCalls := 0
+	backup := &mockMetadataProvider{
+		name:       "backup",
+		configured: true,
+		connected:  true,
+		trackMeta:  &metadata.TrackMetadata{ISRC: "US-ABC-12-99999"},
+		calls:      &backupCalls,
+	}
+	reg.Register(rl)
+	reg.Register(backup)
+
+	store := &mockLibraryStore{
+		track:  &domain.Track{ID: 1, ArtistID: 1, AlbumID: 1, FilePath: trackPath},
+		artist: &domain.Artist{ID: 1, Name: "Test Artist"},
+		// Empty album title forces the SearchAlbum lookup.
+		album:  &domain.Album{ID: 1, Title: "", ArtistID: 1},
+		tracks: []domain.Track{{ID: 1, FilePath: trackPath}},
+	}
+	handler := NewMetadataEnrichmentHandler(reg, nil, store, testLogger())
+	handler.ResetBulk()
+
+	if err := handler.EnrichLibraryTrack(context.Background(), 1); err != nil {
+		t.Fatalf("first track: unexpected error: %v", err)
+	}
+	if !handler.providerCoolingDown("ratelimited") {
+		t.Errorf("provider not marked cooling after ErrRateLimited from SearchAlbum")
+	}
+	if rlAlbumCalls != 1 {
+		t.Errorf("SearchAlbum calls = %d, want 1 (first track)", rlAlbumCalls)
+	}
+
+	// Second track: the cooled provider is skipped before SearchAlbum runs.
+	store.track = &domain.Track{ID: 2, ArtistID: 1, AlbumID: 1, FilePath: trackPath}
+	if err := handler.EnrichLibraryTrack(context.Background(), 2); err != nil {
+		t.Fatalf("second track: unexpected error: %v", err)
+	}
+	if rlAlbumCalls != 1 {
+		t.Errorf("SearchAlbum calls = %d, want 1 (skipped on 2nd track)", rlAlbumCalls)
 	}
 }
 

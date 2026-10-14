@@ -415,23 +415,25 @@ func (p *Plugin) IsMetadataAvailable() bool {
 }
 
 // SearchAlbum finds the album title for a track via the Spotify Web API.
-// Returns empty string when no match is found or the API is unavailable.
-func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) string {
+// Returns ("", nil) when no match is found or the API is unavailable; a failure
+// (including metadata.ErrRateLimited) is propagated so the caller can park the
+// provider on the shared cooldown bucket (AGENTS §8).
+func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	if p.api == nil || artist == "" || title == "" {
-		return ""
+		return "", nil
 	}
 	query := fmt.Sprintf("track:%s artist:%s", title, artist)
 	result, err := p.api.SearchTracks(ctx, query, 3, 0)
 	if err != nil {
 		p.log.Warn("spotify search album failed", "error", err, "artist", artist, "title", title, "component", "spotify")
-		return ""
+		return "", err
 	}
 	for _, t := range result.Items {
 		if t.Album.Name != "" {
-			return t.Album.Name
+			return t.Album.Name, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // SearchCover looks up album cover art via the Spotify Web API.

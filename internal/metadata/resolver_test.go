@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"testing"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
 )
@@ -32,6 +33,8 @@ type mockProvider struct {
 	coverErr   error
 	coverCalls int    // incremented on each SearchCover invocation
 	album      string // returned by SearchAlbum
+	albumErr   error  // returned by SearchAlbum (e.g. metadata.ErrRateLimited)
+	albumCalls int    // incremented on each SearchAlbum invocation
 }
 
 // compile-time interface check
@@ -60,8 +63,9 @@ func (m *mockProvider) SearchArtistImage(_ context.Context, _ string) (*ArtistIm
 	return nil, nil
 }
 
-func (m *mockProvider) SearchAlbum(_ context.Context, _, _ string) string {
-	return m.album
+func (m *mockProvider) SearchAlbum(_ context.Context, _, _ string) (string, error) {
+	m.albumCalls++
+	return m.album, m.albumErr
 }
 
 func (m *mockProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*TrackMetadata, error) {
@@ -417,6 +421,117 @@ func TestEnrichMetadata_AlbumLookupMultipleProviders(t *testing.T) {
 	result, _ := r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
 	if result.Album != "Discovery" {
 		t.Errorf("Album = %q, want 'Discovery'", result.Album)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// shared rate-limit bucket (AGENTS §8)
+// ---------------------------------------------------------------------------
+
+// fakeCooldown is a minimal Cooldown double: a mutable cooling set plus a
+// record of MarkAfter calls (name → duration).
+type fakeCooldown struct {
+	cooling map[string]bool
+	marks   map[string]time.Duration
+}
+
+func newFakeCooldown() *fakeCooldown {
+	return &fakeCooldown{cooling: map[string]bool{}, marks: map[string]time.Duration{}}
+}
+
+func (f *fakeCooldown) CoolingDown(name string) bool { return f.cooling[name] }
+
+func (f *fakeCooldown) MarkAfter(name string, d time.Duration) { f.marks[name] = d }
+
+var _ Cooldown = (*fakeCooldown)(nil)
+
+// TestEnrichMetadata_SkipsCoolingProvider verifies a provider parked on the
+// shared bucket is not called at all — neither for the album lookup nor cover
+// (AGENTS §8: never re-probe a throttled provider).
+func TestEnrichMetadata_SkipsCoolingProvider(t *testing.T) {
+	mp := &mockProvider{name: "mb", configured: true, album: "Discovery", cover: &CoverResult{ImageURL: "https://example.com/c.jpg"}}
+	cd := newFakeCooldown()
+	cd.cooling["mb"] = true
+	r := newTestResolver(mp)
+	r.SetCooldown(cd)
+
+	result, _ := r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
+	if result.Album != "" {
+		t.Errorf("Album = %q, want empty (provider cooling down)", result.Album)
+	}
+	if result.CoverURL != "" {
+		t.Errorf("CoverURL = %q, want empty (provider cooling down)", result.CoverURL)
+	}
+	if mp.coverCalls > 0 {
+		t.Errorf("SearchCover called %d times, want 0 while cooling", mp.coverCalls)
+	}
+}
+
+// TestEnrichMetadata_MarksProviderOnRateLimit verifies a provider that returns
+// metadata.ErrRateLimited during the album lookup is parked on the shared
+// bucket, and no cover search follows for it in the same pass.
+func TestEnrichMetadata_MarksProviderOnRateLimit(t *testing.T) {
+	mp := &mockProvider{name: "mb", configured: true, albumErr: ErrRateLimited}
+	cd := newFakeCooldown()
+	r := newTestResolver(mp)
+	r.SetCooldown(cd)
+
+	result, _ := r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
+	if result.Album != "" {
+		t.Errorf("Album = %q, want empty", result.Album)
+	}
+	if _, ok := cd.marks["mb"]; !ok {
+		t.Errorf("provider %q not marked on the shared bucket after ErrRateLimited", "mb")
+	}
+	if mp.coverCalls > 0 {
+		t.Errorf("SearchCover called %d times, want 0 (album lookup rate-limited)", mp.coverCalls)
+	}
+}
+
+// TestEnrichMetadata_RateLimitSuppressesPrimaryRetry verifies that when the
+// album lookup for the full artist is rate-limited, the resolver does NOT
+// immediately re-probe the same provider with the primary artist (which would
+// re-arm the ban it just recorded) — it moves on.
+func TestEnrichMetadata_RateLimitSuppressesPrimaryRetry(t *testing.T) {
+	mp := &mockProvider{name: "mb", configured: true, albumErr: ErrRateLimited}
+	cd := newFakeCooldown()
+	r := newTestResolver(mp)
+	r.SetCooldown(cd)
+
+	// Comma-joined artist so the primary-artist fallback would normally fire.
+	_, _ = r.EnrichMetadata(context.Background(), "The Moon, DJ Ghost", "Butterfly", "", 0)
+	if mp.albumCalls != 1 {
+		t.Errorf("SearchAlbum called %d times, want 1 (no re-probe after a rate-limit)", mp.albumCalls)
+	}
+}
+
+// TestEnrichMetadata_NilCooldownIsPassThrough verifies the resolver still works
+// (no gating, no panic) when no shared bucket is wired.
+func TestEnrichMetadata_NilCooldownIsPassThrough(t *testing.T) {
+	mp := &mockProvider{name: "mb", configured: true, album: "Discovery"}
+	r := newTestResolver(mp) // SetCooldown never called
+
+	result, err := r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if result.Album != "Discovery" {
+		t.Errorf("Album = %q, want 'Discovery' (nil bucket must not block enrichment)", result.Album)
+	}
+}
+
+// TestEnrichMetadata_RateLimitRetryAfterHonored verifies a structured
+// RateLimitError's server-supplied Retry-After reaches MarkAfter.
+func TestEnrichMetadata_RateLimitRetryAfterHonored(t *testing.T) {
+	retry := 37 * time.Minute
+	mp := &mockProvider{name: "mb", configured: true, albumErr: NewRateLimitError("mb", retry, "")}
+	cd := newFakeCooldown()
+	r := newTestResolver(mp)
+	r.SetCooldown(cd)
+
+	_, _ = r.EnrichMetadata(context.Background(), "Daft Punk", "One More Time", "", 0)
+	if got := cd.marks["mb"]; got != retry {
+		t.Errorf("MarkAfter duration = %v, want %v", got, retry)
 	}
 }
 

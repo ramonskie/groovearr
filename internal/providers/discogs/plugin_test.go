@@ -606,7 +606,10 @@ func TestPlugin_SearchAlbum(t *testing.T) {
 	p, cleanup := newTestPlugin(t, handler)
 	defer cleanup()
 
-	album := p.SearchAlbum(context.Background(), "Daft Punk", "Get Lucky")
+	album, err := p.SearchAlbum(context.Background(), "Daft Punk", "Get Lucky")
+	if err != nil {
+		t.Fatalf("SearchAlbum: %v", err)
+	}
 	if album != "Random Access Memories" {
 		t.Errorf("SearchAlbum = %q, want Random Access Memories", album)
 	}
@@ -619,7 +622,10 @@ func TestPlugin_SearchAlbum_NoResults(t *testing.T) {
 	p, cleanup := newTestPlugin(t, handler)
 	defer cleanup()
 
-	album := p.SearchAlbum(context.Background(), "Unknown", "Track")
+	album, err := p.SearchAlbum(context.Background(), "Unknown", "Track")
+	if err != nil {
+		t.Fatalf("SearchAlbum: %v", err)
+	}
 	if album != "" {
 		t.Errorf("SearchAlbum = %q, want empty", album)
 	}

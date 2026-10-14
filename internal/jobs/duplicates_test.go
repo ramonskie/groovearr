@@ -150,7 +150,9 @@ func (p *stubNameProvider) SearchCover(_ context.Context, _, _ string) (*metadat
 func (p *stubNameProvider) SearchArtistImage(_ context.Context, _ string) (*metadata.ArtistImageResult, error) {
 	return nil, nil
 }
-func (p *stubNameProvider) SearchAlbum(_ context.Context, _, _ string) string { return "" }
+func (p *stubNameProvider) SearchAlbum(_ context.Context, _, _ string) (string, error) {
+	return "", nil
+}
 func (p *stubNameProvider) EnrichTrack(_ context.Context, _ *domain.Track) (*metadata.TrackMetadata, error) {
 	return nil, nil
 }

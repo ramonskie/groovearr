@@ -646,9 +646,10 @@ var _ ImportHandler = (*MetadataEnrichmentHandler)(nil)
 
 // enrichFromProvider runs album title resolution, cover art download, and track
 // metadata enrichment for a single provider. Returns whether track or album was
-// modified so the caller can persist changes. Rate-limit responses are only
-// recorded as cooldowns in bulk mode (bulk=true): the per-download path
-// intentionally tries every provider for every track.
+// modified so the caller can persist changes. Rate-limit responses (from both
+// SearchAlbum and SearchCover) are only recorded as cooldowns in bulk mode
+// (bulk=true): the per-download path intentionally tries every provider for
+// every track.
 func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	ctx context.Context,
 	p metadata.Provider,
@@ -662,12 +663,20 @@ func (h *MetadataEnrichmentHandler) enrichFromProvider(
 	// Try full artist first, then primary artist fallback for comma-separated
 	// Spotify co-artist strings (e.g., "The Moon, DJ Ghost").
 	if album.Title == "" {
-		if found := p.SearchAlbum(ctx, artist.Name, track.Title); found != "" {
+		found, err := p.SearchAlbum(ctx, artist.Name, track.Title)
+		if bulk && h.noteProviderError(p, err) {
+			return // rate limited — stop using this provider for this track
+		}
+		if err == nil && found != "" {
 			album.Title = found
 			albumModified = true
 		} else if primary := library.PrimaryArtistName(artist.Name); primary != artist.Name {
-			if found := p.SearchAlbum(ctx, primary, track.Title); found != "" {
-				album.Title = found
+			found2, err2 := p.SearchAlbum(ctx, primary, track.Title)
+			if bulk && h.noteProviderError(p, err2) {
+				return
+			}
+			if err2 == nil && found2 != "" {
+				album.Title = found2
 				albumModified = true
 			}
 		}

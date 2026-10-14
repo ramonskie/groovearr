@@ -247,13 +247,19 @@ func (p *Plugin) SearchCover(ctx context.Context, artist, album string) (*metada
 	}, nil
 }
 
-// SearchAlbum finds an album title via Last.fm album.getInfo.
-func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) string {
+// SearchAlbum finds an album title via Last.fm album.getInfo. Returns
+// ("", nil) when no match is found; a failure (including
+// metadata.ErrRateLimited) is propagated so the caller can park the provider on
+// the shared cooldown bucket (AGENTS §8).
+func (p *Plugin) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	info, err := p.client.GetAlbumInfo(ctx, artist, title)
-	if err != nil || info == nil {
-		return ""
+	if err != nil {
+		return "", err
 	}
-	return info.Name
+	if info == nil {
+		return "", nil
+	}
+	return info.Name, nil
 }
 
 // EnrichTrack is unsupported by the Last.fm API.

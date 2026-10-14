@@ -144,16 +144,22 @@ func (c *Client) CanonicalArtistName(ctx context.Context, name string) (string, 
 }
 
 // SearchAlbum finds the album title for a track by searching MusicBrainz
-// recordings via artist+title. Returns empty string if no match found.
-func (c *Client) SearchAlbum(ctx context.Context, artist, title string) string {
+// recordings via artist+title. Returns ("", nil) if no match found. A failure
+// (including metadata.ErrRateLimited) is propagated so the caller can park the
+// provider on the shared cooldown bucket (AGENTS §8).
+func (c *Client) SearchAlbum(ctx context.Context, artist, title string) (string, error) {
 	if artist == "" || title == "" {
-		return ""
+		return "", nil
 	}
 	rg, err := c.api.SearchRecording(ctx, artist, title)
-	if err != nil || rg == nil {
-		return ""
+	if err != nil {
+		c.logOpError("musicbrainz search album failed", "error", err, "artist", artist, "title", title, "component", "musicbrainz")
+		return "", err
 	}
-	return rg.Title
+	if rg == nil {
+		return "", nil
+	}
+	return rg.Title, nil
 }
 
 // EnrichTrack fetches ISRC codes, genres, label, release date, and external
