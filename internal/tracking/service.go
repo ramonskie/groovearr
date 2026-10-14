@@ -135,11 +135,22 @@ type SearchResult struct {
 	// canonical policy processed without queuing anything (Queued==0 and no
 	// Errors); both still advance the rotating batch.
 	Skipped int `json:"skipped"`
-	Errors  int `json:"errors"`
+	// NoSource counts albums for which neither the album-first leg nor a single
+	// per-track input was available, so nothing could even be attempted — the
+	// usual cause is no album_sources/download_client configured and no
+	// resolvable tracklist. It is counted separately from Skipped so a
+	// misconfigured acquirer is visible instead of looking like a no-op.
+	NoSource int `json:"no_source"`
+	Errors   int `json:"errors"`
 	// Remaining is the number of wanted albums left unprocessed because the
 	// per-run batch cap was reached. They stay wanted and are picked up by the
 	// next run.
 	Remaining int `json:"remaining"`
+	// Processed is the number of wanted albums this pass actually considered
+	// (the rotating batch size selected). A draining caller uses
+	// ceil((Processed+Remaining)/Processed) to size a full rotation over the
+	// wanted set without the batch cap leaking out of this package.
+	Processed int `json:"processed"`
 }
 
 // fetchArtistAlbums pulls a discography through the discovery provider,

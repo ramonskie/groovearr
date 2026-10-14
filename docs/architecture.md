@@ -359,8 +359,7 @@ type Source interface {
 ### Queue-Time Resolution
 
 Before a download is queued, `MetadataResolver.EnrichMetadata()` queries configured
-providers in the shared provider order (`provider_order`, falling back to
-`metadata_order`). It resolves a missing album
+providers in the shared provider order (`provider_order`). It resolves a missing album
 name, then finds cover art — see the
 [Queue-Time Resolution](flows/queue-time-resolution.md) flow chart. It is
 **best-effort**: errors are logged, empty fields are left empty, and the queue
@@ -392,11 +391,13 @@ cover art lookups via CoverArtArchive and MusicBrainz release metadata.
 
 ### Provider Order
 
-**One order source for every path (D-001 §3).** The canonical key is
-`provider_order`; an install that only ever wrote the legacy `metadata_order`
-keeps working through a fallback (`Config.EffectiveProviderOrder`,
-`internal/config/config.go` — `provider_order` when non-empty, else
-`metadata_order`).
+**One order source for every path (D-001 §3).** There is exactly one key:
+`provider_order`. It covers what used to be split between the canonical
+`provider_order` and the legacy `metadata_order`; a config that still carries
+`metadata_order` has it folded into `provider_order` on load
+(`Config.EffectiveProviderOrder` → `ProviderOrder`,
+`internal/config/config.go`). The settings UI edits this single field
+(Sources → Priority → "Provider Order").
 
 ```json
 {"provider_order": ["deezer", "musicbrainz", "discogs"]}
@@ -529,8 +530,7 @@ SQLite library record
 | `library.folder_template` | `{artist}/{album} ({year})/{track:02d} - {title}` | Rename pattern | — |
 | `library.playlist_path` | `./playlists` | Separate playlist downloads | No |
 | `library.playlist_template` | `{position:02d} {artist} - {title}` | Playlist filename pattern | — |
-| `provider_order` | (unset → falls back) | Canonical provider priority; every path (enrichment, discover, catalog, tracking, duplicates) | — |
-| `metadata_order` | `["deezer", "musicbrainz", "discogs"]` | Legacy provider priority; fallback for `provider_order` | — |
+| `provider_order` | `["deezer", "musicbrainz", "discogs"]` | Single provider priority; every path (enrichment, discover, catalog, tracking, duplicates). Editable in the UI. | — |
 
 ## Database
 

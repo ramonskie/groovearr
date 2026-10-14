@@ -371,6 +371,7 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/tracking/artists/{artistID}/albums", s.adminOnly(s.handleListTrackedAlbums))
 	mux.HandleFunc("POST /api/tracking/artists/{artistID}/refresh", s.adminOnly(s.handleRefreshTrackedArtist))
 	mux.HandleFunc("POST /api/tracking/artists/{artistID}/search-missing", s.adminOnly(s.handleSearchMissingArtist))
+	mux.HandleFunc("POST /api/tracking/search-missing", s.adminOnly(s.handleSearchMissingAll))
 	mux.HandleFunc("POST /api/tracking/refresh", s.adminOnly(s.handleRefreshAllTracked))
 	mux.HandleFunc("GET /api/tracking/wanted", s.adminOnly(s.handleListAllWanted))
 	mux.HandleFunc("PATCH /api/tracking/albums/{albumID}", s.adminOnly(s.handleUpdateTrackedAlbum))
@@ -876,10 +877,26 @@ func (s *Server) handleGetConfig(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
-	var partial config.Config
-	if err := json.NewDecoder(r.Body).Decode(&partial); err != nil {
+	body, err := io.ReadAll(r.Body)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
+	}
+	var partial config.Config
+	if err := json.Unmarshal(body, &partial); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	// Legacy compat: a client still sending the deprecated metadata_order key
+	// adopts it into provider_order when provider_order is absent — the same
+	// rule readConfigFile applies on file load. provider_order is the single
+	// provider priority key.
+	var legacyOrder struct {
+		ProviderOrder *[]string `json:"provider_order"`
+		MetadataOrder *[]string `json:"metadata_order"`
+	}
+	if err := json.Unmarshal(body, &legacyOrder); err == nil && legacyOrder.ProviderOrder == nil && legacyOrder.MetadataOrder != nil {
+		partial.ProviderOrder = *legacyOrder.MetadataOrder
 	}
 
 	// Validate a new plaintext auth password at the edge. Merge hashes it with
@@ -939,7 +956,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := s.cfg.Update(func(cfg *config.Config) error {
+	err = s.cfg.Update(func(cfg *config.Config) error {
 		// Re-validate under the lock — authoritative if a concurrent writer
 		// changed the base since the trial. Merge into a clone so a failure
 		// cannot mutate the live config through shared maps/pointers.
@@ -1015,21 +1032,18 @@ func (s *Server) reconcileAfterConfigUpdate(oldSources map[string]json.RawMessag
 
 	// Sync the provider order with available providers before applying.
 	// This ensures newly-configured providers (like Spotify dev mode)
-	// appear in the order without manual UI reordering. provider_order is
-	// canonical when an install has adopted it; otherwise the legacy
-	// metadata_order stays the live key, so a config that never wrote
-	// provider_order is not shadowed. Every consumer (resolver, enrichment,
+	// appear in the order without manual UI reordering. provider_order is the
+	// single provider priority key. Every consumer (resolver, enrichment,
 	// discovery registry, refresh engine, duplicates) reads the order live
 	// via the shared ProviderOrder, so persisting it here propagates it.
 	effectiveOrder := updated.EffectiveProviderOrder()
 	syncedOrder := mergeAvailableProviders(effectiveOrder, s.mdRegistry.Available())
-	if len(syncedOrder) > 0 && !stringSlicesEqual(syncedOrder, effectiveOrder) {
+	// Only sync when an order is already configured: an explicit empty
+	// provider_order means "registration order" and must not be materialized
+	// into a frozen snapshot.
+	if len(effectiveOrder) > 0 && len(syncedOrder) > 0 && !stringSlicesEqual(syncedOrder, effectiveOrder) {
 		if err := s.cfg.Update(func(cfg *config.Config) error {
-			if len(cfg.ProviderOrder) > 0 {
-				cfg.ProviderOrder = syncedOrder
-			} else {
-				cfg.MetadataOrder = syncedOrder
-			}
+			cfg.ProviderOrder = syncedOrder
 			return nil
 		}); err != nil {
 			s.log.Warn("failed to persist synced provider order", "error", err, "component", "api")

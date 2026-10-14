@@ -371,7 +371,7 @@ func TestTrackingConfigDefaults(t *testing.T) {
 		wantRefreshMins   int
 		wantAutoSearching bool
 	}{
-		{name: "defaults", wantRefreshSet: true, wantRefreshMins: 720, wantAutoSearching: false},
+		{name: "defaults", wantRefreshSet: true, wantRefreshMins: 720, wantAutoSearching: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -826,12 +826,10 @@ func TestCloneCatalogEnabledIndependent(t *testing.T) {
 	}
 }
 
-// TestEffectiveProviderOrder pins the fallback precedence: provider_order is
-// authoritative whenever it is set. An explicit empty provider_order means
-// "registration order" and must NOT fall back to metadata_order; only a
-// nil/unset provider_order falls back to the legacy metadata_order. Both
-// unset means "registration order" (nil). This is the no-config-breakage
-// contract for the D-001 §3 order unification.
+// TestEffectiveProviderOrder pins that there is a single provider priority key:
+// EffectiveProviderOrder returns provider_order verbatim. The legacy
+// metadata_order key is folded into it on load (see
+// TestReadConfigFileMigratesMetadataOrder); there is no shadowing.
 func TestEffectiveProviderOrder(t *testing.T) {
 	tests := []struct {
 		name string
@@ -839,22 +837,17 @@ func TestEffectiveProviderOrder(t *testing.T) {
 		want []string
 	}{
 		{
-			name: "provider_order wins over metadata_order",
-			cfg:  Config{ProviderOrder: []string{"musicbrainz", "deezer"}, MetadataOrder: []string{"deezer", "musicbrainz"}},
-			want: []string{"musicbrainz", "deezer"},
-		},
-		{
-			name: "unset provider_order falls back to legacy metadata_order",
-			cfg:  Config{ProviderOrder: nil, MetadataOrder: []string{"deezer", "musicbrainz"}},
+			name: "provider_order is the effective order",
+			cfg:  Config{ProviderOrder: []string{"deezer", "musicbrainz"}},
 			want: []string{"deezer", "musicbrainz"},
 		},
 		{
-			name: "explicitly empty provider_order means registration order, no fallback",
-			cfg:  Config{ProviderOrder: []string{}, MetadataOrder: []string{"deezer"}},
+			name: "explicitly empty provider_order means registration order",
+			cfg:  Config{ProviderOrder: []string{}},
 			want: []string{},
 		},
 		{
-			name: "both empty means registration order",
+			name: "unset provider_order means registration order (nil)",
 			cfg:  Config{},
 			want: nil,
 		},
@@ -869,28 +862,76 @@ func TestEffectiveProviderOrder(t *testing.T) {
 	}
 }
 
-// TestDefaultConfigProviderOrderFallback pins that the first-run bootstrap seed
-// still reaches every path through the fallback while provider_order stays
-// unset, so DefaultConfig's behavior is unchanged by the unification.
-func TestDefaultConfigProviderOrderFallback(t *testing.T) {
+// TestDefaultConfigProviderOrderSeed pins that the first-run bootstrap seed
+// reaches every path through the single provider_order key.
+func TestDefaultConfigProviderOrderSeed(t *testing.T) {
 	cfg := DefaultConfig()
-	if cfg.ProviderOrder != nil {
-		t.Errorf("default provider_order = %v, want nil (legacy metadata_order is the fallback)", cfg.ProviderOrder)
-	}
 	want := []string{"deezer", "musicbrainz", "discogs"}
 	if got := cfg.EffectiveProviderOrder(); !slices.Equal(got, want) {
-		t.Errorf("default EffectiveProviderOrder() = %v, want the metadata_order seed %v", got, want)
+		t.Errorf("default EffectiveProviderOrder() = %v, want the provider_order seed %v", got, want)
 	}
 }
 
-// TestMergeProviderOrder pins presence-based merge semantics (matching
-// metadata_order/download_order): absent (nil) preserves, an explicit empty
-// array clears, a non-empty value replaces. metadata_order must remain
-// independently mergeable so a legacy client that still writes it works.
-func TestMergeProviderOrder(t *testing.T) {
-	cfg := Config{ProviderOrder: []string{"alpha"}, MetadataOrder: []string{"legacy"}}
+// TestReadConfigFileMigratesMetadataOrder pins the single-key migration: a
+// config file that still carries the legacy metadata_order key adopts it into
+// provider_order when provider_order is absent; an explicit provider_order wins
+// over the legacy key.
+func TestReadConfigFileMigratesMetadataOrder(t *testing.T) {
+	tests := []struct {
+		name string
+		json string
+		want []string
+	}{
+		{
+			name: "legacy metadata_order is adopted",
+			json: `{"metadata_order": ["musicbrainz", "deezer"]}`,
+			want: []string{"musicbrainz", "deezer"},
+		},
+		{
+			name: "explicit empty metadata_order is adopted (registration order)",
+			json: `{"metadata_order": []}`,
+			want: []string{},
+		},
+		{
+			name: "provider_order wins over legacy metadata_order",
+			json: `{"provider_order": ["deezer"], "metadata_order": ["musicbrainz"]}`,
+			want: []string{"deezer"},
+		},
+		{
+			name: "explicit empty provider_order is not clobbered by legacy metadata_order",
+			json: `{"provider_order": [], "metadata_order": ["musicbrainz"]}`,
+			want: []string{},
+		},
+		{
+			name: "neither key keeps the DefaultConfig seed",
+			json: `{}`,
+			want: []string{"deezer", "musicbrainz", "discogs"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "config.json")
+			if err := os.WriteFile(path, []byte(tt.json), 0o600); err != nil {
+				t.Fatalf("write config: %v", err)
+			}
+			cfg, err := readConfigFile(path)
+			if err != nil {
+				t.Fatalf("readConfigFile: %v", err)
+			}
+			if !slices.Equal(cfg.ProviderOrder, tt.want) {
+				t.Errorf("ProviderOrder = %v, want %v", cfg.ProviderOrder, tt.want)
+			}
+		})
+	}
+}
 
-	// Absent provider_order leaves the canonical value untouched.
+// TestMergeProviderOrder pins presence-based merge semantics for the single
+// provider_order key: absent (nil) preserves, an explicit empty array clears,
+// a non-empty value replaces.
+func TestMergeProviderOrder(t *testing.T) {
+	cfg := Config{ProviderOrder: []string{"alpha"}}
+
+	// Absent leaves the value untouched.
 	cfg.Merge(&Config{})
 	if !slices.Equal(cfg.ProviderOrder, []string{"alpha"}) {
 		t.Errorf("absent provider_order changed it: %v", cfg.ProviderOrder)
@@ -907,16 +948,10 @@ func TestMergeProviderOrder(t *testing.T) {
 	if len(cfg.ProviderOrder) != 0 {
 		t.Errorf("empty provider_order should clear, got %v", cfg.ProviderOrder)
 	}
-
-	// metadata_order still merges independently (legacy clients keep working).
-	cfg.Merge(&Config{MetadataOrder: []string{"deezer"}})
-	if !slices.Equal(cfg.MetadataOrder, []string{"deezer"}) {
-		t.Errorf("metadata_order not merged: %v", cfg.MetadataOrder)
-	}
 }
 
-// TestCloneProviderOrderIndependent guards that Clone deep-copies provider_order
-// so a trial-merge cannot mutate the live config's shared slice.
+// TestCloneProviderOrderIndependent guards that Clone deep-copies
+// provider_order so a trial-merge cannot mutate the live config's shared slice.
 func TestCloneProviderOrderIndependent(t *testing.T) {
 	cfg := Config{ProviderOrder: []string{"alpha"}}
 	cl := Clone(cfg)

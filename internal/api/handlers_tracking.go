@@ -417,6 +417,18 @@ func (s *Server) handleSearchMissingArtist(w http.ResponseWriter, r *http.Reques
 	s.startJob(w, "tracked-search", s.runners.SearchMissingArtist(id))
 }
 
+// handleSearchMissingAll starts a search for every tracked artist's missing
+// albums — the global "Search all missing" action. It drains each artist's
+// wanted backlog through the same job Manager as the per-artist search
+// (single-flight, SSE progress, cancellable, persisted).
+func (s *Server) handleSearchMissingAll(w http.ResponseWriter, r *http.Request) {
+	if s.trackingSvc == nil || s.runners == nil || s.jobs == nil {
+		writeError(w, http.StatusServiceUnavailable, errTrackingUnavailable)
+		return
+	}
+	s.startJob(w, "tracked-search", s.runners.SearchMissingAll())
+}
+
 // handleRefreshAllTracked starts a refresh of every auto-refresh artist.
 func (s *Server) handleRefreshAllTracked(w http.ResponseWriter, r *http.Request) {
 	if s.trackingSvc == nil || s.runners == nil || s.jobs == nil {
@@ -428,9 +440,16 @@ func (s *Server) handleRefreshAllTracked(w http.ResponseWriter, r *http.Request)
 
 // StartTrackedRefreshScheduler runs the periodic tracked-artist refresh through
 // the existing job Manager: every interval it starts the same "tracked-refresh"
-// job the HTTP endpoint uses (runners.RefreshTracked()) via runPersistedJob, so
-// single-flight, SSE progress, cancellation, and boot persistence all apply —
-// scheduled runs are persisted and restored exactly like HTTP-triggered ones.
+// job the HTTP endpoint uses via runPersistedJob, so single-flight, SSE
+// progress, cancellation, and boot persistence all apply — scheduled runs are
+// persisted and restored exactly like HTTP-triggered ones.
+//
+// When tracking.auto_search_missing is enabled the tick runs the combined
+// refresh + full search-missing drain (RefreshAndSearchTracked) instead of the
+// refresh alone, so enabling auto-search actually acquires the wanted backlog
+// rather than only refreshing the discography. The live config is read at tick
+// time (AGENTS §9).
+//
 // Because scheduled and HTTP-triggered runs share the one "tracked-refresh" job
 // type, they also share the Manager's single-flight slot: a scheduled tick
 // during a user-triggered refresh (or vice versa) is skipped. The tick is never
@@ -449,7 +468,11 @@ func (s *Server) StartTrackedRefreshScheduler(ctx context.Context, interval time
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := s.jobs.Start("tracked-refresh", s.runPersistedJob("tracked-refresh", s.runners.RefreshTracked())); err != nil {
+				runner := s.runners.RefreshTracked()
+				if s.autoSearchEnabled() {
+					runner = s.runners.RefreshAndSearchTracked()
+				}
+				if _, err := s.jobs.Start("tracked-refresh", s.runPersistedJob("tracked-refresh", runner)); err != nil {
 					if errors.Is(err, jobs.ErrBusy) {
 						s.log.Debug("tracked refresh skipped: a job is already running", "component", "api")
 						continue
@@ -459,4 +482,14 @@ func (s *Server) StartTrackedRefreshScheduler(ctx context.Context, interval time
 			}
 		}
 	}()
+}
+
+// autoSearchEnabled resolves the live tracking.auto_search_missing setting. A
+// nil config persistence (bare test Server) means disabled.
+func (s *Server) autoSearchEnabled() bool {
+	if s.cfg == nil {
+		return false
+	}
+	v := s.cfg.Get().Tracking.AutoSearchMissing
+	return v != nil && *v
 }

@@ -90,7 +90,7 @@ export function useAutoSave({ form, updateConfig, config, sourceList }: UseAutoS
             .map((s) => s.trim())
             .filter((s) => s.length > 0),
         },
-        metadata_order: values.metadata_order,
+        provider_order: values.provider_order,
         download_order: values.download_order,
         album_sources: values.album_sources,
         download_client: values.download_client,

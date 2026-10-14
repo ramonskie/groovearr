@@ -98,7 +98,7 @@ export interface Config {
   sources: Record<string, Record<string, unknown>>;
   library: LibraryConfig;
   auth: AuthConfig;
-  metadata_order?: string[];
+  provider_order?: string[];
   download_order?: string[];
   album_sources?: string[];
   download_client?: string;
@@ -115,7 +115,7 @@ export interface ConfigUpdatePayload {
   logging?: Partial<LoggingConfig>;
   /** Pointer-merged server-side: omit a field to preserve it, send 0 to disable. */
   tracking?: Partial<TrackingConfig>;
-  metadata_order?: string[];
+  provider_order?: string[];
   download_order?: string[];
   album_sources?: string[];
   download_client?: string;
@@ -709,6 +709,12 @@ export interface RefreshResult {
 export interface TrackingSearchResult {
   queued: number;
   skipped: number;
+  /**
+   * Albums where neither album-first nor any per-track input was available, so
+   * nothing could be attempted — usually no album_sources/download_client set
+   * and no resolvable tracklist. Counted separately from `skipped`.
+   */
+  no_source: number;
   errors: number;
   /** Wanted albums left for later runs after the per-run batch cap. */
   remaining: number;

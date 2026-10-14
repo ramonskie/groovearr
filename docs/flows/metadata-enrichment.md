@@ -24,7 +24,7 @@ flowchart TD
     BK1 -- no --> P
     BULK -- no --> P
 
-    P["sync AlbumMBID from record<br/>→ album.ExternalIDs[musicbrainz_release]"] --> ORD["orderedProviders()<br/>(provider_order config; fallback metadata_order)"]
+    P["sync AlbumMBID from record<br/>→ album.ExternalIDs[musicbrainz_release]"] --> ORD["orderedProviders()<br/>(provider_order config)"]
 
     subgraph PROV["for each provider (in order)"]
         PO{"bulk && providerCoolingDown(name)?"}
@@ -60,8 +60,8 @@ flowchart LR
 
 ## Provider Order
 
-- Configurable via `provider_order` in config.json (canonical), falling back to
-  the legacy `metadata_order`
+- Configurable via `provider_order` in config.json (the single provider-priority
+  key for every path, editable in the settings UI under Sources → Priority)
   (`{"provider_order": ["deezer", "musicbrainz", "coverartarchive"]}`).
 - Deezer first (fast, 50 req/5s, better album resolution). Falls through to
   MusicBrainz (1 req/s, deep catalog). Cover Art Archive last (MBID-based only).

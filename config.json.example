@@ -77,7 +77,7 @@
     "password": "",
     "api_key": ""
   },
-  "metadata_order": ["deezer", "spotify", "discogs", "musicbrainz", "coverartarchive", "tidal"],
+  "provider_order": ["deezer", "spotify", "discogs", "musicbrainz", "coverartarchive", "tidal"],
   "download_order": ["tidal", "soulseek"],
   "album_sources": ["prowlarr"],
   "download_client": "qbittorrent",

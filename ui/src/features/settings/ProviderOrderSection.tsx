@@ -13,21 +13,21 @@ interface DragState {
   index: number;
 }
 
-export default function MetadataOrderSection() {
+export default function ProviderOrderSection() {
   const { watch, setValue } = useFormContext<SettingsFormValues>();
   const { data: sources } = useSources();
 
-  const metadataOrder = watch("metadata_order") ?? [];
+  const providerOrder = watch("provider_order") ?? [];
   const [dragOver, setDragOver] = useState<number | null>(null);
   const dragItem = useRef<DragState | null>(null);
 
-  // Build ordered list: metadata-capable providers in metadata_order first,
+  // Build ordered list: metadata-capable providers in provider_order first,
   // then any connected metadata providers not yet in the order list.
   const connected = (sources ?? [])
     .filter((s) => hasMetadata(s) && s.capabilities?.metadata === "connected" && s.enabled !== false)
     .map((s) => s.name);
 
-  const ordered = [...new Set([...metadataOrder, ...connected])].filter((name) =>
+  const ordered = [...new Set([...providerOrder, ...connected])].filter((name) =>
     (sources ?? []).some((s) => s.name === name && hasMetadata(s) && s.enabled !== false),
   );
 
@@ -60,7 +60,7 @@ export default function MetadataOrderSection() {
       const next = [...ordered];
       const [moved] = next.splice(fromIndex, 1);
       next.splice(dropIndex, 0, moved);
-      setValue("metadata_order", next, { shouldDirty: true });
+      setValue("provider_order", next, { shouldDirty: true });
     },
     [ordered, setValue],
   );
@@ -82,9 +82,11 @@ export default function MetadataOrderSection() {
     <div className="rounded-lg border border-slate-800 bg-slate-900/50 p-4">
       <div className="mb-3 flex items-center justify-between">
         <div>
-          <h3 className="text-sm font-semibold text-white">Metadata Provider Order</h3>
+          <h3 className="text-sm font-semibold text-white">Provider Order</h3>
           <p className="mt-0.5 text-xs text-slate-400">
-            Drag to set priority. First provider is tried first when enriching metadata.
+            Drag to set priority. This single order is used for every provider
+            path — metadata enrichment, discovery/search, catalog, tracking, and
+            duplicate detection. First provider is tried first.
           </p>
         </div>
       </div>

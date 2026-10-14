@@ -3,7 +3,7 @@ import { useSearchParams } from "react-router-dom";
 import Spinner from "../../components/Spinner";
 import SubTabs from "../../components/SubTabs";
 import ProviderSection from "./ProviderSection";
-import MetadataOrderSection from "./MetadataOrderSection";
+import ProviderOrderSection from "./ProviderOrderSection";
 import DownloadOrderSection from "./DownloadOrderSection";
 import SourceRoutingSection from "./SourceRoutingSection";
 
@@ -77,7 +77,7 @@ export default function SourcesSettings() {
 
       {tab === "priority" && (
         <div className="space-y-4">
-          <MetadataOrderSection />
+          <ProviderOrderSection />
           <DownloadOrderSection />
           <SourceRoutingSection />
         </div>

@@ -70,7 +70,7 @@ export function buildFormSchema(sources: SourceInfo[]) {
     auth_local_bypass_subnets: z.string().optional(),
 
     // Metadata provider order
-    metadata_order: z.array(z.string()).optional(),
+    provider_order: z.array(z.string()).optional(),
 
     // Download provider order
     download_order: z.array(z.string()).optional(),
@@ -144,7 +144,7 @@ export function buildDefaults(sources: SourceInfo[]) {
     auth_username: "",
     auth_password: "",
     auth_local_bypass_subnets: "",
-    metadata_order: [] as string[],
+    provider_order: [] as string[],
     download_order: [] as string[],
     album_sources: [] as string[],
     download_client: "",

@@ -209,8 +209,8 @@ func NewApp(configPath string) (*App, error) {
 	discoveryReg := discovery.NewRegistry(pluginReg)
 
 	// Single shared source of truth for provider priority (D-001 §3).
-	// provider_order is canonical, with a fallback to the legacy metadata_order
-	// so existing configs keep working. The closure reads the live config on
+	// provider_order is the single key (the legacy metadata_order is folded
+	// into it on load). The closure reads the live config on
 	// every call (AGENTS §9), and this ONE instance is injected into every path:
 	// the metadata resolver + enrichment handler, the discovery registry
 	// (discover search, catalog refresh, tracking), the refresh engine, and the

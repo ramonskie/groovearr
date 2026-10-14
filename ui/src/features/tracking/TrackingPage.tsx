@@ -22,6 +22,7 @@ import {
   setArtistMonitor,
   refreshTrackedArtist,
   searchMissingArtist,
+  searchMissingAll,
   refreshAllTracked,
 } from "../../api/client";
 import type {
@@ -279,6 +280,13 @@ export default function TrackingPage() {
       toast.error(errMessage(err, "Failed to start refresh")),
   });
 
+  const searchAll = useMutation({
+    mutationFn: searchMissingAll,
+    onSuccess: (res) => notifyStarted(queryClient, res, "Search all missing"),
+    onError: (err) =>
+      toast.error(errMessage(err, "Failed to start search")),
+  });
+
   if (selectedArtistId !== null) {
     return (
       <TrackingArtistDetailView
@@ -310,6 +318,18 @@ export default function TrackingPage() {
               {wantedCount} wanted
             </Badge>
           )}
+          <Button
+            variant="ghost"
+            size="default"
+            loading={searchAll.isPending}
+            disabled={
+              searchAll.isPending || refreshAll.isPending || wantedCount === 0
+            }
+            onClick={() => searchAll.mutate()}
+            title="Search and queue every wanted album across all tracked artists"
+          >
+            <Search size={14} /> Search all missing
+          </Button>
           <Button
             variant="primary"
             size="default"

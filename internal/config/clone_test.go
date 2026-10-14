@@ -14,7 +14,7 @@ func TestCloneIsolatesMergeTarget(t *testing.T) {
 	orig := Config{
 		Sources:       map[string]json.RawMessage{"deezer": json.RawMessage(`{"arl":"secret"}`)},
 		Logging:       &LoggingConfig{Level: "info", Compress: boolP(true), AccessLog: boolP(false)},
-		MetadataOrder: []string{"deezer"},
+		ProviderOrder: []string{"deezer"},
 		DownloadOrder: []string{"soulseek"},
 		AlbumSources:  []string{"prowlarr"},
 		Auth:          AuthConfig{LocalBypassSubnets: []string{"10.0.0.0/8"}},
@@ -27,7 +27,7 @@ func TestCloneIsolatesMergeTarget(t *testing.T) {
 	clone.Merge(&Config{
 		Sources:       map[string]json.RawMessage{"deezer": json.RawMessage(`{"arl":"changed"}`)},
 		Logging:       &LoggingConfig{Level: "debug", MaxSizeMB: 99, Compress: boolP(false), AccessLog: boolP(true)},
-		MetadataOrder: []string{"musicbrainz"},
+		ProviderOrder: []string{"musicbrainz"},
 		DownloadOrder: []string{"deezer"},
 		AlbumSources:  []string{"deezer"},
 		Auth:          AuthConfig{LocalBypassSubnets: []string{"192.168.1.0/24"}},
@@ -58,8 +58,8 @@ func TestCloneIsolatesMergeTarget(t *testing.T) {
 	if clone.Logging.Compress == nil || *clone.Logging.Compress != false || clone.Logging.AccessLog == nil || *clone.Logging.AccessLog != true {
 		t.Fatalf("clone logging pointers not merged: %+v", clone.Logging)
 	}
-	if orig.MetadataOrder[0] != "deezer" || orig.DownloadOrder[0] != "soulseek" || orig.AlbumSources[0] != "prowlarr" {
-		t.Fatalf("original slices mutated: %v %v %v", orig.MetadataOrder, orig.DownloadOrder, orig.AlbumSources)
+	if orig.ProviderOrder[0] != "deezer" || orig.DownloadOrder[0] != "soulseek" || orig.AlbumSources[0] != "prowlarr" {
+		t.Fatalf("original slices mutated: %v %v %v", orig.ProviderOrder, orig.DownloadOrder, orig.AlbumSources)
 	}
 	if orig.Auth.LocalBypassSubnets[0] != "10.0.0.0/8" {
 		t.Fatalf("original bypass subnets mutated: %v", orig.Auth.LocalBypassSubnets)

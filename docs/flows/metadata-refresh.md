@@ -27,8 +27,8 @@ goes through the single app-wide `metadata.ProviderCooldown` bucket (AGENTS §1,
 Provider iteration is **deterministic and configured**. `discovery.Registry`
 returns providers from `plugin.Registry.WithCapability("discovery")`, which
 iterates registration order (`r.names`), then sorts them into the one shared
-`metadata.ProviderOrder` — `provider_order` when set, falling back to the legacy
-`metadata_order` (`Config.EffectiveProviderOrder`). The same order instance is
+`metadata.ProviderOrder` — the `provider_order` key
+(`Config.EffectiveProviderOrder`). The same order instance is
 injected into the discovery registry, the engine
 (`refreshSvc.SetProviderOrder`), the metadata resolver/enrichment handler, and
 the background jobs, so catalog materialization, discover search, enrichment and
@@ -407,8 +407,8 @@ an album import, a manual refresh, or the warm job.
 - All provider calls go through `discovery.Provider` (`SearchAlbums`,
   `GetAlbumTracks`); no provider name is referenced outside the provider package.
 - Providers are tried in the one shared order: `WithCapability("discovery")`
-  preserves registration order, then `metadata.Order` sorts by `provider_order`
-  (fallback `metadata_order`). `RefreshAlbum` has no cross-provider ranking —
+  preserves registration order, then `metadata.Order` sorts by `provider_order`.
+  `RefreshAlbum` has no cross-provider ranking —
   `bestMatch` returns the first acceptable match within the current provider, and
   the first provider with a match wins.
 - MusicBrainz is a discovery provider (`["metadata","discovery"]`); its search

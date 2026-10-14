@@ -21,11 +21,13 @@ flowchart TD
     API_ALL["POST /api/tracking/refresh"] --> RTRACK
     API_ONE["POST /api/tracking/artists/{id}/refresh"] --> RONE
     API_SRCH["POST /api/tracking/artists/{id}/search-missing"] --> RSRCH
+    API_SRCHALL["POST /api/tracking/search-missing"] --> RSRCHALL
     API_ADD["POST /api/tracking/artists"] --> ADD["Service.AddArtist<br/>(synchronous, per-call timeout, returns 201)<br/>search_on_add -> one bounded SearchMissing"]
 
     RTRACK["runners.RefreshTracked()"] --> MGR
     RONE["runners.RefreshTrackedArtist(id)"] --> MGR
     RSRCH["runners.SearchMissingArtist(id)"] --> MGR
+    RSRCHALL["runners.SearchMissingAll()"] --> MGR
     MGR["jobs.Manager.Start(type, runner)"] --> BUSY{"a job already running?"}
     BUSY -- yes --> EB["ErrBusy -> started=false, current job returned"]
     BUSY -- no --> RUN["run runner in one goroutine<br/>SSE progress + persisted job.json"]
@@ -34,6 +36,12 @@ flowchart TD
 - The scheduler (`Server.StartTrackedRefreshScheduler`) calls
   `jobs.Manager.Start` directly and **skips** a busy tick (logged, never
   queued); the HTTP path returns `{job, started:false}` instead.
+- **Auto-acquire on schedule**: when `tracking.auto_search_missing` is enabled
+  the scheduled tick runs `runners.RefreshAndSearchTracked()` — the refresh
+  **and** the global search-missing drain composed into one runner — instead of
+  `RefreshTracked()`. Enabling the setting therefore actually acquires the
+  wanted backlog, not just refreshes the discography. The live config is read at
+  tick time.
 - The scheduler loop selects on `ctx.Done()` and blocks nothing at shutdown.
 
 ## Scheduled / Bulk Refresh (`RefreshTracked`)
@@ -259,10 +267,65 @@ flowchart TD
   records key as `artist|track-title`. The two key spaces do **not** overlap —
   an album key never matches its own per-track records. Consequence: when only
   per-track records are pending, the album still looks absent to the
-  pre-filter, so `SearchMissing` re-runs the album search for it on each pass
-  (bounded churn: at most one search per wanted album per run). Literal
-  duplicate download records are still prevented by `QueueAlbum` /
+  pre-filter, so `SearchMissing` re-runs the album search for it. Within one
+  drain the album is stamped after its pass, so the rotation bounds this to one
+  search per wanted album per rotation (not per pass); literal duplicate
+  download records are still prevented by `QueueAlbum` /
   `QueuePending`'s own dedup.
+
+## Global Search-Missing & Drain (`SearchMissingAll`)
+
+```mermaid
+flowchart TD
+    A["runners.SearchMissingAll()"] --> B["ListTrackedArtists()"]
+    B --> C["for each artist (ctx checked between)"]
+    C --> D{"coolingDown(ProviderName)?"}
+    D -- yes --> E["skip; report; next artist"]
+    D -- no --> F["drainArtist: loop SearchMissing<br/>one rotation over the wanted set<br/>(<= 50-pass safety cap)<br/>or provider cools / ctx done"]
+    F --> G["aggregate queued/skipped/no_source/errors"]
+    G --> C
+    C --> H{"any artist failed?"}
+    H -- yes --> I["return summary error (job marked failed)"]
+    H -- no --> J["report totals"]
+```
+
+- `SearchMissingAll` (`internal/jobs/tracked.go`) and the per-artist
+  `SearchMissingArtist` both **drain** an artist: they call
+  `tracking.Service.SearchMissing` repeatedly (each pass queues at most
+  `searchBatchSize`) until the wanted set has been covered once. The pass count
+  is bounded to `ceil((Processed+Remaining)/Processed)` from the first pass —
+  one full rotation over the initial wanted set — and by the
+  `maxSearchPassesPerArtist` (50) safety cap; it stops early if the provider
+  parks in the shared cooldown bucket or the context is cancelled.
+  - The rotation bound matters: an album that cannot be queued (nothing found,
+    no acquisition path, already in the pipeline) **never leaves** the wanted
+    set, so `Remaining` never reaches 0. Without the cycle bound the loop would
+    re-search the same albums up to the safety cap. Each pass stamps the albums
+    it processed (`last_searched_at`) and the next pass selects the next
+    never-searched albums first, so a full-cycle drain visits each album once.
+  - One click therefore clears the whole backlog, not just the first five
+    albums. Any album left unprocessed at the safety cap stays `wanted` and is
+    picked up by the next run (reported as `remaining`).
+- Exposed as `POST /api/tracking/search-missing` (all artists); the UI adds a
+  "Search all missing" action beside "Refresh all". The per-artist route
+  (`POST /api/tracking/artists/{id}/search-missing`) drains the same way.
+  `SearchMissingAll` follows the `monitored` flag, not `auto_refresh`.
+- `RefreshAndSearchTracked` composes `RefreshTracked` then `SearchMissingAll`
+  into one runner so the scheduler auto-acquires under a single job slot.
+- **Auto-acquire default**: `tracking.auto_search_missing` defaults to `true`
+  for new installs (existing config files keep their stored value). When
+  enabled, the scheduled tick uses `RefreshAndSearchTracked`.
+
+### `NoSource` — no silent skip
+
+`SearchResult.NoSource` (`json:"no_source"`) counts albums for which neither the
+album-first leg was configured (`album_sources` **and** `download_client` set)
+nor a single per-track input resolved (`GetAlbumTracks` returned nothing), so
+nothing could even be attempted. They are logged at WARN
+(`no acquisition path for wanted album`) and reported separately from `Skipped`,
+so a missing acquisition path is visible instead of looking like an ordinary
+no-op. When `NoSource > 0` and nothing queues, the fix is configuration
+(`album_sources` / `download_client`) rather than another search.
 
 ## Status Transitions
 

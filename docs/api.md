@@ -1335,15 +1335,15 @@ When another job is already running the current snapshot is returned with
 
 ### `POST /api/tracking/artists/{artistID}/search-missing`
 
-Start the `tracked-search` job: queue the artist's monitored `wanted` albums
-(album-first, per-track fallback). **Bounded and rotating per run**: each pass
-selects at most `searchBatchSize` wanted albums (default 5) ordered
-never-searched first, then oldest `last_searched_at` first, and records the
-search time. An album that cannot be queued this pass (nothing found, or its
-provider is cooling down) is counted as `skipped` and retried on a later run —
-it no longer blocks the albums behind it. The rest stay `wanted` and are picked
-up by the next run. The job summary reports `Remaining`, the count still wanted
-after the cap, so a whole discography is never dumped into the queue at once.
+Start the `tracked-search` job for one artist: queue the artist's monitored
+`wanted` albums (album-first, per-track fallback). **Draining**: the runner calls
+the service repeatedly until the artist's wanted backlog is empty
+(`Remaining == 0`), each pass processing at most `searchBatchSize` wanted albums
+(default 5) ordered never-searched first, then oldest `last_searched_at` first,
+bounded by `maxSearchPassesPerArtist` (50) and stopped early if the provider is
+cooling down. An album that cannot be queued this pass (nothing found, or its
+provider is cooling down) is counted as `skipped` and retried on a later pass —
+it does not block the albums behind it.
 
 A tracked album stuck in `downloading` whose download is a re-armable exhausted
 failure is reset to `wanted` and retried; `downloading` → `wanted` is the only
@@ -1353,6 +1353,30 @@ Album-first vs per-track is the shared canonical policy implemented only by
 `download.Service.QueueAlbumWithFallback`; the discover album-download handler
 (`POST /api/discover/albums/{id}/download`) calls the same method. No endpoint
 re-implements the policy.
+
+The job summary reports `queued`, `skipped`, `no_source`, `errors`, and
+`remaining`. `no_source` counts albums where neither album-first nor any
+per-track input was available (typically `album_sources`/`download_client`
+unset) — surfaced so a missing acquisition path is visible rather than a silent
+skip.
+
+**Response**: `202 {job, started:true}` or `200 {job, started:false}` as above.
+
+### `POST /api/tracking/search-missing`
+
+Start the `tracked-search` job for **every** tracked artist — the global "Search
+all missing" action. It drains each artist's wanted backlog exactly like the
+per-artist route (same batch cap, same one-rotation drain bound), skipping any
+artist whose provider is cooling down; one artist's failure is logged and
+counted but does not stop the run (the job is marked failed if any artist
+failed).
+
+It follows the `monitored` flag, not `auto_refresh`: an artist is searched when
+it has monitored `wanted` albums, regardless of its auto-refresh setting. Its
+job **message** is the aggregate shape
+`searched N artists: queued X, skipped Y, no-source Z, errors E, remaining R`
+(distinct from the per-artist `queued X, skipped Y, no-source Z, errors E,
+remaining R`).
 
 **Response**: `202 {job, started:true}` or `200 {job, started:false}` as above.
 
@@ -1402,11 +1426,15 @@ Refresh and search-missing endpoints only enqueue a runner. The shared
 `jobs.Manager` permits one running job at a time app-wide; a second request
 while a job runs returns the current job with `started:false` (`200`) rather
 than erroring. The scheduled refresh loop (`tracking.refresh_mins`) starts the
-same `tracked-refresh` job and skips a busy tick. Progress streams over SSE —
+same `tracked-refresh` job and skips a busy tick; when
+`tracking.auto_search_missing` is enabled the scheduled tick runs the combined
+refresh + global search-missing drain. Progress streams over SSE —
 see [SSE Streaming](#sse-streaming) — and the job snapshot carries a summary
-**message** string: `refreshed N artists, skipped M cooling down` for a refresh
-and `queued X, skipped Y, errors Z, remaining R` for a search-missing pass
-(`R` is the wanted albums left after the per-run batch cap). The underlying
+**message** string: `refreshed N artists, skipped M cooling down` for a refresh,
+`queued X, skipped Y, no-source Z, errors E, remaining R` for a per-artist
+search, and `searched N artists: queued X, skipped Y, no-source Z, errors E,
+remaining R` for the global drain (`remaining` is the wanted albums left after a
+drain hit its rotation/safety bound — a deferral, not data loss). The underlying
 `RefreshResult` / `SearchResult` structs are not surfaced in the snapshot.
 
 > **Note:** manual and scheduled runs share the `tracked-refresh` job type.

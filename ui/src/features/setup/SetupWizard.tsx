@@ -62,7 +62,7 @@ export default function SetupWizard() {
           auth_username: config.auth?.username ?? "",
           auth_password: "",
           auth_local_bypass_subnets: (config.auth?.local_bypass_subnets ?? []).join("\n"),
-          metadata_order: config.metadata_order ?? [],
+          provider_order: config.provider_order ?? [],
           download_order: config.download_order ?? [],
           album_sources: config.album_sources ?? [],
           download_client: config.download_client ?? "",

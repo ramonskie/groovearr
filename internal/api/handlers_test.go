@@ -234,6 +234,39 @@ func TestHandleUpdateConfig_EmptyMergeOK(t *testing.T) {
 	}
 }
 
+// TestHandleUpdateConfig_LegacyMetadataOrderFoldsIntoProviderOrder pins the
+// API back-compat rule: a client still sending the deprecated metadata_order
+// key has it folded into provider_order (the single key), matching the file
+// load migration.
+func TestHandleUpdateConfig_LegacyMetadataOrderFoldsIntoProviderOrder(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(os.Stderr, nil))
+	cfg := testPersistence(t)
+
+	srv := &Server{
+		log: log, cfg: cfg, bgCtx: context.Background(),
+		mdRegistry:        metadata.NewRegistry(),
+		metadataResolver:  nil,
+		enrichmentHandler: nil,
+		orchestrator:      nil,
+		playlistSvc:       nil,
+		registry:          nil,
+	}
+
+	req := httptest.NewRequest(http.MethodPut, "/api/config",
+		strings.NewReader(`{"metadata_order": ["musicbrainz", "deezer"]}`))
+	rec := httptest.NewRecorder()
+	srv.handleUpdateConfig(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d. body: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	got := cfg.Get().ProviderOrder
+	want := []string{"musicbrainz", "deezer"}
+	if !stringSlicesEqual(got, want) {
+		t.Errorf("ProviderOrder = %v, want %v (legacy metadata_order must fold in)", got, want)
+	}
+}
+
 // ─── Helpers ─────────────────────────────────────────────────────────
 
 func testPersistence(t *testing.T) *config.Persistence {

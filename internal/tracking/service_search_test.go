@@ -582,6 +582,47 @@ func TestSearchMissingRotationNoOpDoesNotBlock(t *testing.T) {
 	}
 }
 
+// TestSearchMissingNoSourceOnlyWhenNoAcquisitionPath proves NoSource is counted
+// only when nothing could be attempted AND the album-first leg is unconfigured.
+// A configured album path (sources + client) keeps the ordinary skip semantics.
+func TestSearchMissingNoSourceOnlyWhenNoAcquisitionPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		albumSource []string
+		wantNoSrc   int
+	}{
+		{name: "unconfigured album path with no tracks counts no_source", wantNoSrc: 1},
+		{name: "configured album path does not count no_source", albumSource: []string{"prowlarr"}, wantNoSrc: 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := newMockStore()
+			artistID := seedTrackedArtist(t, store, "Tool")
+			// Seeded album has a deezer provider id but the fake discovery
+			// provider returns no tracks, and the fake queuer reports a no-op,
+			// so nothing can be attempted.
+			seedTrackedAlbumYear(t, store, artistID, "a", "Alone", 1990, domain.AlbumStatusWanted, true)
+
+			cfg := configWithDownloadClient()
+			cfg.AlbumSources = tt.albumSource
+
+			q := &fakeQueuer{result: download.AlbumQueueResult{}}
+			svc := newTestServiceWith(t, store, newMockLibraryStore(), &fakeDiscoveryProvider{name: "deezer"}, nil, q, cfg)
+
+			res, err := svc.SearchMissing(context.Background(), artistID)
+			if err != nil {
+				t.Fatalf("SearchMissing: %v", err)
+			}
+			if res.Queued != 0 || res.Skipped != 1 {
+				t.Fatalf("result = %+v, want queued=0 skipped=1", res)
+			}
+			if res.NoSource != tt.wantNoSrc {
+				t.Fatalf("no_source = %d, want %d (result %+v)", res.NoSource, tt.wantNoSrc, res)
+			}
+		})
+	}
+}
+
 // TestSearchMissingMarksEveryProcessedAlbumSearched proves MarkAlbumSearched is
 // called once for every processed album across all outcomes: queued, active
 // skip, canonical no-op, and re-arm.

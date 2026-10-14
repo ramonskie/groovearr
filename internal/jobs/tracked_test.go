@@ -25,8 +25,12 @@ type fakeTrackedRefresher struct {
 	// it blocks until the caller's context is done and returns that error, so
 	// tests can exercise the per-run timeout path.
 	searchBlocksUntilCtx bool
-	refreshed            []int64
-	searched             []int64
+	// searchQueue, when non-empty, is consumed one result per SearchMissing
+	// call (before searchResult), so tests can model a multi-pass drain
+	// (Remaining>0 then Remaining==0).
+	searchQueue []tracking.SearchResult
+	refreshed   []int64
+	searched    []int64
 }
 
 func (f *fakeTrackedRefresher) ListTrackedArtists(context.Context) ([]domain.TrackedArtist, error) {
@@ -65,6 +69,11 @@ func (f *fakeTrackedRefresher) SearchMissing(ctx context.Context, id int64) (*tr
 	}
 	if f.searchErr != nil {
 		return nil, f.searchErr
+	}
+	if len(f.searchQueue) > 0 {
+		res := f.searchQueue[0]
+		f.searchQueue = f.searchQueue[1:]
+		return &res, nil
 	}
 	if f.searchResult != nil {
 		return f.searchResult, nil
@@ -440,6 +449,7 @@ func TestSearchMissingArtist(t *testing.T) {
 			var trackingDep TrackedRefresher
 			if !tt.nilTracking {
 				refresher = &fakeTrackedRefresher{
+					artists:              []domain.TrackedArtist{trackedArtist(7, "Seven", "deezer", true)},
 					searchErr:            tt.searchErr,
 					searchResult:         tt.searchResult,
 					searchBlocksUntilCtx: tt.blockSearch,
@@ -484,5 +494,243 @@ func TestSearchMissingArtist(t *testing.T) {
 				t.Errorf("no report message contained %q; reports = %v", tt.wantMsgContains, reports)
 			}
 		})
+	}
+}
+
+func TestSearchMissingAll(t *testing.T) {
+	cancelledCtx, cancel := context.WithCancel(context.Background())
+	cancel()
+	boom := errors.New("search exploded")
+
+	tests := []struct {
+		name            string
+		nilTracking     bool
+		artists         []domain.TrackedArtist
+		searchQueue     []tracking.SearchResult
+		searchErr       error
+		cooling         map[string]bool
+		ctx             context.Context
+		wantErr         error
+		wantAnyErr      bool
+		wantSearched    []int64
+		wantMinReports  int
+		wantMsgContains string
+	}{
+		{
+			name:        "nil tracking returns a clear error",
+			nilTracking: true,
+			wantAnyErr:  true,
+		},
+		{
+			name:            "no artists reports and returns nil",
+			wantMinReports:  1,
+			wantMsgContains: "no tracked artists",
+		},
+		{
+			name: "drains each artist until nothing remains",
+			artists: []domain.TrackedArtist{
+				trackedArtist(1, "Alpha", "deezer", true),
+			},
+			searchQueue: []tracking.SearchResult{
+				{Queued: 5, Remaining: 2, Processed: 5},
+				{Queued: 2, Remaining: 0, Processed: 2},
+			},
+			wantSearched:    []int64{1, 1},
+			wantMinReports:  2,
+			wantMsgContains: "queued 7",
+		},
+		{
+			name: "cooling-down artist is skipped without a search call",
+			artists: []domain.TrackedArtist{
+				trackedArtist(1, "Hot", "deezer", true),
+			},
+			cooling:         map[string]bool{"deezer": true},
+			wantSearched:    nil,
+			wantMinReports:  1,
+			wantMsgContains: "cooling down",
+		},
+		{
+			name: "one artist failure does not stop the run and is reported",
+			artists: []domain.TrackedArtist{
+				trackedArtist(1, "Bad", "deezer", true),
+				trackedArtist(2, "Good", "spotify", true),
+			},
+			searchErr:       boom,
+			wantAnyErr:      true,
+			wantSearched:    []int64{1, 2},
+			wantMinReports:  3,
+			wantMsgContains: "failed Bad",
+		},
+		{
+			name: "context cancellation returns cleanly",
+			artists: []domain.TrackedArtist{
+				trackedArtist(1, "Alpha", "deezer", true),
+			},
+			ctx:          cancelledCtx,
+			wantErr:      context.Canceled,
+			wantSearched: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var refresher *fakeTrackedRefresher
+			var trackingDep TrackedRefresher
+			if !tt.nilTracking {
+				refresher = &fakeTrackedRefresher{
+					artists:     tt.artists,
+					searchQueue: tt.searchQueue,
+					searchErr:   tt.searchErr,
+				}
+				trackingDep = refresher
+			}
+			deps := RunnerDeps{Tracking: trackingDep, Log: testLogger()}
+			if tt.cooling != nil {
+				deps.RateLimit = &stubCooldown{cooling: tt.cooling}
+			}
+			r := NewRunners(deps)
+
+			ctx := tt.ctx
+			if ctx == nil {
+				ctx = context.Background()
+			}
+			var reports []Report
+			err := r.SearchMissingAll()(ctx, func(rep Report) { reports = append(reports, rep) })
+
+			switch {
+			case tt.wantErr != nil:
+				if !errors.Is(err, tt.wantErr) {
+					t.Fatalf("error = %v, want %v", err, tt.wantErr)
+				}
+			case tt.wantAnyErr:
+				if err == nil {
+					t.Fatal("expected an error, got nil")
+				}
+			default:
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			}
+
+			var got []int64
+			if refresher != nil {
+				got = refresher.searched
+			}
+			if !equalInt64s(got, tt.wantSearched) {
+				t.Errorf("searched = %v, want %v", got, tt.wantSearched)
+			}
+			if len(reports) < tt.wantMinReports {
+				t.Errorf("reports = %d, want at least %d", len(reports), tt.wantMinReports)
+			}
+			if tt.wantMsgContains != "" && !reportsContain(reports, tt.wantMsgContains) {
+				t.Errorf("no report message contained %q; reports = %v", tt.wantMsgContains, reports)
+			}
+		})
+	}
+}
+
+// TestSearchMissingArtistResolvesAndSkips covers the two new branches of the
+// per-artist runner: an unknown artist and a cooling-down provider pre-filter.
+func TestSearchMissingArtistResolvesAndSkips(t *testing.T) {
+	t.Run("unknown artist is an error and searches nothing", func(t *testing.T) {
+		f := &fakeTrackedRefresher{}
+		r := NewRunners(RunnerDeps{Tracking: f, Log: testLogger()})
+		err := r.SearchMissingArtist(7)(context.Background(), func(Report) {})
+		if err == nil {
+			t.Fatal("expected an error for an unknown artist")
+		}
+		if len(f.searched) != 0 {
+			t.Errorf("searched = %v, want none", f.searched)
+		}
+	})
+
+	t.Run("cooling-down provider is skipped without a search", func(t *testing.T) {
+		f := &fakeTrackedRefresher{
+			artists: []domain.TrackedArtist{trackedArtist(7, "Seven", "deezer", true)},
+		}
+		r := NewRunners(RunnerDeps{
+			Tracking:  f,
+			Log:       testLogger(),
+			RateLimit: &stubCooldown{cooling: map[string]bool{"deezer": true}},
+		})
+		var reports []Report
+		err := r.SearchMissingArtist(7)(context.Background(), func(rep Report) { reports = append(reports, rep) })
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(f.searched) != 0 {
+			t.Errorf("searched = %v, want none (cooling provider)", f.searched)
+		}
+		if !reportsContain(reports, "cooling down") {
+			t.Errorf("no cooling-down report; reports = %v", reports)
+		}
+	})
+}
+
+// TestSearchMissingAllBounded proves the drain never re-searches past one
+// rotation over the wanted set, and never spins to the safety cap when albums
+// stay wanted (a fake whose result never reaches Remaining==0).
+func TestSearchMissingAllBounded(t *testing.T) {
+	// One pass covers 5 albums out of 95 wanted -> ceil(95/5)=19 passes, then
+	// stop (not the 50-pass safety cap).
+	f := &fakeTrackedRefresher{
+		artists:      []domain.TrackedArtist{trackedArtist(1, "Alpha", "deezer", true)},
+		searchResult: &tracking.SearchResult{Remaining: 90, Processed: 5},
+	}
+	r := NewRunners(RunnerDeps{Tracking: f, Log: testLogger()})
+	if err := r.SearchMissingAll()(context.Background(), func(Report) {}); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.searched) != 19 {
+		t.Fatalf("searched %d times, want 19 (one rotation, bounded)", len(f.searched))
+	}
+}
+
+// TestSearchMissingAllTruncatesAtSafetyCap proves a discography deeper than the
+// safety cap stops there, reports the leftover, and does not lose albums (they
+// stay wanted): 5 per pass with 296 remaining -> ceil(301/5)=61 > 50, so 50
+// passes and 51 albums unprocessed.
+func TestSearchMissingAllTruncatesAtSafetyCap(t *testing.T) {
+	f := &fakeTrackedRefresher{
+		artists:      []domain.TrackedArtist{trackedArtist(1, "Alpha", "deezer", true)},
+		searchResult: &tracking.SearchResult{Remaining: 296, Processed: 5},
+	}
+	r := NewRunners(RunnerDeps{Tracking: f, Log: testLogger()})
+	var reports []Report
+	if err := r.SearchMissingAll()(context.Background(), func(rep Report) { reports = append(reports, rep) }); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(f.searched) != maxSearchPassesPerArtist {
+		t.Fatalf("searched %d times, want %d (safety cap)", len(f.searched), maxSearchPassesPerArtist)
+	}
+	if !reportsContain(reports, "remaining 51") {
+		t.Errorf("summary did not report the leftover; reports = %v", reports)
+	}
+}
+
+func TestRefreshAndSearchTracked(t *testing.T) {
+	// Arrange: one auto-refresh artist whose search clears in a single pass.
+	refresher := &fakeTrackedRefresher{
+		artists:     []domain.TrackedArtist{trackedArtist(1, "Alpha", "deezer", true)},
+		searchQueue: []tracking.SearchResult{{Queued: 3, Remaining: 0}},
+	}
+	r := NewRunners(RunnerDeps{Tracking: refresher, Log: testLogger()})
+
+	// Act
+	var reports []Report
+	err := r.RefreshAndSearchTracked()(context.Background(), func(rep Report) { reports = append(reports, rep) })
+
+	// Assert: refresh ran first, then the global search.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !equalInt64s(refresher.refreshed, []int64{1}) {
+		t.Errorf("refreshed = %v, want [1]", refresher.refreshed)
+	}
+	if !equalInt64s(refresher.searched, []int64{1}) {
+		t.Errorf("searched = %v, want [1]", refresher.searched)
+	}
+	if !reportsContain(reports, "queued 3") {
+		t.Errorf("no report mentioned the queued total; reports = %v", reports)
 	}
 }

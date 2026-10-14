@@ -263,11 +263,11 @@ func (s *Service) SearchMissing(ctx context.Context, artistID int64) (*SearchRes
 		return nil, err
 	}
 	toProcess, remaining := searchBatch(sortWanted(wanted))
-	result := &SearchResult{Remaining: remaining}
+	result := &SearchResult{Remaining: remaining, Processed: len(toProcess)}
 	for _, album := range toProcess {
 		s.processWanted(ctx, artist, album, idx, result)
 	}
-	s.log.Info("search missing complete", "artist_id", artistID, "queued", result.Queued, "skipped", result.Skipped, "errors", result.Errors, "remaining", result.Remaining, "component", "tracking")
+	s.log.Info("search missing complete", "artist_id", artistID, "queued", result.Queued, "skipped", result.Skipped, "no_source", result.NoSource, "errors", result.Errors, "remaining", result.Remaining, "component", "tracking")
 	return result, nil
 }
 
@@ -370,7 +370,16 @@ func (s *Service) processWanted(ctx context.Context, artist *domain.TrackedArtis
 	result.Queued += res.Queued
 	result.Errors += len(res.Errors)
 	if res.Queued == 0 && len(res.Errors) == 0 {
+		// Still a skip (it advances the rotating batch), but when nothing could
+		// even be attempted — no per-track input resolved and the album-first
+		// path is not configured — count it separately too, so a missing
+		// acquisition path is visible instead of looking like an ordinary no-op.
 		result.Skipped++
+		if res.Total == 0 && !s.albumFirstConfigured() {
+			result.NoSource++
+			s.log.Warn("no acquisition path for wanted album",
+				"artist", artist.Name, "album", album.Title, "component", "tracking")
+		}
 		return
 	}
 	if res.Queued > 0 {
@@ -437,6 +446,15 @@ func (s *Service) albumTracks(ctx context.Context, album domain.TrackedAlbum) ([
 		return nil, fmt.Errorf("get album tracks %s/%s: %w", album.ProviderName, album.ProviderAlbumID, err)
 	}
 	return tracks, nil
+}
+
+// albumFirstConfigured reports whether the album-first leg has enough config to
+// be attempted at all: a non-empty download client and at least one album
+// source. The per-track fallback needs no such config, so NoSource is only
+// counted when the album path is off AND no tracklist resolved.
+func (s *Service) albumFirstConfigured() bool {
+	cfg := s.cfg()
+	return cfg.DownloadClient != "" && len(cfg.AlbumSources) > 0
 }
 
 // downloadIndex classifies existing download records into "already in the

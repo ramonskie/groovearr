@@ -8,10 +8,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/sse"
@@ -631,6 +633,7 @@ func TestTrackingJobEndpoints(t *testing.T) {
 	}{
 		{"refresh one artist starts tracked-refresh", "7", &fakeTrackingService{artist: artist}, func(s *Server) http.HandlerFunc { return s.handleRefreshTrackedArtist }, http.StatusAccepted, "tracked-refresh", true},
 		{"search missing starts tracked-search", "7", &fakeTrackingService{artist: artist}, func(s *Server) http.HandlerFunc { return s.handleSearchMissingArtist }, http.StatusAccepted, "tracked-search", true},
+		{"search all missing starts tracked-search", "", &fakeTrackingService{}, func(s *Server) http.HandlerFunc { return s.handleSearchMissingAll }, http.StatusAccepted, "tracked-search", true},
 		{"refresh all starts tracked-refresh", "", &fakeTrackingService{}, func(s *Server) http.HandlerFunc { return s.handleRefreshAllTracked }, http.StatusAccepted, "tracked-refresh", true},
 		{"refresh one artist rejects non-numeric id", "abc", &fakeTrackingService{artist: artist}, func(s *Server) http.HandlerFunc { return s.handleRefreshTrackedArtist }, http.StatusBadRequest, "", false},
 		{"search missing rejects non-numeric id", "abc", &fakeTrackingService{artist: artist}, func(s *Server) http.HandlerFunc { return s.handleSearchMissingArtist }, http.StatusBadRequest, "", false},
@@ -668,5 +671,41 @@ func TestTrackingJobEndpoints(t *testing.T) {
 			// Let the started job settle so it does not outlive the test.
 			waitJobState(t, s, jobs.StateCompleted)
 		})
+	}
+}
+
+// TestServerAutoSearchEnabled covers the scheduler's runner-choice branch: the
+// live tracking.auto_search_missing value decides whether a tick drains, and a
+// nil config persistence (bare test Server) reads as disabled.
+func TestServerAutoSearchEnabled(t *testing.T) {
+	p, err := config.LoadOrCreate(filepath.Join(t.TempDir(), "config.json"))
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	s := &Server{cfg: p}
+	on, off := true, false
+
+	if err := p.Update(func(c *config.Config) error {
+		c.Tracking.AutoSearchMissing = &on
+		return nil
+	}); err != nil {
+		t.Fatalf("enable auto search: %v", err)
+	}
+	if !s.autoSearchEnabled() {
+		t.Error("autoSearchEnabled = false, want true")
+	}
+
+	if err := p.Update(func(c *config.Config) error {
+		c.Tracking.AutoSearchMissing = &off
+		return nil
+	}); err != nil {
+		t.Fatalf("disable auto search: %v", err)
+	}
+	if s.autoSearchEnabled() {
+		t.Error("autoSearchEnabled = true, want false")
+	}
+
+	if (&Server{}).autoSearchEnabled() {
+		t.Error("nil config persistence should read as disabled")
 	}
 }

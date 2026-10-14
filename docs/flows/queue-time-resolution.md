@@ -4,8 +4,8 @@
 
 `MetadataResolver.EnrichMetadata` completes **partial** track metadata at queue
 time — before a download is queued — by querying configured metadata providers
-in priority order (`provider_order` config, falling back to the legacy
-`metadata_order`). It resolves a missing album name, then finds cover art.
+in priority order (`provider_order` config). It resolves a missing album name,
+then finds cover art.
 
 It is **non-fatal and best-effort**: provider errors are logged at warn level
 and enrichment failures leave fields empty rather than blocking the queue
@@ -18,7 +18,7 @@ handler, it is **not** gated by `ProviderCooldown`.
 flowchart TD
     E["EnrichMetadata(artist, title, album, year)"] --> EMPTY{"artist == '' || title == ''?"}
     EMPTY -- yes --> RETURN["return as-is"]
-    EMPTY -- no --> PROV["OrderedProviders()<br/>(provider_order config; fallback metadata_order)"]
+    EMPTY -- no --> PROV["OrderedProviders()<br/>(provider_order config)"]
 
     PROV --> P1{"album empty?"}
 

@@ -22,8 +22,7 @@ type Config struct {
 	Catalog        CatalogConfig              `json:"catalog"`  // materialized metadata catalog + refresh engine
 	Auth           AuthConfig                 `json:"auth"`
 	Logging        *LoggingConfig             `json:"logging"`         // log level, format, rotation policy
-	MetadataOrder  []string                   `json:"metadata_order"`  // legacy provider priority; fallback for provider_order (e.g. ["deezer", "musicbrainz"])
-	ProviderOrder  []string                   `json:"provider_order"`  // canonical provider priority shared by every path — see EffectiveProviderOrder (D-001 §3)
+	ProviderOrder  []string                   `json:"provider_order"`  // single provider priority shared by every path (D-001 §3)
 	DownloadOrder  []string                   `json:"download_order"`  // download source priority (e.g. ["soulseek", "deezer"])
 	AlbumSources   []string                   `json:"album_sources"`   // album-capable source order (e.g. ["prowlarr"])
 	DownloadClient string                     `json:"download_client"` // default download client (e.g. "qbittorrent")
@@ -48,7 +47,7 @@ type TrackingConfig struct {
 	// AutoSearchMissing is a pointer so a partial update can distinguish
 	// "not sent" (nil, preserve) from an explicit false (disable). A plain
 	// bool could only ever be enabled by the true-overrides merge convention.
-	AutoSearchMissing *bool `json:"auto_search_missing"` // automatically search for missing tracked releases (default false)
+	AutoSearchMissing *bool `json:"auto_search_missing"` // automatically search for missing tracked releases (default true)
 }
 
 // CatalogConfig controls materialized catalog metadata refresh: the paced
@@ -228,7 +227,7 @@ func DefaultConfig() Config {
 		// order so discovery, search, and downloads work out of the box.
 		// This is a seed only — the user's config can override it at any
 		// time. Runtime provider behavior never depends on it.
-		MetadataOrder:  []string{"deezer", "musicbrainz", "discogs"},
+		ProviderOrder:  []string{"deezer", "musicbrainz", "discogs"},
 		DownloadOrder:  []string{"soulseek"},
 		AlbumSources:   []string{},
 		DownloadClient: "",
@@ -244,34 +243,28 @@ func DefaultConfig() Config {
 		},
 		Tracking: TrackingConfig{
 			RefreshMins:       intPtr(720), // 12h
-			AutoSearchMissing: boolPtr(false),
+			AutoSearchMissing: boolPtr(true),
 		},
 		Catalog: DefaultCatalog(),
 	}
 }
 
-// EffectiveProviderOrder returns the canonical provider priority order shared
-// by every provider path (enrichment/queue-time resolve, discover search,
-// catalog refresh, tracking, and the duplicates canonical-name lookup).
+// EffectiveProviderOrder returns the single provider priority order shared by
+// every provider path (enrichment/queue-time resolve, discover search, catalog
+// refresh, tracking, and the duplicates canonical-name lookup).
 //
-// provider_order is authoritative whenever it is set — including an explicit
-// empty array, which means "registration order" and deliberately suppresses the
-// legacy fallback. Only a nil/unset provider_order falls back to metadata_order,
-// so an install that only ever wrote the legacy key keeps working and no
-// existing config is broken by the D-001 §3 unification.
+// There is one key: provider_order. It covers what used to be split between
+// provider_order and the legacy metadata_order, which is folded into it on load
+// (see readConfigFile). metadata.Order is the consumer of this value.
 //
-// A nil/empty result means "registration order" — the unchanged
-// pre-unification behavior (metadata.Order treats a zero-length order as
-// registration order).
+// A nil/empty result means "registration order" — metadata.Order treats a
+// zero-length order as registration order.
 //
 // It is a pure read of the live config (AGENTS §9): callers wire it behind a
 // metadata.ProviderOrder closure, so a settings change is honored without a
 // restart and the value is never cached in a struct.
 func (c Config) EffectiveProviderOrder() []string {
-	if c.ProviderOrder != nil {
-		return c.ProviderOrder
-	}
-	return c.MetadataOrder
+	return c.ProviderOrder
 }
 
 // applyEnvPathDefaults overrides the default library paths from GROOVEARR_*
@@ -420,7 +413,6 @@ func Clone(c Config) Config {
 		lg := *c.Logging
 		out.Logging = &lg
 	}
-	out.MetadataOrder = cloneStrings(c.MetadataOrder)
 	out.ProviderOrder = cloneStrings(c.ProviderOrder)
 	out.DownloadOrder = cloneStrings(c.DownloadOrder)
 	out.AlbumSources = cloneStrings(c.AlbumSources)
@@ -593,14 +585,10 @@ func (c *Config) mergeFields(partial *Config) {
 
 	// Order/source arrays merge when present (non-nil), so an explicitly empty
 	// array from the UI clears the setting. JSON decodes an absent field to nil
-	// and "[]" to an empty non-nil slice. provider_order is the canonical key;
-	// metadata_order stays mergeable so a legacy client that still writes it
-	// keeps working through EffectiveProviderOrder's fallback.
+	// and "[]" to an empty non-nil slice. provider_order is the single provider
+	// priority key (legacy metadata_order is folded in on load).
 	if partial.ProviderOrder != nil {
 		c.ProviderOrder = partial.ProviderOrder
-	}
-	if partial.MetadataOrder != nil {
-		c.MetadataOrder = partial.MetadataOrder
 	}
 	if partial.DownloadOrder != nil {
 		c.DownloadOrder = partial.DownloadOrder
@@ -672,6 +660,19 @@ func readConfigFile(path string) (Config, error) {
 	}
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return cfg, err
+	}
+	// Migration: provider_order is the single provider-priority key (D-001 §3).
+	// A config that still carries the legacy metadata_order adopts it when
+	// provider_order is absent, so an install that only ever wrote
+	// metadata_order keeps its configured priority (including an explicit empty
+	// array = registration order). The legacy key is dropped from the file on
+	// the next save.
+	var rawOrder struct {
+		ProviderOrder *[]string `json:"provider_order"`
+		MetadataOrder *[]string `json:"metadata_order"`
+	}
+	if err := json.Unmarshal(data, &rawOrder); err == nil && rawOrder.ProviderOrder == nil && rawOrder.MetadataOrder != nil {
+		cfg.ProviderOrder = *rawOrder.MetadataOrder
 	}
 	// A logging block may be absent (keep defaults) or partial (JSON zeroes
 	// omitted fields). Normalize every non-specified value to its default so a

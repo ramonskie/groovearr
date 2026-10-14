@@ -17,7 +17,7 @@ per-domain interfaces (`download`, `playlist`, `metadata`, `discovery`).
 `api`, `jobs`, `matching`, `metadata`, `playlist`, `plugin`):
 
 - Provider names in defaults or hardcoded lists — **one sanctioned
-  exception**: the first-run bootstrap `metadata_order`/`download_order`
+  exception**: the first-run bootstrap `provider_order`/`download_order`
   seed in `config.DefaultConfig()`. It exists only so discovery, search,
   and downloads work out of the box on first setup; the user's config can
   override it at any time and runtime provider behavior never depends on

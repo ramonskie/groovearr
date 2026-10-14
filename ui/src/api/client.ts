@@ -580,6 +580,16 @@ export function searchMissingArtist(
   );
 }
 
+/**
+ * searchMissingAll starts the global "Search all missing" job: it drains every
+ * tracked artist's wanted backlog through the shared job Manager.
+ */
+export function searchMissingAll(): Promise<StartJobResponse> {
+  return request<StartJobResponse>("/api/tracking/search-missing", {
+    method: "POST",
+  });
+}
+
 export function refreshAllTracked(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/tracking/refresh", { method: "POST" });
 }

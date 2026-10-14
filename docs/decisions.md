@@ -53,9 +53,10 @@ Adopt **one provider flow**:
    plumbing already exists).
 2. **Capabilities are interfaces, not registries.** A provider declares which
    capabilities it implements; callers ask the registry for a capability.
-3. **One order source.** `metadata_order` is promoted to the single provider
-   order for **every** path (enrichment, queue-time resolve, artist de-dup,
-   discover, catalog, tracking). Registration-order selection is retired.
+3. **One order source.** A single provider-priority key (now `provider_order`;
+   the legacy `metadata_order` is folded into it on load) orders **every** path
+   (enrichment, queue-time resolve, artist de-dup, discover, catalog,
+   tracking). Registration-order selection is retired.
 4. **One cooldown bucket.** Every path checks `CoolingDown` / marks
    `MarkAfter` on the shared `metadata.ProviderCooldown` (already true for the
    catalog engine and artist de-dup; extend to all).
@@ -109,9 +110,10 @@ Adopt **one provider flow**:
   iterates `r.names` (registration order) instead of the `r.factories` map, so
   the discovery/catalog provider order is stable across calls
   (`internal/plugin/registry.go`).
-- **One order source.** `provider_order` is canonical with a fallback to the
-  legacy `metadata_order` (`Config.EffectiveProviderOrder`,
-  `internal/config/config.go`). One `metadata.ProviderOrder`
+- **One order source.** `provider_order` is the single provider priority key
+  (the legacy `metadata_order` is folded into it on load — one key, no
+  shadowing). `Config.EffectiveProviderOrder` returns `ProviderOrder`
+  (`internal/config/config.go`). One `metadata.ProviderOrder`
   (`internal/metadata/order.go`) is built in `cmd/groovearr/app.go` and injected
   into the metadata resolver + enrichment handler, the discovery registry, the
   refresh engine, and the background jobs (`SetProviderOrder`). Registration-order
@@ -246,7 +248,7 @@ outside this appendix's own record were changed.
 | # | Finding | Evidence |
 |---|---|---|
 | F1 | Two provider registries with overlapping membership | `internal/metadata/registry.go`, `internal/discovery/registry.go`; capabilities in `deezer/factory.go:28`, `spotify/factory.go:51`, `tidal/factory.go:36`, `lastfm/factory.go:24`, `musicbrainz/factory.go:26`, `discogs/factory.go:27` |
-| F2 | Three order sources | `metadata_order` (`config.go:25`) vs registration order in `Registry.Available()` (`registry.go:76`) and `discovery.Registry` |
+| F2 | Three order sources | `metadata_order` (`config.go:25`, pre-rename snapshot) vs registration order in `Registry.Available()` (`registry.go:76`) and `discovery.Registry` |
 | F3 | Two MusicBrainz clients; one is a provider→provider concrete import | `musicbrainz/factory.go` and `prowlarr/factory.go:11,36` |
 | F4 | One handler mixes both registries | `handler_enrichment.go:209` (metadata order) vs `:315,:594` (`discoveryReg`) |
 | F5 | `bestMatch` normalization is punctuation-blind | `refresh/service.go:920` + `normalize` (`:947`) = `ToLower(TrimSpace)` only |

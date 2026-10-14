@@ -3,7 +3,7 @@ package metadata
 // ProviderOrder is the single shared source of truth for the configured
 // metadata provider priority order. All consumers (MetadataResolver,
 // MetadataEnrichmentHandler) hold the same instance, backed by a live getter
-// into the config, so runtime changes to metadata_order apply everywhere
+// into the config, so runtime changes to provider_order apply everywhere
 // without a restart and without per-consumer wiring.
 type ProviderOrder struct {
 	get func() []string
