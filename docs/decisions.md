@@ -316,3 +316,129 @@ remain open.
 - Re-run the sample against a **uniform** library slice now that F6 is fixed — the
   2026-10-13 live sample was drawn from the first 200 rows because the endpoint
   capped the page and ignored `offset`.
+
+---
+
+## D-007 — Structured discovery search contract + matcher consolidation (matcher-plugin deferred)
+
+**Date**: 2026-10-14 · **Status**: Approved
+
+### Context
+
+The discovery contract `discovery.Provider.SearchAlbums(ctx, query string, limit)`
+takes a pre-joined `"artist title"` string, discarding the artist/title boundary.
+Callers hand it joined strings (`internal/refresh/service.go`,
+`internal/api/handlers_discover.go`). MusicBrainz must
+re-guess the split (`albumSearchCandidates`, `maxAlbumSearchArtistWords = 3`,
+`internal/providers/musicbrainz/provider.go`), which mis-splits 4+ word artists
+(`Red Hot Chili Peppers`) and titles containing `" - "` (`Échame la culpa - Single`).
+Combined with single-release-group recall and abort-on-transient-error, MB-only
+releases stay `unmatched` even when MusicBrainz has them (live evidence, build
+`cdd932d`). Album-result matching is also duplicated — `bestMatch`/`normalizeTitle`
+(`internal/refresh/service.go`) and `internal/catalog/merge.go` each re-implement
+it — while `internal/matching` already exists as the shared home (AGENTS §3).
+
+### Decision
+
+1. **Structured query.** Replace the joined-string search with an `AlbumQuery`
+   (explicit artist/title fields plus a free-text fallback for the Discover UI).
+   Provider-specific query building stays inside the provider package (AGENTS §1);
+   the generic matcher is **not** provider-specific.
+2. **Consolidate matching.** Fold album-result matching (`NormalizeTitle`,
+   `ArtistCompatible`, best-candidate selection) into one shared
+   `internal/matching` path and delete the duplicated matcher bodies in
+   `internal/refresh/service.go`. (`internal/catalog/merge.go`'s `normalize` is a
+   *different* key — punctuation/feat/edition-preserving — and is intentionally
+   kept, not folded.)
+
+### Rationale
+
+- Deterministic lookup: the artist/title boundary is carried, not re-guessed.
+- One matching policy instead of three divergent copies (AGENTS §3).
+- Provider isolation preserved: the contract is generic; only query building is
+  per-provider.
+
+### Alternatives Considered
+
+| Alternative | Pros | Cons | Why rejected |
+|---|---|---|---|
+| **A — status quo (joined string)** | No interface change | Keeps the mis-split + duplication defects | Does not fix the observed `unmatched` cause |
+| **B — structured `AlbumQuery` + shared matcher (chosen)** | Fixes boundary + duplication; small surface | Interface change across all discovery providers | Adopted |
+| **C — matcher capability/plugin** | Pluggable acceptance policies | Premature; single implementation; matching is generic policy | Deferred — see below |
+
+### Explicitly deferred — "matcher plugin" capability (Option C)
+
+Do **not** build a matcher capability/plugin now. No observed failure mode is a
+matcher-acceptance failure: the correct candidate is either never produced
+(contract/recall) or the provider is unavailable. A capability/registry with a
+single implementation is premature; matching is generic policy, not provider-owned
+behavior, and `internal/matching` is already the shared home. Option C only makes
+sense once ≥2 configured providers need genuinely different acceptance policies or
+a cross-provider candidate-ranking need exists.
+
+### Revisit triggers
+
+- ≥2 configured providers requiring different acceptance policies.
+- A cross-provider candidate-ranking requirement.
+- Per-provider tolerance strategies.
+
+### Impact
+
+- **Positive**: deterministic lookup preserved; fewer MusicBrainz requests; one
+  matching policy; AGENTS-compliant (§1, §3).
+- **Negative / risk**: interface change across all discovery providers
+  (mechanical); behavior change in edge titles — mitigate with regression tests.
+
+### Phases
+
+| Phase | Work | Status |
+|---|---|---|
+| 0 | This decision record | Done (2026-10-14) |
+| 1 | Introduce `AlbumQuery`; migrate all discovery providers | Done (2026-10-14, task 08) |
+| 2 | Consolidate album-result matching into `internal/matching`; delete duplicates | Done (2026-10-14, task 08) |
+| 3 | Regression tests for mis-split artists/titles | Done (`internal/matching/match_test.go`, `internal/providers/musicbrainz/provider_discovery_test.go`) |
+
+### Resolved (2026-10-14)
+
+The duplicated MusicBrainz split heuristic named in **Context**
+(`albumSearchCandidates`, `maxAlbumSearchArtistWords = 3`) was removed in task 08:
+the structured path now carries the artist/title boundary and issues one
+release-group request, and the free-text path is a single bare query
+(`internal/providers/musicbrainz/provider.go`, `api.go`). Album-result matching
+was consolidated into `internal/matching` (`NormalizeTitle`, `ArtistCompatible`,
+`BestMatch`); `internal/refresh` delegates to it: the duplicated matcher bodies
+were removed and `refresh.bestMatch` is now a thin adapter over
+`matching.BestMatch`. Phase 1
+(`AlbumQuery`) and Phase 2 (matcher consolidation) are done; Phase 3 regression
+tests are in place. This note records the resolution without rewriting the
+Context/Decision history above.
+
+### Deferred (with reason)
+
+Review nits deliberately not actioned in task 08:
+
+- **Release group's `ArtistName` preferred over the search artist** —
+  `albumResultFromReleaseGroup` keeps the release group's own artist credit and
+  falls back to the searched artist only when the credit is empty
+  (`internal/providers/musicbrainz/provider.go`). Kept intentionally: a tribute or
+  split release group should surface its real credit, not the query artist.
+- **`time.After` reuse in the MusicBrainz pacer** — the pacer waits on
+  `time.After(wait)` (`internal/providers/musicbrainz/api.go:625`); a reusable
+  `time.Timer` would avoid a per-wait allocation. Perf nit only, no correctness
+  impact.
+- **`internal/matching/engine.go` provider-name comment** — the doc comment names
+  `(Spotify, iTunes, etc.)` (`engine.go:15`). Pre-existing and unrelated to this
+  change (iTunes is not a provider).
+
+### Audit note — one MusicBrainz client (pacing audit, D2)
+
+One `musicbrainz.APIClient` is live at a time and shared by catalog refresh,
+enrichment, health check and release-resolve through the one `plugin.Registry`
+(`internal/providers/musicbrainz/factory.go` builds one `*Client`, which owns one
+`*APIClient`; `cmd/groovearr/app.go` wires that one registry). Every path
+therefore serializes through one MusicBrainz token bucket (1 req/s; paced at
+1100ms for margin) and one shared cooldown (AGENTS §8). A config hot-reload
+recreates the plugin (`plugin.Registry.Rebuild` → `factory.Create`), replacing
+the `*APIClient` and resetting its pacer bucket; the cooldown bucket is separate
+and survives the rebuild. No code change; recorded to close the pacing audit's
+D2 finding.

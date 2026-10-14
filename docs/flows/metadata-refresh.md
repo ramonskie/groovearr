@@ -6,8 +6,11 @@
 > `internal/catalog/stats.go`, `internal/catalog/sqlite/stats.go`,
 > `internal/catalog/migrate/backfill.go`, `internal/refresh/service.go`,
 > `internal/refresh/enqueue.go`, `internal/refresh/cold.go`,
-> `internal/refresh/bulk.go`, `internal/jobs/warm_library.go`,
-> `internal/jobs/recheck_unmatched.go`,
+> `internal/refresh/bulk.go`, `internal/matching/match.go`,
+> `internal/discovery/provider.go`,
+> `internal/jobs/warm_library.go`, `internal/jobs/recheck_unmatched.go`,
+> `internal/providers/musicbrainz/provider.go`,
+> `internal/providers/musicbrainz/api.go`,
 > `internal/api/handlers_library.go`, `internal/api/handlers_discover.go`,
 > `internal/api/handlers_jobs.go`, `internal/api/handlers_catalog.go`,
 > `internal/config/config.go`,
@@ -36,8 +39,14 @@ the duplicates scan iterate providers in one order (`cmd/groovearr/app.go`).
 MusicBrainz is itself a discovery provider (factory capabilities
 `["metadata","discovery"]`; `*Client` implements `discovery.Provider`), so an
 album only MusicBrainz carries (the album-359 class) can materialize here. Its
-release-group/release lookups ride the same shared, rate-limited `*APIClient` as
-the metadata path (1 req/s pacer) and the same cooldown bucket.
+`SearchAlbums`/release-group/release lookups ride the same single shared,
+rate-limited `*APIClient` as the metadata path (1100ms interval, ~0.91 req/s —
+margin under MusicBrainz's 1 req/s per-IP limit) and the same cooldown bucket.
+That one live `*APIClient` is shared by catalog refresh, enrichment, health check
+and release-resolve through the one `plugin.Registry`, so every path serializes
+through one token bucket and one cooldown (AGENTS §8); a config hot-reload
+recreates it via `plugin.Registry.Rebuild`, resetting the pacer bucket while the
+separate cooldown bucket persists.
 
 ## Sweep-Free Model
 
@@ -197,23 +206,30 @@ providers()                         live closure; empty -> ErrNoProviders
   |       rate-limited -> return ErrRateLimited (link kept; not at fault)
   |
   | 2. else: resolve local artist name + album title
-  | 3. query = "artist title"; for each provider in shared order (skip cooling):
-  |       searchAlbums(query, SearchLimit) -> bestMatch
-  |          (bestMatch returns the FIRST acceptable match in that provider's
-  |           results — there is no cross-provider ranking. normalizeTitle drops
-  |           a DELIMITED trailing same-content edition/format suffix — markers
-  |           {deluxe, edition, expanded, anniversary, remaster, remastered,
-  |           bonus, explicit, clean} plus bare years — then normalizes case,
-  |           quotes, brackets and punctuation, then drops a `feat.` credit. A
-  |           suffix is dropped only when delimited (a trailing `(...)`/`[...]`
-  |           group, or after a dash/colon), so "New Edition", "First Edition"
-  |           and "The Single" are preserved. A same-title candidate is accepted
-  |           when its artist is equal, contains the library artist or vice-versa
-  |           (whole-token), or shares a significant token (>=3 chars) — so
-  |           collab credits ("Artist A" vs "Artist A & Artist B" / `feat.`)
-  |           match while a genuinely different artist is rejected; a title-only
-  |           match is also accepted when the library artist is unknown/empty or
-  |           the candidate omits the artist.)
+  | 3. q = discovery.AlbumQuery{Artist: artistName, Title: album.Title}
+  |    (structured: the artist/title boundary is carried, never re-guessed)
+  |    for each provider in shared order (skip cooling):
+  |       searchAlbums(q, SearchLimit) -> matching.BestMatch
+  |          (one request per provider, no split heuristic; the matcher lives in
+  |           internal/matching (NormalizeTitle, ArtistCompatible, BestMatch) and
+  |           the refresh package delegates to it — no local duplicate.
+  |           BestMatch returns the FIRST acceptable match in that provider's
+  |           RANKED results — there is no cross-provider ranking, the caller
+  |           owns provider order. NormalizeTitle drops a DELIMITED trailing
+  |           same-content edition/format suffix — markers {deluxe, edition,
+  |           expanded, anniversary, remaster, remastered, bonus, explicit,
+  |           clean} plus bare years, and the separator-only format words
+  |           "- Single" / "- EP" — then normalizes case, quotes, brackets and
+  |           punctuation, then drops a `feat.` credit, so "Échame la culpa -
+  |           Single" matches "Échame La Culpa". A suffix is dropped only when
+  |           delimited (a trailing `(...)`/`[...]` group, or after a dash/colon),
+  |           so "New Edition", "First Edition" and "The Single" are preserved.
+  |           ArtistCompatible accepts an exact credit, a collaboration
+  |           containment, an article-only containment, or TWO shared
+  |           distinctive tokens — so collab credits ("Artist A" vs "Artist A &
+  |           Artist B" / `feat.`) match while a genuinely different artist is
+  |           rejected; a title-only match is also accepted when the library
+  |           artist is unknown/empty or the candidate omits the artist.)
   |       fetchTracks -> materialize -> Matched
   |
   + 4. classify no-match:
@@ -376,7 +392,7 @@ catalog.Store.ReArmTerminalAlbums(now, limit)        (catalog/sqlite/queue.go)
     |  -> fresh/stale/pending album: never touched
     v
 engine next drain: ClaimDueRefresh(now) -> processBatch -> RefreshAlbum (chart 3)
-    |  re-runs bestMatch/provider search with the CURRENT matcher
+    |  re-runs matching.BestMatch/provider search with the CURRENT matcher
     |  still-unmatched -> re-parks due_at=+90d (processItem); no-match again is expected
     v
 the request itself does NO provider I/O -> progress is the card's queue.due_now draining
@@ -409,12 +425,19 @@ an album import, a manual refresh, or the warm job.
 - Providers are tried in the one shared order: `WithCapability("discovery")`
   preserves registration order, then `metadata.Order` sorts by `provider_order`.
   `RefreshAlbum` has no cross-provider ranking —
-  `bestMatch` returns the first acceptable match within the current provider, and
-  the first provider with a match wins.
+  `matching.BestMatch` returns the first acceptable match within the current
+  provider, and the first provider with a match wins.
+- Album search is structured: the engine passes
+  `discovery.AlbumQuery{Artist, Title}` (never a re-joined string), and the
+  generic matcher is `internal/matching` — the refresh package delegates to it.
 - MusicBrainz is a discovery provider (`["metadata","discovery"]`); its search
-  and lookup calls share the single `*APIClient` (1 req/s pacer) with the
-  metadata path, so MB-only albums can materialize without a second client or a
-  second pacer.
+  and lookup calls share the single `*APIClient` (1100ms interval, ~0.91 req/s —
+  margin under MusicBrainz's 1 req/s per-IP limit) with the metadata path, so
+  MB-only albums can materialize without a second client or a second pacer.
+  `SearchReleaseGroups` returns the ranked result list (not just the top hit);
+  the structured path issues ONE release-group request with explicit
+  `artist`/`releasegroup` terms, the free-text path issues one bare query, and
+  partial results are kept when a later candidate errors.
 - Before a call: `coolingDown(name)` skips a parked provider. On
   `metadata.ErrRateLimited`: `markProviderError` marks the shared cooldown
   (`MarkAfter`, honoring a server `Retry-After`), so a bulk pass cannot push a

@@ -37,6 +37,10 @@ per-domain interfaces (`download`, `playlist`, `metadata`, `discovery`).
   provider's own config struct (see `docs/plugins.md`)
 - Provider workarounds → inside the provider package; expose the corrected
   result through the interface, not the workaround
+- Generic album-result matching (title/artist acceptance) → the shared
+  `internal/matching` package (`NormalizeTitle`, `ArtistCompatible`,
+  `BestMatch`); a provider maps its own results onto it instead of
+  re-implementing matching policy (AGENTS §3)
 
 New provider = one directory in `internal/providers/` + a factory registered
 in `cmd/groovearr/main.go`. Follow `docs/plugins.md` (walkthrough: Tidal).

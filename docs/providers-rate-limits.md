@@ -47,7 +47,8 @@
 3. **Deezer download 30 → 10 → 1 req/s; gateway 10 → 1 req/s** — Deezer's quota is per IP: 50 requests per 5 seconds. Rates now sit ~10× below the cap, matching SoulSync's production pacing (1/s).
 4. **Spotify Web API 10 → 2 req/s** — SoulSync runs ~2.85/s in production; 10/s was the outlier and empirically tripped Spotify (429 with 1h53m Retry-After). 2/s sits under SoulSync's proven rate.
 5. **Deezer quota error codes detected** — Deezer signals quota via JSON `error.code` 4/700 (not always HTTP 429). These now surface through the shared `ErrRateLimited` sentinel so the cooldown kicks in.
-6. **Tidal, Cover Art Archive, Discogs, MusicBrainz unchanged** — either already at the documented limit (MusicBrainz 1/s), within it (Discogs 24/min < 25/min), or no verifiable number to tune against.
+6. **Tidal, Cover Art Archive, Discogs unchanged** — either already within the documented limit (Discogs 24/min < 25/min) or no verifiable number to tune against.
+7. **MusicBrainz interval 1000 → 1100ms (~0.91 req/s)** — ~10% headroom under the hard 1 req/s per-IP limit (`internal/providers/musicbrainz/api.go`, `defaultMinInterval`).
 
 ---
 

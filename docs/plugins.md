@@ -360,6 +360,65 @@ func (f *factory) UISlots() *plugin.UISlots {
 - "Browse {DisplayName} Playlists" button in Playlists page
 - URL import patterns in the Import Playlist dialog
 
+### discovery.Provider — structured album search
+
+Implement when the source can search its album catalog with clean artist/album
+metadata. A discovery provider registers with the `"discovery"` capability (the
+`musicbrainz` factory declares `["metadata","discovery"]`) and the catalog refresh
+engine, discover search and tracking consume it through `discovery.Provider`
+(`internal/discovery/provider.go`), which extends `plugin.BasePlugin`:
+
+```go
+// internal/discovery/provider.go
+type Provider interface {
+    plugin.BasePlugin
+
+    SearchArtists(ctx context.Context, query string, limit int) ([]ArtistSummary, error)
+    GetArtistAlbums(ctx context.Context, providerArtistID string, limit int) ([]AlbumResult, error)
+    GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]TrackInfo, error)
+    SearchAlbums(ctx context.Context, q AlbumQuery, limit int) ([]AlbumResult, error)
+}
+
+// AlbumQuery is a structured album search. Callers set Artist+Title (the
+// catalog path) or Text (the Discover free-text path); a bare Title is valid
+// when the artist is unknown. Resolve precedence: structured Artist+Title, else
+// the bare Title, else Text.
+type AlbumQuery struct {
+    Artist string
+    Title  string
+    Text   string
+}
+```
+
+**The `SearchAlbums` contract (do not re-join the fields):**
+
+- Callers set exactly one form:
+  - **Structured** `{Artist, Title}` — the catalog refresh engine; the
+    artist/title boundary is carried, not re-guessed.
+  - **Free text** `{Text}` — the Discover UI (`/api/discover/search`); run one
+    bare query, do not split it into artist/title.
+- Resolve precedence uniformly, matching `AlbumQuery.Query()`
+  (`internal/discovery/provider.go`, docs/discovery.md): structured
+  `Artist`+`Title` first; else the bare `Title`; else `q.Text`.
+- Build the provider-specific query **inside the provider package** (AGENTS §1).
+  The generic album-result matcher is not the provider's concern — map your
+  results to `discovery.AlbumResult` and let the caller match.
+- Return **ranked** results (best first) up to `limit`; keep partial results on a
+  transient per-candidate error rather than discarding everything already found.
+
+**Album-result matching** (which candidate refers to the wanted release) is shared,
+provider-agnostic policy in `internal/matching` (`NormalizeTitle`,
+`ArtistCompatible`, `BestMatch`). Providers do not implement it.
+
+**Reference implementations:** all six discovery providers —
+`internal/providers/musicbrainz/provider.go`, `internal/providers/deezer/download.go`,
+`internal/providers/spotify/plugin.go`, `internal/providers/discogs/plugin.go`,
+`internal/providers/lastfm/plugin.go`, `internal/providers/tidal/client.go`.
+MusicBrainz issues one structured release-group query with explicit
+`artist`/`releasegroup` terms (title through `matching.TrimEditionSuffix`), or one
+bare free-text query; the others render the phrase via `AlbumQuery.Query()` and
+pass it to their own album search.
+
 ---
 
 ## PluginFactory — Self-Registration

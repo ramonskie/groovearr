@@ -91,10 +91,43 @@ package discovery
 type Provider interface {
     plugin.BasePlugin
 
+    // SearchArtists searches for artists by name.
     SearchArtists(ctx context.Context, query string, limit int) ([]ArtistSummary, error)
+
+    // GetArtistAlbums returns an artist's albums.
     GetArtistAlbums(ctx context.Context, providerArtistID string, limit int) ([]AlbumResult, error)
+
+    // GetAlbumTracks returns all tracks on an album.
     GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]TrackInfo, error)
-    SearchAlbums(ctx context.Context, query string, limit int) ([]AlbumResult, error)
+
+    // SearchAlbums searches for albums. Callers supply a structured
+    // AlbumQuery — Artist+Title (the catalog path) or Text (the Discover
+    // free-text path) — and render the phrase with AlbumQuery.Query() rather
+    // than guessing an artist/title boundary themselves.
+    SearchAlbums(ctx context.Context, q AlbumQuery, limit int) ([]AlbumResult, error)
+}
+
+// AlbumQuery is a structured album search. Callers set Artist+Title (the
+// catalog carries the boundary it already has) or Text (the Discover free-text
+// path). Query() renders the phrase with a defined precedence so no provider has
+// to re-derive it.
+type AlbumQuery struct {
+    Artist string
+    Title  string
+    Text   string
+}
+
+// Query renders the search phrase. Structured Artist+Title wins; otherwise the
+// bare Title; otherwise the free-text Text. Artist and Title are trimmed and
+// whitespace-collapsed when joined. Returns "" only when every field is blank.
+func (q AlbumQuery) Query() string {
+    if artist := strings.TrimSpace(q.Artist); artist != "" {
+        return strings.Join(strings.Fields(artist+" "+strings.TrimSpace(q.Title)), " ")
+    }
+    if title := strings.TrimSpace(q.Title); title != "" {
+        return title
+    }
+    return strings.TrimSpace(q.Text)
 }
 
 type ArtistSummary struct {
@@ -126,6 +159,69 @@ type TrackInfo struct {
     ISRC        string
 }
 ```
+
+### Search contract — `AlbumQuery` + the shared album-result matcher
+
+`SearchAlbums` takes a structured `AlbumQuery` (`internal/discovery/provider.go`),
+not a pre-joined `"artist title"` string, so the artist/title boundary is carried
+instead of re-guessed. Callers set exactly one form:
+
+| Caller | Sets | Path |
+|--------|------|------|
+| Catalog refresh engine (`internal/refresh/service.go`) | `{Artist, Title}` | provider resolves the structured pair |
+| Discover UI (`internal/api/handlers_discover.go`) | `{Text}` | provider runs one bare free-text query |
+
+Precedence is uniform and defined once by `AlbumQuery.Query()`
+(`internal/discovery/provider.go`): structured `Artist`+`Title` when `Artist` is
+non-empty, else the bare `Title`, else the free-text `Text`. The title-only
+fallback covers an album with no/unknown artist whose catalog record carries a
+title but no artist. Provider-specific query building stays inside the provider
+package (AGENTS §1); a free-text caller never guesses a split.
+
+**MusicBrainz query term.** The structured path sends `artist:"…"` +
+`releasegroup:"…"` in one release-group query, with the title passed through
+`matching.TrimEditionSuffix` — a delimited `" - Single"`/`" - EP"` suffix is
+dropped, but case and punctuation (`Don't Stop`, `AC/DC`) are kept for
+MusicBrainz to tokenize (it does **not** run the full `NormalizeTitle`). The
+`artist:` term is omitted when `Artist` is empty, so a title-only query still
+sends `releasegroup:"…"` alone. The requested limit is clamped to
+`[1, maxReleaseGroupLimit]` before any slice is pre-allocated. A rate-limit error
+(`metadata.ErrRateLimited`) always propagates out of the provider — even with
+partial results — so the shared provider cooldown (AGENTS §8) can park
+MusicBrainz app-wide.
+
+> **Behaviour change — MusicBrainz free-text.** The Discover free-text path for
+> MusicBrainz is now a **single bare release-group query** built from the raw text,
+> replacing the old multi-split search. Results are broader/looser, and the request
+> count per query drops (one request, no artist/title split heuristic).
+
+**Album-result matching is shared.** Deciding which provider result refers to the
+wanted release is a pure, provider-agnostic policy in `internal/matching`
+(`match.go`): `NormalizeTitle`, `ArtistCompatible`, `BestMatch`. `internal/refresh`
+maps `discovery.AlbumResult` onto `matching.AlbumCandidate` and delegates to
+`matching.BestMatch`; the duplicated matcher bodies were removed and
+`refresh.bestMatch` is now a thin adapter over `matching.BestMatch`. `BestMatch`
+returns the FIRST acceptable candidate within one
+provider's ranked results — there is no cross-provider ranking, the caller owns
+provider order.
+
+Tolerances (code-verified):
+
+- **Title** — `NormalizeTitle` drops a DELIMITED trailing same-content
+  edition/format suffix, then normalizes case, quotes, brackets and punctuation,
+  then drops a `feat.` credit. The suffix is stripped only when delimited: a
+  trailing `(...)`/`[...]` group whose tokens are edition markers
+  ({deluxe, edition, expanded, anniversary, remaster, remastered, bonus,
+  explicit, clean}) or bare years, or a suffix after a dash/colon separator —
+  including the format words `- Single` / `- EP`. This is what lets
+  `Échame la culpa - Single` match the provider release group `Échame La Culpa`.
+  A bare trailing word (`New Edition`, `The Single`) is preserved.
+- **Artist** — `ArtistCompatible` accepts an exact normalized credit; a
+  collaboration containment where the shorter credit is the whole-token prefix
+  before a space-delimited joiner (` & `, ` / `, `, `, `feat`/`ft`/`featuring`/
+  `with`/`x`); an article-only containment (`The Cure` ⊃ `Cure`); or at least TWO
+  shared distinctive tokens (`Simon & Garfunkel` vs `Garfunkel & Simon`). A single
+  shared generic token is rejected (`King` vs `King Crimson`).
 
 ### 2. TagValidator handler (`internal/download/handler_tagvalidator.go`)
 
@@ -217,7 +313,7 @@ compile-time assertion or method set in its own package).
 
 | Method | Spotify | Deezer | MusicBrainz |
 |--------|---------|--------|-------------|
-| `SearchAlbums(query)` | ✅ `Plugin.SearchAlbums` | ✅ `DownloadClient.SearchAlbums` | ✅ release-group search → `AlbumResult{ProviderID: rgMBID}` |
+| `SearchAlbums(AlbumQuery)` | ✅ `Plugin.SearchAlbums` | ✅ `DownloadClient.SearchAlbums` | ✅ release-group search → `AlbumResult{ProviderID: rgMBID}` |
 | `GetAlbumTracks(id)` | ✅ `Plugin.GetAlbumTracks` | ✅ `DownloadClient.GetAlbumTracks` | ✅ `LookupReleaseGroup` → representative release → `LookupRelease` |
 | `SearchArtists(query)` | ✅ `Plugin.SearchArtists` | ✅ `DownloadClient.SearchArtists` | ✅ `Client.SearchArtists` |
 | `GetArtistAlbums(id)` | ✅ `Plugin.GetArtistAlbums` | ✅ `DownloadClient.GetArtistAlbums` | ✅ release-groups by artist |
