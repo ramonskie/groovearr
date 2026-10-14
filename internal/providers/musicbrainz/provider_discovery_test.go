@@ -253,7 +253,10 @@ func TestSearchAlbums_EmptyQuery(t *testing.T) {
 }
 
 func TestSearchAlbums_RateLimited(t *testing.T) {
+	// A genuine throttle carries a Retry-After header → metadata.ErrRateLimited
+	// so the shared cooldown parks the provider (AGENTS §8).
 	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	defer cleanup()
@@ -264,6 +267,24 @@ func TestSearchAlbums_RateLimited(t *testing.T) {
 	}
 	if !errors.Is(err, metadata.ErrRateLimited) {
 		t.Errorf("error = %v, want metadata.ErrRateLimited", err)
+	}
+}
+
+func TestSearchAlbums_BusyNoRetryAfterIsTransient(t *testing.T) {
+	// A 503 with NO Retry-After is MusicBrainz's transient "server busy" blip,
+	// not a throttle: it must surface as metadata.ErrProviderBusy so the whole
+	// refresh batch is not frozen behind a parked cooldown (AGENTS §8).
+	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	defer cleanup()
+
+	_, err := client.SearchAlbums(context.Background(), discovery.AlbumQuery{Text: "Nirvana Nevermind"}, 5)
+	if !errors.Is(err, metadata.ErrProviderBusy) {
+		t.Fatalf("error = %v, want metadata.ErrProviderBusy", err)
+	}
+	if errors.Is(err, metadata.ErrRateLimited) {
+		t.Fatalf("error = %v must NOT be ErrRateLimited (would park the shared cooldown)", err)
 	}
 }
 
@@ -487,6 +508,9 @@ func TestSearchAlbums_RateLimitedPartialResultsPropagateSentinel(t *testing.T) {
 			writeJSON(w, `{"release-groups":[{"id":"rg-1","title":"One","primary-type":"Album"}]}`)
 			return
 		}
+		// A genuine throttle (Retry-After) mid-stream must still propagate the
+		// rate-limit sentinel even with partial results.
+		w.Header().Set("Retry-After", "60")
 		w.WriteHeader(http.StatusServiceUnavailable)
 	})
 	defer cleanup()

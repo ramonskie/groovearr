@@ -25,6 +25,14 @@ import (
 // one" instead of a hard failure.
 var ErrRateLimited = errors.New("provider rate limited")
 
+// ErrProviderBusy is returned by providers when the downstream API answers a
+// transient "server busy"/unavailable response that is NOT a rate-limit (no
+// Retry-After header). Unlike ErrRateLimited it must NOT park the shared
+// cooldown — it is not a throttle (AGENTS §8) — so callers reschedule it soon
+// and keep the provider usable instead of escalating a long, app-wide park on a
+// momentary upstream blip.
+var ErrProviderBusy = errors.New("provider temporarily busy")
+
 // RateLimitError is the structured form of ErrRateLimited. Providers that can
 // read the server's Retry-After header wrap the sentinel in this type so
 // callers can honor the server's requested backoff (via errors.As) instead of

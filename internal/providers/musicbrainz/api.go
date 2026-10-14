@@ -682,10 +682,21 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 		return nil, nil // not found is not an error
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
-		// MusicBrainz signals rate limiting with 503 (not 429). Honor
-		// Retry-After when present; the cooldown fallback covers absence.
-		c.log.Warn("musicbrainz rate limited", "path", path, "component", "musicbrainz_api")
-		return nil, metadata.NewRateLimitError("musicbrainz", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "HTTP 503")
+		// MusicBrainz answers 503 for two distinct conditions:
+		//   - a genuine throttle/ban, which carries a Retry-After header; and
+		//   - a transient capacity blip ("The MusicBrainz web server is
+		//     currently busy"), which does NOT and recurs intermittently even at
+		//     multi-second spacing (observed live).
+		// Only the former is a shared-bucket rate-limit (AGENTS §8). The latter
+		// must not park the provider: treating every 503 as a rate-limit
+		// escalated a 2m→4h app-wide cooldown and froze the whole refresh batch
+		// on a momentary upstream blip.
+		if ra := metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")); ra > 0 {
+			c.log.Warn("musicbrainz rate limited", "path", path, "retry_after", ra.String(), "component", "musicbrainz_api")
+			return nil, metadata.NewRateLimitError("musicbrainz", ra, "HTTP 503")
+		}
+		c.log.Warn("musicbrainz busy (503, no Retry-After)", "path", path, "component", "musicbrainz_api")
+		return nil, fmt.Errorf("musicbrainz: %w: HTTP 503 (server busy)", metadata.ErrProviderBusy)
 	}
 	if resp.StatusCode != http.StatusOK {
 		c.logOpError("musicbrainz non-OK status", "status", resp.StatusCode, "body", string(body)[:min(len(string(body)), 200)], "component", "musicbrainz_api")

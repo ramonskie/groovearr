@@ -470,6 +470,39 @@ func TestService_ProcessBatch_RateLimitedMarksCooldownAndReschedules(t *testing.
 	}
 }
 
+func TestService_ProcessBatch_ProviderBusyReschedulesWithoutParkingCooldown(t *testing.T) {
+	// A transient "provider busy" (e.g. MusicBrainz 503 without Retry-After)
+	// must reschedule soon WITHOUT counting a failure and WITHOUT parking the
+	// shared cooldown — it is not a throttle (AGENTS §8). This is what stops a
+	// momentary upstream blip from freezing the whole batch behind a 2m→4h park.
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID: 42, ProviderName: "alpha", ProviderAlbumID: "pa1", RefreshStatus: catalog.StatusStale,
+	}
+	p := &fakeProvider{name: "alpha", tracksErr: errors.Join(metadata.ErrProviderBusy, errors.New("HTTP 503 (server busy)"))}
+	cd := newFakeCooldown()
+	svc := newTestService(store, &fakeLibrary{}, Options{}, p)
+	svc.cooldown = cd
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	if len(cd.marks) != 0 {
+		t.Fatalf("cooldown marks = %v, want none (a busy provider is not a throttle)", cd.marks)
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 0 {
+		t.Fatalf("retries = %+v, want one rescheduled with no failure counted", store.retries)
+	}
+	if !store.retries[0].next.After(fixedNow) {
+		t.Fatalf("retry next = %v, want a future time", store.retries[0].next)
+	}
+	if len(store.finishes) != 0 {
+		t.Fatalf("finishes = %+v, want none (not failed)", store.finishes)
+	}
+}
+
 func TestService_ProcessItem_BackoffThenTerminalFailure(t *testing.T) {
 	tests := []struct {
 		name          string

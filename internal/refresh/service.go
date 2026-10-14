@@ -91,6 +91,12 @@ type Options struct {
 	CooldownRetry time.Duration
 	// CallTimeout bounds every single provider call (AGENTS §7).
 	CallTimeout time.Duration
+	// BusyRetry is how long an item waits before retry when a provider answered
+	// a transient "busy"/unavailable response (metadata.ErrProviderBusy). Short,
+	// because it is a momentary upstream blip, not a throttle — the item is
+	// rescheduled without counting a failure and WITHOUT parking the shared
+	// cooldown (AGENTS §8).
+	BusyRetry time.Duration
 	// StaleAfter is the soft TTL after which materialized album metadata is
 	// considered stale. The drain loop never reads it; it is exposed for the api
 	// read path (via AlbumStaleAfter) to decide when a warm read should enqueue
@@ -111,6 +117,7 @@ func DefaultOptions() Options {
 		SearchLimit:   20,
 		CooldownRetry: 15 * time.Minute,
 		CallTimeout:   30 * time.Second,
+		BusyRetry:     30 * time.Second,
 		StaleAfter:    DefaultAlbumStaleAfter,
 	}
 }
@@ -132,6 +139,9 @@ func (o Options) withDefaults() Options {
 	}
 	if o.CooldownRetry <= 0 {
 		o.CooldownRetry = d.CooldownRetry
+	}
+	if o.BusyRetry <= 0 {
+		o.BusyRetry = d.BusyRetry
 	}
 	if o.CallTimeout <= 0 {
 		o.CallTimeout = d.CallTimeout
@@ -504,6 +514,15 @@ func (s *Service) processItem(ctx context.Context, item catalog.RefreshItem) err
 		// A cancelled parent is a clean stop, not a failure: leave the row
 		// untouched so the next run re-claims it.
 		return nil
+
+	case errors.Is(err, metadata.ErrProviderBusy):
+		// Upstream momentarily busy (e.g. MusicBrainz 503 "server busy" with no
+		// Retry-After). Transient and self-healing: reschedule soon WITHOUT
+		// counting a failure and WITHOUT parking the shared cooldown — this is
+		// not a throttle (AGENTS §8). Treating it as a rate-limit previously
+		// escalated an app-wide 2m→4h park and froze the whole batch on a blip.
+		return s.store.RetryRefresh(ctx, item.ID, item.Attempts,
+			s.now().Add(s.options().BusyRetry), err.Error())
 
 	case errors.Is(err, metadata.ErrRateLimited),
 		errors.Is(err, errAllCooling),

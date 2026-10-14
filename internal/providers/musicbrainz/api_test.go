@@ -325,7 +325,10 @@ func TestSearchRecording_EmptyResults(t *testing.T) {
 	}
 }
 
-func TestSearchRecording_HTTP503(t *testing.T) {
+func TestSearchRecording_HTTP503BusyIsTransient(t *testing.T) {
+	// A 503 with NO Retry-After is MusicBrainz's transient "web server is
+	// currently busy" blip, not a rate-limit: it must surface as
+	// metadata.ErrProviderBusy so the shared cooldown is not parked (AGENTS §8).
 	client, cleanup := newTestClientWithStatus(t, http.StatusServiceUnavailable)
 	defer cleanup()
 
@@ -333,8 +336,11 @@ func TestSearchRecording_HTTP503(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for 503, got nil")
 	}
-	if !errors.Is(err, metadata.ErrRateLimited) {
-		t.Errorf("error = %v, want metadata.ErrRateLimited sentinel", err)
+	if !errors.Is(err, metadata.ErrProviderBusy) {
+		t.Errorf("error = %v, want metadata.ErrProviderBusy", err)
+	}
+	if errors.Is(err, metadata.ErrRateLimited) {
+		t.Errorf("error = %v must NOT be ErrRateLimited (would park the shared cooldown)", err)
 	}
 }
 
