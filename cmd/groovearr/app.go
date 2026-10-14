@@ -304,11 +304,12 @@ func NewApp(configPath string) (*App, error) {
 	// a paced, cooldown-aware, service-owned loop (AGENTS §2 — not a jobs.Manager
 	// job, so a long materialization pass cannot monopolize the single-flight
 	// slot). Providers are read live from the discovery registry on every drain:
-	// configured providers, falling back to any discovery-capable plugin — the
-	// same selection the discover search handlers use — so a provider configured
-	// after startup is picked up without a restart.
+	// configured providers PLUS any credential-free public API (Searchable — e.g.
+	// Deezer without an ARL), falling back to any discovery-capable plugin, so a
+	// provider available without full config still feeds the catalog without a
+	// restart.
 	refreshProviders := func() []discovery.Provider {
-		if providers := discoveryReg.Configured(); len(providers) > 0 {
+		if providers := discoveryReg.Searchable(); len(providers) > 0 {
 			return providers
 		}
 		return discoveryReg.Any()

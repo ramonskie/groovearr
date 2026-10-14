@@ -76,6 +76,36 @@ func (r *Registry) Configured() []Provider {
 	return metadata.Order(r.providerOrder(), out)
 }
 
+// Searchable returns discovery providers usable for album search: every
+// configured provider PLUS any provider that exposes its metadata/discovery API
+// without full credentials (metadata.Provider.IsMetadataAvailable) — e.g.
+// Deezer's ARL-free public API (IsConfigured is false without an ARL, yet its
+// public search/track API works). Ordering matches Configured. This is the
+// selection the catalog refresh engine uses so a credential-free discovery
+// source can materialize albums instead of MusicBrainz carrying the whole load.
+func (r *Registry) Searchable() []Provider {
+	plugins := r.inner.WithCapability("discovery")
+	var out []Provider
+	for _, p := range plugins {
+		dp, ok := p.(Provider)
+		if !ok {
+			continue
+		}
+		if dp.IsConfigured() || publicMetadataAvailable(dp) {
+			out = append(out, dp)
+		}
+	}
+	return metadata.Order(r.providerOrder(), out)
+}
+
+// publicMetadataAvailable reports whether p exposes its API without full
+// credentials (metadata.Provider.IsMetadataAvailable). Providers that do not
+// implement the method are treated as unavailable.
+func publicMetadataAvailable(p Provider) bool {
+	m, ok := p.(interface{ IsMetadataAvailable() bool })
+	return ok && m.IsMetadataAvailable()
+}
+
 // Any returns all discovery-capable plugins regardless of IsConfigured(),
 // ordered by the shared provider priority (SetProviderOrder). Useful for
 // best-effort operations (e.g. artist image enrichment) where a partially

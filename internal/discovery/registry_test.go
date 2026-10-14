@@ -14,15 +14,20 @@ import (
 // fakeProvider is a minimal discovery.Provider with a fixed name/configured
 // state; it is never called by these order tests.
 type fakeProvider struct {
-	name       string
-	configured bool
+	name              string
+	configured        bool
+	metadataAvailable bool
 }
 
 var _ Provider = (*fakeProvider)(nil)
 
-func (p *fakeProvider) Name() string                          { return p.name }
-func (p *fakeProvider) DisplayName() string                   { return p.name }
-func (p *fakeProvider) IsConfigured() bool                    { return p.configured }
+func (p *fakeProvider) Name() string        { return p.name }
+func (p *fakeProvider) DisplayName() string { return p.name }
+func (p *fakeProvider) IsConfigured() bool  { return p.configured }
+
+// IsMetadataAvailable models a credential-free public API (e.g. Deezer without
+// an ARL): usable for discovery even though IsConfigured is false.
+func (p *fakeProvider) IsMetadataAvailable() bool             { return p.metadataAvailable }
 func (p *fakeProvider) CheckConnection(context.Context) error { return nil }
 func (p *fakeProvider) Connected() bool                       { return true }
 func (p *fakeProvider) CapabilityStatus() map[string]string   { return nil }
@@ -111,6 +116,29 @@ func TestRegistryAnyHonorsProviderOrder(t *testing.T) {
 	}
 }
 
+// TestRegistrySearchableIncludesCredentialFreeProvider verifies the refresh's
+// provider selection: a provider whose public API is available without full
+// credentials (IsMetadataAvailable) is included even when IsConfigured is false
+// (Deezer without an ARL), while a plain unconfigured provider is still
+// excluded. Configured() is unchanged.
+func TestRegistrySearchableIncludesCredentialFreeProvider(t *testing.T) {
+	inner := plugin.NewRegistry()
+	for _, name := range []string{"alpha", "beta", "gamma"} {
+		_ = inner.RegisterFactory(&fakeFactory{name: name})
+	}
+	_ = inner.Register(&fakeProvider{name: "alpha", configured: true})
+	_ = inner.Register(&fakeProvider{name: "beta", configured: false})
+	_ = inner.Register(&fakeProvider{name: "gamma", configured: false, metadataAvailable: true})
+	reg := NewRegistry(inner)
+
+	if got := providerNames(reg.Searchable()); !slices.Equal(got, []string{"alpha", "gamma"}) {
+		t.Fatalf("Searchable() = %v, want [alpha gamma] (configured + public-only, excluding plain unconfigured)", got)
+	}
+	if got := providerNames(reg.Configured()); !slices.Equal(got, []string{"alpha"}) {
+		t.Errorf("Configured() = %v, want [alpha] (public-only must not leak in)", got)
+	}
+}
+
 // TestRegistrySetProviderOrderConcurrent guards FIX D: SetProviderOrder used to
 // write r.order with no synchronization while Configured/Any read it on every
 // request. Run under `go test -race`; the mutex must make this clean.
@@ -141,6 +169,7 @@ func TestRegistrySetProviderOrderConcurrent(t *testing.T) {
 			defer readers.Done()
 			for j := 0; j < 2000; j++ {
 				_ = reg.Configured()
+				_ = reg.Searchable()
 				_ = reg.Any()
 			}
 		}()
