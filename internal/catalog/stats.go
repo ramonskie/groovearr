@@ -15,8 +15,22 @@ type QueueStats struct {
 	Scheduled int
 }
 
+// UnmatchedAlbum is one parked album whose metadata could not be matched to a
+// provider. It carries the joined library artist/title so a read-only listing
+// does not need a second library query per row.
+type UnmatchedAlbum struct {
+	AlbumID   int64
+	ArtistID  int64
+	Artist    string
+	Title     string
+	Status    RefreshStatus
+	Error     string
+	UpdatedAt time.Time
+}
+
 // StatsStore is the read-only observability surface over the catalog: queue
-// depth and materialized-entity counts, used by the settings status card.
+// depth, materialized-entity counts, and the parked-unmatched listing used by
+// the settings status card and its diagnostic endpoint.
 //
 // It is deliberately separate from Store so exposing metrics never widens the
 // interfaces every catalog consumer embeds (AGENTS §3). The same
@@ -29,4 +43,8 @@ type StatsStore interface {
 	AlbumStatusCounts(ctx context.Context) (map[RefreshStatus]int, error)
 	// CountArtistMetadata returns how many artist overviews are materialized.
 	CountArtistMetadata(ctx context.Context) (int, error)
+	// ListUnmatchedAlbums returns parked album metadata rows joined with their
+	// library artist/title, ordered by title then album id, capped at limit.
+	// limit <= 0 returns an empty slice.
+	ListUnmatchedAlbums(ctx context.Context, limit int) ([]UnmatchedAlbum, error)
 }

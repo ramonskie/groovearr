@@ -345,9 +345,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
 	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))
 	// Read-only status of the materialized metadata catalog and its refresh
-	// engine. The engine is a service-owned loop, not a jobs.Manager job, so
-	// this is its only observability surface (AGENTS §2).
+	// engine. The engine is a service-owned loop, not a jobs.Manager job; the
+	// status snapshot and the parked-unmatched listing are its observability
+	// surface (AGENTS §2).
 	mux.HandleFunc("GET /api/catalog/status", s.adminOnly(s.handleCatalogStatus))
+	mux.HandleFunc("GET /api/catalog/unmatched", s.adminOnly(s.handleCatalogUnmatched))
 
 	// ── Shared surface: playlists ──────────────────────────────────────
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)

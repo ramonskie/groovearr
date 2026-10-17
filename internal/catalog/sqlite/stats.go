@@ -67,3 +67,42 @@ func (s *Store) CountArtistMetadata(ctx context.Context) (int, error) {
 	}
 	return n, nil
 }
+
+// ListUnmatchedAlbums returns parked unmatched album metadata joined with the
+// library artist/title, ordered by title then album id. limit <= 0 is an empty
+// read (matching ListAlbumsDueForRefresh's contract).
+func (s *Store) ListUnmatchedAlbums(ctx context.Context, limit int) ([]catalog.UnmatchedAlbum, error) {
+	if limit <= 0 {
+		return []catalog.UnmatchedAlbum{}, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT am.album_id, al.artist_id, COALESCE(ar.name, ''), al.title,
+			am.refresh_status, COALESCE(am.refresh_error, ''), am.updated_at
+		FROM album_metadata am
+		JOIN albums al ON al.id = am.album_id
+		LEFT JOIN artists ar ON ar.id = al.artist_id
+		WHERE am.refresh_status = ?
+		ORDER BY al.title COLLATE NOCASE, am.album_id
+		LIMIT ?`, string(catalog.StatusUnmatched), limit)
+	if err != nil {
+		return nil, fmt.Errorf("catalog sqlite: list unmatched albums: %w", err)
+	}
+	defer rows.Close()
+
+	out := []catalog.UnmatchedAlbum{}
+	for rows.Next() {
+		var a catalog.UnmatchedAlbum
+		var status, updated string
+		if err := rows.Scan(&a.AlbumID, &a.ArtistID, &a.Artist, &a.Title,
+			&status, &a.Error, &updated); err != nil {
+			return nil, fmt.Errorf("catalog sqlite: scan unmatched album: %w", err)
+		}
+		a.Status = catalog.RefreshStatus(status)
+		a.UpdatedAt = parseTime(updated)
+		out = append(out, a)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("catalog sqlite: iterate unmatched albums: %w", err)
+	}
+	return out, nil
+}

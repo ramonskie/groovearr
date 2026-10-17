@@ -950,8 +950,9 @@ Job progress is also streamed to SSE clients (`/api/events`) as `job_started`,
 
 Read-only snapshot of the materialized metadata catalog and its background
 refresh engine. The engine is a **service-owned loop**, not a `jobs.Manager`
-job, so it never appears in `GET /api/jobs` — this endpoint is its only
-observability surface. Settings → Jobs renders it as the "Metadata Catalog"
+job, so it never appears in `GET /api/jobs` — this endpoint is the engine's own
+status surface; the parked-album rows behind `albums.unmatched` are listed by
+`GET /api/catalog/unmatched`. Settings → Jobs renders it as the "Metadata Catalog"
 card, whose **Warm library** button calls `POST /api/jobs/warm-library` and
 whose **Recheck unmatched** button calls `POST /api/jobs/recheck-unmatched`.
 
@@ -989,6 +990,43 @@ with an empty queue on a freshly upgraded instance is expected, not a fault.
 
 **Errors**:
 - `500` — `{"error": "catalog status unavailable"}` when a catalog read fails.
+- `503` — `{"error": "catalog stats not available"}` when no catalog store is wired.
+
+### `GET /api/catalog/unmatched`
+
+**Admin only.**
+
+Read-only listing of the albums parked with `refresh_status=unmatched`. The
+status card only exposes the unmatched **count**; this endpoint returns the rows
+behind it so an operator can inspect which albums are parked and why. It reads
+the materialized catalog only — no provider calls, no queue changes.
+
+**Response** `200` (up to 1000 rows, ordered by title then album id):
+```json
+[
+  {
+    "album_id": 4332,
+    "artist_id": 682,
+    "artist": "R.E.M.",
+    "title": "1992 Fanclub Single",
+    "status": "unmatched",
+    "error": "no provider match",
+    "updated_at": "2026-10-14T17:55:12Z"
+  }
+]
+```
+
+- `status` — always `unmatched` today; kept in the row so a future terminal
+  listing can share the shape.
+- `error` — the persisted `refresh_error` (omitted when empty).
+- `updated_at` — when the parked metadata row last changed.
+- Returns `[]` when nothing is parked.
+- `X-Result-Truncated: true` is set when more than 1000 rows are parked; the body
+  is then the first 1000 in title order. Compare with `albums.unmatched` from
+  `GET /api/catalog/status` to detect truncation.
+
+**Errors**:
+- `500` — `{"error": "catalog unmatched unavailable"}` when the catalog read fails.
 - `503` — `{"error": "catalog stats not available"}` when no catalog store is wired.
 
 ### `GET /api/covers/{albumID}`

@@ -12,9 +12,10 @@ import (
 
 // refreshStatusReader is the narrow slice of the refresh engine the status
 // handler reads. The engine is a service-owned loop (AGENTS §2), not a job, so a
-// read-only snapshot is its only observability surface. Wired via
-// Server.SetRefreshStatus. The catalog side depends on catalog.StatsStore
-// directly (the Server field holds it), so only the engine needs a port here.
+// read-only snapshot is its status surface; the parked-row listing reads the
+// catalog store directly. Wired via Server.SetRefreshStatus. The catalog side
+// depends on catalog.StatsStore (the Server field holds it), so only the engine
+// needs a port here.
 type refreshStatusReader interface {
 	Status() refresh.Status
 }
@@ -27,6 +28,11 @@ var errCatalogStatsUnavailable = errors.New("catalog stats not available")
 // catalogStatusReadTimeout bounds the read-only store reads behind the status
 // endpoint (AGENTS §7 — every I/O operation carries a per-operation timeout).
 const catalogStatusReadTimeout = 5 * time.Second
+
+// catalogUnmatchedLimit caps one unmatched-listing response. The parked set is
+// bounded by library size; the cap only keeps a pathological library from
+// returning an unbounded body.
+const catalogUnmatchedLimit = 1000
 
 // ─── Catalog status (read-only) ──────────────────────────────────────
 
@@ -108,6 +114,56 @@ func (s *Server) handleCatalogStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, resp)
 }
 
+// catalogUnmatchedAlbum is one parked album in the unmatched listing.
+type catalogUnmatchedAlbum struct {
+	AlbumID   int64                 `json:"album_id"`
+	ArtistID  int64                 `json:"artist_id"`
+	Artist    string                `json:"artist"`
+	Title     string                `json:"title"`
+	Status    catalog.RefreshStatus `json:"status"`
+	Error     string                `json:"error,omitempty"`
+	UpdatedAt time.Time             `json:"updated_at"`
+}
+
+// handleCatalogUnmatched lists the albums parked with refresh_status=unmatched.
+// It is the read-only diagnostic behind the status card's unmatched count: the
+// count alone cannot tell an operator which albums are parked. Thin by contract
+// (AGENTS §4): timeout -> store read -> writeJSON, no provider calls.
+func (s *Server) handleCatalogUnmatched(w http.ResponseWriter, r *http.Request) {
+	if s.catalogStats == nil {
+		writeError(w, http.StatusServiceUnavailable, errCatalogStatsUnavailable)
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), catalogStatusReadTimeout)
+	defer cancel()
+
+	// Fetch one extra row so a full page can be reported as truncated without a
+	// second COUNT query. The response stays a plain array; the header is the
+	// signal that the 1000-row cap clipped it.
+	rows, err := s.catalogStats.ListUnmatchedAlbums(ctx, catalogUnmatchedLimit+1)
+	if err != nil {
+		s.catalogUnmatchedError(w, err)
+		return
+	}
+	if len(rows) > catalogUnmatchedLimit {
+		rows = rows[:catalogUnmatchedLimit]
+		w.Header().Set("X-Result-Truncated", "true")
+	}
+	resp := make([]catalogUnmatchedAlbum, 0, len(rows))
+	for _, row := range rows {
+		resp = append(resp, catalogUnmatchedAlbum{
+			AlbumID:   row.AlbumID,
+			ArtistID:  row.ArtistID,
+			Artist:    row.Artist,
+			Title:     row.Title,
+			Status:    row.Status,
+			Error:     row.Error,
+			UpdatedAt: row.UpdatedAt,
+		})
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
 // catalogStatusError logs the wrapped store error server-side and returns a
 // generic 500, so internal SQL/driver text is not echoed to the client.
 func (s *Server) catalogStatusError(w http.ResponseWriter, err error) {
@@ -115,6 +171,14 @@ func (s *Server) catalogStatusError(w http.ResponseWriter, err error) {
 		s.log.Error("catalog status read failed", "component", "api", "error", err)
 	}
 	writeError(w, http.StatusInternalServerError, errors.New("catalog status unavailable"))
+}
+
+// catalogUnmatchedError mirrors catalogStatusError for the unmatched listing.
+func (s *Server) catalogUnmatchedError(w http.ResponseWriter, err error) {
+	if s.log != nil {
+		s.log.Error("catalog unmatched read failed", "component", "api", "error", err)
+	}
+	writeError(w, http.StatusInternalServerError, errors.New("catalog unmatched unavailable"))
 }
 
 // albumStatusJSON renders the per-status album counts with every known status

@@ -93,6 +93,75 @@ func TestStore_AlbumStatusCounts(t *testing.T) {
 	}
 }
 
+// TestStore_ListUnmatchedAlbums verifies the unmatched listing joins the
+// library artist/title, filters out non-unmatched statuses, orders by title,
+// and honors the limit contract.
+func TestStore_ListUnmatchedAlbums(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	at := time.Date(2026, 10, 14, 17, 55, 12, 0, time.UTC)
+
+	artistID := insertArtist(t, db, "R.E.M.")
+	// Seed deliberately out of title order and with same-title rows, so the
+	// test fails if the title ORDER BY is removed. The album_id tiebreak is
+	// defensive (it protects against a plan change); it is not claimed to be
+	// exercised by this seed.
+	unmatchedZ := insertAlbum(t, db, artistID, "Zzz Later")
+	unmatchedA := insertAlbum(t, db, artistID, "aaa First")
+	same1 := insertAlbum(t, db, artistID, "Same Title")
+	same2 := insertAlbum(t, db, artistID, "Same Title")
+	fresh := insertAlbum(t, db, artistID, "Green")
+
+	for _, row := range []struct {
+		albumID int64
+		status  catalog.RefreshStatus
+		err     string
+	}{
+		{unmatchedZ, catalog.StatusUnmatched, "no provider match"},
+		{unmatchedA, catalog.StatusUnmatched, "no provider match"},
+		{same1, catalog.StatusUnmatched, "no provider match"},
+		{same2, catalog.StatusUnmatched, "no provider match"},
+		{fresh, catalog.StatusFresh, ""},
+	} {
+		if err := s.UpsertAlbumMetadata(ctx, catalog.AlbumMetadata{
+			AlbumID:       row.albumID,
+			RefreshStatus: row.status,
+			RefreshError:  row.err,
+			UpdatedAt:     at,
+		}); err != nil {
+			t.Fatalf("upsert album metadata %d: %v", row.albumID, err)
+		}
+	}
+
+	got, err := s.ListUnmatchedAlbums(ctx, 10)
+	if err != nil {
+		t.Fatalf("list unmatched: %v", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("rows = %d, want 4", len(got))
+	}
+	wantOrder := []int64{unmatchedA, same1, same2, unmatchedZ}
+	for i, want := range wantOrder {
+		if got[i].AlbumID != want {
+			t.Errorf("row %d album_id = %d, want %d (title COLLATE NOCASE, then id)", i, got[i].AlbumID, want)
+		}
+	}
+	if got[0].ArtistID != artistID || got[0].Artist != "R.E.M." {
+		t.Errorf("artist = (%d,%q), want (%d,%q)", got[0].ArtistID, got[0].Artist, artistID, "R.E.M.")
+	}
+	if got[0].Title != "aaa First" || got[0].Status != catalog.StatusUnmatched ||
+		got[0].Error != "no provider match" || !got[0].UpdatedAt.Equal(at) {
+		t.Errorf("first row = %+v", got[0])
+	}
+
+	if limited, err := s.ListUnmatchedAlbums(ctx, 1); err != nil || len(limited) != 1 || limited[0].AlbumID != unmatchedA {
+		t.Errorf("limit 1 = (%+v, %v), want only %d", limited, err, unmatchedA)
+	}
+	if empty, err := s.ListUnmatchedAlbums(ctx, 0); err != nil || len(empty) != 0 {
+		t.Errorf("limit 0 = (%d, %v), want (0, nil)", len(empty), err)
+	}
+}
+
 // TestStore_CountArtistMetadata verifies the materialized-artist count.
 func TestStore_CountArtistMetadata(t *testing.T) {
 	ctx := context.Background()

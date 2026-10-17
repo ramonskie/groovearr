@@ -408,15 +408,18 @@ because the engine still performs the paced re-search.
 ## Observability
 
 The engine is a service-owned loop, not a `jobs.Manager` job, so it does **not**
-appear in `GET /api/jobs`. Its only status surface is **`GET /api/catalog/status`**
+appear in `GET /api/jobs`. Its status surface is **`GET /api/catalog/status`**
 (admin-only), assembled from the read-only `catalog.StatsStore` (`QueueStats`,
 `AlbumStatusCounts`, `CountArtistMetadata`) and the engine's
 `refresh.Service.Status()` snapshot. Settings → Jobs renders it as the
 "Metadata Catalog" card, whose **Warm library** button starts the opt-in
 `POST /api/jobs/warm-library` job and whose **Recheck unmatched** button starts
-`POST /api/jobs/recheck-unmatched` (chart 6). An idle engine with an empty queue
-is normal: the queue fills only on demand — a cold album open, a stale warm read,
-an album import, a manual refresh, or the warm job.
+`POST /api/jobs/recheck-unmatched` (chart 6). The count alone cannot identify
+the parked albums, so **`GET /api/catalog/unmatched`** (admin-only) exposes the
+same `StatsStore`'s `ListUnmatchedAlbums` rows (album id, artist, title,
+persisted error, updated_at) as a read-only diagnostic. An idle engine with an
+empty queue is normal: the queue fills only on demand — a cold album open, a
+stale warm read, an album import, a manual refresh, or the warm job.
 
 ## Provider I/O & Rate Limiting
 
