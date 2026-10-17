@@ -29,7 +29,9 @@ RUN CGO_ENABLED=0 go build -ldflags="-s -w -X github.com/ramonskie/groovearr/int
 # ─── Runtime ───────────────────────────────────────────────
 FROM alpine:3.21
 
-RUN apk add --no-cache ca-certificates tzdata
+# ffmpeg supplies ffprobe, used by the scanner/backfill to populate track
+# duration. The Go binary itself remains CGo-free and does not link ffmpeg.
+RUN apk add --no-cache ca-certificates tzdata ffmpeg
 
 COPY --from=builder /out/groovearr /usr/local/bin/groovearr
 

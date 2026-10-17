@@ -16,6 +16,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var _ library.TrackDurationUpdater = (*Store)(nil)
+
 // Store implements library.Store backed by SQLite.
 type Store struct {
 	db  *sql.DB
@@ -745,6 +747,19 @@ func (s *Store) UpsertTrack(ctx context.Context, track *domain.Track) (int64, er
 func (s *Store) GetTrack(ctx context.Context, id int64) (*domain.Track, error) {
 	row := s.db.QueryRowContext(ctx, trackSelect+" WHERE id=?", id)
 	return s.scanTrack(row)
+}
+
+// UpdateTrackDuration updates only a track's duration and updated_at. It is the
+// narrow write used by the scanner backfill so a probe cannot clobber concurrent
+// metadata enrichment on the same row.
+func (s *Store) UpdateTrackDuration(ctx context.Context, id, durationMs int64) error {
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE tracks SET duration=?, updated_at=? WHERE id=?`,
+		durationMs, time.Now().UTC().Format(time.RFC3339), id)
+	if err != nil {
+		return fmt.Errorf("library sqlite: update track duration %d: %w", id, err)
+	}
+	return nil
 }
 
 func (s *Store) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {

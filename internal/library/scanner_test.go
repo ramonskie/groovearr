@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/dhowden/tag"
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -569,6 +570,9 @@ func TestScannerScanPath(t *testing.T) {
 		albums:  map[string]int64{},
 	}
 	scanner := NewScanner(store, testLogger())
+	scanner.probeDuration = func(context.Context, string) (time.Duration, error) {
+		return 0, ErrDurationUnavailable
+	}
 
 	stats, err := scanner.ScanPath(t.Context(), dir)
 	if err != nil {
@@ -587,13 +591,16 @@ func TestScannerScanPath(t *testing.T) {
 
 // mockStore is a minimal in-memory implementation of Store for testing.
 type mockStore struct {
-	artists      map[string]int64
-	albums       map[string]int64
-	tracks       []domain.Track
-	thumbs       map[int64]string
-	remoteThumbs map[string]string // artist name → pre-existing thumb_url
-	upsertErr    error             // when set, UpsertTrack fails (organize rollback tests)
-	nextID       int64
+	artists       map[string]int64
+	albums        map[string]int64
+	tracks        []domain.Track
+	thumbs        map[int64]string
+	remoteThumbs  map[string]string // artist name → pre-existing thumb_url
+	upsertErr     error             // when set, UpsertTrack fails (organize rollback tests)
+	durationErr   error             // when set, UpdateTrackDuration fails
+	durationCalls int
+	upsertCalls   int
+	nextID        int64
 }
 
 func (m *mockStore) next() int64 { m.nextID++; return m.nextID }
@@ -663,6 +670,7 @@ func (m *mockStore) SearchAlbums(ctx context.Context, query string, offset, limi
 	return out, nil
 }
 func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, error) {
+	m.upsertCalls++
 	if m.upsertErr != nil {
 		return 0, m.upsertErr
 	}
@@ -678,6 +686,19 @@ func (m *mockStore) UpsertTrack(ctx context.Context, t *domain.Track) (int64, er
 	t.ID = id
 	m.tracks = append(m.tracks, *t)
 	return id, nil
+}
+func (m *mockStore) UpdateTrackDuration(ctx context.Context, id, durationMs int64) error {
+	m.durationCalls++
+	if m.durationErr != nil {
+		return m.durationErr
+	}
+	for i := range m.tracks {
+		if m.tracks[i].ID == id {
+			m.tracks[i].Duration = durationMs
+			return nil
+		}
+	}
+	return nil
 }
 func (m *mockStore) GetTrack(ctx context.Context, id int64) (*domain.Track, error) { return nil, nil }
 func (m *mockStore) GetTracksByAlbum(ctx context.Context, albumID int64) ([]domain.Track, error) {
@@ -723,7 +744,7 @@ func (m *mockStore) ListPlaylists(ctx context.Context) ([]domain.Playlist, error
 func (m *mockStore) CountPlaylistsByName(ctx context.Context, source, name string) (int64, error) {
 	return 0, nil
 }
-func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error           { return nil }
+func (m *mockStore) DeletePlaylist(ctx context.Context, id int64) error { return nil }
 func (m *mockStore) UpsertPlaylistTrack(ctx context.Context, t *domain.PlaylistTrack) error {
 	return nil
 }

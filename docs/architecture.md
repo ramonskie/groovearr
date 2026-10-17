@@ -80,9 +80,9 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/providers/qbittorrent` | qBittorrent download client — torrent downloads via WebUI API v2 | `Plugin` (implements `download.DownloadClient`) |
 | `internal/download/sqlite` | SQLite download record store | `Store` (implements `DownloadStore`) |
 | `internal/events` | In-memory pub/sub event bus | `InMemoryEventBus`, 8 topic constants |
-| `internal/library` | Library store interface, scanner, renamer, path resolver, filename parser | `Store` (interface), `Scanner`, `Renamer`, `ParseArtistTitle`, `ParseAlbumDir` |
+| `internal/library` | Library store interface, scanner, duration probe, renamer, path resolver, filename parser | `Store` (interface), `Scanner`, `ProbeDuration`, `ErrDurationUnavailable`, `Renamer`, `ParseArtistTitle`, `ParseAlbumDir` |
 | `internal/library/sqlite` | SQLite library store (artists, albums, tracks, playlists) | `Store` (implements `library.Store`) |
-| `internal/matching` | Cross-source track matching with version awareness | `Engine` |
+| `internal/matching` | Cross-source track matching with version awareness; candidate confidence policy | `Engine`, `CandidateScore`, `CandidateSignals`, `DurationWithinTolerance` |
 | `internal/playlist` | Playlist service, registry, source interface | `Service`, `Registry`, `Source` (interface) |
 | `internal/playlist/deezer` | Deezer playlist source plugin | `PlaylistSource` |
 | `internal/sanitize` | Filename/path sanitization | `PathSegment`, `TrimLeadingDots` |
@@ -109,6 +109,14 @@ Artist ──1:N──> Album ──1:N──> Track
                                   file_size
                                   external_ids (8 services)
 ```
+
+Track duration is populated by the scanner through `ffprobe` (`library.ProbeDuration`;
+override the binary with `FFPROBE_PATH`): new imports are probed on insert, and a
+scan backfills existing rows whose `duration` is still 0. The provider-neutral
+`matching.CandidateScore` is the proposed 0–100 scoring policy for track-identity
+resolution (not yet wired; `matching.Engine` remains the active track scorer): a
+known duration is compared within the caller-supplied tolerance (typically ±5s),
+and a known duration conflict caps the candidate below auto-apply.
 
 ### Downloads (SQLite: `downloads`, `download_events`)
 

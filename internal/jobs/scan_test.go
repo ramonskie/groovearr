@@ -41,6 +41,9 @@ func (s *scanStore) ListTracksWithQuality(ctx context.Context) ([]domain.Track, 
 // scanner against a temp library directory imports audio files, reports per-file
 // progress, and finishes with the outcome summary.
 func TestScanRunnerImportsAndReports(t *testing.T) {
+	// Keep the test hermetic: the scanner probes duration, but fake .flac files
+	// are not real media.
+	t.Setenv("FFPROBE_PATH", "definitely-not-a-real-ffprobe")
 	libDir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(libDir, "01 - Track.flac"), []byte("fake"), 0o644); err != nil {
 		t.Fatal(err)
@@ -133,6 +136,7 @@ func TestScanRunnerLayoutGuard(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("FFPROBE_PATH", "definitely-not-a-real-ffprobe")
 			for _, d := range []string{tc.lib, tc.dl} {
 				if err := os.MkdirAll(d, 0o755); err != nil {
 					t.Fatal(err)

@@ -13,6 +13,13 @@ import (
 // UI-facing pagination uses parsePagination's 200-row default instead.
 const AllAlbumsLimit = 10000
 
+// TrackDurationUpdater is the narrow write the scanner backfill prefers. It is
+// optional: a minimal/test Store may only implement UpsertTrack. Keeping it out
+// of Store avoids widening every consumer's fake just for one maintenance write.
+type TrackDurationUpdater interface {
+	UpdateTrackDuration(ctx context.Context, id, durationMs int64) error
+}
+
 // Store is the interface for music library persistence.
 // Implementations: SQLite (current), potentially PostgreSQL in the future.
 type Store interface {

@@ -3,7 +3,7 @@
 Self-hosted music download manager. Search, download, and organize music from multiple sources
 (Soulseek via slskd, Deezer) through a single web UI.
 
-Single Go binary with embedded frontend — no runtime dependencies except a slskd daemon for Soulseek.
+Single Go binary with embedded frontend — no runtime dependencies except a slskd daemon for Soulseek. The Docker image bundles `ffprobe` for track-duration probing; source builds need `ffprobe` on `PATH` for duration population (optional — everything else works without it).
 
 ## Features
 

@@ -4,6 +4,7 @@ package library
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -11,6 +12,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/dhowden/tag"
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -23,6 +25,10 @@ var TrackNumRE = regexp.MustCompile(`^(\d{1,3})[\.\s\-]+(.+)$`)
 type Scanner struct {
 	store Store
 	log   *slog.Logger
+	// probeDuration is a seam for tests; production always points at
+	// ProbeDuration. It keeps the scan/backfill paths unit-testable without a
+	// real ffprobe binary.
+	probeDuration func(context.Context, string) (time.Duration, error)
 }
 
 // ScanStats tracks the outcome of a library scan.
@@ -35,7 +41,7 @@ type ScanStats struct {
 
 // NewScanner creates a library scanner.
 func NewScanner(store Store, logger *slog.Logger) *Scanner {
-	return &Scanner{store: store, log: logger}
+	return &Scanner{store: store, log: logger, probeDuration: ProbeDuration}
 }
 
 // scanRoot returns the absolute, symlink-resolved scan root. WalkDir does not
@@ -476,6 +482,15 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 	// whose portrait exists but whose tags keep failing the compilation guard
 	// (e.g. every track of a grouping folder carries a different artist).
 	artistThumbAttempts := make(map[string]int)
+	// Duration probing is serial and each ffprobe can take tens of ms. Bound
+	// the one-time backfill per scan so a huge legacy library cannot turn one
+	// scan into an hour-long job; new imports are always probed.
+	durationBackfills := 0
+	durationWarnLogged := false
+	durationCapLogged := false
+	durationBudgetLogged := false
+	durationUnavailable := false
+	durationBackfillDeadline := time.Now().Add(durationBackfillBudget)
 	var err error
 	err = filepath.WalkDir(absRoot, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
@@ -521,6 +536,30 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		}
 		if existing != nil {
 			stats.Skipped++
+			switch {
+			case durationUnavailable:
+				// ffprobe is absent; no point probing the rest of the backlog.
+			case time.Now().After(durationBackfillDeadline):
+				if !durationBudgetLogged {
+					s.log.Debug("duration backfill time budget reached for this scan",
+						"budget", durationBackfillBudget, "component", "scanner")
+					durationBudgetLogged = true
+				}
+			case durationBackfills < maxDurationBackfillsPerScan:
+				attempted, unavailable := s.backfillDuration(ctx, existing, &durationWarnLogged)
+				if attempted {
+					durationBackfills++
+				}
+				if unavailable {
+					durationUnavailable = true
+				}
+			default:
+				if !durationCapLogged {
+					s.log.Debug("duration backfill attempt cap reached for this scan",
+						"limit", maxDurationBackfillsPerScan, "component", "scanner")
+					durationCapLogged = true
+				}
+			}
 			// Backfill embedded artwork for albums that were scanned before
 			// cover extraction existed. Runs when either the cover or the
 			// artist image is missing — albums that already carried a
@@ -575,11 +614,26 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 			return nil
 		}
 
+		// Probe duration once per file. A missing ffprobe leaves it zero
+		// (the scan still imports); a malformed file is also non-fatal.
+		var durationMs int64
+		if !durationUnavailable {
+			if d, derr := s.probeDuration(ctx, path); derr == nil {
+				durationMs = d.Milliseconds()
+			} else {
+				s.logDurationProbeError(path, derr, &durationWarnLogged)
+				if errors.Is(derr, ErrDurationUnavailable) {
+					durationUnavailable = true
+				}
+			}
+		}
+
 		// Import track via shared pipeline.
 		trackID, err := s.store.ImportTrack(ctx, &domain.Track{
 			Title:       trackTitle,
 			TrackNumber: trackNumber,
 			DiscNumber:  discNumber,
+			Duration:    durationMs,
 			FilePath:    path,
 			FileSize:    fi.Size(),
 		}, artistName, albumTitle, albumYear, genres)
@@ -602,6 +656,60 @@ func (s *Scanner) ScanPathWithProgress(ctx context.Context, root string, onProgr
 		return nil
 	})
 	return stats, err
+}
+
+// maxDurationBackfillsPerScan bounds the one-time legacy duration backfill in
+// one scan. New imports are always probed; a scan that hits this cap logs once
+// and the next scan continues the backlog.
+const maxDurationBackfillsPerScan = 5000
+
+// durationBackfillBudget bounds the wall-clock time a single scan spends on the
+// legacy duration backfill. The per-probe timeout is 5s, so a corrupt block of
+// files must not hold the job for hours even when the attempt count is under
+// the cap.
+const durationBackfillBudget = 10 * time.Minute
+
+// backfillDuration fills a track's missing duration during a scan. It reports
+// whether a probe was attempted (success or failure), so the caller's per-run
+// budget counts both. A missing ffprobe, an unreadable file or a store failure
+// leaves the existing row untouched so the next scan can retry.
+func (s *Scanner) backfillDuration(ctx context.Context, t *domain.Track, warnOnce *bool) (attempted, unavailable bool) {
+	if t == nil || t.Duration > 0 || t.FilePath == "" {
+		return false, false
+	}
+	d, err := s.probeDuration(ctx, t.FilePath)
+	if err != nil {
+		s.logDurationProbeError(t.FilePath, err, warnOnce)
+		return true, errors.Is(err, ErrDurationUnavailable)
+	}
+	// Prefer a duration-only update so a concurrent enrichment write cannot be
+	// reverted by a stale full-row snapshot. Test/minimal stores may not
+	// implement it; fall back to UpsertTrack there.
+	if u, ok := s.store.(TrackDurationUpdater); ok && t.ID != 0 {
+		if err := u.UpdateTrackDuration(ctx, t.ID, d.Milliseconds()); err != nil {
+			s.log.Debug("duration backfill failed", "path", t.FilePath, "error", err, "component", "scanner")
+		}
+		return true, false
+	}
+	t.Duration = d.Milliseconds()
+	if _, err := s.store.UpsertTrack(ctx, t); err != nil {
+		s.log.Debug("duration backfill failed", "path", t.FilePath, "error", err, "component", "scanner")
+	}
+	return true, false
+}
+
+// logDurationProbeError warns once per scan when the ffprobe binary is absent
+// (so a source install without ffmpeg is diagnosable) and debug-logs per-file
+// parse failures.
+func (s *Scanner) logDurationProbeError(path string, err error, warnOnce *bool) {
+	if errors.Is(err, ErrDurationUnavailable) {
+		if warnOnce != nil && !*warnOnce {
+			s.log.Warn("duration probe unavailable; install ffprobe or set FFPROBE_PATH; track durations stay 0", "component", "scanner")
+			*warnOnce = true
+		}
+		return
+	}
+	s.log.Debug("duration probe failed", "path", path, "error", err, "component", "scanner")
 }
 
 // maxArtistThumbAttempts bounds how many tracks probe a directory before the

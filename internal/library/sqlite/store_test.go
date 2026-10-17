@@ -235,6 +235,59 @@ func TestStore_AlbumCRUD(t *testing.T) {
 	}
 }
 
+func TestStore_UpdateTrackDurationPreservesOtherFields(t *testing.T) {
+	dbPath := t.TempDir() + "/test.db"
+	store, err := New(dbPath, testLogger())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	artistID, _ := store.UpsertArtist(ctx, &domain.Artist{Name: "Duration Artist"})
+	albumID, _ := store.UpsertAlbum(ctx, &domain.Album{ArtistID: artistID, Title: "Duration Album"})
+	filePath := "/music/Duration Artist/Duration Album/01 - Duration Track.flac"
+	id, err := store.UpsertTrack(ctx, &domain.Track{
+		AlbumID:     albumID,
+		ArtistID:    artistID,
+		Title:       "Duration Track",
+		TrackNumber: 1,
+		Duration:    0,
+		FilePath:    filePath,
+		Bitrate:     1411,
+		FileSize:    25000000,
+		ISRC:        "US-ABC-12-99999",
+		ExternalIDs: map[string]string{"spotify": "track123"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := store.GetTrack(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := store.UpdateTrackDuration(ctx, id, 123456); err != nil {
+		t.Fatalf("UpdateTrackDuration: %v", err)
+	}
+	track, err := store.GetTrack(ctx, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if track.Duration != 123456 {
+		t.Errorf("duration = %d, want 123456", track.Duration)
+	}
+	if track.Title != "Duration Track" || track.ISRC != "US-ABC-12-99999" ||
+		track.AlbumID != albumID || track.ArtistID != artistID || track.TrackNumber != 1 ||
+		track.FilePath != filePath || track.Bitrate != 1411 || track.FileSize != 25000000 ||
+		track.ExternalIDs["spotify"] != "track123" {
+		t.Errorf("duration-only update clobbered fields: %+v", track)
+	}
+	if track.CreatedAt.IsZero() || track.UpdatedAt.Before(before.UpdatedAt) {
+		t.Errorf("timestamps = created %v updated %v (before %v)", track.CreatedAt, track.UpdatedAt, before.UpdatedAt)
+	}
+}
+
 func TestStore_TrackCRUD(t *testing.T) {
 	dbPath := t.TempDir() + "/test.db"
 	store, err := New(dbPath, testLogger())

@@ -4,6 +4,7 @@
 
 - Go 1.26+
 - Node.js 18+ (UI build only)
+- `ffprobe` (optional, for track-duration probing; bundled in the Docker image)
 - [staticcheck](https://staticcheck.io/) (optional, for linting)
 
 ## Build System
