@@ -26,6 +26,24 @@ func TestProviderCooldownLifecycle(t *testing.T) {
 	}
 }
 
+func TestProviderCooldownCoolingUntil(t *testing.T) {
+	c := NewProviderCooldown()
+	if got := c.CoolingUntil("spotify"); !got.IsZero() {
+		t.Fatalf("fresh cooldown expiry = %v, want zero", got)
+	}
+
+	c.MarkAfter("spotify", 2*time.Minute)
+	until := c.CoolingUntil("spotify")
+	if until.IsZero() || time.Until(until) <= 0 {
+		t.Fatalf("CoolingUntil = %v, want a future expiry", until)
+	}
+
+	var nilCooldown *ProviderCooldown
+	if got := nilCooldown.CoolingUntil("spotify"); !got.IsZero() {
+		t.Fatalf("nil cooldown expiry = %v, want zero", got)
+	}
+}
+
 func TestProviderCooldownExpiry(t *testing.T) {
 	orig := ProviderRateLimitCooldown
 	ProviderRateLimitCooldown = 20 * time.Millisecond
@@ -39,6 +57,9 @@ func TestProviderCooldownExpiry(t *testing.T) {
 	time.Sleep(40 * time.Millisecond)
 	if c.CoolingDown("musicbrainz") {
 		t.Error("cooldown should have expired")
+	}
+	if got := c.CoolingUntil("musicbrainz"); !got.IsZero() {
+		t.Errorf("expired CoolingUntil = %v, want zero", got)
 	}
 }
 

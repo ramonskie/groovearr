@@ -91,7 +91,8 @@ meta         = catalog.GetAlbumMetadata(albumID)    [SQLite only]
     +-- fresh matched-empty (StatusFresh, 0 rows) -> WARM, empty tracks list
     |
     +-- terminal (unmatched|failed) AND !terminalRetryElapsed -> local pending
-    |       |  no re-search, no re-enqueue (parked queue row keeps its due_at)
+    |       |  no re-search, no re-enqueue (unmatched keeps its parked queue row;
+    |       |  failed has no queue row and is re-armed only by cold-open gate/recheck)
     |       +-> local tracks, metadata_pending = true, metadata_terminal = true
     |
     +-- pending / no metadata row -> COLD path (chart 2)
@@ -102,9 +103,11 @@ rows is warm, not cold**, and is never re-fetched on open. `terminalRetryElapsed
 compares the terminal row's refresh/update time against `catalog.UnmatchedRetry`
 (90d), so opening an `unmatched`/`failed` album inside the window does not
 re-search the provider. That terminal-parked branch deliberately does **not**
-enqueue: the parked `metadata_refresh_queue` row already carries its 90-day
-`due_at`, and re-arming it here would let the engine re-search the provider within
-one interval (code: `terminalRetryParked` / `buildAlbumDiscovery`).
+enqueue: for `unmatched`, the parked `metadata_refresh_queue` row already carries
+its 90-day `due_at`, and re-arming it here would let the engine re-search the
+provider within one interval; `failed` has no queue row and is re-armed only by
+the cold-open gate after 90d or by an explicit recheck/manual refresh (code:
+`terminalRetryParked` / `buildAlbumDiscovery`).
 
 `MergeTracksScoped` is a pure function (`internal/catalog/merge.go`): no IO, no
 globals. Local tracks are indexed once by ISRC (matched against the **artist-wide**
@@ -180,7 +183,11 @@ Service.Start(ctx)  ->  loop goroutine                 (refresh/service.go; own 
                 outcome = RefreshAlbum(albumID)
                   matched                 -> FinishRefresh(fresh)            [row deleted]
                   no match                -> RetryRefresh(+UnmatchedRetry 90d)  [album_metadata=unmatched]
+                  coolingRetryError       -> RetryRefresh(at CoolingUntil)   [no failure counted]
+                  errTransientSearch      -> RetryRefresh(attempts+1, +BackoffFor(attempts))
+                                              [pending; never StatusFailed]
                   ctx cancelled/deadline  -> leave row untouched (re-claimed next run)
+                  ErrProviderBusy         -> RetryRefresh(+BusyRetry 30s)     [no failure counted]
                   ErrRateLimited / errAllCooling / ErrNoProviders
                                           -> RetryRefresh(+CooldownRetry 15m)  [no failure counted]
                   ErrAlbumNotFound        -> FinishRefresh(failed)          [terminal]
@@ -203,7 +210,8 @@ providers()                         live closure; empty -> ErrNoProviders
   |       fetchTracks(GetAlbumTracks, CallTimeout) -> materialize -> Matched
   |       tracklist error (not rate-limited) -> clearProviderLink(album)
   |         (next attempt falls back to a fresh search instead of staying stuck)
-  |       rate-limited -> return ErrRateLimited (link kept; not at fault)
+  |       rate-limited / ErrProviderBusy / DeadlineExceeded / Canceled
+  |         -> return the error (link kept; not the link's fault)
   |
   | 2. else: resolve local artist name + album title
   | 3. q = discovery.AlbumQuery{Artist: artistName, Title: album.Title}
@@ -224,18 +232,25 @@ providers()                         live closure; empty -> ErrNoProviders
   |           Single" matches "Échame La Culpa". A suffix is dropped only when
   |           delimited (a trailing `(...)`/`[...]` group, or after a dash/colon),
   |           so "New Edition", "First Edition" and "The Single" are preserved.
-  |           ArtistCompatible accepts an exact credit, a collaboration
-  |           containment, an article-only containment, or TWO shared
-  |           distinctive tokens — so collab credits ("Artist A" vs "Artist A &
-  |           Artist B" / `feat.`) match while a genuinely different artist is
-  |           rejected; a title-only match is also accepted when the library
-  |           artist is unknown/empty or the candidate omits the artist.)
+  |           ArtistCompatible accepts an exact credit (accents folded), a
+  |           core alphanumeric match, ANY act inside a collaboration, an
+  |           article-only containment, or TWO shared distinctive tokens — so
+  |           collab credits ("Roscoe" vs "Nelly, Roscoe", "Masta Ace" vs
+  |           "Eminem, J-Black, Masta Ace") match while a genuinely different
+  |           artist is rejected. Member splitting uses comma, " & ", " / ",
+  |           and feat/ft/featuring; "with"/"x" are not boundaries, so single
+  |           acts ("Dancing With Wolves", "Malcolm X Trio") are not split. A
+  |           title-only match is accepted when the library artist is
+  |           unknown/empty or the candidate omits the artist.)
   |       fetchTracks -> materialize -> Matched
   |
   + 4. classify no-match:
-        rate-limited seen -> return ErrRateLimited
+        parent ctx.Err()   -> return ctx.Err() (row untouched)
+        rate-limited seen  -> return ErrRateLimited
         tracklist error    -> return (retry with backoff)
-        tried == 0         -> searchErr or errAllCooling
+        tried == 0         -> transient search error or cooling-retry
+        searchErr != nil   -> transient provider search (BackoffFor; no StatusFailed)
+        skipped cooling    -> cooling-retry until the cooldown expiry (no count)
         otherwise          -> markUnmatched(album_metadata) ; Matched=false, nil
 ```
 

@@ -4,6 +4,10 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	"golang.org/x/text/runes"
+	"golang.org/x/text/transform"
+	"golang.org/x/text/unicode/norm"
 )
 
 // This file holds the pure, provider-agnostic album-result matcher extracted
@@ -34,7 +38,7 @@ func BestMatch(wantArtist, wantTitle string, candidates []AlbumCandidate) (int, 
 	if wantTitleKey == "" {
 		return 0, false
 	}
-	wantArtistKey := normalize(wantArtist)
+	wantArtistKey := normalizeArtist(wantArtist)
 
 	unknownArtist := -1
 	for i := range candidates {
@@ -45,7 +49,7 @@ func BestMatch(wantArtist, wantTitle string, candidates []AlbumCandidate) (int, 
 		if wantArtistKey == "" {
 			return i, true
 		}
-		candArtistKey := normalize(candidates[i].ArtistName)
+		candArtistKey := normalizeArtist(candidates[i].ArtistName)
 		if !ArtistCompatible(wantArtist, candidates[i].ArtistName) {
 			continue
 		}
@@ -69,27 +73,33 @@ func BestMatch(wantArtist, wantTitle string, candidates []AlbumCandidate) (int, 
 // ArtistCompatible reports whether a provider artist credit can refer to the
 // same act as the library artist. It accepts:
 //
-//   - an exact normalized credit;
-//   - a collaboration containment where the shorter credit is the whole-token
-//     prefix immediately before a space-delimited joiner
-//     ("Artist A" vs "Artist A & Artist B");
+//   - an exact normalized credit (accents folded, case/punctuation ignored);
+//   - a core alphanumeric match, so an acronym/punctuation variant such as
+//     "LL Cool J" vs "L.L. Cool J" still matches;
+//   - any act inside a collaboration credit, not only the first
+//     ("Roscoe" in "Nelly, Roscoe", "Masta Ace" in
+//     "Eminem, J-Black, Masta Ace"). Member splitting uses comma, " & ",
+//     " / ", and feat/ft/featuring only; "with"/"x" stay prefix tolerance so
+//     single acts ("Dancing With Wolves", "Malcolm X Trio") are not split, and a
+//     compact symbol inside one act ("AC/DC") is never a boundary;
 //   - an article-only containment whose only added tokens are articles/stopwords
 //     ("The Cure" vs "Cure");
 //   - at least TWO shared significant tokens, so a reordered/reformatted
 //     collaboration still matches ("Simon & Garfunkel" vs "Garfunkel & Simon").
 //
 // It rejects a bare containment ("Air" vs "Air Supply", "King" vs "King
-// Crimson"), a single shared generic token, and an overlap that is only
-// stopwords/joiners ("The Cure" vs "The Beatles"). Raw credits are compared for
-// the collaboration branch because normalize() strips the "&", "," and "/"
-// joiners that check relies on. It is provider-agnostic (AGENTS §1).
+// Crimson"), a single shared generic token outside a collaboration, and an
+// overlap that is only stopwords/joiners ("The Cure" vs "The Beatles"). Raw
+// credits are compared for the collaboration branch because normalize() strips
+// the "&", "," and "/" joiners that check relies on. It is provider-agnostic
+// (AGENTS §1).
 func ArtistCompatible(wantRaw, candRaw string) bool {
-	want := normalize(wantRaw)
-	cand := normalize(candRaw)
+	want := normalizeArtist(wantRaw)
+	cand := normalizeArtist(candRaw)
 	if want == "" || cand == "" {
 		return true
 	}
-	if want == cand {
+	if want == cand || coreArtistMatch(wantRaw, candRaw) {
 		return true
 	}
 	if collabContains(wantRaw, candRaw) {
@@ -101,45 +111,105 @@ func ArtistCompatible(wantRaw, candRaw string) bool {
 	return shareTwoSignificantTokens(want, cand)
 }
 
-// collabContains reports whether one raw credit is a collaboration of the
-// other: the shorter credit is the WHOLE-TOKEN PREFIX immediately before the
-// longer credit's first space-delimited multi-credit joiner. A joiner must be
-// space-delimited (" & ", " / ", ", ") or a whitespace-delimited word joiner
-// ("feat", "ft", "featuring", "with", "x"); a compact symbol inside a single
-// act ("AC/DC") is NOT a joiner, so "AC/DC" does not bind to "AC". A
-// containment that is not the prefix before a joiner is left to
-// articleOnlyContains.
+// collabContains reports whether one raw credit is a collaboration containing
+// the other. A joiner must be space-delimited (" & ", " / ", ", ") or a
+// whitespace-delimited word joiner ("feat", "ft", "featuring", "with", "x"); a
+// compact symbol inside a single act ("AC/DC") is NOT a joiner, so "AC/DC" does
+// not bind to "AC". A containment that is not a whole collaboration member is
+// left to articleOnlyContains.
 //
-// Residual tolerance (intentional, not a bug): a short credit that happens to
-// be the prefix before a space-delimited joiner still matches — for example
-// "Earth" vs "Earth, Wind & Fire" and "Tyler" vs "Tyler, The Creator". This is
-// an alias tolerance for the common "lead act, featured act" spelling.
+// Every member is accepted, not only the first: "Roscoe" matches
+// "Nelly, Roscoe", and "Masta Ace" matches "Eminem, J-Black, Masta Ace". The
+// exact title match is the other half of BestMatch, so an alias inside a
+// collaboration credit is safe here.
 func collabContains(aRaw, bRaw string) bool {
-	a := normalize(aRaw)
-	b := normalize(bRaw)
+	a := normalizeArtist(aRaw)
+	b := normalizeArtist(bRaw)
 	switch {
 	case containsTokenSeq(a, b):
-		return collabPrefixIs(aRaw, b)
+		return collabCreditMatches(aRaw, b) || collabPrefixIs(aRaw, b)
 	case containsTokenSeq(b, a):
-		return collabPrefixIs(bRaw, a)
+		return collabCreditMatches(bRaw, a) || collabPrefixIs(bRaw, a)
 	}
 	return false
 }
 
-// collabPrefixIs reports whether shorterNorm is exactly the normalized credit
-// preceding longerRaw's first space-delimited joiner. A longerRaw with no such
-// joiner never qualifies.
-func collabPrefixIs(longerRaw, shorterNorm string) bool {
-	idx := firstCreditJoinerIndex(longerRaw)
-	if idx < 0 {
+// collabCreditMatches reports whether shorterNorm is one whole act inside
+// longerRaw's collaboration credit. A longerRaw with no joiner (one act) never
+// qualifies, so compact names such as "AC/DC" are not split.
+func collabCreditMatches(longerRaw, shorterNorm string) bool {
+	parts := collabCreditParts(longerRaw)
+	if len(parts) < 2 {
 		return false
 	}
-	return normalize(longerRaw[:idx]) == shorterNorm
+	for _, part := range parts {
+		if normalizeArtist(part) == shorterNorm {
+			return true
+		}
+	}
+	return false
 }
 
-// creditJoinerWords are whitespace-delimited tokens that join two credits.
+// collabCreditParts splits a raw credit into acts. Member extraction uses only
+// strong joiners (comma, " & ", " / ", feat/ft/featuring); "with" and "x" are
+// NOT split here because they occur inside single-act names ("Dancing With
+// Wolves", "Malcolm X Trio"). A leading strong joiner after a delimiter is
+// skipped, so "A, feat. B" still yields B.
+func collabCreditParts(raw string) []string {
+	var parts []string
+	rest := strings.TrimSpace(raw)
+	for rest != "" {
+		idx := firstMemberJoinerIndex(rest)
+		if idx < 0 {
+			parts = append(parts, rest)
+			break
+		}
+		if idx == 0 {
+			if len(parts) == 0 {
+				// A joiner word at the very start is the act's own name
+				// ("Feat", "With Confidence"), not a collaboration boundary.
+				parts = append(parts, rest)
+				break
+			}
+			rest = dropLeadingJoiner(rest, memberJoinerWords)
+			continue
+		}
+		parts = append(parts, strings.TrimSpace(rest[:idx]))
+		rest = dropLeadingJoiner(strings.TrimSpace(rest[idx:]), memberJoinerWords)
+	}
+	return parts
+}
+
+// dropLeadingJoiner removes one space-delimited symbol or member-word joiner
+// from the front of rest. It returns rest unchanged when no joiner is present.
+func dropLeadingJoiner(rest string, words map[string]struct{}) string {
+	rest = strings.TrimSpace(rest)
+	switch {
+	case strings.HasPrefix(rest, "&"), strings.HasPrefix(rest, "/"), strings.HasPrefix(rest, ","):
+		return strings.TrimSpace(rest[1:])
+	}
+	fields := strings.Fields(rest)
+	if len(fields) == 0 {
+		return rest
+	}
+	if _, ok := words[normalize(fields[0])]; ok {
+		return strings.TrimSpace(strings.Join(fields[1:], " "))
+	}
+	return rest
+}
+
+// creditJoinerWords are whitespace-delimited tokens that join two credits for
+// the broad prefix tolerance. "with" and "x" stay here so the old
+// "Artist A" vs "Artist A x Artist B" prefix match keeps working.
 var creditJoinerWords = map[string]struct{}{
 	"feat": {}, "ft": {}, "featuring": {}, "with": {}, "x": {},
+}
+
+// memberJoinerWords are the joiners strong enough to split a credit into
+// independent acts for any-member matching. "with"/"x" are deliberately absent:
+// they are common inside a single act's name.
+var memberJoinerWords = map[string]struct{}{
+	"feat": {}, "ft": {}, "featuring": {},
 }
 
 // hasCreditJoiner reports whether a raw credit carries a SPACE-DELIMITED
@@ -152,10 +222,22 @@ func hasCreditJoiner(raw string) bool {
 
 // firstCreditJoinerIndex returns the byte index at which the first
 // space-delimited multi-credit joiner begins in raw, or -1 when raw has none.
-// Word joiners match as whole whitespace-delimited tokens; symbol joiners only
-// when surrounded by whitespace (" & ", " / ") or, for a comma, when followed
-// by a space.
 func firstCreditJoinerIndex(raw string) int {
+	return firstJoinerIndex(raw, creditJoinerWords)
+}
+
+// firstMemberJoinerIndex is firstCreditJoinerIndex restricted to the strong
+// member-splitting joiners (comma, " & ", " / ", feat/ft/featuring).
+func firstMemberJoinerIndex(raw string) int {
+	return firstJoinerIndex(raw, memberJoinerWords)
+}
+
+// firstJoinerIndex returns the byte index at which the first space-delimited
+// multi-credit joiner from words begins in raw, or -1 when raw has none. Word
+// joiners match as whole whitespace-delimited tokens; symbol joiners only when
+// surrounded by whitespace (" & ", " / ") or, for a comma, when followed by a
+// space.
+func firstJoinerIndex(raw string, words map[string]struct{}) int {
 	idx := -1
 	for i := 0; i < len(raw); {
 		for i < len(raw) && (raw[i] == ' ' || raw[i] == '\t') {
@@ -168,7 +250,7 @@ func firstCreditJoinerIndex(raw string) int {
 		if start >= i {
 			break
 		}
-		if _, ok := creditJoinerWords[normalize(raw[start:i])]; ok && (idx < 0 || start < idx) {
+		if _, ok := words[normalize(raw[start:i])]; ok && (idx < 0 || start < idx) {
 			idx = start
 		}
 	}
@@ -178,6 +260,16 @@ func firstCreditJoinerIndex(raw string) int {
 		}
 	}
 	return idx
+}
+
+// collabPrefixIs is the broad prefix tolerance: the shorter credit is exactly
+// the normalized act before the first joiner, including "with"/"x".
+func collabPrefixIs(longerRaw, shorterNorm string) bool {
+	idx := firstCreditJoinerIndex(longerRaw)
+	if idx <= 0 {
+		return false
+	}
+	return normalizeArtist(longerRaw[:idx]) == shorterNorm
 }
 
 // containsTokenSeq reports whether haystack contains needle as a contiguous run
@@ -196,8 +288,8 @@ func containsTokenSeq(haystack, needle string) bool {
 // credit that adds a real word ("Air Supply" ⊅ "Air", "New Order" ⊅ "Order") is
 // a different act and is rejected.
 func articleOnlyContains(aRaw, bRaw string) bool {
-	a := normalize(aRaw)
-	b := normalize(bRaw)
+	a := normalizeArtist(aRaw)
+	b := normalizeArtist(bRaw)
 	switch {
 	case containsTokenSeq(a, b):
 		return !hasCreditJoiner(aRaw) && stopwordExtrasOnly(a, b)
@@ -311,6 +403,51 @@ func normalize(s string) string {
 	return strings.Join(strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
 	}), " ")
+}
+
+// foldAccents decomposes accented letters and drops the combining marks, so
+// "Derülo" and "Derulo" compare equal. Titles keep their accents in
+// NormalizeTitle; this helper is for artist credits, where the same act is
+// routinely spelled both ways.
+func foldAccents(s string) string {
+	if s == "" {
+		return ""
+	}
+	t := transform.Chain(norm.NFD, runes.Remove(runes.In(unicode.Mn)))
+	out, _, _ := transform.String(t, s)
+	return out
+}
+
+// normalizeArtist is normalize plus accent folding. It is the artist-side
+// comparison key; title normalization stays faithful to the title bytes.
+func normalizeArtist(s string) string {
+	return normalize(foldAccents(s))
+}
+
+// coreArtist is the strict alphanumeric form of an artist credit: accents
+// folded, lowercase, and every non-alphanumeric character removed. It catches
+// punctuation/acronym variants ("L.L. Cool J" vs "LL Cool J") that tokenization
+// would otherwise split into different keys.
+func coreArtist(s string) string {
+	return strings.Map(func(r rune) rune {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) {
+			return unicode.ToLower(r)
+		}
+		return -1
+	}, foldAccents(s))
+}
+
+// coreArtistMatch accepts a punctuation/acronym variant only when both credits
+// have at least two tokens and the dense core is long enough. That keeps
+// "LL Cool J" vs "L.L. Cool J" working while rejecting distinct short acts such
+// as "Mia" vs "M.I.A." or "A" vs "A+".
+func coreArtistMatch(aRaw, bRaw string) bool {
+	aCore, bCore := coreArtist(aRaw), coreArtist(bRaw)
+	if utf8.RuneCountInString(aCore) < 4 || aCore != bCore {
+		return false
+	}
+	return len(strings.Fields(normalizeArtist(aRaw))) >= 2 &&
+		len(strings.Fields(normalizeArtist(bRaw))) >= 2
 }
 
 // titleVersionTokens are generic SAME-CONTENT edition/format markers providers

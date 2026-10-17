@@ -145,11 +145,25 @@ func TestArtistCompatible(t *testing.T) {
 	}{
 		{"exact", "Daft Punk", "Daft Punk", true},
 		{"exact case/punctuation folded", "AC/DC", "AC DC", true},
-		{"accents are not folded (faithful port)", "Sigur Rós", "sigur ros", false},
+		{"accents folded", "Sigur Rós", "sigur ros", true},
+		{"accented artist", "Jason Derulo", "Jason Derülo", true},
+		{"acronym punctuation", "LL Cool J", "L.L. Cool J", true},
 		{"collaboration symbol", "Artist A", "Artist A & Artist B", true},
 		{"collaboration symbol reverse", "Artist A & Artist B", "Artist A", true},
 		{"collaboration feat", "Artist A", "Artist A feat. Artist B", true},
 		{"collaboration featuring", "Artist A", "Artist A featuring Artist B", true},
+		{"collaboration second act", "Roscoe", "Nelly, Roscoe", true},
+		{"collaboration third act", "Masta Ace", "Eminem, J‐Black, Masta Ace", true},
+		{"collaboration second act with feat", "BrainCrash", "Dr. Peacock feat. BrainCrash", true},
+		{"collaboration any act", "Fire", "Earth, Wind & Fire", true},
+		{"collaboration comma then feat", "B", "A, feat. B", true},
+		{"collaboration amp then feat", "B", "A & feat. B", true},
+		{"collaboration different act", "Madonna", "Nelly, Roscoe", false},
+		{"leading joiner word is not a boundary", "Confidence", "With Confidence", false},
+		{"single act with x not split", "Trio", "Malcolm X Trio", false},
+		{"single act with with not split", "Wolves", "Dancing With Wolves", false},
+		{"prefix tolerance retained", "Malcolm", "Malcolm X", true},
+		{"distinct short acronym", "Mia", "M.I.A.", false},
 		{"article-only", "The Cure", "Cure", true},
 		{"article-only reverse", "Cure", "The Cure", true},
 		{"reorder two significant tokens", "Simon & Garfunkel", "Garfunkel & Simon", true},
@@ -168,6 +182,58 @@ func TestArtistCompatible(t *testing.T) {
 		if got := ArtistCompatible(tt.want, tt.candidate); got != tt.ok {
 			t.Errorf("%s: ArtistCompatible(%q, %q) = %v, want %v", tt.name, tt.want, tt.candidate, got, tt.ok)
 		}
+	}
+}
+
+// TestBestMatch_CollaborationCreditOrder pins the real 281-album findings:
+// MusicBrainz lists these albums under a multi-act credit, and the wanted act is
+// not the first. The exact title match makes each one a valid album match.
+func TestBestMatch_CollaborationCreditOrder(t *testing.T) {
+	cases := []struct {
+		artist string
+		title  string
+		credit string
+	}{
+		{"Roscoe", "#1 / Training Day (In My Hood)", "Nelly, Roscoe"},
+		{"Chrono", "Das Boot EP", "Dr. Peacock, Chrono, Lano"},
+		{"Masta Ace", "Hellbound", "Eminem, J‐Black, Masta Ace"},
+		{"BrainCrash", "Italy EP", "Dr. Peacock, BrainCrash"},
+		{"Babyface", "Love, Marriage & Divorce", "Toni Braxton, Babyface"},
+		{"Hyrule War", "Unite! EP", "Dr. Peacock, Hyrule War"},
+		{"Mr. Ivex", "Vive La Frenchcore EP 2016", "Dr. Peacock, Mr. Ivex"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.artist, func(t *testing.T) {
+			idx, ok := BestMatch(tc.artist, tc.title, []AlbumCandidate{
+				{ArtistName: tc.credit, Title: tc.title},
+			})
+			if !ok || idx != 0 {
+				t.Fatalf("BestMatch(%q, %q, credit %q) = (%d,%v), want (0,true)",
+					tc.artist, tc.title, tc.credit, idx, ok)
+			}
+		})
+	}
+}
+
+// TestBestMatch_ArtistNormalization covers accent and punctuation variants that
+// the same provider spelling can produce.
+func TestBestMatch_ArtistNormalization(t *testing.T) {
+	cases := []struct {
+		artist string
+		credit string
+		title  string
+	}{
+		{"LL Cool J", "L.L. Cool J", "Around the Way Girl"},
+		{"Jason Derulo", "Jason Derülo", "Jason Derülo"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.artist, func(t *testing.T) {
+			if _, ok := BestMatch(tc.artist, tc.title, []AlbumCandidate{
+				{ArtistName: tc.credit, Title: tc.title},
+			}); !ok {
+				t.Fatalf("BestMatch(%q, %q, credit %q) = false, want true", tc.artist, tc.title, tc.credit)
+			}
+		})
 	}
 }
 

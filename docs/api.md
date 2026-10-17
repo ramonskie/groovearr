@@ -752,17 +752,21 @@ and **no** provider call (see below).
   `pending` | `fresh` | `stale` | `unmatched` | `failed` (empty string when the
   album has no catalog metadata row yet).
 - `metadata_terminal` — `true` when `metadata_status` is `unmatched` or `failed`:
-  a terminal match failure that will not materialize again until its long retry
-  (90d, `catalog.UnmatchedRetry`) elapses. It is `false` for a cold/pending album
-  (still materializing) and for a warm `fresh`/`stale` read. The UI uses it to
-  render an accurate parked state instead of an indefinite "fetching" spinner.
+  a terminal match failure. `unmatched` is retried after the long interval
+  (90d, `catalog.UnmatchedRetry`). `failed` has no queue row and is not
+  auto-retried, but a cold open re-searches it after the same 90d read gate; a
+  recheck/manual refresh re-arms it sooner. It is `false` for a cold/pending
+  album (still materializing) and for a warm `fresh`/`stale` read. The UI uses it
+  to render an accurate parked state instead of an indefinite "fetching" spinner.
 - A matched album is served from the catalog **even when its metadata is older
   than the soft TTL** (`catalog.album_refresh_days`, default 30d): the stale rows
   are returned immediately and a low-priority refresh is enqueued behind the
-  response. An album parked `unmatched`/`failed` before its long retry elapses is
+  response. An album parked `unmatched`/`failed` before the read gate elapses is
   also served without a provider call — its persisted metadata row plus local
-  library tracks, never re-searched on open, and **not** re-enqueued (the parked
-  queue row keeps its own 90-day `due_at`).
+  library tracks, never re-searched on open, and **not** re-enqueued. Only
+  `unmatched` keeps a parked queue row with a 90-day `due_at`; `failed` has no
+  queue row and is re-searched by a cold open after the same read gate or by a
+  recheck/manual refresh.
 
 **Errors**:
 - `400` — invalid album ID.

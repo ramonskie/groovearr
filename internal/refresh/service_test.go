@@ -257,6 +257,19 @@ func (p *fakeProvider) GetAlbumTracks(context.Context, string) ([]discovery.Trac
 	return p.tracks, nil
 }
 
+// cancelingProvider cancels the parent context during SearchAlbums, simulating
+// shutdown mid-call. It returns the parent cancellation so the engine must leave
+// the queue row untouched rather than classifying it as a transient search.
+type cancelingProvider struct {
+	fakeProvider
+	cancel context.CancelFunc
+}
+
+func (p *cancelingProvider) SearchAlbums(context.Context, discovery.AlbumQuery, int) ([]discovery.AlbumResult, error) {
+	p.cancel()
+	return nil, context.Canceled
+}
+
 // fakeLibrary is a minimal Library backed by maps.
 type fakeLibrary struct {
 	albums  map[int64]*domain.Album
@@ -271,15 +284,21 @@ func (l *fakeLibrary) GetArtist(_ context.Context, id int64) (*domain.Artist, er
 	return l.artists[id], nil
 }
 
-// fakeCooldown records marks and answers CoolingDown from a set.
+// fakeCooldown records marks and answers CoolingDown from a set. until is the
+// optional cooldown expiry used to test scheduling at the real release time.
 type fakeCooldown struct {
 	cooling map[string]bool
+	until   map[string]time.Time
 	marks   []string
 }
 
-func newFakeCooldown() *fakeCooldown { return &fakeCooldown{cooling: map[string]bool{}} }
+func newFakeCooldown() *fakeCooldown {
+	return &fakeCooldown{cooling: map[string]bool{}, until: map[string]time.Time{}}
+}
 
 func (c *fakeCooldown) CoolingDown(name string) bool { return c.cooling[name] }
+
+func (c *fakeCooldown) CoolingUntil(name string) time.Time { return c.until[name] }
 
 func (c *fakeCooldown) MarkAfter(name string, _ time.Duration) { c.marks = append(c.marks, name) }
 
@@ -301,6 +320,14 @@ func dueAlbumItem(entityID int64) catalog.RefreshItem {
 		Reason:     catalog.ReasonEvent,
 		Priority:   catalog.PriorityDefault,
 		DueAt:      fixedNow.Add(-time.Minute),
+	}
+}
+
+// noMatchLibrary is the minimal album+artist pair for no-match classifications.
+func noMatchLibrary() *fakeLibrary {
+	return &fakeLibrary{
+		albums:  map[int64]*domain.Album{42: {ID: 42, ArtistID: 7, Title: "Album One"}},
+		artists: map[int64]*domain.Artist{7: {ID: 7, Name: "Artist One"}},
 	}
 }
 
@@ -433,6 +460,268 @@ func TestService_ProcessBatch_SkipsCoolingProviderAndReschedules(t *testing.T) {
 	}
 	if len(store.finishes) != 0 {
 		t.Fatalf("finishes = %+v, want none", store.finishes)
+	}
+}
+
+// TestService_ProcessBatch_BusySearchWithOtherProviderReschedules is the
+// root-cause-1 regression: one provider returns a definitive empty result while
+// another is transiently busy. The album must reschedule on BusyRetry, not park
+// as unmatched for 90 days.
+func TestService_ProcessBatch_BusySearchWithOtherProviderReschedules(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	empty := &fakeProvider{name: "alpha"}
+	busy := &fakeProvider{name: "beta", searchErr: errors.Join(metadata.ErrProviderBusy, errors.New("HTTP 503"))}
+	svc := newTestService(store, noMatchLibrary(), Options{}, empty, busy)
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta != nil && meta.RefreshStatus == catalog.StatusUnmatched {
+		t.Fatalf("meta parked unmatched; a busy provider must reschedule")
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 0 {
+		t.Fatalf("retries = %+v, want one with attempts unchanged", store.retries)
+	}
+	if want := fixedNow.Add(DefaultOptions().BusyRetry); !store.retries[0].next.Equal(want) {
+		t.Fatalf("next = %v, want BusyRetry %v", store.retries[0].next, want)
+	}
+	if len(store.finishes) != 0 {
+		t.Fatalf("finishes = %+v, want none", store.finishes)
+	}
+}
+
+// TestService_ProcessBatch_SearchErrorWithOtherProviderReschedules covers a
+// generic transient search error on one provider while another returned empty.
+// It must retry with backoff, not park unmatched.
+func TestService_ProcessBatch_SearchErrorWithOtherProviderReschedules(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	empty := &fakeProvider{name: "alpha"}
+	broken := &fakeProvider{name: "beta", searchErr: errors.New("beta boom")}
+	svc := newTestService(store, noMatchLibrary(), Options{}, empty, broken)
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta != nil && meta.RefreshStatus == catalog.StatusFailed {
+		t.Fatalf("meta = %+v, want a non-terminal retry", meta)
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 1 {
+		t.Fatalf("retries = %+v, want one transient retry with attempts=1", store.retries)
+	}
+	if want := fixedNow.Add(catalog.BackoffFor(1)); !store.retries[0].next.Equal(want) {
+		t.Fatalf("next = %v, want BackoffFor(1) %v", store.retries[0].next, want)
+	}
+	if len(store.finishes) != 0 {
+		t.Fatalf("finishes = %+v, want none", store.finishes)
+	}
+}
+
+// TestService_ProcessBatch_TransientSearchNeverTerminal proves a transient
+// provider error never consumes the StatusFailed budget, even at a high attempt
+// count, and that the retry delay escalates instead of churning at 15m.
+func TestService_ProcessBatch_TransientSearchNeverTerminal(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	store.queue[1].Attempts = 10
+	svc := newTestService(store, noMatchLibrary(), Options{},
+		&fakeProvider{name: "alpha"}, &fakeProvider{name: "beta", searchErr: errors.New("beta boom")})
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta != nil && meta.RefreshStatus == catalog.StatusFailed {
+		t.Fatalf("meta = %+v, a transient search error must not fail the album", meta)
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 11 {
+		t.Fatalf("retries = %+v, want attempts=11", store.retries)
+	}
+	if want := fixedNow.Add(catalog.BackoffFor(11)); !store.retries[0].next.Equal(want) {
+		t.Fatalf("next = %v, want capped BackoffFor(11) %v", store.retries[0].next, want)
+	}
+	if len(store.finishes) != 0 {
+		t.Fatalf("finishes = %+v, want none", store.finishes)
+	}
+}
+
+// TestService_ProcessBatch_CoolingProviderWithOtherProviderReschedules covers a
+// skipped cooling provider while another returned empty: the skipped provider
+// may have matched, so the item must reschedule on CooldownRetry.
+func TestService_ProcessBatch_CoolingProviderWithOtherProviderReschedules(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	empty := &fakeProvider{name: "beta"}
+	cd := newFakeCooldown()
+	cd.cooling["alpha"] = true
+	svc := newTestService(store, noMatchLibrary(), Options{}, &fakeProvider{name: "alpha"}, empty)
+	svc.cooldown = cd
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta != nil && meta.RefreshStatus == catalog.StatusUnmatched {
+		t.Fatalf("meta parked unmatched; a cooling provider must reschedule")
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 0 {
+		t.Fatalf("retries = %+v, want one with attempts unchanged", store.retries)
+	}
+	if want := fixedNow.Add(DefaultOptions().CooldownRetry); !store.retries[0].next.Equal(want) {
+		t.Fatalf("next = %v, want CooldownRetry %v", store.retries[0].next, want)
+	}
+	if len(store.finishes) != 0 {
+		t.Fatalf("finishes = %+v, want none", store.finishes)
+	}
+}
+
+// TestService_ProcessItem_ParentCancellationLeavesRowUntouched proves a parent
+// cancellation during a provider call wins over the transient-search
+// classification: the claimed row must remain for the next run.
+func TestService_ProcessItem_ParentCancellationLeavesRowUntouched(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	ctx, cancel := context.WithCancel(context.Background())
+	p := &cancelingProvider{fakeProvider: fakeProvider{name: "alpha"}, cancel: cancel}
+	svc := newTestService(store, noMatchLibrary(), Options{}, p)
+
+	handled, err := svc.processBatch(ctx)
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil (row untouched)", handled, err)
+	}
+	if len(store.retries) != 0 || len(store.finishes) != 0 {
+		t.Fatalf("retries=%+v finishes=%+v, want none", store.retries, store.finishes)
+	}
+	if _, ok := store.queue[1]; !ok {
+		t.Fatal("queue row was removed; a parent cancellation must leave it claimable")
+	}
+}
+
+// TestService_ProcessBatch_RateLimitWinsOverEmptyProvider pins the mixed-class
+// precedence: a rate-limited search is classified as a rate limit even when
+// another provider returned a definitive empty result.
+func TestService_ProcessBatch_RateLimitWinsOverEmptyProvider(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	limited := &fakeProvider{name: "alpha", searchErr: metadata.NewRateLimitError("alpha", time.Minute, "429")}
+	cd := newFakeCooldown()
+	svc := newTestService(store, noMatchLibrary(), Options{}, limited, &fakeProvider{name: "beta"})
+	svc.cooldown = cd
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	if len(cd.marks) != 1 || cd.marks[0] != "alpha" {
+		t.Fatalf("cooldown marks = %v, want [alpha]", cd.marks)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta != nil && meta.RefreshStatus == catalog.StatusUnmatched {
+		t.Fatalf("meta parked unmatched; a rate limit must reschedule")
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 0 {
+		t.Fatalf("retries = %+v, want one rate-limit retry", store.retries)
+	}
+}
+
+// TestService_ProcessBatch_SearchErrorWinsOverCooling pins the other mixed
+// precedence: a transient search error outranks a cooling skip.
+func TestService_ProcessBatch_SearchErrorWinsOverCooling(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	cd := newFakeCooldown()
+	cd.cooling["alpha"] = true
+	cd.until["alpha"] = fixedNow.Add(4 * time.Hour)
+	svc := newTestService(store, noMatchLibrary(), Options{},
+		&fakeProvider{name: "alpha"}, &fakeProvider{name: "beta", searchErr: errors.New("beta boom")})
+	svc.cooldown = cd
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	if len(store.retries) != 1 || store.retries[0].attempts != 1 {
+		t.Fatalf("retries = %+v, want one transient retry with attempts=1", store.retries)
+	}
+	if want := fixedNow.Add(catalog.BackoffFor(1)); !store.retries[0].next.Equal(want) {
+		t.Fatalf("next = %v, want transient BackoffFor(1) %v (not the 4h cooling expiry)", store.retries[0].next, want)
+	}
+}
+
+// TestService_ProcessBatch_CoolingProviderSchedulesAtExpiry proves the queue
+// sleeps until the skipped provider's cooldown expires instead of polling every
+// CooldownRetry.
+func TestService_ProcessBatch_CoolingProviderSchedulesAtExpiry(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	cd := newFakeCooldown()
+	until := fixedNow.Add(4 * time.Hour)
+	cd.cooling["alpha"] = true
+	cd.until["alpha"] = until
+	svc := newTestService(store, noMatchLibrary(), Options{},
+		&fakeProvider{name: "alpha"}, &fakeProvider{name: "beta"})
+	svc.cooldown = cd
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	if len(store.retries) != 1 || !store.retries[0].next.Equal(until) {
+		t.Fatalf("retries = %+v, want next = cooldown expiry %v", store.retries, until)
+	}
+}
+
+// TestService_ProcessBatch_AllProvidersEmptyMarksUnmatched guards the genuine
+// no-match case: every provider was actually searched and returned empty, so the
+// album parks on the long retry as before.
+func TestService_ProcessBatch_AllProvidersEmptyMarksUnmatched(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	svc := newTestService(store, noMatchLibrary(), Options{},
+		&fakeProvider{name: "alpha"}, &fakeProvider{name: "beta"})
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta == nil || meta.RefreshStatus != catalog.StatusUnmatched {
+		t.Fatalf("meta = %+v, want unmatched", meta)
+	}
+	if len(store.retries) != 1 || !store.retries[0].next.Equal(fixedNow.Add(catalog.UnmatchedRetry)) {
+		t.Fatalf("retries = %+v, want the 90-day unmatched retry", store.retries)
+	}
+}
+
+// TestService_ProcessBatch_SearchErrorStillFallsThroughToMatch guards the loop
+// behavior: a search error on one provider must not prevent a later provider
+// from matching.
+func TestService_ProcessBatch_SearchErrorStillFallsThroughToMatch(t *testing.T) {
+	store := newFakeStore()
+	store.enqueue(dueAlbumItem(42))
+	broken := &fakeProvider{name: "alpha", searchErr: errors.New("alpha boom")}
+	good := &fakeProvider{name: "beta", searchResults: []discovery.AlbumResult{
+		{ProviderID: "b1", ArtistName: "Artist One", Title: "Album One"},
+	}, tracks: []discovery.TrackInfo{{ProviderID: "t1", Title: "Track One", TrackNumber: 1}}}
+	svc := newTestService(store, noMatchLibrary(), Options{}, broken, good)
+
+	handled, err := svc.processBatch(context.Background())
+	if err != nil || handled != 1 {
+		t.Fatalf("handled=%d err=%v, want 1/nil", handled, err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta == nil || meta.RefreshStatus != catalog.StatusFresh {
+		t.Fatalf("meta = %+v, want fresh from the second provider", meta)
+	}
+	if len(store.retries) != 0 {
+		t.Fatalf("retries = %+v, want none after a match", store.retries)
 	}
 }
 
@@ -1185,6 +1474,66 @@ func TestService_RefreshAlbum_RateLimitKeepsProviderLink(t *testing.T) {
 	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
 	if meta.ProviderAlbumID != "pa1" {
 		t.Fatalf("rate limit cleared the link: %+v", meta)
+	}
+}
+
+// TestService_RefreshAlbum_BusyKeepsProviderLink proves a transient busy error
+// on the tracklist call does not discard a valid link.
+func TestService_RefreshAlbum_BusyKeepsProviderLink(t *testing.T) {
+	store := newFakeStore()
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID: 42, ProviderName: "alpha", ProviderAlbumID: "pa1",
+		RefreshStatus: catalog.StatusStale,
+	}
+	p := &fakeProvider{name: "alpha", tracksErr: errors.Join(metadata.ErrProviderBusy, errors.New("HTTP 503"))}
+	svc := newTestService(store, &fakeLibrary{}, Options{}, p)
+
+	if _, err := svc.RefreshAlbum(context.Background(), 42); !errors.Is(err, metadata.ErrProviderBusy) {
+		t.Fatalf("err = %v, want ErrProviderBusy", err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta.ProviderAlbumID != "pa1" {
+		t.Fatalf("busy error cleared the link: %+v", meta)
+	}
+}
+
+// TestService_RefreshAlbum_CancelKeepsProviderLink proves a parent cancellation
+// does not discard a valid link.
+func TestService_RefreshAlbum_CancelKeepsProviderLink(t *testing.T) {
+	store := newFakeStore()
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID: 42, ProviderName: "alpha", ProviderAlbumID: "pa1",
+		RefreshStatus: catalog.StatusStale,
+	}
+	p := &fakeProvider{name: "alpha", tracksErr: context.Canceled}
+	svc := newTestService(store, &fakeLibrary{}, Options{}, p)
+
+	if _, err := svc.RefreshAlbum(context.Background(), 42); !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want Canceled", err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta.ProviderAlbumID != "pa1" {
+		t.Fatalf("cancel cleared the link: %+v", meta)
+	}
+}
+
+// TestService_RefreshAlbum_TimeoutKeepsProviderLink proves a per-call timeout
+// does not discard a valid link.
+func TestService_RefreshAlbum_TimeoutKeepsProviderLink(t *testing.T) {
+	store := newFakeStore()
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID: 42, ProviderName: "alpha", ProviderAlbumID: "pa1",
+		RefreshStatus: catalog.StatusStale,
+	}
+	p := &fakeProvider{name: "alpha", tracksErr: context.DeadlineExceeded}
+	svc := newTestService(store, &fakeLibrary{}, Options{}, p)
+
+	if _, err := svc.RefreshAlbum(context.Background(), 42); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("err = %v, want DeadlineExceeded", err)
+	}
+	meta, _ := store.GetAlbumMetadata(context.Background(), 42)
+	if meta.ProviderAlbumID != "pa1" {
+		t.Fatalf("timeout cleared the link: %+v", meta)
 	}
 }
 

@@ -152,6 +152,22 @@ func (c *ProviderCooldown) CoolingDown(name string) bool {
 	return time.Now().Before(c.until[name])
 }
 
+// CoolingUntil returns the current cooldown expiry for the named provider, or
+// the zero time when it is not cooling. Callers that schedule work around a
+// cooldown use this instead of re-probing on a fixed interval.
+func (c *ProviderCooldown) CoolingUntil(name string) time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	until := c.until[name]
+	if !time.Now().Before(until) {
+		return time.Time{}
+	}
+	return until
+}
+
 // Mark puts the named provider in cooldown for ProviderRateLimitCooldown
 // (escalating on repeated hits). No-op for an empty name.
 func (c *ProviderCooldown) Mark(name string) {

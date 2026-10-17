@@ -216,12 +216,20 @@ Tolerances (code-verified):
   including the format words `- Single` / `- EP`. This is what lets
   `Échame la culpa - Single` match the provider release group `Échame La Culpa`.
   A bare trailing word (`New Edition`, `The Single`) is preserved.
-- **Artist** — `ArtistCompatible` accepts an exact normalized credit; a
-  collaboration containment where the shorter credit is the whole-token prefix
-  before a space-delimited joiner (` & `, ` / `, `, `, `feat`/`ft`/`featuring`/
-  `with`/`x`); an article-only containment (`The Cure` ⊃ `Cure`); or at least TWO
-  shared distinctive tokens (`Simon & Garfunkel` vs `Garfunkel & Simon`). A single
-  shared generic token is rejected (`King` vs `King Crimson`).
+- **Artist** — `ArtistCompatible` accepts an exact normalized credit with accents
+  folded (`Jason Derulo` vs `Jason Derülo`); a core alphanumeric match
+  (`LL Cool J` vs `L.L. Cool J`); **any act inside a collaboration**, not only
+  the first (`Roscoe` in `Nelly, Roscoe`; `Masta Ace` in
+  `Eminem, J-Black, Masta Ace`); an article-only containment
+  (`The Cure` ⊃ `Cure`); or at least TWO shared distinctive tokens
+  (`Simon & Garfunkel` vs `Garfunkel & Simon`). Member splitting uses comma,
+  ` & `, ` / `, and `feat`/`ft`/`featuring`; `with` and `x` are not member
+  boundaries, so single acts such as `Dancing With Wolves` and `Malcolm X Trio`
+  are not split. The broad prefix tolerance still accepts the act before any
+  joiner, including `with`/`x` (`Malcolm` vs `Malcolm X`), but those are not
+  member splits. A compact symbol inside one act (`AC/DC`) is not a joiner, and
+  a single shared generic token is rejected outside a collaboration
+  (`King` vs `King Crimson`).
 
 ### 2. TagValidator handler (`internal/download/handler_tagvalidator.go`)
 

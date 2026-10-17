@@ -9,6 +9,7 @@ import (
 
 	"github.com/ramonskie/groovearr/internal/catalog"
 	"github.com/ramonskie/groovearr/internal/domain"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/refresh"
 )
 
@@ -233,6 +234,36 @@ func TestWarmLibraryBoundedBatch(t *testing.T) {
 		t.Fatalf("report Total = %d, want 2", got)
 	}
 	assertHasETA(t, reports)
+}
+
+func TestWarmLibraryTransientErrorsAreSkippedNotFailed(t *testing.T) {
+	cat := &fakeWarmCatalog{albums: []int64{1}}
+	local := map[int64][]domain.Track{1: {}}
+	ref := &fakeWarmRefresher{cat: cat, errs: map[int64]error{1: metadata.ErrProviderBusy}}
+	r := newWarmRunners(cat, local, ref, nil)
+
+	var last Report
+	if err := r.WarmLibrary()(context.Background(), func(rep Report) { last = rep }); err != nil {
+		t.Fatalf("WarmLibrary: %v", err)
+	}
+	if !strings.Contains(last.Message, "0 failed") || !strings.Contains(last.Message, "1 skipped") {
+		t.Fatalf("message = %q, want 0 failed / 1 skipped", last.Message)
+	}
+}
+
+func TestWarmLibraryHardErrorsAreFailed(t *testing.T) {
+	cat := &fakeWarmCatalog{albums: []int64{1}}
+	local := map[int64][]domain.Track{1: {}}
+	ref := &fakeWarmRefresher{cat: cat, errs: map[int64]error{1: errors.New("boom")}}
+	r := newWarmRunners(cat, local, ref, nil)
+
+	var last Report
+	if err := r.WarmLibrary()(context.Background(), func(rep Report) { last = rep }); err != nil {
+		t.Fatalf("WarmLibrary: %v", err)
+	}
+	if !strings.Contains(last.Message, "1 failed") || !strings.Contains(last.Message, "0 skipped") {
+		t.Fatalf("message = %q, want 1 failed / 0 skipped", last.Message)
+	}
 }
 
 func TestWarmLibraryResumable(t *testing.T) {

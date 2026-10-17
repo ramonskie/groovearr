@@ -74,7 +74,7 @@ func (r *Runners) WarmLibrary() Runner {
 		report(Report{Done: 0, Total: total, Message: fmt.Sprintf("warming %d albums", total)})
 
 		started := time.Now()
-		var warmed, failed int
+		var warmed, failed, skipped int
 		for i, albumID := range candidates {
 			if cerr := ctx.Err(); cerr != nil {
 				return cerr
@@ -89,8 +89,15 @@ func (r *Runners) WarmLibrary() Runner {
 				if cerr := ctx.Err(); cerr != nil {
 					return cerr
 				}
-				failed++
-				r.logWarn("warm library album failed", "album_id", albumID, "error", rerr)
+				if refresh.IsTransient(rerr) {
+					// A cooling/busy/transient provider is not an album
+					// failure; the queue will retry it.
+					skipped++
+					r.logWarn("warm library album skipped", "album_id", albumID, "error", rerr)
+				} else {
+					failed++
+					r.logWarn("warm library album failed", "album_id", albumID, "error", rerr)
+				}
 			} else {
 				warmed++
 			}
@@ -99,14 +106,14 @@ func (r *Runners) WarmLibrary() Runner {
 			report(Report{
 				Done:    done,
 				Total:   total,
-				Message: warmProgressMessage(done, total, started, failed),
+				Message: warmProgressMessage(done, total, started, failed, skipped),
 			})
 		}
 
 		report(Report{
 			Done:    total,
 			Total:   total,
-			Message: fmt.Sprintf("warmed %d albums, %d failed", warmed, failed),
+			Message: fmt.Sprintf("warmed %d albums, %d failed, %d skipped", warmed, failed, skipped),
 		})
 		return nil
 	}
@@ -115,7 +122,7 @@ func (r *Runners) WarmLibrary() Runner {
 // warmProgressMessage renders "done/total albums, eta <d>". The ETA is the
 // observed per-album pace extrapolated to the albums still to process; it is
 // omitted until at least one album has finished (no pace to extrapolate from).
-func warmProgressMessage(done, total int, started time.Time, failed int) string {
+func warmProgressMessage(done, total int, started time.Time, failed, skipped int) string {
 	if done <= 0 {
 		return fmt.Sprintf("warming %d albums", total)
 	}
@@ -124,6 +131,9 @@ func warmProgressMessage(done, total int, started time.Time, failed int) string 
 	msg := fmt.Sprintf("%d/%d albums, eta %s", done, total, remaining.Round(time.Second))
 	if failed > 0 {
 		msg += fmt.Sprintf(", %d failed", failed)
+	}
+	if skipped > 0 {
+		msg += fmt.Sprintf(", %d skipped", skipped)
 	}
 	return msg
 }

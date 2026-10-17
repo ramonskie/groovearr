@@ -55,6 +55,7 @@ type Library interface {
 // provider is ever cooling down" and marks are dropped.
 type Cooldown interface {
 	CoolingDown(name string) bool
+	CoolingUntil(name string) time.Time
 	MarkAfter(name string, retryAfter time.Duration)
 }
 
@@ -68,10 +69,37 @@ var (
 	// ErrAlbumNotFound means the local album row is gone. The queue row is
 	// terminal (removed) rather than retried forever.
 	ErrAlbumNotFound = errors.New("refresh: album not found")
-	// errAllCooling means every candidate provider is currently cooling down, so
-	// no call was attempted. Treated like a rate-limit: reschedule, no failure.
-	errAllCooling = errors.New("refresh: all discovery providers cooling down")
+	// errAllCooling means no usable provider call was possible because every
+	// candidate provider was cooling down (or the only remaining ones were).
+	// Treated like a rate-limit: reschedule, no failure.
+	errAllCooling = errors.New("refresh: discovery providers cooling down")
+	// errTransientSearch wraps a non-rate-limit provider search failure that was
+	// not a definitive no-match. It reschedules with backoff without recording a
+	// hard failure; a broken provider must not terminally fail every album the
+	// healthy providers do not have.
+	errTransientSearch = errors.New("refresh: transient provider search failure")
 )
+
+// coolingRetryError carries the moment a skipped provider becomes available, so
+// the queue can sleep until then instead of polling on CooldownRetry. It unwraps
+// to errAllCooling for callers that only know the broad transient class.
+type coolingRetryError struct {
+	until time.Time
+}
+
+func (e *coolingRetryError) Error() string { return errAllCooling.Error() }
+func (e *coolingRetryError) Unwrap() error { return errAllCooling }
+
+// IsTransient reports whether err is a self-healing refresh condition that must
+// not be counted as an album failure by callers such as the warm-library job.
+func IsTransient(err error) bool {
+	return errors.Is(err, metadata.ErrRateLimited) ||
+		errors.Is(err, metadata.ErrProviderBusy) ||
+		errors.Is(err, errTransientSearch) ||
+		errors.Is(err, errAllCooling) ||
+		errors.Is(err, ErrNoProviders) ||
+		errors.Is(err, context.DeadlineExceeded)
+}
 
 // Options configures the engine. Zero values fall back to DefaultOptions so a
 // caller can set only what it cares about. Subtask 14 wires these from the live
@@ -499,6 +527,7 @@ func (s *Service) processBatch(ctx context.Context) (int, error) {
 // caller can log-and-continue.
 func (s *Service) processItem(ctx context.Context, item catalog.RefreshItem) error {
 	outcome, err := s.RefreshAlbum(ctx, item.EntityID)
+	var coolingRetry *coolingRetryError
 
 	switch {
 	case err == nil && outcome.Matched:
@@ -509,6 +538,27 @@ func (s *Service) processItem(ctx context.Context, item catalog.RefreshItem) err
 		// retry on the long interval so the queue drains instead of churning.
 		return s.store.RetryRefresh(ctx, item.ID, item.Attempts,
 			s.now().Add(catalog.UnmatchedRetry), "no provider match")
+
+	case errors.As(err, &coolingRetry):
+		// A skipped provider is parked until it becomes available. Sleep until
+		// that expiry instead of re-probing every CooldownRetry; no failure is
+		// counted.
+		next := coolingRetry.until
+		if next.IsZero() {
+			next = s.now().Add(s.options().CooldownRetry)
+		}
+		return s.store.RetryRefresh(ctx, item.ID, item.Attempts, next, err.Error())
+
+	case errors.Is(err, errTransientSearch):
+		// A provider search failed transiently while another provider was
+		// searched. Retry with exponential backoff without recording a hard
+		// failure: a broken provider must not terminally fail every album the
+		// healthy providers do not have, and a persistent fault must not churn
+		// every CooldownRetry forever. Checked before the context case because a
+		// per-call timeout is joined with the transient sentinel.
+		attempts := item.Attempts + 1
+		return s.store.RetryRefresh(ctx, item.ID, attempts,
+			s.now().Add(catalog.BackoffFor(attempts)), err.Error())
 
 	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
 		// A cancelled parent is a clean stop, not a failure: leave the row
@@ -654,6 +704,15 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 					// cooldown; the link is not at fault.
 					return AlbumOutcome{}, err
 				}
+				if errors.Is(err, metadata.ErrProviderBusy) ||
+					errors.Is(err, context.DeadlineExceeded) ||
+					errors.Is(err, context.Canceled) {
+					// A busy provider or a per-call timeout says nothing about
+					// the link's validity; keep it so the next attempt retries
+					// the same edition instead of re-searching and risking a
+					// different one.
+					return AlbumOutcome{}, err
+				}
 				// The stored link is dead (e.g. the provider 404s an album it
 				// removed). Mark it stale by clearing it so a later retry falls
 				// back to a fresh search instead of being stuck on the dead
@@ -693,12 +752,21 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 	// 3. Search each provider, skipping cooling ones, and materialize the first
 	//    acceptable match.
 	tried := 0
+	skippedCooling := false
+	var coolingUntil time.Time
 	var rateLimitedErr, searchErr, matchErr error
 	for _, p := range providers {
 		if ctx.Err() != nil {
 			return AlbumOutcome{}, ctx.Err()
 		}
 		if s.coolingDown(p.Name()) {
+			// A cooling provider was not searched, so a no-match from the
+			// remaining providers is not definitive. Remember the skip and
+			// reschedule instead of parking the album if nothing matches.
+			skippedCooling = true
+			if until := s.cooldownUntil(p.Name()); until.After(coolingUntil) {
+				coolingUntil = until
+			}
 			continue
 		}
 		results, err := s.searchAlbums(ctx, p, q)
@@ -732,6 +800,12 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 		return AlbumOutcome{Matched: true, ProviderName: p.Name(), ProviderAlbumID: best.ProviderID}, nil
 	}
 
+	// A parent cancellation during the last provider call wins over the
+	// per-call error classification: leave the queue row untouched.
+	if err := ctx.Err(); err != nil {
+		return AlbumOutcome{}, err
+	}
+
 	// 4. Classify the no-match case.
 	if rateLimitedErr != nil {
 		return AlbumOutcome{}, rateLimitedErr
@@ -741,9 +815,20 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 	}
 	if tried == 0 {
 		if searchErr != nil {
-			return AlbumOutcome{}, searchErr
+			return AlbumOutcome{}, s.transientSearchError(searchErr)
 		}
-		return AlbumOutcome{}, errAllCooling
+		return AlbumOutcome{}, s.coolingRetry(coolingUntil)
+	}
+	// A provider that was skipped (cooling) or errored transiently may be the
+	// one that would have matched. Only park unmatched when every provider was
+	// actually searched and returned no acceptable candidate; otherwise
+	// reschedule so the next drain retries the unavailable provider instead of
+	// turning a transient miss into a 90-day terminal.
+	if searchErr != nil {
+		return AlbumOutcome{}, s.transientSearchError(searchErr)
+	}
+	if skippedCooling {
+		return AlbumOutcome{}, s.coolingRetry(coolingUntil)
 	}
 	// Genuinely unmatched: park the album with a long retry, queue drains.
 	if err := s.markUnmatched(ctx, albumID, meta); err != nil {
@@ -931,6 +1016,37 @@ func (s *Service) markProviderError(name string, err error) {
 // coolingDown is nil-safe: no cooldown wired means nothing is parked.
 func (s *Service) coolingDown(name string) bool {
 	return s.cooldown != nil && s.cooldown.CoolingDown(name)
+}
+
+// cooldownUntil is nil-safe: no cooldown wired means no expiry.
+func (s *Service) cooldownUntil(name string) time.Time {
+	if s.cooldown == nil {
+		return time.Time{}
+	}
+	return s.cooldown.CoolingUntil(name)
+}
+
+// transientSearchError keeps ErrProviderBusy's short retry class and wraps every
+// other non-rate-limit search failure as a transient. The original
+// error is joined as the cause so callers that inspect it (the cold fetcher's
+// timeout) still see context.DeadlineExceeded; processItem checks the transient
+// sentinel before the context branch and, after the provider loop,
+// RefreshAlbum returns the parent ctx.Err() directly.
+func (s *Service) transientSearchError(err error) error {
+	if errors.Is(err, metadata.ErrProviderBusy) {
+		return err
+	}
+	return errors.Join(errTransientSearch, err)
+}
+
+// coolingRetry schedules the next attempt for when the skipped provider becomes
+// available. A fake/minimal cooldown without an expiry falls back to the fixed
+// CooldownRetry.
+func (s *Service) coolingRetry(until time.Time) error {
+	if !until.After(s.now()) {
+		until = s.now().Add(s.options().CooldownRetry)
+	}
+	return &coolingRetryError{until: until}
 }
 
 // logWarn logs through the shared logger when one is wired; a nil logger is a
