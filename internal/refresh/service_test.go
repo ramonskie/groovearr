@@ -125,6 +125,17 @@ func (s *fakeStore) DeleteRefresh(_ context.Context, id int64) error {
 	return nil
 }
 
+func (s *fakeStore) DeleteRefreshByEntity(_ context.Context, entityType catalog.EntityType, entityID int64) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, it := range s.queue {
+		if it.EntityType == entityType && it.EntityID == entityID {
+			delete(s.queue, id)
+		}
+	}
+	return nil
+}
+
 func (s *fakeStore) BumpRefreshPriority(_ context.Context, _ catalog.EntityType, _ int64, _ int) error {
 	return nil
 }
@@ -380,6 +391,86 @@ func TestService_ProcessBatch_MaterializesAlbumOnDrain(t *testing.T) {
 	}
 	if p.searchCalls != 1 || p.tracksCalls != 1 {
 		t.Fatalf("provider calls search=%d tracks=%d, want 1/1", p.searchCalls, p.tracksCalls)
+	}
+}
+
+func TestService_MaterializeResolvedPartial(t *testing.T) {
+	store := newFakeStore()
+	svc := newTestService(store, &fakeLibrary{}, Options{})
+	tracks := []discovery.TrackInfo{{ProviderID: "t1", Title: "Single", ArtistName: "A", TrackNumber: 1, DurationMs: 1000}}
+
+	applied, err := svc.MaterializeResolved(context.Background(), 42, "alpha", "al1", tracks, true)
+	if err != nil {
+		t.Fatalf("MaterializeResolved: %v", err)
+	}
+	if !applied {
+		t.Fatal("MaterializeResolved applied = false, want true for an unmatched album")
+	}
+	meta := store.meta[42]
+	if !meta.Partial {
+		t.Fatal("partial marker not persisted")
+	}
+	if meta.RefreshStatus != catalog.StatusFresh || meta.ProviderAlbumID != "al1" {
+		t.Fatalf("meta = %+v, want fresh al1", meta)
+	}
+	if got := len(store.tracks[42]); got != 1 {
+		t.Fatalf("materialized tracks = %d, want 1", got)
+	}
+}
+
+func TestService_MaterializeResolvedSkipsAlreadyWarmAlbum(t *testing.T) {
+	store := newFakeStore()
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID:         42,
+		ProviderName:    "alpha",
+		ProviderAlbumID: "full",
+		RefreshStatus:   catalog.StatusFresh,
+	}
+	svc := newTestService(store, &fakeLibrary{}, Options{})
+
+	applied, err := svc.MaterializeResolved(context.Background(), 42, "alpha", "single",
+		[]discovery.TrackInfo{{ProviderID: "t1"}}, true)
+	if err != nil {
+		t.Fatalf("MaterializeResolved: %v", err)
+	}
+	if applied {
+		t.Fatal("applied = true, want false for an already-warm album")
+	}
+	if got := store.meta[42].ProviderAlbumID; got != "full" {
+		t.Fatalf("provider link = %q, want the completed full release", got)
+	}
+	if len(store.tracks[42]) != 0 {
+		t.Fatalf("wrote %d provider rows over a warm album", len(store.tracks[42]))
+	}
+}
+
+func TestService_RefreshAlbum_DoesNotExpandPartial(t *testing.T) {
+	store := newFakeStore()
+	store.meta[42] = catalog.AlbumMetadata{
+		AlbumID:         42,
+		ProviderName:    "alpha",
+		ProviderAlbumID: "al1",
+		RefreshStatus:   catalog.StatusFresh,
+		Partial:         true,
+	}
+	p := &fakeProvider{name: "alpha", tracks: []discovery.TrackInfo{{ProviderID: "t1"}}}
+	svc := newTestService(store, &fakeLibrary{}, Options{}, p)
+
+	outcome, err := svc.RefreshAlbum(context.Background(), 42)
+	if err != nil {
+		t.Fatalf("RefreshAlbum: %v", err)
+	}
+	if !outcome.Matched {
+		t.Fatalf("outcome = %+v, want matched", outcome)
+	}
+	if !store.meta[42].Partial {
+		t.Fatal("partial marker was cleared by RefreshAlbum")
+	}
+	if p.tracksCalls != 0 {
+		t.Fatalf("GetAlbumTracks calls = %d, want 0 for a partial album", p.tracksCalls)
+	}
+	if !store.meta[42].LastRefreshedAt.Equal(fixedNow) {
+		t.Fatalf("last refreshed = %v, want %v", store.meta[42].LastRefreshedAt, fixedNow)
 	}
 }
 
@@ -1331,6 +1422,74 @@ func waitForAlbumInFlight(t *testing.T, svc *Service, albumID int64) {
 		time.Sleep(time.Millisecond)
 	}
 	t.Fatalf("no in-flight refresh registered for album %d within timeout", albumID)
+}
+
+// TestService_MaterializeResolvedWaitsForInFlightRefresh proves an identity
+// write joins the same per-album slot as the engine: it waits for the completed
+// full materialization, then skips instead of replacing the full tracklist with
+// a single/partial result.
+func TestService_MaterializeResolvedWaitsForInFlightRefresh(t *testing.T) {
+	store := newFakeStore()
+	p := &syncProvider{
+		name:    "alpha",
+		results: []discovery.AlbumResult{{ProviderID: "pa1", ArtistName: "Artist One", Title: "Album One"}},
+		tracks:  []discovery.TrackInfo{{ProviderID: "t1", DiscNumber: 1, TrackNumber: 1, Title: "Song 1"}},
+		entered: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	svc := newTestService(store, newColdAlbumLibrary(), Options{}, p)
+
+	refreshDone := make(chan error, 1)
+	go func() {
+		_, err := svc.RefreshAlbum(context.Background(), 42)
+		refreshDone <- err
+	}()
+	waitForAlbumInFlight(t, svc, 42)
+	select {
+	case <-p.entered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("provider was never invoked")
+	}
+
+	applied := make(chan bool, 1)
+	matErr := make(chan error, 1)
+	go func() {
+		ok, err := svc.MaterializeResolved(context.Background(), 42, "alpha", "identity-release",
+			[]discovery.TrackInfo{{ProviderID: "identity"}}, true)
+		applied <- ok
+		matErr <- err
+	}()
+
+	// The identity write must be parked behind the engine's in-flight refresh,
+	// not racing it into the catalog.
+	select {
+	case ok := <-applied:
+		t.Fatalf("MaterializeResolved applied=%v before the in-flight refresh finished", ok)
+	case <-time.After(50 * time.Millisecond):
+	}
+	if got := albumInFlightCount(svc); got != 1 {
+		t.Fatalf("in-flight calls = %d, want 1 shared slot", got)
+	}
+
+	close(p.release)
+	if err := <-refreshDone; err != nil {
+		t.Fatalf("RefreshAlbum: %v", err)
+	}
+	if ok := <-applied; ok {
+		t.Fatal("MaterializeResolved applied over a completed full refresh")
+	}
+	if err := <-matErr; err != nil {
+		t.Fatalf("MaterializeResolved: %v", err)
+	}
+	if got := store.meta[42].ProviderAlbumID; got != "pa1" {
+		t.Fatalf("provider link = %q, want the full refresh link pa1", got)
+	}
+	if got := len(store.tracks[42]); got != 1 {
+		t.Fatalf("provider rows = %d, want the full refresh row set", got)
+	}
+	if got := albumInFlightCount(svc); got != 0 {
+		t.Fatalf("in-flight calls = %d after completion, want 0", got)
+	}
 }
 
 // TestService_RefreshAlbumConcurrentSameAlbumCoalescesToOneFetch proves the

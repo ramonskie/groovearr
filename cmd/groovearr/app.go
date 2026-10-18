@@ -20,6 +20,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/download"
 	dlsqlite "github.com/ramonskie/groovearr/internal/download/sqlite"
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/identity"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/library/sqlite"
 	"github.com/ramonskie/groovearr/internal/logger"
@@ -347,6 +348,13 @@ func NewApp(configPath string) (*App, error) {
 		sseHub.Broadcast(sse.SSEEvent{Type: "metadata_refresh", Data: data, Timestamp: time.Now()})
 	})
 
+	// Identity-first unmatched resolver. The user-triggered recheck-unmatched
+	// job runs this before the old re-arm fallback: it probes duration only for
+	// the parked albums' tracks, resolves by provider track id / ISRC, and
+	// materializes high-confidence releases through the same refresh write path.
+	// Providers and the shared cooldown are read live (AGENTS §8/§9).
+	identitySvc := identity.New(libStore, catalogStore, refreshSvc, refreshProviders, providerOrder, providerCooldown, log, identity.Options{})
+
 	// Bridge new log file lines to the SSE hub so the Log tab streams live.
 	// The file is the source of truth: history comes from GET /api/logs
 	// (ReadTail), and this tailer only broadcasts new lines as they are
@@ -506,6 +514,10 @@ func NewApp(configPath string) (*App, error) {
 	// so POST /api/jobs/recheck-unmatched re-arms parked terminal albums through
 	// the exact queue policy the engine uses (bypassing the 90-day park).
 	srv.SetUnmatchedRearmer(refreshSvc)
+	// The identity-first resolver takes precedence over the re-arm fallback for
+	// the same job: it resolves what identity can prove and leaves the rest
+	// parked for review instead of re-running the failed album strings.
+	srv.SetUnmatchedResolver(identitySvc)
 	// Cold lazy fetch (Option A): the first open of an unmaterialized album does
 	// one bounded, deduplicated provider fetch through the refresh engine, which
 	// reuses the shared cooldown and materializes the album. Its goroutines are

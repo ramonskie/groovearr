@@ -87,6 +87,10 @@ type RefreshQueue interface {
 	RetryRefresh(ctx context.Context, id int64, attempts int, nextAttempt time.Time, lastErr string) error
 	// DeleteRefresh removes an item from the queue.
 	DeleteRefresh(ctx context.Context, id int64) error
+	// DeleteRefreshByEntity removes any open queue row for the entity. It is a
+	// no-op when the entity is not queued. Used when a resolver materializes an
+	// album outside the engine, so the parked row does not linger.
+	DeleteRefreshByEntity(ctx context.Context, entityType EntityType, entityID int64) error
 	// BumpRefreshPriority raises an existing item's priority (a no-op if the
 	// entity is not queued).
 	BumpRefreshPriority(ctx context.Context, entityType EntityType, entityID int64, priority int) error

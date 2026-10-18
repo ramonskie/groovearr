@@ -15,6 +15,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/catalog"
@@ -79,6 +80,7 @@ func (s *Store) migrate() error {
 			consecutive_failures INTEGER NOT NULL DEFAULT 0,
 			refresh_error       TEXT NOT NULL DEFAULT '',
 			updated_at          TEXT NOT NULL,
+			partial             INTEGER NOT NULL DEFAULT 0,
 			FOREIGN KEY (album_id) REFERENCES albums(id) ON DELETE CASCADE
 		)		`,
 		// Supports the per-status rollup behind GET /api/catalog/status, which
@@ -145,6 +147,21 @@ func (s *Store) migrate() error {
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit schema: %w", err)
+	}
+
+	// Additive migrations for databases created before a column existed.
+	// SQLite's ALTER TABLE ADD COLUMN is not idempotent; a duplicate-column
+	// error means the migration was already applied.
+	migrations := []string{
+		`ALTER TABLE album_metadata ADD COLUMN partial INTEGER NOT NULL DEFAULT 0`,
+	}
+	for _, stmt := range migrations {
+		if _, err := s.db.Exec(stmt); err != nil {
+			if strings.Contains(err.Error(), "duplicate column name") {
+				continue
+			}
+			return fmt.Errorf("migrate: %s: %w", stmt, err)
+		}
 	}
 	return nil
 }
@@ -254,8 +271,8 @@ func (s *Store) UpsertAlbumMetadata(ctx context.Context, m catalog.AlbumMetadata
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO album_metadata (album_id, provider_name, provider_album_id,
 			refresh_status, last_refreshed_at, last_accessed_at,
-			consecutive_failures, refresh_error, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			consecutive_failures, refresh_error, updated_at, partial)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(album_id) DO UPDATE SET
 			provider_name=excluded.provider_name,
 			provider_album_id=excluded.provider_album_id,
@@ -264,10 +281,12 @@ func (s *Store) UpsertAlbumMetadata(ctx context.Context, m catalog.AlbumMetadata
 			last_accessed_at=excluded.last_accessed_at,
 			consecutive_failures=excluded.consecutive_failures,
 			refresh_error=excluded.refresh_error,
-			updated_at=excluded.updated_at`,
+			updated_at=excluded.updated_at,
+			partial=excluded.partial`,
 		m.AlbumID, m.ProviderName, m.ProviderAlbumID, string(m.RefreshStatus),
 		fmtTime(m.LastRefreshedAt), fmtTime(m.LastAccessedAt),
-		m.ConsecutiveFailures, m.RefreshError, fmtTime(orNow(m.UpdatedAt, time.Now().UTC())))
+		m.ConsecutiveFailures, m.RefreshError, fmtTime(orNow(m.UpdatedAt, time.Now().UTC())),
+		m.Partial)
 	if err != nil {
 		return fmt.Errorf("catalog sqlite: upsert album metadata %d: %w", m.AlbumID, err)
 	}
@@ -281,10 +300,10 @@ func (s *Store) GetAlbumMetadata(ctx context.Context, albumID int64) (*catalog.A
 	err := s.db.QueryRowContext(ctx, `
 		SELECT album_id, provider_name, provider_album_id, refresh_status,
 			COALESCE(last_refreshed_at, ''), COALESCE(last_accessed_at, ''),
-			consecutive_failures, refresh_error, updated_at
+			consecutive_failures, refresh_error, updated_at, partial
 		FROM album_metadata WHERE album_id=?`, albumID).
 		Scan(&m.AlbumID, &m.ProviderName, &m.ProviderAlbumID, &status,
-			&refreshed, &accessed, &m.ConsecutiveFailures, &m.RefreshError, &updated)
+			&refreshed, &accessed, &m.ConsecutiveFailures, &m.RefreshError, &updated, &m.Partial)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

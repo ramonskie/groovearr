@@ -652,14 +652,24 @@ func (s *Service) RefreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 	s.inflight[albumID] = call
 	s.inflightMu.Unlock()
 
-	outcome, err := s.refreshAlbum(ctx, albumID)
+	var outcome AlbumOutcome
+	var err error
+	// Publish in a defer: a panic in refreshAlbum must not strand an unclosed
+	// call that would block every later refresh of this album.
+	defer func() { s.finishCall(albumID, call, outcome, err) }()
+	outcome, err = s.refreshAlbum(ctx, albumID)
+	return outcome, err
+}
 
+// finishCall publishes one in-flight materialization and removes it from the
+// coalescing map. It is safe to call from a defer; waiters see the outcome and
+// a panic still propagates to the owner.
+func (s *Service) finishCall(albumID int64, call *albumCall, outcome AlbumOutcome, err error) {
 	s.inflightMu.Lock()
 	call.outcome, call.err = outcome, err
 	close(call.done)
 	delete(s.inflight, albumID)
 	s.inflightMu.Unlock()
-	return outcome, err
 }
 
 // waitAlbum blocks until the shared materialization completes or the caller's
@@ -688,6 +698,18 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 	meta, err := s.store.GetAlbumMetadata(ctx, albumID)
 	if err != nil {
 		return AlbumOutcome{}, err
+	}
+	// A partial materialization is deliberate: the provider link points at a
+	// full release, but only the resolved rows were written (a 1-track local
+	// release). Never let a later refresh expand it into the full album.
+	if meta != nil && meta.Partial {
+		now := s.now()
+		meta.LastRefreshedAt = now
+		meta.UpdatedAt = now
+		if err := s.store.UpsertAlbumMetadata(ctx, *meta); err != nil {
+			return AlbumOutcome{}, err
+		}
+		return AlbumOutcome{Matched: true, ProviderName: meta.ProviderName, ProviderAlbumID: meta.ProviderAlbumID}, nil
 	}
 	providers := metadata.Order(s.order, s.providers())
 	if len(providers) == 0 {
@@ -722,7 +744,7 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 				}
 				return AlbumOutcome{}, err
 			}
-			if err := s.materialize(ctx, albumID, meta, p.Name(), meta.ProviderAlbumID, tracks); err != nil {
+			if err := s.materialize(ctx, albumID, meta, p.Name(), meta.ProviderAlbumID, tracks, false); err != nil {
 				return AlbumOutcome{}, err
 			}
 			return AlbumOutcome{Matched: true, ProviderName: p.Name(), ProviderAlbumID: meta.ProviderAlbumID}, nil
@@ -794,7 +816,7 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 			}
 			continue
 		}
-		if err := s.materialize(ctx, albumID, meta, p.Name(), best.ProviderID, tracks); err != nil {
+		if err := s.materialize(ctx, albumID, meta, p.Name(), best.ProviderID, tracks, false); err != nil {
 			return AlbumOutcome{}, err
 		}
 		return AlbumOutcome{Matched: true, ProviderName: p.Name(), ProviderAlbumID: best.ProviderID}, nil
@@ -841,7 +863,7 @@ func (s *Service) refreshAlbum(ctx context.Context, albumID int64) (AlbumOutcome
 // short per-album transactions. It preserves the last-accessed timestamp so a
 // refresh does not erase the read-recency used for refresh ordering.
 func (s *Service) materialize(ctx context.Context, albumID int64, prev *catalog.AlbumMetadata,
-	providerName, providerAlbumID string, tracks []discovery.TrackInfo) error {
+	providerName, providerAlbumID string, tracks []discovery.TrackInfo, partial bool) error {
 	now := s.now()
 	keys := providerTrackKeys(tracks)
 	rows := make([]catalog.AlbumTrack, 0, len(tracks))
@@ -872,6 +894,7 @@ func (s *Service) materialize(ctx context.Context, albumID int64, prev *catalog.
 		RefreshStatus:   catalog.StatusFresh,
 		LastRefreshedAt: now,
 		UpdatedAt:       now,
+		Partial:         partial,
 	}
 	if prev != nil {
 		m.LastAccessedAt = prev.LastAccessedAt
@@ -881,6 +904,81 @@ func (s *Service) materialize(ctx context.Context, albumID int64, prev *catalog.
 	}
 	s.notifyMaterialized(albumID)
 	return nil
+}
+
+// MaterializeResolved writes a high-confidence identity resolution outside the
+// refresh queue. It uses the same catalog write path as the engine (provider
+// rows + metadata row in short transactions) so the read path sees a normal
+// warm album. partial marks a 1-track local release that was resolved to a
+// track on a larger provider release: the provider link is kept for
+// observability, but the refresh engine never expands the row set.
+//
+// applied is false when the album stopped being unmatched before the write
+// (the engine or another caller materialized it first). The caller should count
+// that as skipped, not resolved.
+func (s *Service) MaterializeResolved(ctx context.Context, albumID int64, providerName, providerAlbumID string, tracks []discovery.TrackInfo, partial bool) (applied bool, err error) {
+	if s == nil {
+		return false, errors.New("refresh: nil materializer")
+	}
+	// Join the same per-album in-flight map RefreshAlbum uses. If the engine is
+	// already materializing this album, wait for it to finish before applying
+	// the identity result, so a partial single and a full album cannot clobber
+	// each other's rows.
+	s.inflightMu.Lock()
+	if s.inflight == nil {
+		s.inflight = make(map[int64]*albumCall)
+	}
+	for {
+		call, ok := s.inflight[albumID]
+		if !ok {
+			break
+		}
+		s.inflightMu.Unlock()
+		select {
+		case <-call.done:
+		case <-ctx.Done():
+			return false, ctx.Err()
+		}
+		s.inflightMu.Lock()
+	}
+	call := &albumCall{done: make(chan struct{})}
+	s.inflight[albumID] = call
+	s.inflightMu.Unlock()
+
+	completed := false
+	defer func() {
+		outcome := AlbumOutcome{
+			Matched:         completed && err == nil && providerAlbumID != "",
+			ProviderName:    providerName,
+			ProviderAlbumID: providerAlbumID,
+		}
+		s.finishCall(albumID, call, outcome, err)
+	}()
+
+	prev, err := s.store.GetAlbumMetadata(ctx, albumID)
+	if err != nil {
+		return false, err
+	}
+	// Re-check after acquiring the slot: the engine may have materialized the
+	// album while this caller was waiting. Never overwrite a non-unmatched
+	// album (especially a full release) with a late single/identity result.
+	if prev != nil && prev.RefreshStatus != catalog.StatusUnmatched {
+		// The album is already warm. Publish a matched outcome for anyone
+		// waiting on this slot, but tell the identity caller it did not apply.
+		if prev.ProviderName != "" {
+			providerName = prev.ProviderName
+		}
+		if prev.ProviderAlbumID != "" {
+			providerAlbumID = prev.ProviderAlbumID
+		}
+		completed = true
+		return false, nil
+	}
+	if err = s.materialize(ctx, albumID, prev, providerName, providerAlbumID, tracks, partial); err != nil {
+		return false, err
+	}
+	completed = true
+	return true, nil
 }
 
 // providerTrackKeys assigns every provider track a unique (disc, track) key.

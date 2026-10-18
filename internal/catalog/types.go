@@ -135,6 +135,11 @@ type AlbumMetadata struct {
 	ConsecutiveFailures int
 	RefreshError        string
 	UpdatedAt           time.Time
+	// Partial marks a deliberately subsetted materialization: the provider link
+	// points at a full release, but only the resolved rows (typically one track
+	// from a 1-track local release) are materialized. The refresh engine never
+	// expands a partial album, so a single stays a single.
+	Partial bool
 }
 
 // ArtistMetadata is the durable artist overview (bio, image, genres) keyed by

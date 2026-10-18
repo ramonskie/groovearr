@@ -346,6 +346,36 @@ func TestDeleteAndBumpRefreshPriority(t *testing.T) {
 	}
 }
 
+func TestDeleteRefreshByEntity(t *testing.T) {
+	s, _ := newTestStore(t)
+	ctx := context.Background()
+	base := time.Date(2026, 6, 1, 12, 0, 0, 0, time.UTC)
+
+	enqueue(t, s, catalog.RefreshItem{EntityType: catalog.EntityAlbum, EntityID: 1, DueAt: base})
+	enqueue(t, s, catalog.RefreshItem{EntityType: catalog.EntityAlbum, EntityID: 2, DueAt: base})
+	enqueue(t, s, catalog.RefreshItem{EntityType: catalog.EntityArtist, EntityID: 1, DueAt: base})
+
+	if err := s.DeleteRefreshByEntity(ctx, catalog.EntityAlbum, 1); err != nil {
+		t.Fatalf("delete by entity: %v", err)
+	}
+	if n, _ := s.CountQueuedRefresh(ctx); n != 2 {
+		t.Errorf("queued after delete = %d, want 2", n)
+	}
+	items, err := s.ClaimDueRefresh(ctx, base, 10)
+	if err != nil {
+		t.Fatalf("claim: %v", err)
+	}
+	for _, it := range items {
+		if it.EntityType == catalog.EntityAlbum && it.EntityID == 1 {
+			t.Errorf("deleted album still queued: %+v", it)
+		}
+	}
+	// Deleting an absent entity is a no-op.
+	if err := s.DeleteRefreshByEntity(ctx, catalog.EntityAlbum, 99); err != nil {
+		t.Errorf("delete absent entity: %v", err)
+	}
+}
+
 func TestClaimDueRefreshLimit(t *testing.T) {
 	s, _ := newTestStore(t)
 	ctx := context.Background()

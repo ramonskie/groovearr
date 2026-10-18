@@ -9,6 +9,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/download"
+	"github.com/ramonskie/groovearr/internal/identity"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/refresh"
@@ -95,6 +96,10 @@ type RunnerDeps struct {
 	// recheck-unmatched job (may be nil — the job then returns a clear error).
 	// Wired post-construction via SetUnmatchedRearmer, like Refresh.
 	Rearm UnmatchedRearmer
+	// UnmatchedResolver resolves parked unmatched albums by track identity for
+	// the same user-triggered job. When set it takes precedence over Rearm.
+	// Wired post-construction via SetUnmatchedResolver.
+	UnmatchedResolver identity.UnmatchedResolver
 }
 
 // Runners implements every background job body. One instance is constructed
@@ -162,6 +167,13 @@ func (r *Runners) SetWarmRefresher(ref WarmRefresher) {
 // runs.
 func (r *Runners) SetUnmatchedRearmer(x UnmatchedRearmer) {
 	r.deps.Rearm = x
+}
+
+// SetUnmatchedResolver wires the identity-first resolver the recheck-unmatched
+// job runs before falling back to the re-arm path. Called once at startup,
+// before any job runs.
+func (r *Runners) SetUnmatchedResolver(x identity.UnmatchedResolver) {
+	r.deps.UnmatchedResolver = x
 }
 
 // SetBootJob records the persisted job snapshot restored at startup. A job

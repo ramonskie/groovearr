@@ -2,6 +2,7 @@ package deezer
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
@@ -58,5 +59,87 @@ func TestSearchTracks_NotFound(t *testing.T) {
 	}
 	if errors.Is(err, metadata.ErrRateLimited) {
 		t.Errorf("404 error mislabeled as rate limited: %v", err)
+	}
+}
+
+func TestGetTrackByISRC(t *testing.T) {
+	client, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Path; got != "/track/isrc:US1" {
+			t.Errorf("path = %q, want /track/isrc:US1", got)
+		}
+		_, _ = w.Write([]byte(`{
+			"id": 3135556,
+			"title": "Harder Better Faster Stronger",
+			"duration": 224,
+			"isrc": "US1",
+			"track_position": 2,
+			"disk_number": 1,
+			"artist": {"id": 27, "name": "Daft Punk"},
+			"album": {"id": 302127, "title": "Discovery", "nb_tracks": 14}
+		}`))
+	})
+	defer srv.Close()
+
+	track, err := client.GetTrackByISRC(context.Background(), "US1")
+	if err != nil || track == nil {
+		t.Fatalf("GetTrackByISRC = (%v, %v), want track", track, err)
+	}
+	if track.ID != 3135556 || track.ISRC != "US1" || track.Album.ID != 302127 || track.Album.NbTracks != 14 {
+		t.Fatalf("track = %+v", track)
+	}
+}
+
+func TestGetTrackByISRC_NotFound(t *testing.T) {
+	client, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte(`{"error":{"type":"DataException","message":"no data","code":800}}`))
+	})
+	defer srv.Close()
+
+	track, err := client.GetTrackByISRC(context.Background(), "US1")
+	if err != nil {
+		t.Fatalf("GetTrackByISRC err = %v, want nil for a miss", err)
+	}
+	if track != nil {
+		t.Fatalf("track = %+v, want nil", track)
+	}
+}
+
+func TestGetTrackByISRC_HTTP404(t *testing.T) {
+	client, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+	})
+	defer srv.Close()
+
+	track, err := client.GetTrackByISRC(context.Background(), "US1")
+	if err != nil {
+		t.Fatalf("GetTrackByISRC err = %v, want nil for a 404 miss", err)
+	}
+	if track != nil {
+		t.Fatalf("track = %+v, want nil", track)
+	}
+}
+
+func TestTrackIdentityMapping(t *testing.T) {
+	var track Track
+	if err := json.Unmarshal([]byte(`{
+		"id": 7, "title": "Song", "duration": 200, "isrc": "US1",
+		"track_position": 3, "disk_number": 1,
+		"artist": {"id": 1, "name": "Artist"},
+		"album": {"id": 9, "title": "Album", "nb_tracks": 12, "record_type": "album"}
+	}`), &track); err != nil {
+		t.Fatalf("unmarshal track: %v", err)
+	}
+	id, err := (&DownloadClient{}).trackIdentity(context.Background(), &track)
+	if err != nil {
+		t.Fatalf("trackIdentity: %v", err)
+	}
+	if id.ProviderName != "deezer" || id.ProviderTrackID != "7" || id.ProviderAlbumID != "9" {
+		t.Fatalf("identity = %+v", id)
+	}
+	if id.Title != "Song" || id.ArtistName != "Artist" || id.AlbumTitle != "Album" {
+		t.Fatalf("identity text = %+v", id)
+	}
+	if id.DurationMs != 200000 || id.AlbumTrackCount != 12 || id.TrackNumber != 3 || id.ISRC != "US1" {
+		t.Fatalf("identity numbers = %+v", id)
 	}
 }

@@ -240,6 +240,60 @@ func TestAlbumTracksCascadeOnAlbumDelete(t *testing.T) {
 
 // ─── Album metadata ──────────────────────────────────────────────────
 
+// TestMigrateAddsPartialToLegacySchema covers the upgrade path from a v0.11.0
+// database whose album_metadata table predates the partial column.
+func TestMigrateAddsPartialToLegacySchema(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	db.SetMaxOpenConns(1)
+	t.Cleanup(func() { _ = db.Close() })
+
+	if _, err := db.Exec(`CREATE TABLE album_metadata (
+		album_id             INTEGER PRIMARY KEY,
+		provider_name        TEXT NOT NULL DEFAULT '',
+		provider_album_id    TEXT NOT NULL DEFAULT '',
+		refresh_status       TEXT NOT NULL DEFAULT 'pending',
+		last_refreshed_at    TEXT,
+		last_accessed_at     TEXT,
+		consecutive_failures INTEGER NOT NULL DEFAULT 0,
+		refresh_error        TEXT NOT NULL DEFAULT '',
+		updated_at           TEXT NOT NULL
+	)`); err != nil {
+		t.Fatalf("create legacy album_metadata: %v", err)
+	}
+
+	if _, err := New(db, slog.New(slog.DiscardHandler)); err != nil {
+		t.Fatalf("New on legacy schema: %v", err)
+	}
+
+	rows, err := db.Query(`PRAGMA table_info(album_metadata)`)
+	if err != nil {
+		t.Fatalf("pragma: %v", err)
+	}
+	defer rows.Close()
+	found := false
+	for rows.Next() {
+		var cid, notNull, pk int
+		var name, typ string
+		var dflt any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &dflt, &pk); err != nil {
+			t.Fatalf("scan pragma: %v", err)
+		}
+		if name == "partial" {
+			found = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("pragma rows: %v", err)
+	}
+	if !found {
+		t.Fatal("legacy album_metadata was not upgraded with the partial column")
+	}
+}
+
+// TestAlbumMetadataUpsertGetAndNotFound covers the metadata roundtrip.
 func TestAlbumMetadataUpsertGetAndNotFound(t *testing.T) {
 	s, db := newTestStore(t)
 	ctx := context.Background()
@@ -262,6 +316,7 @@ func TestAlbumMetadataUpsertGetAndNotFound(t *testing.T) {
 		LastAccessedAt:      accessed,
 		ConsecutiveFailures: 2,
 		RefreshError:        "boom",
+		Partial:             true,
 	}
 	if err := s.UpsertAlbumMetadata(ctx, want); err != nil {
 		t.Fatalf("upsert: %v", err)
@@ -273,7 +328,7 @@ func TestAlbumMetadataUpsertGetAndNotFound(t *testing.T) {
 	}
 	if got.ProviderName != "deezer" || got.ProviderAlbumID != "dz-42" ||
 		got.RefreshStatus != catalog.StatusFresh || got.ConsecutiveFailures != 2 ||
-		got.RefreshError != "boom" {
+		got.RefreshError != "boom" || !got.Partial {
 		t.Errorf("got = %+v", got)
 	}
 	if !got.LastRefreshedAt.Equal(refreshed) || !got.LastAccessedAt.Equal(accessed) {

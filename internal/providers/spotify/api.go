@@ -3,12 +3,16 @@ package spotify
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
 )
+
+// ErrNotFound means Spotify has no entity for the requested id.
+var ErrNotFound = errors.New("spotify: not found")
 
 // API provides typed methods for accessing the Spotify Web API.
 // All methods require dev mode (valid access token). Call requireDevMode
@@ -341,7 +345,13 @@ func (a *API) get(ctx context.Context, path string, params url.Values, target in
 			} `json:"error"`
 		}
 		if decodeErr := json.NewDecoder(resp.Body).Decode(&apiErr); decodeErr == nil && apiErr.Error.Message != "" {
+			if resp.StatusCode == http.StatusNotFound || apiErr.Error.Status == http.StatusNotFound {
+				return fmt.Errorf("spotify: API error 404: %s: %w", apiErr.Error.Message, ErrNotFound)
+			}
 			return fmt.Errorf("spotify: API error %d: %s", apiErr.Error.Status, apiErr.Error.Message)
+		}
+		if resp.StatusCode == http.StatusNotFound {
+			return fmt.Errorf("spotify: HTTP 404: %w", ErrNotFound)
 		}
 		return fmt.Errorf("spotify: HTTP %d", resp.StatusCode)
 	}

@@ -144,6 +144,20 @@ func (s *Store) DeleteRefresh(ctx context.Context, id int64) error {
 	return nil
 }
 
+// DeleteRefreshByEntity removes any open queue row for the entity. It is a
+// no-op when the entity is not queued.
+func (s *Store) DeleteRefreshByEntity(ctx context.Context, entityType catalog.EntityType, entityID int64) error {
+	if !entityType.Valid() {
+		return fmt.Errorf("catalog sqlite: delete refresh by entity: invalid entity type %q", entityType)
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`DELETE FROM metadata_refresh_queue WHERE entity_type=? AND entity_id=?`,
+		string(entityType), entityID); err != nil {
+		return fmt.Errorf("catalog sqlite: delete refresh by entity %s/%d: %w", entityType, entityID, err)
+	}
+	return nil
+}
+
 // BumpRefreshPriority raises an existing item's priority to at least priority
 // (MAX(existing, priority)). It is a no-op when the entity is not queued; it
 // does not touch due_at, so a bumped item still respects its schedule.

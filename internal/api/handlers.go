@@ -23,6 +23,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/download"
 	"github.com/ramonskie/groovearr/internal/events"
+	"github.com/ramonskie/groovearr/internal/identity"
 	"github.com/ramonskie/groovearr/internal/jobs"
 	"github.com/ramonskie/groovearr/internal/library"
 	"github.com/ramonskie/groovearr/internal/logger"
@@ -582,6 +583,14 @@ func (s *Server) SetWarmRefresher(r jobs.WarmRefresher) {
 func (s *Server) SetUnmatchedRearmer(x jobs.UnmatchedRearmer) {
 	if s.runners != nil {
 		s.runners.SetUnmatchedRearmer(x)
+	}
+}
+
+// SetUnmatchedResolver injects the identity-first resolver the recheck-unmatched
+// job runs before the re-arm fallback. Pass nil to keep the old behavior.
+func (s *Server) SetUnmatchedResolver(x identity.UnmatchedResolver) {
+	if s.runners != nil {
+		s.runners.SetUnmatchedResolver(x)
 	}
 }
 

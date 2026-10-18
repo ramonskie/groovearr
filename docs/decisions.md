@@ -442,3 +442,48 @@ recreates the plugin (`plugin.Registry.Rebuild` → `factory.Create`), replacing
 the `*APIClient` and resetting its pacer bucket; the cooldown bucket is separate
 and survives the rebuild. No code change; recorded to close the pacing audit's
 D2 finding.
+
+## D-008 — Identity-first unmatched resolution (Phase A)
+
+### Context
+
+Album-title search leaves a stable unmatched set: 223 albums / 495 tracks on the
+live library, almost all with a Spotify track id and/or ISRC. The album string
+is often a local grouping artifact (1-track pseudo-albums, quoted titles,
+compilation artists), so re-running `BestMatch` on it cannot recover them.
+`matching.CandidateScore` already defined the confidence bands (auto ≥75,
+review 50–74, local-only <50) and the known-duration-conflict cap, but nothing
+consumed it.
+
+### Decision
+
+Resolve parked unmatched albums from **track identity**, not more album-string
+matching:
+
+- An optional `discovery.TrackIdentityProvider` capability resolves one track by
+  provider id (`GetTrackIdentity`) or ISRC (`LookupTrackByISRC`). Deezer and
+  Spotify implement it; core packages reference only the interface.
+- `internal/identity` probes duration only for the parked albums' tracks, scores
+  each candidate with `matching.CandidateScore`, and auto-applies only when the
+  title agrees and either artist or duration confirms the recording; a known
+  duration conflict always parks.
+- A 1-track local release materializes exactly one provider row. It is marked
+  `album_metadata.partial = 1` only when the provider release is known to have
+  more than one track (a true single, or an unknown count, stays refreshable).
+  A multi-track album materializes the full provider release only when every
+  local track maps to the same provider album and every candidate is
+  high-confidence. Ambiguous/wrong-ISRC/conflicting candidates stay parked for
+  the review UI.
+- The user-triggered `POST /api/jobs/recheck-unmatched` runs the resolver first;
+  the old re-arm path remains as a fallback when no resolver is wired or no
+  configured provider exposes the identity capability.
+
+### Consequences
+
+- Positive: high-confidence identities are used directly; wrong ISRCs cannot
+  auto-apply on ID alone; singles/EPs are valid releases; duration is probed
+  only for the backlog (495 tracks), not the 33k library.
+- Positive: one shared provider cooldown still governs every lookup; partial
+  materializations are never expanded by the refresh engine.
+- Deferred: the review UI for 50–74 confident candidates (Phase B) and a
+  targeted "play local track / choose candidate" flow.

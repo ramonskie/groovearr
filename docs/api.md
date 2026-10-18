@@ -912,27 +912,35 @@ Rate-limited: shared `scan` bucket, 2 req/min per client IP (override via
 
 **Admin only.**
 
-Start the explicit **recheck of parked unmatched albums**. It re-arms the
-terminal (`unmatched`/`failed`) album queue rows to *due now*, so the background
-refresh engine re-searches them with the current matcher without waiting out the
-90-day `UnmatchedRetry` park. This is the user-triggered counterpart to that
-park — useful after a matching improvement (or a new provider) to re-attempt the
-backlog.
+Start the explicit **recheck of parked unmatched albums**. It first runs the
+identity-first resolver: probe missing durations for only the parked albums'
+tracks, look up each track by provider track id or ISRC, score the candidate with
+title, artist, duration, album, and track-count evidence, and materialize
+high-confidence releases through the refresh engine's normal catalog write path.
+Ambiguous, wrong-ISRC, and conflicting candidates stay parked for review.
 
-The request performs **no provider I/O**: it moves the queue rows and returns
-immediately. The paced, cooldown-aware re-search happens on the engine's next
-drain, so progress shows on the catalog status card (`GET /api/catalog/status`
-— watch `queue.due_now` drain). The **Recheck unmatched** button on the settings
-catalog card calls this endpoint.
+If no identity resolver is wired (or the resolver reports no configured provider
+with the identity capability), it falls back to the original behavior:
+re-arming the terminal (`unmatched`/`failed`) album queue rows to *due now*, so
+the background refresh engine re-searches them with the current matcher without
+waiting out the 90-day `UnmatchedRetry` park.
+
+The request returns immediately. The identity pass performs cooldown-aware
+provider I/O in the job runner (paced by the provider HTTP clients); progress
+and the resolved/parked counts appear in the job's `message` (poll `GET
+/api/jobs` or watch the SSE `job_completed` event).
+The **Recheck unmatched** button on the settings catalog card calls this endpoint.
 
 **Response** `202` (or `200` when a job was already running):
 ```json
 {"job": {"type": "recheck-unmatched", "state": "running"}, "started": true}
 ```
 
-The pass is quick, so the runner usually completes within the request; the
-re-armed count then appears in the job's `message` (poll `GET /api/jobs` or watch
-the SSE `job_completed` event).
+A 1-track local release is materialized as exactly one provider row. It is marked
+partial only when the resolved track belongs to a provider release known to have
+more than one track; a true single (or an unknown track count) stays refreshable.
+A multi-track release is materialized only when every track maps to the same
+provider album with high confidence.
 
 Rate-limited: shared `scan` bucket, 2 req/min per client IP (override via
 `RATE_SCAN`).

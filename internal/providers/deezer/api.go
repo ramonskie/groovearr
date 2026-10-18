@@ -6,6 +6,7 @@ package deezer
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -13,6 +14,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/domain"
@@ -21,6 +23,11 @@ import (
 )
 
 const baseURL = "https://api.deezer.com"
+
+// ErrNotFound means Deezer has no entity for the requested id/ISRC. Callers
+// that treat a miss as "no candidate" can errors.Is it instead of inspecting a
+// provider-specific message.
+var ErrNotFound = errors.New("deezer: not found")
 
 // Track represents a Deezer track from the public API.
 type Track struct {
@@ -34,6 +41,7 @@ type Track struct {
 	DiskNumber  int    `json:"disk_number"`
 	Explicit    bool   `json:"explicit_lyrics"`
 	ReleaseDate string `json:"release_date"`
+	ISRC        string `json:"isrc"`
 	Artist      struct {
 		ID   int    `json:"id"`
 		Name string `json:"name"`
@@ -95,7 +103,9 @@ type Client struct {
 	baseURL     string
 	log         *slog.Logger
 
-	// Rate limiting.
+	// Rate limiting. rateMu guards lastCall: the client is shared by the
+	// refresh engine, identity resolver, enrichment, and API search.
+	rateMu      sync.Mutex
 	lastCall    time.Time
 	minInterval time.Duration
 }
@@ -206,6 +216,30 @@ func (c *Client) GetTrack(ctx context.Context, trackID int) (*Track, error) {
 	var track Track
 	if err := json.Unmarshal(data, &track); err != nil {
 		c.log.Error("unmarshal track failed", "error", err, "trackID", trackID, "component", "deezer_api")
+		return nil, err
+	}
+	return &track, nil
+}
+
+// GetTrackByISRC returns the track Deezer associates with isrc. It returns
+// (nil, nil) when Deezer has no track for the ISRC; any other failure is
+// propagated so the caller can observe metadata.ErrRateLimited.
+func (c *Client) GetTrackByISRC(ctx context.Context, isrc string) (*Track, error) {
+	isrc = strings.TrimSpace(isrc)
+	if isrc == "" {
+		return nil, nil
+	}
+	data, err := c.apiGet(ctx, "track/isrc:"+url.PathEscape(isrc), nil)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		c.log.Error("get track by ISRC failed", "error", err, "isrc", isrc, "component", "deezer_api")
+		return nil, err
+	}
+	var track Track
+	if err := json.Unmarshal(data, &track); err != nil {
+		c.log.Error("unmarshal ISRC track failed", "error", err, "isrc", isrc, "component", "deezer_api")
 		return nil, err
 	}
 	return &track, nil
@@ -360,17 +394,30 @@ func (t Track) ToTrackResult(quality string) domain.TrackResult {
 
 // ─── Internal ───────────────────────────────────────────────────────
 
-func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]string) (json.RawMessage, error) {
-	// Rate limit.
+// waitForRate enforces the client-wide minimum interval between calls. The
+// mutex is held across the wait so concurrent callers (refresh, identity, API
+// search) pace as one client instead of racing lastCall.
+func (c *Client) waitForRate(ctx context.Context) error {
+	c.rateMu.Lock()
+	defer c.rateMu.Unlock()
 	elapsed := time.Since(c.lastCall)
 	if elapsed < c.minInterval {
+		timer := time.NewTimer(c.minInterval - elapsed)
+		defer timer.Stop()
 		select {
-		case <-time.After(c.minInterval - elapsed):
+		case <-timer.C:
 		case <-ctx.Done():
-			return nil, ctx.Err()
+			return ctx.Err()
 		}
 	}
 	c.lastCall = time.Now()
+	return nil
+}
+
+func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]string) (json.RawMessage, error) {
+	if err := c.waitForRate(ctx); err != nil {
+		return nil, err
+	}
 
 	u, err := url.Parse(c.baseURL + "/" + strings.TrimLeft(endpoint, "/"))
 	if err != nil {
@@ -408,6 +455,9 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 	}
 
 	if resp.StatusCode != http.StatusOK {
+		if resp.StatusCode == http.StatusNotFound {
+			return nil, ErrNotFound
+		}
 		if resp.StatusCode == http.StatusTooManyRequests {
 			return nil, metadata.NewRateLimitError("deezer", metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After")), "API HTTP 429")
 		}
@@ -443,7 +493,7 @@ func (c *Client) apiGet(ctx context.Context, endpoint string, params map[string]
 		}
 		if errResp.Error.Message != "" {
 			if errResp.Error.Type == "DataException" {
-				return nil, fmt.Errorf("deezer: not found")
+				return nil, ErrNotFound
 			}
 			return nil, fmt.Errorf("deezer API error (%s): %s", errResp.Error.Type, errResp.Error.Message)
 		}

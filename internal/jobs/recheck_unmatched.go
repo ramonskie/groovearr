@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+
+	"github.com/ramonskie/groovearr/internal/identity"
 )
 
 // UnmatchedRearmer re-arms parked terminal (unmatched/failed) albums so the
@@ -20,19 +22,61 @@ type UnmatchedRearmer interface {
 // below it.
 const recheckUnmatchedCap = 100000
 
-// RecheckUnmatched returns a Runner that re-arms every parked terminal
-// (unmatched/failed) album so the background refresh engine re-searches it with
-// the current matcher. It is the explicit, user-triggered override of the 90-day
-// UnmatchedRetry park: the way to re-attempt the backlog after a matching
-// improvement without waiting out the window.
+// RecheckUnmatched returns a Runner that first resolves parked unmatched albums
+// by track identity (provider track id / ISRC / title+artist+duration), then
+// materializes high-confidence releases. When no identity resolver is wired it
+// falls back to the original behavior: re-arm every parked terminal album so
+// the background refresh engine re-searches it with the current matcher.
 //
-// It performs no provider I/O itself — it moves the parked queue rows to
-// "due now" and the service-owned engine does the paced, cooldown-aware
-// re-search on its next drain. The pass is therefore fast and bounded, and its
-// progress is visible on the catalog status card ("N due now" draining) rather
-// than on this job.
+// The identity pass is the explicit, user-triggered override of the 90-day
+// UnmatchedRetry park. Ambiguous candidates stay parked for the review UI; the
+// old album-title search is not re-run for them, because identity evidence has
+// already established that the album string is not enough.
 func (r *Runners) RecheckUnmatched() Runner {
 	return func(ctx context.Context, report func(Report)) error {
+		if r.deps.UnmatchedResolver != nil {
+			report(Report{Message: "resolving unmatched albums by track identity"})
+			lastResolved := -1
+			result, err := r.deps.UnmatchedResolver.ResolveUnmatched(ctx, func(p identity.Progress) {
+				if p.Done%10 != 0 && p.Done != p.Total && p.Resolved == lastResolved {
+					return
+				}
+				lastResolved = p.Resolved
+				report(Report{
+					Done:    p.Done,
+					Total:   p.Total,
+					Message: fmt.Sprintf("identity: %d/%d albums; %d resolved", p.Done, p.Total, p.Resolved),
+				})
+			})
+			if err != nil {
+				if !errors.Is(err, identity.ErrNoTrackProviders) || r.deps.Rearm == nil {
+					return fmt.Errorf("recheck unmatched: %w", err)
+				}
+				report(Report{Message: "no identity providers available; falling back to re-arming unmatched albums"})
+			} else {
+				msg := fmt.Sprintf("identity resolved %d of %d unmatched albums; %d parked for review", result.Resolved, result.Total, result.Parked)
+				if result.CoolingDown {
+					msg = "every identity provider is cooling down; nothing was resolved — retry later"
+				} else {
+					if result.NoIdentity > 0 {
+						msg += fmt.Sprintf(" (%d had no identity candidate)", result.NoIdentity)
+					}
+					if result.Errors > 0 {
+						msg += fmt.Sprintf("; %d errored", result.Errors)
+					}
+					if result.Skipped > 0 {
+						msg += fmt.Sprintf("; %d already resolved", result.Skipped)
+					}
+				}
+				done := result.Total
+				if result.CoolingDown {
+					done = 0
+				}
+				report(Report{Done: done, Total: result.Total, Message: msg})
+				return nil
+			}
+		}
+
 		if r.deps.Rearm == nil {
 			return errors.New("catalog re-arm not available")
 		}

@@ -9,6 +9,8 @@
 > `internal/refresh/bulk.go`, `internal/matching/match.go`,
 > `internal/discovery/provider.go`,
 > `internal/jobs/warm_library.go`, `internal/jobs/recheck_unmatched.go`,
+> `internal/identity/resolver.go`, `internal/discovery/identity.go`,
+> `internal/providers/deezer/download.go`, `internal/providers/spotify/identity.go`,
 > `internal/providers/musicbrainz/provider.go`,
 > `internal/providers/musicbrainz/api.go`,
 > `internal/api/handlers_library.go`, `internal/api/handlers_discover.go`,
@@ -263,10 +265,15 @@ provider fetch and one metadata write instead of racing duplicate calls.
 disc → 1, zero track → position, collisions disambiguated forward) so a provider
 tracklist with repeated keys cannot violate `UNIQUE(album_id, disc_number,
 track_number)` and abort the album. It writes `album_tracks` (`ReplaceAlbumTracks`,
-`origin='provider'`) and upserts `album_metadata` (`refresh_status='fresh'`) in
-short per-album transactions — never across a provider call — preserving the
-previous `last_accessed_at`. It then fires `notifyMaterialized`, which the server
-wires to an SSE broadcast (chart 4).
+`origin='provider'`) and upserts `album_metadata` (`refresh_status='fresh'`,
+`partial` from the caller) in short per-album transactions — never across a
+provider call — preserving the previous `last_accessed_at`. It then fires
+`notifyMaterialized`, which the server wires to an SSE broadcast (chart 4).
+A partial row is written by the identity resolver for a 1-track local release
+resolved to a track on a provider release known to have more than one track;
+`refreshAlbum` returns matched immediately for it, so the engine never expands
+the single into the full album. An unknown/zero provider track count is not
+marked partial, so the album remains refreshable.
 
 Timing constants (`internal/catalog/queue.go`, `DefaultOptions`):
 `BackoffBase` 1m, exponential `2^(n-1)` capped at `BackoffCap` 24h;
@@ -341,7 +348,7 @@ would spend provider calls for no gain. `IncludeComplete` defaults off.
 | Table | Key columns | Notes |
 |---|---|---|
 | `album_tracks` | `album_id, disc_number, track_number, title, artist_name, duration_ms, isrc, provider_name, provider_track_id, origin, created_at, updated_at` | `UNIQUE(album_id, disc_number, track_number)`; `FK albums ON DELETE CASCADE`; `origin ∈ {library, provider}` |
-| `album_metadata` | `album_id PK, provider_name, provider_album_id, refresh_status, last_refreshed_at, last_accessed_at, consecutive_failures, refresh_error, updated_at` | Durable provider link + bookkeeping |
+| `album_metadata` | `album_id PK, provider_name, provider_album_id, refresh_status, last_refreshed_at, last_accessed_at, consecutive_failures, refresh_error, updated_at, partial` | Durable provider link + bookkeeping; `partial` marks a deliberately subsetted 1-track materialization |
 | `artist_metadata` | `artist_id PK, provider_name, provider_artist_id, image_url, genres, summary, refresh_status, last_refreshed_at, consecutive_failures, refresh_error, updated_at` | Written by the discover artist read path |
 | `artist_discography` | `artist_id, provider_name, provider_album_id, title, year, type, cover_url, track_count, last_seen_at` | Display-only read-model |
 | `metadata_refresh_queue` | `entity_type, entity_id, reason, priority, due_at, attempts, last_error, created_at` | `UNIQUE(entity_type, entity_id)`; index `(priority, due_at)`; no FK (polymorphic id) |
@@ -383,7 +390,7 @@ empty pays no cost. Started in `cmd/groovearr/app.go`; `Stop()` runs on shutdown
 > dropped). Tracked in `.opencode/context/project-intelligence/living-notes.md`.
 
 
-## Chart 6 — Recheck Terminal Albums (On-Demand Park Override)
+## Chart 6 — Recheck Unmatched Albums (Identity-First)
 
 ```text
 POST /api/jobs/recheck-unmatched    (admin-only; rate-limit bucket: scan)
@@ -391,34 +398,68 @@ POST /api/jobs/recheck-unmatched    (admin-only; rate-limit bucket: scan)
     v
 startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.go)
     |
+    +-- identity.UnmatchedResolver wired --------------------------------+
+    |                                                                    |
+    |  ResolveUnmatched(ctx)                          (identity/resolver.go)
+    |      |  catalog.ListUnmatchedAlbums(limit)      (catalog/sqlite/stats.go)
+    |      |  per album: GetAlbumMetadata; skip if no longer unmatched
+    |      |  library.GetTracksByAlbum(albumID)
+    |      |  probe duration ONLY for tracks with duration=0
+    |      |      library.ProbeDuration -> UpdateTrackDuration
+    |      |      ErrDurationUnavailable disables probing for the pass
+    |      |
+    |      |  per track: discovery.TrackIdentityProvider
+    |      |      external provider id -> GetTrackIdentity
+    |      |      ISRC -> LookupTrackByISRC (skipped once the id candidate
+    |      |              already auto-applies)
+    |      |      score -> matching.CandidateScore
+    |      |      auto only when:
+    |      |        score >= 75, title agrees,
+    |      |        (artist agrees OR duration agrees),
+    |      |        no known duration conflict
+    |      |
+    |      +-- 1-track local release:
+    |      |      MaterializeResolved(one provider row,
+    |      |          partial = provider album has >1 track)
+    |      |
+    |      +-- multi-track local release:
+    |      |      group candidates by provider release
+    |      |      only one complete group (every local track, same album)
+    |      |      -> GetAlbumTracks -> MaterializeResolved(full release)
+    |      |
+    |      +-- ambiguous / wrong-ISRC / conflicting -> stay parked
+    |      |
+    |      v
+    |  catalog.DeleteRefreshByEntity(album) for each resolved album
+    |  report resolved / parked / no-identity / skipped counts
+    |
+    +-- no resolver OR ErrNoTrackProviders (fallback) --------------------+
+    |
     v
 UnmatchedRearmer.ReArmTerminalAlbums(ctx, recheckUnmatchedCap)   (refresh/enqueue.go
     |                                                             -> jobs/recheck_unmatched.go)
     v
 catalog.Store.ReArmTerminalAlbums(now, limit)        (catalog/sqlite/queue.go)
-    |  INSERT ... SELECT 'album', m.album_id, 'manual', PriorityHigh, now, attempts 0 ...
-    |      FROM album_metadata m  WHERE refresh_status IN ('unmatched','failed')
-    |      ORDER BY m.album_id  LIMIT limit            (limit<=0 -> all)
-    |  ON CONFLICT(entity_type, entity_id) DO UPDATE SET
-    |      due_at = excluded.due_at, priority = MAX(priority, excluded.priority)
-    |
-    |  -> parked unmatched row (due_at=+90d): moved to due-now, priority raised
-    |  -> failed album (terminal transition DELETED its row): a fresh row is inserted
-    |  -> fresh/stale/pending album: never touched
+    |  parked unmatched row (due_at=+90d) -> due-now, priority raised
+    |  failed album (terminal transition DELETED its row) -> fresh row
     v
 engine next drain: ClaimDueRefresh(now) -> processBatch -> RefreshAlbum (chart 3)
-    |  re-runs matching.BestMatch/provider search with the CURRENT matcher
-    |  still-unmatched -> re-parks due_at=+90d (processItem); no-match again is expected
-    v
-the request itself does NO provider I/O -> progress is the card's queue.due_now draining
 ```
 
-This is the explicit, user-triggered override of the two terminal parks: the
-90-day `UnmatchedRetry` due_at (`internal/refresh/service.go` `processItem`) and
-the failed-album row removal (`retryOrFail` → `FinishRefresh`). It exists so a
-matcher improvement can be applied to the whole backlog without waiting out the
-window; the provider-isolation (§1) and shared-cooldown (§8) rules are unchanged
-because the engine still performs the paced re-search.
+The identity pass is the explicit, user-triggered override of the 90-day
+`UnmatchedRetry` park. It does **not** re-run the album-string search for
+ambiguous albums: identity evidence has already shown that the album string is
+not enough, so those rows stay parked for the review UI. Provider access is
+through the optional `discovery.TrackIdentityProvider` capability (Deezer by
+ISRC, Spotify by track id / ISRC); core packages never reference a provider
+name (§1). Every call consults and marks the one shared
+`metadata.ProviderCooldown` bucket (§8).
+
+`MaterializeResolved` uses the same per-album in-flight coalescer as
+`RefreshAlbum`, so an identity result and a concurrent engine refresh cannot
+clobber each other's rows. A partial materialization (`album_metadata.partial`)
+is never expanded by the engine: `refreshAlbum` returns matched immediately for
+it (chart 3), so a 1-track local release stays a single.
 
 ## Observability
 

@@ -7,6 +7,7 @@ import (
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -1278,9 +1279,77 @@ func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID str
 			TrackNumber: t.TrackPos,
 			DiscNumber:  t.DiskNumber,
 			DurationMs:  int64(t.Duration) * 1000,
+			ISRC:        t.ISRC,
 		}
 	}
 	return out, nil
+}
+
+// GetTrackIdentity resolves one Deezer track by its provider id. It is the
+// identity-first counterpart to GetAlbumTracks: the caller already has a
+// provider track id (e.g. from enrichment) and needs the release context.
+func (d *DownloadClient) GetTrackIdentity(ctx context.Context, providerTrackID string) (*discovery.TrackIdentity, error) {
+	id, err := strconv.Atoi(strings.TrimSpace(providerTrackID))
+	if err != nil {
+		return nil, fmt.Errorf("deezer: invalid track id %q: %w", providerTrackID, err)
+	}
+	t, err := d.api.GetTrack(ctx, id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return d.trackIdentity(ctx, t)
+}
+
+// LookupTrackByISRC resolves one Deezer track by ISRC. It returns (nil, nil)
+// when Deezer has no track for the ISRC.
+func (d *DownloadClient) LookupTrackByISRC(ctx context.Context, isrc string) (*discovery.TrackIdentity, error) {
+	t, err := d.api.GetTrackByISRC(ctx, isrc)
+	if err != nil || t == nil {
+		return nil, err
+	}
+	return d.trackIdentity(ctx, t)
+}
+
+// trackIdentity maps the public API track onto the provider-neutral identity.
+// It fills the album track count lazily (the ISRC endpoint sometimes omits it)
+// so the resolver can distinguish a true single from a track on a full album.
+func (d *DownloadClient) trackIdentity(ctx context.Context, t *Track) (*discovery.TrackIdentity, error) {
+	albumTracks := t.Album.NbTracks
+	albumType := ""
+	if albumTracks == 0 && t.Album.ID != 0 {
+		album, err := d.api.GetAlbum(ctx, t.Album.ID)
+		if err != nil {
+			if errors.Is(err, metadata.ErrRateLimited) || errors.Is(err, metadata.ErrProviderBusy) {
+				return nil, err
+			}
+			// Track count is optional context; keep the identity and let the
+			// resolver treat the count as unknown.
+		} else if album != nil {
+			albumTracks = album.NbTracks
+			albumType = album.RecordType
+		}
+	}
+	albumID := ""
+	if t.Album.ID != 0 {
+		albumID = strconv.Itoa(t.Album.ID)
+	}
+	return &discovery.TrackIdentity{
+		ProviderName:    downloadPluginName,
+		ProviderTrackID: strconv.Itoa(t.ID),
+		ProviderAlbumID: albumID,
+		Title:           t.Title,
+		ArtistName:      t.Artist.Name,
+		AlbumTitle:      t.Album.Title,
+		AlbumType:       albumType,
+		AlbumTrackCount: albumTracks,
+		TrackNumber:     t.TrackPos,
+		DiscNumber:      t.DiskNumber,
+		DurationMs:      int64(t.Duration) * 1000,
+		ISRC:            t.ISRC,
+	}, nil
 }
 
 func (d *DownloadClient) SearchAlbums(ctx context.Context, q discovery.AlbumQuery, limit int) ([]discovery.AlbumResult, error) {
@@ -1347,6 +1416,7 @@ func (d *DownloadClient) GetArtistTopTracks(ctx context.Context, providerArtistI
 var _ metadata.Provider = (*DownloadClient)(nil)
 var _ download.MonitoredProvider = (*DownloadClient)(nil)
 var _ discovery.Provider = (*DownloadClient)(nil)
+var _ discovery.TrackIdentityProvider = (*DownloadClient)(nil)
 
 // SearchAlbum finds the album title for a track via Deezer's public search API.
 // Returns ("", nil) when no match is found; a failure (including
