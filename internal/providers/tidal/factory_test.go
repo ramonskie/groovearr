@@ -50,8 +50,8 @@ func TestFactoryConfigSchema(t *testing.T) {
 		t.Fatal("Factory does not implement ConfigSchemaProvider")
 	}
 	schema := sp.ConfigSchema()
-	if len(schema) < 4 {
-		t.Fatalf("expected at least 4 fields, got %d", len(schema))
+	if len(schema) < 5 {
+		t.Fatalf("expected at least 5 fields, got %d", len(schema))
 	}
 	fields := map[string]plugin.ConfigField{}
 	for _, f := range schema {
@@ -65,6 +65,7 @@ func TestFactoryConfigSchema(t *testing.T) {
 		wantLabel string
 		secret    bool
 	}{
+		{"enabled", "toggle", "Enabled", false},
 		{"client_id", "password", "Client ID", true},
 		{"client_secret", "password", "Client Secret", true},
 		{"country_code", "text", "Country Code", false},
@@ -84,6 +85,9 @@ func TestFactoryConfigSchema(t *testing.T) {
 			}
 			if f.Secret != tt.secret {
 				t.Errorf("secret = %v, want %v", f.Secret, tt.secret)
+			}
+			if tt.name == "enabled" && f.Default != "true" {
+				t.Errorf("default = %q, want true", f.Default)
 			}
 		})
 	}
@@ -166,6 +170,80 @@ func TestFactoryDefaultConfig(t *testing.T) {
 	}
 	if cfg.UserID != 0 {
 		t.Errorf("UserID = %d, want 0", cfg.UserID)
+	}
+	if !cfg.Enabled {
+		t.Error("Enabled = false, want true (toggle defaults ON)")
+	}
+}
+
+// ─── Enabler ────────────────────────────────────────────────────────────
+
+func TestFactoryEnabledToggle(t *testing.T) {
+	resources := plugin.PluginResources{DownloadPath: t.TempDir()}
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want bool
+	}{
+		{"default config", Factory.DefaultConfig(), true},
+		{"explicitly enabled", json.RawMessage(`{"enabled":true}`), true},
+		{"explicitly disabled", json.RawMessage(`{"enabled":false}`), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			p, err := Factory.Create(tt.raw, resources)
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			enabler, ok := p.(plugin.Enabler)
+			if !ok {
+				t.Fatal("plugin does not implement plugin.Enabler")
+			}
+			if got := enabler.IsEnabled(); got != tt.want {
+				t.Errorf("IsEnabled = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRegistryMergeDefaultsEnabled pins the production path: InitAll merges
+// factory defaults over the stored source config, so a legacy config with no
+// "enabled" key stays enabled and an explicit false is preserved.
+func TestRegistryMergeDefaultsEnabled(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  json.RawMessage
+		want bool
+	}{
+		{"legacy config without enabled", json.RawMessage(`{"access_token":"tok"}`), true},
+		{"explicitly disabled", json.RawMessage(`{"enabled":false,"access_token":"tok"}`), false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reg := plugin.NewRegistry()
+			if err := reg.RegisterFactory(Factory); err != nil {
+				t.Fatalf("RegisterFactory: %v", err)
+			}
+			sources := map[string]json.RawMessage{"tidal": tt.raw}
+			if err := reg.InitAll(sources, plugin.PluginResources{DownloadPath: t.TempDir()}); err != nil {
+				t.Fatalf("InitAll: %v", err)
+			}
+			p := reg.Get("tidal")
+			if p == nil {
+				t.Fatal("tidal plugin not registered")
+			}
+			enabler, ok := p.(plugin.Enabler)
+			if !ok {
+				t.Fatal("plugin does not implement plugin.Enabler")
+			}
+			if got := enabler.IsEnabled(); got != tt.want {
+				t.Errorf("IsEnabled = %v, want %v", got, tt.want)
+			}
+			configured := reg.Configured()
+			if !tt.want && len(configured) != 0 {
+				t.Errorf("Configured() = %v, want empty for disabled provider", configured)
+			}
+		})
 	}
 }
 

@@ -125,6 +125,13 @@ func NewClient(cfg TidalConfig, downloadPath string, logger *slog.Logger) (*Clie
 func (c *Client) Name() string        { return pluginName }
 func (c *Client) DisplayName() string { return displayName }
 
+// IsEnabled returns false when the plugin has been explicitly disabled.
+func (c *Client) IsEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.cfg.Enabled
+}
+
 // SetTokenPersistCallback registers a function called after token refresh
 // to persist the new token (and its expiry) to config. Called by OAuth handlers.
 func (c *Client) SetTokenPersistCallback(fn func(accessToken, refreshToken string, expiresAt time.Time)) {

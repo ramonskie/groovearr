@@ -11,6 +11,7 @@ import (
 // Fields matching known sensitive keys (access_token, refresh_token, client_secret)
 // are auto-masked in logs and config dumps.
 type TidalConfig struct {
+	Enabled      bool   `json:"enabled"`       // user-facing enable/disable toggle (default true)
 	AccessToken  string `json:"access_token"`  // auto-masked (contains "token")
 	RefreshToken string `json:"refresh_token"` // auto-masked (contains "token")
 	ExpiresAt    int64  `json:"expires_at"`    // token expiry, unix seconds (0 = unknown; internal)
@@ -65,12 +66,19 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Tidal configuration as JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"access_token":"","refresh_token":"","expires_at":0,"client_id":"","client_secret":"","country_code":"US","quality":"LOSSLESS","user_id":0}`)
+	return json.RawMessage(`{"enabled":true,"access_token":"","refresh_token":"","expires_at":0,"client_id":"","client_secret":"","country_code":"US","quality":"LOSSLESS","user_id":0}`)
 }
 
 // ConfigSchema returns the UI form fields for Tidal settings.
 func (f *factory) ConfigSchema() []plugin.ConfigField {
 	return []plugin.ConfigField{
+		{
+			Name:    "enabled",
+			Type:    "toggle",
+			Label:   "Enabled",
+			Hint:    "Enable or disable Tidal. When disabled, health checks are skipped.",
+			Default: "true",
+		},
 		{
 			Name:        "client_id",
 			Type:        "password",

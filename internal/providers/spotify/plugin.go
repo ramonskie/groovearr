@@ -71,6 +71,10 @@ func (p *Plugin) Name() string { return pluginName }
 // DisplayName returns a human-readable label.
 func (p *Plugin) DisplayName() string { return displayName }
 
+// IsEnabled returns false when the plugin has been explicitly disabled.
+// Enabled is immutable after Create, so no lock is needed here.
+func (p *Plugin) IsEnabled() bool { return p.cfg.Enabled }
+
 // IsConfigured reports whether the plugin is ready to serve requests.
 // Free mode is always ready. Dev mode requires client credentials (client_id + client_secret).
 // Access tokens are obtained at runtime via OAuth — they are not part of configuration.

@@ -271,6 +271,8 @@ type TrackIdentityProvider interface {
 Implement when the plugin supports user-facing enable/disable. Plugins that do NOT implement
 this are implicitly always enabled. The health checker skips disabled plugins.
 
+Current implementations: Soulseek, Deezer, qBittorrent, Tidal, and Spotify.
+
 ```go
 // internal/plugin/plugin.go
 type Enabler interface {

@@ -3,6 +3,7 @@ package tidal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -199,20 +200,6 @@ func handleTidalPoll(cfg *config.Persistence, registry *plugin.Registry, logger 
 			return
 		}
 
-		// Merge token into tidal config.
-		current := cfg.Get()
-		raw, ok := current.Sources["tidal"]
-		if !ok {
-			writePollJSON(w, "error", "tidal not configured")
-			return
-		}
-
-		var tidalCfg TidalConfig
-		if err := json.Unmarshal(raw, &tidalCfg); err != nil {
-			writePollJSON(w, "error", "invalid tidal config")
-			return
-		}
-
 		// Extract access and refresh token from the oauth2.Token.
 		var tok struct {
 			AccessToken  string    `json:"access_token"`
@@ -224,34 +211,61 @@ func handleTidalPoll(cfg *config.Persistence, registry *plugin.Registry, logger 
 			return
 		}
 
-		tidalCfg.AccessToken = tok.AccessToken
-		tidalCfg.RefreshToken = tok.RefreshToken
-		if tok.Expiry.IsZero() {
-			tidalCfg.ExpiresAt = 0
-		} else {
-			tidalCfg.ExpiresAt = tok.Expiry.Unix()
-		}
-
-		newRaw, err := json.Marshal(tidalCfg)
-		if err != nil {
-			writePollJSON(w, "error", "failed to marshal config")
-			return
-		}
-
+		// Merge token into tidal config inside the update lock so a concurrent
+		// settings change (e.g. the enabled toggle) is not overwritten by a
+		// stale pre-lock snapshot.
+		errNotConfigured := errors.New("tidal not configured")
+		errInvalidConfig := errors.New("invalid tidal config")
 		if err := cfg.Update(func(c *config.Config) error {
+			raw, ok := c.Sources["tidal"]
+			if !ok {
+				return errNotConfigured
+			}
+			var tidalCfg TidalConfig
+			if err := json.Unmarshal(raw, &tidalCfg); err != nil {
+				return errInvalidConfig
+			}
+
+			tidalCfg.AccessToken = tok.AccessToken
+			tidalCfg.RefreshToken = tok.RefreshToken
+			if tok.Expiry.IsZero() {
+				tidalCfg.ExpiresAt = 0
+			} else {
+				tidalCfg.ExpiresAt = tok.Expiry.Unix()
+			}
+
+			b, err := json.Marshal(tidalCfg)
+			if err != nil {
+				return err
+			}
 			if c.Sources == nil {
 				c.Sources = make(map[string]json.RawMessage)
 			}
-			c.Sources["tidal"] = newRaw
+			c.Sources["tidal"] = b
 			return nil
 		}); err != nil {
-			logger.Error("tidal token save failed", "error", err, "component", "tidal_oauth")
-			writePollJSON(w, "error", "Failed to save token: "+err.Error())
+			switch {
+			case errors.Is(err, errNotConfigured):
+				writePollJSON(w, "error", "tidal not configured")
+			case errors.Is(err, errInvalidConfig):
+				writePollJSON(w, "error", "invalid tidal config")
+			default:
+				logger.Error("tidal token save failed", "error", err, "component", "tidal_oauth")
+				writePollJSON(w, "error", "Failed to save token: "+err.Error())
+			}
+			return
+		}
+
+		// Rebuild from live config, not the write-time snapshot, so a concurrent
+		// settings change (e.g. the enabled toggle) is reflected in the plugin.
+		liveRaw, ok := cfg.Get().Sources["tidal"]
+		if !ok {
+			writePollJSON(w, "error", "tidal not configured")
 			return
 		}
 
 		// Rebuild the plugin.
-		if err := rebuild("tidal", newRaw); err != nil {
+		if err := rebuild("tidal", liveRaw); err != nil {
 			logger.Error("tidal plugin rebuild failed", "error", err, "component", "tidal_oauth")
 			writePollJSON(w, "error", "Token saved but plugin rebuild failed: "+err.Error())
 			return

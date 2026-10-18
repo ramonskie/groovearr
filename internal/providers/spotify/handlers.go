@@ -2,6 +2,7 @@ package spotify
 
 import (
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"sync"
@@ -140,15 +141,24 @@ func handleSpotifyCallback(cfg *config.Persistence, logger *slog.Logger, rebuild
 			return
 		}
 
-		// Store tokens in config.
-		spCfg.Tokens = SpotifyTokens{
-			AccessToken:  accessToken,
-			RefreshToken: refreshToken,
-			ExpiresAt:    time.Now().Unix() + int64(expiresIn),
-		}
-
+		// Store tokens in config. Patch the token block inside the update lock
+		// from the freshly-read source config so a concurrent settings change
+		// (e.g. the enabled toggle) is not overwritten by a stale snapshot.
 		if err := cfg.Update(func(c *config.Config) error {
-			b, err := json.Marshal(spCfg)
+			raw, ok := c.Sources["spotify"]
+			if !ok {
+				return fmt.Errorf("spotify not configured")
+			}
+			var currentCfg SpotifyConfig
+			if err := json.Unmarshal(raw, &currentCfg); err != nil {
+				return err
+			}
+			currentCfg.Tokens = SpotifyTokens{
+				AccessToken:  accessToken,
+				RefreshToken: refreshToken,
+				ExpiresAt:    time.Now().Unix() + int64(expiresIn),
+			}
+			b, err := json.Marshal(currentCfg)
 			if err != nil {
 				logger.Error("spotify config marshal failed", "error", err, "component", "spotify_handler")
 				return err

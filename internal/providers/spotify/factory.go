@@ -20,6 +20,7 @@ type SpotifyTokens struct {
 
 // SpotifyConfig holds Spotify-specific plugin configuration.
 type SpotifyConfig struct {
+	Enabled      bool          `json:"enabled"`       // user-facing enable/disable toggle (default true)
 	Mode         string        `json:"mode"`          // "free" or "dev"
 	ClientID     string        `json:"client_id"`     // Spotify app client ID
 	ClientSecret string        `json:"client_secret"` // Spotify app client secret
@@ -98,11 +99,18 @@ func (f *factory) ValidateConfig(rawCfg json.RawMessage) error {
 
 // DefaultConfig returns the default Spotify configuration as raw JSON.
 func (f *factory) DefaultConfig() json.RawMessage {
-	return json.RawMessage(`{"mode":"free","client_id":"","client_secret":"","redirect_uri":"http://localhost:8008/api/spotify/callback","tokens":{"access_token":"","refresh_token":"","expires_at":0}}`)
+	return json.RawMessage(`{"enabled":true,"mode":"free","client_id":"","client_secret":"","redirect_uri":"http://localhost:8008/api/spotify/callback","tokens":{"access_token":"","refresh_token":"","expires_at":0}}`)
 }
 
 func (f *factory) ConfigSchema() []plugin.ConfigField {
 	return []plugin.ConfigField{
+		{
+			Name:    "enabled",
+			Type:    "toggle",
+			Label:   "Enabled",
+			Hint:    "Enable or disable Spotify. When disabled, health checks are skipped.",
+			Default: "true",
+		},
 		{
 			Name:    "mode",
 			Type:    "select",
