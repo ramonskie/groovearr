@@ -1101,6 +1101,31 @@ func TestApplyTrackMatchMaterializesPartial(t *testing.T) {
 	}
 }
 
+func TestApplyTrackMatchUnknownTrackCountNotPartial(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {{ID: 10, AlbumID: 1, Title: "Song", TrackNumber: 1, Duration: 200000}},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Song"}}}
+	mat := &fakeMaterializer{}
+	p := &fakeProvider{name: "spotify", byID: map[string]*discovery.TrackIdentity{
+		"sp1": {ProviderName: "spotify", ProviderTrackID: "sp1", ProviderAlbumID: "al1",
+			Title: "Song", ArtistName: "Artist", AlbumTitle: "Song", AlbumTrackCount: 0,
+			TrackNumber: 1, DurationMs: 200000, ISRC: "US1"},
+	}}
+
+	applied, err := newResolver(lib, cat, mat, []discovery.Provider{p}, nil, Options{}).
+		ApplyTrackMatch(context.Background(), 1, 10, "spotify", "sp1")
+	if err != nil {
+		t.Fatalf("ApplyTrackMatch: %v", err)
+	}
+	if !applied || len(mat.calls) != 1 || mat.calls[0].partial {
+		t.Fatalf("applied=%v calls=%+v, want one non-partial call", applied, mat.calls)
+	}
+	if len(mat.calls[0].tracks) != 1 || mat.calls[0].tracks[0].ProviderID != "sp1" {
+		t.Fatalf("tracks = %+v, want sp1", mat.calls[0].tracks)
+	}
+}
+
 func TestApplyTrackMatchRejectsMultiTrackAlbum(t *testing.T) {
 	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
 		1: {

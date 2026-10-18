@@ -119,6 +119,98 @@ func TestGetTrackByISRC_HTTP404(t *testing.T) {
 	}
 }
 
+func TestTrackIdentityKeepsIdentityWhenAlbumContextBusy(t *testing.T) {
+	api, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/album/9" {
+			t.Errorf("path = %q, want /album/9", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	defer srv.Close()
+
+	var track Track
+	if err := json.Unmarshal([]byte(`{
+		"id": 7, "title": "Song", "duration": 200, "isrc": "US1",
+		"track_position": 3, "disk_number": 1,
+		"artist": {"id": 1, "name": "Artist"},
+		"album": {"id": 9, "title": "Album", "nb_tracks": 0}
+	}`), &track); err != nil {
+		t.Fatalf("unmarshal track: %v", err)
+	}
+
+	id, err := (&DownloadClient{api: api, log: testLogger()}).trackIdentity(context.Background(), &track)
+	if err != nil {
+		t.Fatalf("trackIdentity: %v, want the identity when optional album context is busy", err)
+	}
+	if id == nil || id.ProviderTrackID != "7" || id.ProviderAlbumID != "9" {
+		t.Fatalf("identity = %+v, want the track identity without album context", id)
+	}
+	if id.AlbumTrackCount != 0 || id.AlbumType != "" {
+		t.Fatalf("album context = %+v, want unknown context", id)
+	}
+}
+
+func TestTrackIdentityPropagatesAlbumContextRateLimit(t *testing.T) {
+	api, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/album/9" {
+			t.Errorf("path = %q, want /album/9", r.URL.Path)
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+	defer srv.Close()
+
+	var track Track
+	if err := json.Unmarshal([]byte(`{
+		"id": 7, "title": "Song", "duration": 200, "isrc": "US1",
+		"track_position": 3, "disk_number": 1,
+		"artist": {"id": 1, "name": "Artist"},
+		"album": {"id": 9, "title": "Album", "nb_tracks": 0}
+	}`), &track); err != nil {
+		t.Fatalf("unmarshal track: %v", err)
+	}
+
+	id, err := (&DownloadClient{api: api, log: testLogger()}).trackIdentity(context.Background(), &track)
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Fatalf("trackIdentity error = %v, want metadata.ErrRateLimited", err)
+	}
+	if id != nil {
+		t.Fatalf("identity = %+v, want nil on a rate limit", id)
+	}
+}
+
+func TestTrackIdentityPropagatesAlbumContextCancellation(t *testing.T) {
+	api, srv := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		t.Errorf("unexpected request %s after cancellation", r.URL.Path)
+		http.NotFound(w, r)
+	})
+	defer srv.Close()
+
+	var track Track
+	if err := json.Unmarshal([]byte(`{
+		"id": 7, "title": "Song", "duration": 200, "isrc": "US1",
+		"track_position": 3, "disk_number": 1,
+		"artist": {"id": 1, "name": "Artist"},
+		"album": {"id": 9, "title": "Album", "nb_tracks": 0}
+	}`), &track); err != nil {
+		t.Fatalf("unmarshal track: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	id, err := (&DownloadClient{api: api, log: testLogger()}).trackIdentity(ctx, &track)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("trackIdentity error = %v, want context.Canceled", err)
+	}
+	if id != nil {
+		t.Fatalf("identity = %+v, want nil after cancellation", id)
+	}
+}
+
 func TestTrackIdentityMapping(t *testing.T) {
 	var track Track
 	if err := json.Unmarshal([]byte(`{

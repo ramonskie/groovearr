@@ -114,6 +114,33 @@ func TestGetTrackIdentityKeepsIdentityWhenAlbumContextFails(t *testing.T) {
 	}
 }
 
+// Tidal surfaces 5xx as a plain httpStatusError rather than metadata.ErrProviderBusy;
+// this test locks the optional-context contract for that path.
+func TestGetTrackIdentityKeepsIdentityWhenAlbumBusy(t *testing.T) {
+	client := newTestIdentityClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/tracks/123":
+			fmt.Fprint(w, `{"id":123,"title":"Song","duration":214,"trackNumber":4,"volumeNumber":1,"isrc":"CH4881102606","artist":{"id":1,"name":"DJ Antoine"},"album":{"id":10,"title":"WOW"}}`)
+		case "/albums/10":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+
+	id, err := client.GetTrackIdentity(context.Background(), "123")
+	if err != nil {
+		t.Fatalf("GetTrackIdentity: %v, want the track identity when optional album context is busy", err)
+	}
+	if id == nil || id.ProviderTrackID != "123" || id.ProviderAlbumID != "10" {
+		t.Fatalf("identity = %+v, want the track identity without album context", id)
+	}
+	if id.AlbumTrackCount != 0 || id.AlbumType != "" {
+		t.Fatalf("album context = %+v, want unknown context", id)
+	}
+}
+
 func TestGetTrackIdentityPropagatesAlbumRateLimit(t *testing.T) {
 	client := newTestIdentityClient(t, func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

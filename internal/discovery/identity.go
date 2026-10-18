@@ -55,6 +55,11 @@ type TrackIdentity struct {
 // can resolve one exact track by provider ID or ISRC. Callers type-assert a
 // discovery.Provider to this interface, so core code depends on behavior, not
 // a concrete provider package (D-003 / AGENTS §1).
+//
+// Optional release context must not fail a usable identity. Providers propagate
+// rate-limit errors and context cancellation/deadline, but a 5xx without
+// Retry-After (transient busy) or other optional-context failure keeps the
+// identity with an unknown track count.
 type TrackIdentityProvider interface {
 	Provider
 

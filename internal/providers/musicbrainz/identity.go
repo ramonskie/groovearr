@@ -96,8 +96,10 @@ func (c *Client) fillReleaseGroupTrackCount(ctx context.Context, id *discovery.T
 	releases, err := c.api.LookupReleaseGroup(ctx, id.ProviderAlbumID)
 	if err != nil {
 		// A rate-limit response must reach the shared bucket even when the
-		// caller's context is ending.
-		if errors.Is(err, metadata.ErrRateLimited) || errors.Is(err, metadata.ErrProviderBusy) {
+		// caller's context is ending. A transient busy/5xx response is only
+		// optional context: the recording identity is still usable, so keep it
+		// with an unknown track count.
+		if errors.Is(err, metadata.ErrRateLimited) {
 			return nil, err
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {

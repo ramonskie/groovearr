@@ -1322,7 +1322,15 @@ func (d *DownloadClient) trackIdentity(ctx context.Context, t *Track) (*discover
 	if albumTracks == 0 && t.Album.ID != 0 {
 		album, err := d.api.GetAlbum(ctx, t.Album.ID)
 		if err != nil {
-			if errors.Is(err, metadata.ErrRateLimited) || errors.Is(err, metadata.ErrProviderBusy) {
+			if errors.Is(err, metadata.ErrRateLimited) {
+				return nil, err
+			}
+			// Optional context must not turn a canceled or timed-out call into
+			// a successful identity lookup.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return nil, ctxErr
+			}
+			if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 				return nil, err
 			}
 			// Track count is optional context; keep the identity and let the

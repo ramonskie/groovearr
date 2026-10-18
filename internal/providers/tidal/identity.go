@@ -108,7 +108,8 @@ func (c *Client) LookupTrackByISRC(ctx context.Context, isrc string) (*discovery
 
 // fillAlbumContext fetches the album summary that the sparse track endpoints do
 // not carry. Release context is optional evidence: a rate limit still parks the
-// provider, while a missing/unknown album keeps the identity usable.
+// provider, while a transient busy response or a missing/unknown album keeps
+// the identity usable.
 func (c *Client) fillAlbumContext(ctx context.Context, id *discovery.TrackIdentity) (*discovery.TrackIdentity, error) {
 	if id == nil || id.ProviderAlbumID == "" {
 		return id, nil
@@ -117,7 +118,7 @@ func (c *Client) fillAlbumContext(ctx context.Context, id *discovery.TrackIdenti
 	if err != nil {
 		// A rate-limit response must reach the shared bucket even when the
 		// caller's context is ending, so it takes precedence over ctx.Err().
-		if errors.Is(err, metadata.ErrRateLimited) || errors.Is(err, metadata.ErrProviderBusy) {
+		if errors.Is(err, metadata.ErrRateLimited) {
 			return nil, err
 		}
 		// Optional release context must not turn a canceled or timed-out call

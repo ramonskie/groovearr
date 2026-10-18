@@ -148,6 +148,37 @@ func TestLookupTrackByISRCRejectsMismatchedISRC(t *testing.T) {
 	}
 }
 
+func TestLookupTrackByISRCKeepsIdentityWhenReleaseGroupBusy(t *testing.T) {
+	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/isrc/CH4881102606":
+			writeJSON(w, `{"isrc":"CH4881102606","recordings":[{"id":"rec-1","title":"Anywhere You Go (DJ Antoine vs Mad Mark 2K12 radio edit)","length":214076,"isrcs":["CH4881102606"],"artist-credit":[{"name":"DJ Antoine","joinphrase":""}]}]}`)
+		case "/recording/rec-1":
+			writeJSON(w, isrcRecordingJSON)
+		case "/release-group/rg-1":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Errorf("unexpected path %s", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+
+	id, err := client.LookupTrackByISRC(context.Background(), "CH4881102606")
+	if err != nil {
+		t.Fatalf("LookupTrackByISRC: %v, want the identity when optional release context is busy", err)
+	}
+	if id == nil || id.ProviderTrackID != "rec-1" || id.ProviderAlbumID != "rg-1" {
+		t.Fatalf("identity = %+v, want the recording identity without a count", id)
+	}
+	if id.AlbumTrackCount != 0 {
+		t.Fatalf("AlbumTrackCount = %d, want 0 when the release-group lookup is busy", id.AlbumTrackCount)
+	}
+	if id.AlbumType != "album" {
+		t.Fatalf("AlbumType = %q, want the recording's release-group type when only the size lookup is busy", id.AlbumType)
+	}
+}
+
 func TestGetTrackIdentityMapsRecording(t *testing.T) {
 	const recordingMBID = "11111111-1111-1111-1111-111111111111"
 	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -233,6 +264,31 @@ func TestGetTrackIdentityPropagatesReleaseGroupRateLimit(t *testing.T) {
 	}
 }
 
+func TestGetTrackIdentityPropagatesReleaseGroupThrottle(t *testing.T) {
+	const recordingMBID = "11111111-1111-1111-1111-111111111111"
+	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/recording/" + recordingMBID:
+			writeJSON(w, isrcRecordingJSON)
+		case "/release-group/rg-1":
+			w.Header().Set("Retry-After", "60")
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Errorf("path = %s, want recording or release-group", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+
+	id, err := client.GetTrackIdentity(context.Background(), recordingMBID)
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Fatalf("GetTrackIdentity error = %v, want metadata.ErrRateLimited from 503 + Retry-After", err)
+	}
+	if id != nil {
+		t.Fatalf("identity = %+v, want nil on a throttle", id)
+	}
+}
+
 func TestGetTrackIdentityKeepsIdentityWhenReleaseGroupFails(t *testing.T) {
 	const recordingMBID = "11111111-1111-1111-1111-111111111111"
 	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
@@ -257,6 +313,36 @@ func TestGetTrackIdentityKeepsIdentityWhenReleaseGroupFails(t *testing.T) {
 	}
 	if id.AlbumTrackCount != 0 {
 		t.Fatalf("AlbumTrackCount = %d, want 0 when the release-group lookup fails", id.AlbumTrackCount)
+	}
+}
+
+func TestGetTrackIdentityKeepsIdentityWhenReleaseGroupBusy(t *testing.T) {
+	const recordingMBID = "11111111-1111-1111-1111-111111111111"
+	client, cleanup := newDiscoveryClient(t, func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/recording/" + recordingMBID:
+			writeJSON(w, isrcRecordingJSON)
+		case "/release-group/rg-1":
+			w.WriteHeader(http.StatusServiceUnavailable)
+		default:
+			t.Errorf("path = %s, want recording or release-group", r.URL.Path)
+			http.NotFound(w, r)
+		}
+	})
+	defer cleanup()
+
+	id, err := client.GetTrackIdentity(context.Background(), recordingMBID)
+	if err != nil {
+		t.Fatalf("GetTrackIdentity: %v, want the track identity when optional release context is busy", err)
+	}
+	if id == nil || id.ProviderAlbumID != "rg-1" {
+		t.Fatalf("identity = %+v, want the recording identity without a count", id)
+	}
+	if id.AlbumTrackCount != 0 {
+		t.Fatalf("AlbumTrackCount = %d, want 0 when the release-group lookup is busy", id.AlbumTrackCount)
+	}
+	if id.AlbumType != "album" {
+		t.Fatalf("AlbumType = %q, want the recording's release-group type when only the size lookup is busy", id.AlbumType)
 	}
 }
 
