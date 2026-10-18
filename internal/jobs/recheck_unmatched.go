@@ -24,9 +24,11 @@ const recheckUnmatchedCap = 100000
 
 // RecheckUnmatched returns a Runner that first resolves parked unmatched albums
 // by track identity (provider track id / ISRC / title+artist+duration), then
-// materializes high-confidence releases. When no identity resolver is wired it
-// falls back to the original behavior: re-arm every parked terminal album so
-// the background refresh engine re-searches it with the current matcher.
+// materializes high-confidence releases. When no resolver is wired, or no
+// configured provider exposes automatic identity capability, it falls back to
+// the original behavior: re-arm every parked terminal album so the background
+// refresh engine re-searches it with the current matcher. Review-only providers
+// do not count as automatic capability.
 //
 // The identity pass is the explicit, user-triggered override of the 90-day
 // UnmatchedRetry park. Ambiguous candidates stay parked for the review UI; the
@@ -52,11 +54,11 @@ func (r *Runners) RecheckUnmatched() Runner {
 				if !errors.Is(err, identity.ErrNoTrackProviders) || r.deps.Rearm == nil {
 					return fmt.Errorf("recheck unmatched: %w", err)
 				}
-				report(Report{Message: "no identity providers available; falling back to re-arming unmatched albums"})
+				report(Report{Message: "no automatic identity providers available (review-only providers are manual); falling back to re-arming unmatched albums"})
 			} else {
 				msg := fmt.Sprintf("identity resolved %d of %d unmatched albums; %d parked for review", result.Resolved, result.Total, result.Parked)
 				if result.CoolingDown {
-					msg = "every identity provider is cooling down; nothing was resolved — retry later"
+					msg = "every automatic identity provider is cooling down; nothing was resolved — retry later"
 				} else {
 					if result.NoIdentity > 0 {
 						msg += fmt.Sprintf(" (%d had no identity candidate)", result.NoIdentity)

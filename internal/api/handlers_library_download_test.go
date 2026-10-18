@@ -124,12 +124,17 @@ func TestHandleLibraryTrackDownload(t *testing.T) {
 	if err := os.WriteFile(outsidePath, []byte("SECRET"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	notesPath := filepath.Join(root, "Artist", "Album", "notes.txt")
+	if err := os.WriteFile(notesPath, []byte("NOTES"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 
 	tracks := map[int64]*domain.Track{
 		1: {ID: 1, FilePath: trackPath},
 		2: {ID: 2, FilePath: ""},
 		3: {ID: 3, FilePath: outsidePath},
 		4: {ID: 4, FilePath: "../../etc/passwd"},
+		5: {ID: 5, FilePath: notesPath},
 	}
 	s := newDownloadServer(t, root, tracks)
 
@@ -195,6 +200,22 @@ func TestHandleLibraryTrackDownload(t *testing.T) {
 		}
 		if ct := rec.Header().Get("Content-Type"); ct != "audio/flac" {
 			t.Errorf("Content-Type = %q, want audio/flac", ct)
+		}
+	})
+
+	t.Run("inline=1 keeps non-audio as attachment", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/tracks/5/download?inline=1", nil)
+		req.SetPathValue("trackID", "5")
+		rec := httptest.NewRecorder()
+		s.handleLibraryTrackDownload(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "attachment;") {
+			t.Errorf("Content-Disposition = %q, want attachment for non-audio", cd)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "" {
+			t.Errorf("Cache-Control = %q, want no inline cache directive", cc)
 		}
 	})
 

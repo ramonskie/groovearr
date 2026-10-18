@@ -412,9 +412,12 @@ startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.
     |      |      ErrDurationUnavailable disables probing for the pass
     |      |
     |      |  per track: discovery.TrackIdentityProvider
+    |      |      review-only providers excluded from this automatic pass
     |      |      external provider id -> GetTrackIdentity
     |      |      ISRC -> LookupTrackByISRC (skipped once the id candidate
     |      |              already auto-applies)
+    |      |      resolved identity fills AlbumTrackCount from the provider's
+    |      |              representative release media counts (when available)
     |      |      score -> matching.CandidateScore
     |      |      auto only when:
     |      |        score >= 75, title agrees,
@@ -433,10 +436,13 @@ startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.
     |      |      group candidates by provider release
     |      |      only complete groups are eligible
     |      |        (every local track, same provider album)
+    |      |      require distinct provider track ids (one-to-one mapping)
     |      |      equal-score groups accepted only when every local track
     |      |        is the same recording and known track counts agree;
     |      |        earlier provider wins
-    |      |      -> GetAlbumTracks -> MaterializeResolved(full release)
+    |      |      -> GetAlbumTracks
+    |      |      reject a fetched release smaller than the local album
+    |      |      -> MaterializeResolved(full release)
     |      |
     |      +-- ambiguous / wrong-ISRC / conflicting -> stay parked
     |      |

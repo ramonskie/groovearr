@@ -23,7 +23,7 @@ const review: UnmatchedAlbumReview = {
   artist: "Artist",
   title: "Single",
   track_count: 1,
-  identity_providers: [], // MusicBrainz has no track-identity support
+  identity_providers: [], // this fixture exercises the release-search fallback
   tracks: [
     {
       track_id: 10,

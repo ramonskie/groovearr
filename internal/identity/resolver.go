@@ -114,14 +114,16 @@ type Result struct {
 	// Skipped counts albums that were no longer unmatched by the time the
 	// resolver reached them (the refresh engine resolved them concurrently).
 	Skipped int
-	// CoolingDown is true when every provider with the identity capability is
-	// currently parked on the shared cooldown bucket. Nothing was processed.
+	// CoolingDown is true when every automatic identity provider is currently
+	// parked on the shared cooldown bucket. Review-only providers do not count:
+	// they are never part of the automatic pass. Nothing was processed.
 	CoolingDown bool
 }
 
-// ErrNoTrackProviders means no configured discovery provider exposes the
-// TrackIdentityProvider capability, so an identity pass cannot run at all.
-var ErrNoTrackProviders = errors.New("identity: no track identity providers available")
+// ErrNoTrackProviders means no configured discovery provider is identity-capable,
+// available, and eligible for automatic resolution (review-only and unavailable
+// providers are excluded), so an identity pass cannot run at all.
+var ErrNoTrackProviders = errors.New("identity: no automatic track identity providers available")
 
 // UnmatchedResolver is the behavior the recheck-unmatched job drives.
 type UnmatchedResolver interface {
@@ -181,7 +183,7 @@ func (r *Resolver) ResolveUnmatched(ctx context.Context, report func(Progress)) 
 	if len(providers) == 0 {
 		result.Parked = len(albums)
 		result.CoolingDown = true
-		r.log.Warn("identity resolve skipped: every identity provider is cooling down", "albums", len(albums), "component", "identity")
+		r.log.Warn("identity resolve skipped: every automatic identity provider is cooling down", "albums", len(albums), "component", "identity")
 		return result, nil
 	}
 
@@ -226,11 +228,24 @@ func (r *Resolver) ResolveUnmatched(ctx context.Context, report func(Progress)) 
 	return result, nil
 }
 
-// trackProviders returns the ordered providers that expose the identity
-// capability and are not currently cooling down, plus the number of capable
-// providers regardless of cooldown (so the caller can distinguish "not
-// configured" from "temporarily parked").
+// trackProviders returns the ordered providers eligible for a bulk automatic
+// resolve pass: identity-capable, available, and not review-only. The count is
+// the number of auto-capable providers regardless of cooldown, so the caller can
+// distinguish "not configured" from "temporarily parked".
 func (r *Resolver) trackProviders() ([]discovery.TrackIdentityProvider, int) {
+	return r.identityProviders(false)
+}
+
+// reviewTrackProviders returns every available identity-capable provider,
+// including review-only ones. The manual review dialog may use a provider whose
+// lookups are too costly for ResolveUnmatched (for example a multi-step ISRC
+// lookup).
+func (r *Resolver) reviewTrackProviders() []discovery.TrackIdentityProvider {
+	providers, _ := r.identityProviders(true)
+	return providers
+}
+
+func (r *Resolver) identityProviders(includeReviewOnly bool) ([]discovery.TrackIdentityProvider, int) {
 	ordered := metadata.Order(r.order, r.providers())
 	out := make([]discovery.TrackIdentityProvider, 0, len(ordered))
 	capable := 0
@@ -241,6 +256,11 @@ func (r *Resolver) trackProviders() ([]discovery.TrackIdentityProvider, int) {
 		}
 		if avail, ok := tp.(discovery.IdentityAvailability); ok && !avail.IdentityAvailable() {
 			continue
+		}
+		if !includeReviewOnly {
+			if reviewOnly, ok := tp.(discovery.ReviewOnlyIdentity); ok && reviewOnly.IdentityReviewOnly() {
+				continue
+			}
 		}
 		capable++
 		if r.cooldown != nil && r.cooldown.CoolingDown(p.Name()) {
@@ -489,6 +509,28 @@ func (r *Resolver) resolveRelease(ctx context.Context, album catalog.UnmatchedAl
 		}
 	}
 
+	// A complete group must map each local track to a distinct provider track.
+	// byTrack is keyed by local track id, so duplicate provider ids would
+	// otherwise look "complete" while one provider row covers two local rows.
+	providerTrackIDs := make(map[string]struct{}, len(best.byTrack))
+	for _, c := range best.byTrack {
+		trackID := strings.TrimSpace(c.identity.ProviderTrackID)
+		if trackID == "" {
+			r.log.Warn("identity release candidate has no track id; parking",
+				"album_id", album.AlbumID, "provider", best.key.provider,
+				"provider_album_id", best.key.albumID, "component", "identity")
+			return albumOutcome{hadCandidate: anyCandidate}, nil
+		}
+		providerTrackIDs[trackID] = struct{}{}
+	}
+	if len(providerTrackIDs) != len(tracks) {
+		r.log.Warn("identity release candidates do not map one-to-one; parking",
+			"album_id", album.AlbumID, "provider", best.key.provider,
+			"provider_album_id", best.key.albumID, "local_tracks", len(tracks),
+			"provider_tracks", len(providerTrackIDs), "component", "identity")
+		return albumOutcome{hadCandidate: anyCandidate}, nil
+	}
+
 	provider := findProvider(providers, best.key.provider)
 	if provider == nil || best.key.albumID == "" {
 		return albumOutcome{hadCandidate: anyCandidate}, nil
@@ -504,6 +546,15 @@ func (r *Resolver) resolveRelease(ctx context.Context, album catalog.UnmatchedAl
 		return albumOutcome{hadCandidate: anyCandidate}, nil
 	}
 	if len(full) == 0 {
+		return albumOutcome{hadCandidate: anyCandidate}, nil
+	}
+	// MaterializeResolved replaces the album's rows. A smaller provider release
+	// would silently delete local tracks, so park it for review instead.
+	if len(full) < len(tracks) {
+		r.log.Warn("identity release smaller than local album; parking",
+			"album_id", album.AlbumID, "provider", best.key.provider,
+			"provider_album_id", best.key.albumID, "local_tracks", len(tracks),
+			"provider_tracks", len(full), "component", "identity")
 		return albumOutcome{hadCandidate: anyCandidate}, nil
 	}
 	applied, err := r.materializer.MaterializeResolved(ctx, album.AlbumID, best.key.provider, best.key.albumID, full, false)

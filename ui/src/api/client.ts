@@ -391,10 +391,10 @@ export function startWarmLibraryJob(): Promise<StartJobResponse> {
 }
 
 /**
- * Starts the explicit recheck of parked unmatched albums. Re-arms their queue
- * rows to due-now so the background refresh engine re-searches them with the
- * current matcher, bypassing the 90-day retry park. Fast — no provider I/O in
- * the request; the engine does the paced work on its next drain.
+ * Starts the explicit recheck of parked unmatched albums. The job runner runs
+ * the identity resolver first (provider I/O, shared cooldown), then falls back
+ * to re-arming their queue rows to due-now so the background refresh engine
+ * re-searches them with the current matcher, bypassing the 90-day retry park.
  */
 export function startRecheckUnmatchedJob(): Promise<StartJobResponse> {
   return request<StartJobResponse>("/api/jobs/recheck-unmatched", {

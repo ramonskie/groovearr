@@ -339,10 +339,11 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// periodic sweep. Each invocation materializes a bounded batch and yields the
 	// job slot; re-triggering resumes with the remaining candidates.
 	mux.Handle("POST /api/jobs/warm-library", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobWarmLibrary)))
-	// Explicit recheck of parked terminal (unmatched/failed) albums: re-arms
-	// their queue rows to due-now so the engine re-searches them with the current
-	// matcher, bypassing the 90-day park. The request does no provider I/O; the
-	// engine does the paced work on its next drain.
+	// Explicit recheck of parked terminal (unmatched/failed) albums: the job
+	// runner runs the identity resolver first (provider I/O, shared cooldown).
+	// It falls back to re-arming queue rows to due-now only when no automatic
+	// identity provider is available. The engine does the paced work on its
+	// next drain.
 	mux.Handle("POST /api/jobs/recheck-unmatched", withRateLimit("scan", s.rateLimiter, s.adminOnly(s.handleJobRecheckUnmatched)))
 	mux.HandleFunc("GET /api/jobs/organize/report", s.adminOnly(s.handleOrganizeReport))
 	mux.HandleFunc("POST /api/jobs/cancel", s.adminOnly(s.handleJobCancel))

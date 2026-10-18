@@ -107,11 +107,13 @@ type fakeProvider struct {
 	albumErr            error
 	err                 error
 	identityUnavailable bool
+	reviewOnly          bool
 }
 
 func (p *fakeProvider) Name() string { return p.name }
 
-func (p *fakeProvider) IdentityAvailable() bool { return !p.identityUnavailable }
+func (p *fakeProvider) IdentityAvailable() bool  { return !p.identityUnavailable }
+func (p *fakeProvider) IdentityReviewOnly() bool { return p.reviewOnly }
 
 func (p *fakeProvider) GetTrackIdentity(_ context.Context, id string) (*discovery.TrackIdentity, error) {
 	p.idCalls++
@@ -350,6 +352,81 @@ func TestResolveMultiTrackRelease(t *testing.T) {
 	}
 }
 
+func TestResolveMultiTrackSmallerReleaseStaysParked(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {
+			{ID: 10, AlbumID: 1, Title: "A", TrackNumber: 1, Duration: 100000, ISRC: "US1", ExternalIDs: map[string]string{"spotify": "s1"}},
+			{ID: 11, AlbumID: 1, Title: "B", TrackNumber: 2, Duration: 110000, ISRC: "US2", ExternalIDs: map[string]string{"spotify": "s2"}},
+		},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Album"}}}
+	mat := &fakeMaterializer{}
+	p := &fakeProvider{
+		name: "spotify",
+		byID: map[string]*discovery.TrackIdentity{
+			"s1": {ProviderName: "spotify", ProviderTrackID: "s1", ProviderAlbumID: "al1", Title: "A", ArtistName: "Artist", AlbumTitle: "Album", AlbumTrackCount: 2, TrackNumber: 1, DurationMs: 100000, ISRC: "US1"},
+			"s2": {ProviderName: "spotify", ProviderTrackID: "s2", ProviderAlbumID: "al1", Title: "B", ArtistName: "Artist", AlbumTitle: "Album", AlbumTrackCount: 2, TrackNumber: 2, DurationMs: 110000, ISRC: "US2"},
+		},
+		album: map[string][]discovery.TrackInfo{
+			"al1": {{ProviderID: "s1", Title: "A", ArtistName: "Artist", AlbumTitle: "Album", TrackNumber: 1, DurationMs: 100000}},
+		},
+	}
+
+	res, err := newResolver(lib, cat, mat, []discovery.Provider{p}, nil, Options{}).
+		ResolveUnmatched(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ResolveUnmatched: %v", err)
+	}
+	if res.Resolved != 0 || res.Parked != 1 {
+		t.Fatalf("result = %+v, want parked smaller release", res)
+	}
+	if p.albumCalls != 1 {
+		t.Fatalf("album calls = %d, want 1", p.albumCalls)
+	}
+	if len(mat.calls) != 0 {
+		t.Fatalf("materialized a smaller release: %+v", mat.calls)
+	}
+}
+
+func TestResolveMultiTrackDuplicateProviderTrackStaysParked(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {
+			{ID: 10, AlbumID: 1, Title: "A", TrackNumber: 1, Duration: 100000, ISRC: "US1", ExternalIDs: map[string]string{"spotify": "s1"}},
+			{ID: 11, AlbumID: 1, Title: "B", TrackNumber: 2, Duration: 110000, ISRC: "US2", ExternalIDs: map[string]string{"spotify": "s2"}},
+		},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Album"}}}
+	mat := &fakeMaterializer{}
+	p := &fakeProvider{
+		name: "spotify",
+		byID: map[string]*discovery.TrackIdentity{
+			"s1": {ProviderName: "spotify", ProviderTrackID: "same", ProviderAlbumID: "al1", Title: "A", ArtistName: "Artist", AlbumTitle: "Album", AlbumTrackCount: 2, TrackNumber: 1, DurationMs: 100000, ISRC: "US1"},
+			"s2": {ProviderName: "spotify", ProviderTrackID: "same", ProviderAlbumID: "al1", Title: "B", ArtistName: "Artist", AlbumTitle: "Album", AlbumTrackCount: 2, TrackNumber: 2, DurationMs: 110000, ISRC: "US2"},
+		},
+		album: map[string][]discovery.TrackInfo{
+			"al1": {
+				{ProviderID: "same", Title: "A", ArtistName: "Artist", AlbumTitle: "Album", TrackNumber: 1, DurationMs: 100000},
+				{ProviderID: "other", Title: "B", ArtistName: "Artist", AlbumTitle: "Album", TrackNumber: 2, DurationMs: 110000},
+			},
+		},
+	}
+
+	res, err := newResolver(lib, cat, mat, []discovery.Provider{p}, nil, Options{}).
+		ResolveUnmatched(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ResolveUnmatched: %v", err)
+	}
+	if res.Resolved != 0 || res.Parked != 1 {
+		t.Fatalf("result = %+v, want parked duplicate mapping", res)
+	}
+	if p.albumCalls != 0 {
+		t.Fatalf("album calls = %d, want 0 for a duplicate mapping", p.albumCalls)
+	}
+	if len(mat.calls) != 0 {
+		t.Fatalf("materialized a duplicate mapping: %+v", mat.calls)
+	}
+}
+
 func TestResolveMultiTrackConflictStaysParked(t *testing.T) {
 	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
 		1: {
@@ -419,6 +496,29 @@ func TestResolveAllProvidersCooling(t *testing.T) {
 	}
 	if len(mat.calls) != 0 {
 		t.Fatal("materialized while every provider was cooling down")
+	}
+}
+
+func TestResolveMarksRateLimitedProvider(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {{ID: 10, AlbumID: 1, Title: "Song", ISRC: "US1", ExternalIDs: map[string]string{"spotify": "sp1"}}},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Song"}}}
+	mat := &fakeMaterializer{}
+	cool := &fakeCooldown{}
+	retry := 2 * time.Minute
+	p := &fakeProvider{name: "spotify", idErr: metadata.NewRateLimitError("spotify", retry, "")}
+
+	res, err := newResolver(lib, cat, mat, []discovery.Provider{p}, cool, Options{}).
+		ResolveUnmatched(context.Background(), nil)
+	if err != nil {
+		t.Fatalf("ResolveUnmatched: %v", err)
+	}
+	if res.Resolved != 0 || res.Parked != 1 {
+		t.Fatalf("result = %+v, want a parked album", res)
+	}
+	if got := cool.marks["spotify"]; got != retry {
+		t.Fatalf("MarkAfter duration = %v, want %v", got, retry)
 	}
 }
 
@@ -1090,6 +1190,7 @@ func TestEquivalentRecordingsSafety(t *testing.T) {
 		want bool
 	}{
 		{"same ISRC wins despite title spelling", mk("US1", "Song - Radio Edit", "Artist", 200000), mk("US1", "Song (Radio Edit)", "Artist", 500000), true},
+		{"hyphenated ISRC matches normalized", mk("US-RC1-76-07839", "Song", "Artist", 200000), mk("USRC17607839", "Song", "Artist", 200000), true},
 		{"different non-empty ISRC is not equivalent", mk("US1", "Song", "Artist", 200000), mk("US2", "Song", "Artist", 200000), false},
 		{"one missing ISRC needs known duration", mk("", "Song", "Artist", 200000), mk("US2", "Song", "Artist", 201000), true},
 		{"one missing ISRC with unknown duration parks", mk("", "Song", "Artist", 0), mk("US2", "Song", "Artist", 200000), false},
@@ -1242,6 +1343,89 @@ func TestTrackProvidersSkipsUnavailableIdentity(t *testing.T) {
 	}
 }
 
+func TestResolveUnmatchedSkipsReviewOnlyProvider(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {{ID: 10, AlbumID: 1, Title: "Song", TrackNumber: 1, Duration: 200000, ISRC: "US1"}},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Song"}}}
+	mat := &fakeMaterializer{}
+	p := &fakeProvider{name: "musicbrainz", reviewOnly: true, byISRC: map[string]*discovery.TrackIdentity{
+		"US1": {
+			ProviderName: "musicbrainz", ProviderTrackID: "rec1", ProviderAlbumID: "rg1",
+			Title: "Song", ArtistName: "Artist", AlbumTitle: "Song",
+			AlbumTrackCount: 1, TrackNumber: 1, DurationMs: 200000, ISRC: "US1",
+		},
+	}}
+
+	res, err := newResolver(lib, cat, mat, []discovery.Provider{p}, nil, Options{}).
+		ResolveUnmatched(context.Background(), nil)
+	if !errors.Is(err, ErrNoTrackProviders) {
+		t.Fatalf("err = %v, want ErrNoTrackProviders", err)
+	}
+	if res.Total != 1 {
+		t.Fatalf("result = %+v, want the album counted", res)
+	}
+	if p.isrcCalls != 0 || len(mat.calls) != 0 {
+		t.Fatalf("provider calls=%d materialize=%+v, want none", p.isrcCalls, mat.calls)
+	}
+}
+
+func TestReviewAlbumIncludesReviewOnlyProvider(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {{ID: 10, AlbumID: 1, Title: "Song", TrackNumber: 1, Duration: 200000, ISRC: "US1"}},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Song"}}}
+	p := &fakeProvider{name: "musicbrainz", reviewOnly: true, byISRC: map[string]*discovery.TrackIdentity{
+		"US1": {
+			ProviderName: "musicbrainz", ProviderTrackID: "rec1", ProviderAlbumID: "rg1",
+			Title: "Song", ArtistName: "Artist", AlbumTitle: "Song",
+			AlbumTrackCount: 1, TrackNumber: 1, DurationMs: 200000, ISRC: "US1",
+		},
+	}}
+
+	review, err := newResolver(lib, cat, &fakeMaterializer{}, []discovery.Provider{p}, nil, Options{}).
+		ReviewAlbum(context.Background(), 1)
+	if err != nil {
+		t.Fatalf("ReviewAlbum: %v", err)
+	}
+	if len(review.IdentityProviders) != 1 || review.IdentityProviders[0] != "musicbrainz" {
+		t.Fatalf("identity providers = %v, want musicbrainz", review.IdentityProviders)
+	}
+	if len(review.Tracks) != 1 || len(review.Tracks[0].Candidates) != 1 {
+		t.Fatalf("review = %+v, want one review-only candidate", review)
+	}
+	if got := review.Tracks[0].Candidates[0].Provider; got != "musicbrainz" {
+		t.Errorf("candidate provider = %q, want musicbrainz", got)
+	}
+	if review.Tracks[0].Candidates[0].Auto {
+		t.Error("review-only candidate must not advertise automatic application")
+	}
+}
+
+func TestApplyTrackMatchAllowsReviewOnlyProvider(t *testing.T) {
+	lib := &fakeLibrary{tracks: map[int64][]domain.Track{
+		1: {{ID: 10, AlbumID: 1, Title: "Song", TrackNumber: 1, Duration: 200000}},
+	}}
+	cat := &fakeCatalog{albums: []catalog.UnmatchedAlbum{{AlbumID: 1, Artist: "Artist", Title: "Song"}}}
+	mat := &fakeMaterializer{}
+	p := &fakeProvider{name: "musicbrainz", reviewOnly: true, byID: map[string]*discovery.TrackIdentity{
+		"rec1": {
+			ProviderName: "musicbrainz", ProviderTrackID: "rec1", ProviderAlbumID: "rg1",
+			Title: "Song", ArtistName: "Artist", AlbumTitle: "Song",
+			AlbumTrackCount: 1, TrackNumber: 1, DurationMs: 200000,
+		},
+	}}
+
+	applied, err := newResolver(lib, cat, mat, []discovery.Provider{p}, nil, Options{}).
+		ApplyTrackMatch(context.Background(), 1, 10, "musicbrainz", "rec1")
+	if err != nil {
+		t.Fatalf("ApplyTrackMatch: %v", err)
+	}
+	if !applied || len(mat.calls) != 1 {
+		t.Fatalf("applied=%v calls=%+v, want one materialization", applied, mat.calls)
+	}
+}
+
 func TestValidProviderID(t *testing.T) {
 	cases := []struct {
 		id   string
@@ -1256,6 +1440,8 @@ func TestValidProviderID(t *testing.T) {
 		{"a#b", false},
 		{"a%2Fb", false},
 		{"a b", false},
+		{".", false},
+		{"..", false},
 	}
 	for _, tc := range cases {
 		if got := validProviderID(tc.id); got != tc.want {

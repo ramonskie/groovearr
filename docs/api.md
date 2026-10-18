@@ -587,7 +587,8 @@ Stream a single library track file. Available to any authenticated user
 
 **Query param**: `inline=1` (or `true`) switches
 `Content-Disposition` from `attachment` to `inline` for the unmatched-review
-`<audio>` player. Authorization, root containment and range handling are
+`<audio>` player when the file resolves to a known audio MIME type. Non-audio
+files stay `attachment`. Authorization, root containment and range handling are
 identical to a download.
 
 **Response** `200`: the raw audio file, with:
@@ -598,6 +599,8 @@ identical to a download.
   lookup, then `application/octet-stream`.
 - `Content-Disposition: attachment` with both a legacy ASCII `filename=` and an
   RFC 5987 `filename*=UTF-8''…` parameter, so non-ASCII titles survive intact.
+  With `inline=1` and an audio MIME type it is `inline` instead, and the response
+  carries `Cache-Control: private, no-store`.
 - `Range` and `HEAD` support (partial content / resume) via `http.ServeContent`,
   plus `Last-Modified` and `Content-Length`.
 
@@ -929,7 +932,7 @@ review dialog and its match endpoint are documented under
 `GET /api/catalog/unmatched/{albumID}/review`.
 
 If no identity resolver is wired (or the resolver reports no configured provider
-with the identity capability), it falls back to the original behavior:
+with the automatic identity capability), it falls back to the original behavior:
 re-arming the terminal (`unmatched`/`failed`) album queue rows to *due now*, so
 the background refresh engine re-searches them with the current matcher without
 waiting out the 90-day `UnmatchedRetry` park.
@@ -945,9 +948,11 @@ The **Recheck unmatched** button on the settings catalog card calls this endpoin
 {"job": {"type": "recheck-unmatched", "state": "running"}, "started": true}
 ```
 
-A 1-track local release is materialized as exactly one provider row. It is marked
-partial only when the resolved track belongs to a provider release known to have
-more than one track; a true single (or an unknown track count) stays refreshable.
+Providers that mark themselves review-only (currently MusicBrainz) are excluded
+from this automatic pass but remain available in the review dialog. A 1-track
+local release is materialized as exactly one provider row. It is marked partial
+only when the resolved track belongs to a provider release known to have more
+than one track; a true single (or an unknown track count) stays refreshable.
 A multi-track release is materialized only when every track maps to the same
 provider album with high confidence.
 
@@ -1065,11 +1070,15 @@ derived from its stored provider id and ISRC, scored with
 the safe action is a complete provider release chosen through discovery search,
 not a per-track merge.
 
-`identity_providers` lists the currently available providers that support
-track-identity lookups. A cooling provider is omitted rather than failing the
-whole review, so the dialog can still open and use provider search. Release
-matches work with any configured discovery provider; a single-track match needs
-one of these.
+`identity_providers` lists the providers that supported track-identity lookups
+when the review was built. A cooling provider is omitted rather than failing the
+whole review, so the dialog can still open and use provider search. A provider
+can cool down while candidates are probed; applying through it then returns
+`ErrProviderCoolingDown`. Release matches work with any configured discovery
+provider; a single-track match needs one of these. The list includes providers
+marked review-only (currently MusicBrainz, whose ISRC lookup is a multi-step
+paced sequence); those providers are deliberately excluded from the bulk
+`recheck-unmatched` automatic pass.
 
 **Response** `200`:
 ```json

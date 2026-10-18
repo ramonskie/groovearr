@@ -485,7 +485,8 @@ matching:
   the review UI.
 - The user-triggered `POST /api/jobs/recheck-unmatched` runs the resolver first;
   the old re-arm path remains as a fallback when no resolver is wired or no
-  configured provider exposes the identity capability.
+  configured provider exposes automatic identity capability. Review-only
+  providers (MusicBrainz) do not count as automatic capability.
 
 ### Phase B — equivalent tie-break and manual review
 

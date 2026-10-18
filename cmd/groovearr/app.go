@@ -510,9 +510,11 @@ func NewApp(configPath string) (*App, error) {
 	// (provider-link reuse, shared cooldown) as the queue engine. The job itself
 	// is default off and triggered explicitly via POST /api/jobs/warm-library.
 	srv.SetWarmRefresher(refreshSvc)
-	// Inject the same engine as the explicit recheck-unmatched job's re-armer,
-	// so POST /api/jobs/recheck-unmatched re-arms parked terminal albums through
-	// the exact queue policy the engine uses (bypassing the 90-day park).
+	// Inject the same engine as the explicit recheck-unmatched job's re-armer.
+	// The runner tries that job's identity resolver first; the re-armer remains
+	// the fallback when no automatic identity provider is available, re-arming
+	// parked terminal albums through the exact queue policy the engine uses
+	// (bypassing the 90-day park).
 	srv.SetUnmatchedRearmer(refreshSvc)
 	// The identity-first resolver takes precedence over the re-arm fallback for
 	// the same job: it resolves what identity can prove and leaves the rest

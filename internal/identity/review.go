@@ -93,9 +93,11 @@ type AlbumReview struct {
 	Title      string        `json:"title"`
 	TrackCount int           `json:"track_count"`
 	Tracks     []ReviewTrack `json:"tracks"`
-	// IdentityProviders lists available providers that support track-identity
-	// lookups. Release matches work for any discovery provider, but a
-	// single-track match needs one of these.
+	// IdentityProviders lists the providers that supported track-identity
+	// lookups when the review was built. A provider can cool down while
+	// candidates are probed; applying through it then returns
+	// ErrProviderCoolingDown. Release matches work for any discovery provider,
+	// but a single-track match needs one of these.
 	IdentityProviders []string `json:"identity_providers"`
 }
 
@@ -127,7 +129,7 @@ func (r *Resolver) ReviewAlbum(ctx context.Context, albumID int64) (AlbumReview,
 		Tracks:            make([]ReviewTrack, 0, len(tracks)),
 		IdentityProviders: []string{},
 	}
-	providers, _ := r.trackProviders()
+	providers := r.reviewTrackProviders()
 	for _, p := range providers {
 		review.IdentityProviders = append(review.IdentityProviders, p.Name())
 	}
@@ -245,9 +247,9 @@ func (r *Resolver) ApplyReleaseMatch(ctx context.Context, albumID int64,
 	if providerName == "" || !validProviderID(providerAlbumID) {
 		return 0, false, ErrCandidateNotFound
 	}
-	// A release match only needs the base discovery capability. Providers that
-	// do not expose track identities (e.g. MusicBrainz/Discogs) can still supply
-	// a complete tracklist for the search fallback.
+	// A release match only needs the base discovery capability. Providers
+	// without track-identity support can still supply a complete tracklist for
+	// the search fallback.
 	provider, err := r.releaseProvider(providerName)
 	if err != nil {
 		return 0, false, err
@@ -322,9 +324,10 @@ func (r *Resolver) releaseProvider(name string) (discovery.Provider, error) {
 // validProviderID rejects strings that would alter a provider URL path or
 // query. Provider ids are opaque, but none of the supported providers use
 // '/', '?', '#' or '%'; forwarding them would be a client-controlled URL
-// injection.
+// injection. Dot segments are rejected explicitly because url.PathEscape leaves
+// them intact.
 func validProviderID(id string) bool {
-	if id == "" || len(id) > 256 {
+	if id == "" || id == "." || id == ".." || len(id) > 256 {
 		return false
 	}
 	return !strings.ContainsAny(id, "/?#% \t\r\n")
@@ -346,7 +349,7 @@ func reviewCandidate(c scoredCandidate) ReviewCandidate {
 		DurationMs:      id.DurationMs,
 		ISRC:            id.ISRC,
 		Score:           c.score,
-		Auto:            autoAllowed(c),
+		Auto:            autoAllowed(c) && !c.reviewOnly,
 		Signals: ReviewSignals{
 			ISRCExact:               c.signals.ISRCExact,
 			ProviderTrackIDExact:    c.signals.ProviderTrackIDExact,

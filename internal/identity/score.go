@@ -27,6 +27,9 @@ type scoredCandidate struct {
 	// It is the deterministic tie-break for equivalent recordings, never a
 	// provider name (AGENTS §1).
 	rank int
+	// reviewOnly marks a candidate whose provider is excluded from the bulk
+	// automatic pass, even when the score is high enough to auto-apply.
+	reviewOnly bool
 }
 
 // candidates collects and deduplicates the identity candidates for one local
@@ -57,13 +60,14 @@ func (r *Resolver) candidates(ctx context.Context, album catalog.UnmatchedAlbum,
 			} else if id != nil {
 				c := r.score(album, track, localTrackCount, id)
 				c.rank = rank
+				c.reviewOnly = isReviewOnlyProvider(p)
 				addCandidate(seen, c)
-				if autoAllowed(c) {
+				if autoAllowed(c) && !c.reviewOnly {
 					continue
 				}
 			}
 		}
-		isrc := strings.TrimSpace(track.ISRC)
+		isrc := matching.NormalizeISRC(track.ISRC)
 		if isrc == "" {
 			continue
 		}
@@ -75,6 +79,7 @@ func (r *Resolver) candidates(ctx context.Context, album catalog.UnmatchedAlbum,
 		if id != nil {
 			c := r.score(album, track, localTrackCount, id)
 			c.rank = rank
+			c.reviewOnly = isReviewOnlyProvider(p)
 			addCandidate(seen, c)
 		}
 	}
@@ -102,6 +107,11 @@ func (r *Resolver) candidates(ctx context.Context, album catalog.UnmatchedAlbum,
 	return out
 }
 
+func isReviewOnlyProvider(p discovery.TrackIdentityProvider) bool {
+	reviewOnly, ok := p.(discovery.ReviewOnlyIdentity)
+	return ok && reviewOnly.IdentityReviewOnly()
+}
+
 func addCandidate(seen map[string]*scoredCandidate, c scoredCandidate) {
 	key := c.identity.ProviderName + "\x00" + c.identity.ProviderTrackID
 	if prev, ok := seen[key]; ok {
@@ -118,6 +128,7 @@ func addCandidate(seen map[string]*scoredCandidate, c scoredCandidate) {
 		if c.rank < prev.rank {
 			prev.rank = c.rank
 		}
+		prev.reviewOnly = prev.reviewOnly || c.reviewOnly
 		// Prefer a concrete release link when the duplicate identities differ
 		// (a track appears on both a single and an album).
 		if prev.identity.ProviderAlbumID == "" && c.identity.ProviderAlbumID != "" {
@@ -133,8 +144,8 @@ func (r *Resolver) score(album catalog.UnmatchedAlbum, track domain.Track, local
 	id *discovery.TrackIdentity) scoredCandidate {
 	titleKey := matching.NormalizeTitle(track.Title)
 	albumKey := matching.NormalizeTitle(album.Title)
-	isrc := strings.TrimSpace(track.ISRC)
-	candISRC := strings.TrimSpace(id.ISRC)
+	isrc := matching.NormalizeISRC(track.ISRC)
+	candISRC := matching.NormalizeISRC(id.ISRC)
 	extID := strings.TrimSpace(track.ExternalIDs[id.ProviderName])
 	candTrackID := strings.TrimSpace(id.ProviderTrackID)
 	signals := matching.CandidateSignals{
@@ -230,10 +241,10 @@ func equivalentRecordings(a, b *discovery.TrackIdentity) bool {
 	if a == nil || b == nil {
 		return false
 	}
-	aISRC := strings.TrimSpace(a.ISRC)
-	bISRC := strings.TrimSpace(b.ISRC)
+	aISRC := matching.NormalizeISRC(a.ISRC)
+	bISRC := matching.NormalizeISRC(b.ISRC)
 	if aISRC != "" && bISRC != "" {
-		return strings.EqualFold(aISRC, bISRC)
+		return aISRC == bISRC
 	}
 	aTitle := matching.NormalizeTitle(a.Title)
 	bTitle := matching.NormalizeTitle(b.Title)
