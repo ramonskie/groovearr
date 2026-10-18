@@ -24,6 +24,9 @@ logs/
 # Temporary files
 .tmp/
 
+# Live-captured MusicBrainz corpus (contains real library metadata)
+internal/providers/musicbrainz/testdata/album_corpus.json
+
 # OS files
 .DS_Store
 Thumbs.db
