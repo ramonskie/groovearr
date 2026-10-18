@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -159,7 +160,7 @@ func TestWithAccessLogUserAttribution(t *testing.T) {
 			c.Auth.Method = "forms"
 			return nil
 		})
-		token, _, _ := sessions.Create(user.User{ID: 7, Username: "alice", Role: user.RoleAdmin})
+		token, _, _ := sessions.Create(context.Background(), user.User{ID: 7, Username: "alice", Role: user.RoleAdmin})
 
 		req := httptest.NewRequest(http.MethodGet, sharedPath, nil)
 		req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})

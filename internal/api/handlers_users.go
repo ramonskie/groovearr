@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +13,10 @@ import (
 	"github.com/ramonskie/groovearr/internal/config"
 	"github.com/ramonskie/groovearr/internal/user"
 )
+
+// sessionPurgeTimeout bounds the detached session purge run after a
+// security-relevant account change.
+const sessionPurgeTimeout = 5 * time.Second
 
 // validatePassword enforces the account-password boundary at the API edge. The
 // rule itself lives in the user domain (user.ValidatePassword) so it cannot
@@ -92,7 +97,7 @@ func (s *Server) requireUserStore(w http.ResponseWriter) bool {
 
 // invalidateUserSessions drops every session belonging to userID after a
 // security-relevant change, and terminates that user's live SSE stream. The
-// in-memory session carries a role copy, so a demoted or disabled account
+// persisted session row carries a role copy, so a demoted or disabled account
 // would otherwise keep acting with its old role until expiry; a password
 // change likewise retires sessions issued under the old credential. The SSE
 // stream is closed too because it resolves the caller's role once at connect
@@ -108,9 +113,29 @@ func (s *Server) requireUserStore(w http.ResponseWriter) bool {
 // re-authentication with the new password as confirmation it took effect. The
 // wire response is unchanged (a userResponse), so the SPA simply sees the next
 // request as 401 and returns to the login screen.
-func (s *Server) invalidateUserSessions(userID int64) {
+func (s *Server) invalidateUserSessions(ctx context.Context, userID int64) {
+	// Detach from the request lifetime: a client that disconnects mid-update
+	// must not cancel the security-relevant session purge and leave the old
+	// credential live. The operation is still bounded.
+	ctx, cancel := sessionPurgeContext(ctx)
+	defer cancel()
 	if s.sessions != nil {
-		s.sessions.DeleteByUserID(userID)
+		// Retry once: a transient busy/lock is the common failure and a lost
+		// purge leaves the old role/credential valid for up to 30 days. The
+		// account mutation is already committed, so there is no response left
+		// to fail — log loudly instead (the next security-relevant change on
+		// this account purges again).
+		err := s.sessions.DeleteByUserID(ctx, userID)
+		if err != nil {
+			err = s.sessions.DeleteByUserID(ctx, userID)
+		}
+		if err != nil {
+			s.log.Error("users: session invalidation failed",
+				"user_id", userID,
+				"error", err,
+				"component", "api",
+			)
+		}
 	}
 	if s.sseHub != nil {
 		s.sseHub.UnregisterByUserID(userID)
@@ -325,7 +350,7 @@ func (s *Server) handleUpdateUser(w http.ResponseWriter, r *http.Request) {
 	// is the acting admin (self password change), this logs them out on their
 	// next request; see invalidateUserSessions for the rationale.
 	if securityRelevantChange {
-		s.invalidateUserSessions(id)
+		s.invalidateUserSessions(r.Context(), id)
 	}
 	writeJSON(w, http.StatusOK, newUserResponse(*updated))
 }
@@ -354,6 +379,6 @@ func (s *Server) handleDeleteUser(w http.ResponseWriter, r *http.Request) {
 		s.writeUserMutationError(w, err)
 		return
 	}
-	s.invalidateUserSessions(id)
+	s.invalidateUserSessions(r.Context(), id)
 	writeJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
 }

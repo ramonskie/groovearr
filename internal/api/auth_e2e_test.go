@@ -69,7 +69,7 @@ func TestAuthEndToEndGate(t *testing.T) {
 		t.Fatalf("bootstrap did not seed an admin: (%+v, %v)", seeded, err)
 	}
 
-	sessions := newSessionStore()
+	sessions := newTestSessions(t)
 	t.Cleanup(sessions.Shutdown)
 	limiter := newIPRateLimiter(roleTestBuckets(), testAPILogger())
 	t.Cleanup(limiter.Shutdown)

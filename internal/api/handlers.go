@@ -33,6 +33,7 @@ import (
 	"github.com/ramonskie/groovearr/internal/plugin"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/refresh"
+	"github.com/ramonskie/groovearr/internal/session"
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/user"
 )
@@ -96,8 +97,11 @@ type Server struct {
 	logRotator          *logger.Rotator
 	accessLog           *logger.Rotator
 	rateLimiter         *ipRateLimiter
-	sessions            *sessionStore
-	healthChecker       *plugin.HealthChecker
+	// sessions is the persistent session service (SQLite-backed). Nil means the
+	// server was wired without persistence (some tests): withAuth then resolves
+	// no session and fails closed.
+	sessions      *session.Service
+	healthChecker *plugin.HealthChecker
 	// albumZipSem caps simultaneous album-zip streams so a few large requests
 	// cannot exhaust the process (see handlers_library_download.go). Buffered
 	// channel used as a counting semaphore; lazily initialized so a bare
@@ -133,7 +137,7 @@ func (a pluginRouteAdapter) User(method, path string, h http.HandlerFunc) {
 	a.mux.Handle(method+" "+path, h)
 }
 
-func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, catalogStore catalogDeps, userStore user.Store, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
+func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *config.Persistence, registry *download.Registry, mdRegistry *metadata.Registry, discoveryReg *discovery.Registry, downloadSvc *download.Service, store library.Store, catalogStore catalogDeps, userStore user.Store, sessionSvc *session.Service, scanner *library.Scanner, playlistSvc *playlist.Service, trackingSvc trackingService, qualityProfileStore quality.ProfileStore, eventBus events.IEventAggregator, sseHub *sse.SSEHub, metadataResolver *metadata.MetadataResolver, enrichmentHandler *download.MetadataEnrichmentHandler, orchestrator *download.Orchestrator, healthChecker *plugin.HealthChecker, logRotator *logger.Rotator, accessLog *logger.Rotator, logPath string, jobStatePath string, pluginRoutes ...PluginRouteRegistrar) *Server {
 	s := &Server{
 		cfg:                 cfg,
 		registry:            registry,
@@ -162,7 +166,7 @@ func NewServer(addr string, bgCtx context.Context, logger *slog.Logger, cfg *con
 		logPath:             logPath,
 		jobStatePath:        jobStatePath,
 		rateLimiter:         newIPRateLimiter(defaultRateBuckets(), logger),
-		sessions:            newSessionStore(),
+		sessions:            sessionSvc,
 		albumZipSem:         make(chan struct{}, albumZipMaxConcurrent),
 	}
 	s.bgCtx, s.bgCancel = context.WithCancel(bgCtx)
@@ -622,7 +626,9 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	s.jobs.Shutdown()
 	s.sseHub.Shutdown()
 	s.rateLimiter.Shutdown()
-	s.sessions.Shutdown()
+	if s.sessions != nil {
+		s.sessions.Shutdown()
+	}
 	return s.httpSrv.Shutdown(ctx)
 }
 

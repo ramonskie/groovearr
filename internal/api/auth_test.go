@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/session"
 	"github.com/ramonskie/groovearr/internal/user"
 )
 
@@ -17,7 +18,7 @@ const testMeAPIKey = "super-secret-api-key"
 
 // newMeTestServer builds a Server backed by an isolated session store and a
 // temp config, optionally mutating the auth config before the request.
-func newMeTestServer(t *testing.T, apply func(*config.Config) error) (*Server, *sessionStore) {
+func newMeTestServer(t *testing.T, apply func(*config.Config) error) (*Server, *session.Service) {
 	t.Helper()
 	cfg := testPersistence(t)
 	if apply != nil {
@@ -25,7 +26,7 @@ func newMeTestServer(t *testing.T, apply func(*config.Config) error) (*Server, *
 			t.Fatalf("config update: %v", err)
 		}
 	}
-	sessions := newSessionStore()
+	sessions := newTestSessions(t)
 	t.Cleanup(sessions.Shutdown)
 	return &Server{cfg: cfg, log: testAPILogger(), sessions: sessions}, sessions
 }
@@ -50,7 +51,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 	tests := []struct {
 		name       string
 		apply      func(*config.Config) error
-		prepare    func(t *testing.T, sessions *sessionStore) *http.Request
+		prepare    func(t *testing.T, sessions *session.Service) *http.Request
 		wantStatus int
 		wantSeen   bool
 		wantID     Identity
@@ -61,7 +62,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.Method = "none"
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				return httptest.NewRequest(http.MethodGet, "/api/me", nil)
 			},
 			wantStatus: http.StatusOK,
@@ -74,8 +75,8 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.Method = "forms"
 				return nil
 			},
-			prepare: func(t *testing.T, sessions *sessionStore) *http.Request {
-				token, _, _ := sessions.Create(user.User{ID: 7, Username: "alice", Role: user.RoleAdmin})
+			prepare: func(t *testing.T, sessions *session.Service) *http.Request {
+				token, _, _ := sessions.Create(context.Background(), user.User{ID: 7, Username: "alice", Role: user.RoleAdmin})
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})
 				return req
@@ -90,8 +91,8 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.Method = "forms"
 				return nil
 			},
-			prepare: func(t *testing.T, sessions *sessionStore) *http.Request {
-				token, _, _ := sessions.Create(user.User{ID: 9, Username: "bob", Role: user.RoleUser})
+			prepare: func(t *testing.T, sessions *session.Service) *http.Request {
+				token, _, _ := sessions.Create(context.Background(), user.User{ID: 9, Username: "bob", Role: user.RoleUser})
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})
 				return req
@@ -107,7 +108,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.APIKey = testMeAPIKey
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.Header.Set("X-Api-Key", testMeAPIKey)
 				return req
@@ -123,7 +124,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.APIKey = testMeAPIKey
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				return httptest.NewRequest(http.MethodGet, "/api/me?apikey="+testMeAPIKey, nil)
 			},
 			wantStatus: http.StatusOK,
@@ -137,7 +138,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.APIKey = testMeAPIKey
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.Header.Set("Authorization", "Bearer "+testMeAPIKey)
 				return req
@@ -153,7 +154,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.LocalBypassSubnets = []string{"10.0.0.0/8"}
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.RemoteAddr = "10.0.0.5:12345"
 				return req
@@ -170,7 +171,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.LocalBypassSubnets = []string{"10.0.0.0/8"}
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.RemoteAddr = "10.0.0.5:12345"
 				req.Header.Set("X-Api-Key", testMeAPIKey)
@@ -187,7 +188,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.APIKey = testMeAPIKey
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				return httptest.NewRequest(http.MethodGet, "/api/me", nil)
 			},
 			wantStatus: http.StatusUnauthorized,
@@ -199,7 +200,7 @@ func TestWithAuthInjectsIdentity(t *testing.T) {
 				c.Auth.Method = "forms"
 				return nil
 			},
-			prepare: func(_ *testing.T, _ *sessionStore) *http.Request {
+			prepare: func(_ *testing.T, _ *session.Service) *http.Request {
 				req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 				req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: "not-a-real-token"})
 				return req
@@ -272,7 +273,7 @@ func TestHandleMe(t *testing.T) {
 			c.Auth.Method = "forms"
 			return nil
 		})
-		token, _, _ := sessions.Create(user.User{ID: 1, Username: "alice", Role: user.RoleAdmin})
+		token, _, _ := sessions.Create(context.Background(), user.User{ID: 1, Username: "alice", Role: user.RoleAdmin})
 
 		req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 		req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})
@@ -298,7 +299,7 @@ func TestHandleMe(t *testing.T) {
 			c.Auth.Method = "forms"
 			return nil
 		})
-		token, _, _ := sessions.Create(user.User{ID: 2, Username: "bob", Role: user.RoleUser})
+		token, _, _ := sessions.Create(context.Background(), user.User{ID: 2, Username: "bob", Role: user.RoleUser})
 
 		req := httptest.NewRequest(http.MethodGet, "/api/me", nil)
 		req.AddCookie(&http.Cookie{Name: "groovearr_sid", Value: token})
@@ -450,6 +451,9 @@ type fakeUserStore struct {
 	users   []user.User
 	getErr  error
 	listErr error
+	// mutateOnGet simulates an account changed between the credential lookup
+	// and the post-login re-check (disable, demotion, password reset).
+	mutateOnGet func(*user.User)
 }
 
 var _ user.Store = (*fakeUserStore)(nil)
@@ -458,7 +462,18 @@ func (f *fakeUserStore) CreateUser(_ context.Context, u *user.User) (int64, erro
 	f.users = append(f.users, *u)
 	return int64(len(f.users)), nil
 }
-func (f *fakeUserStore) GetUser(context.Context, int64) (*user.User, error) { return nil, nil }
+func (f *fakeUserStore) GetUser(_ context.Context, id int64) (*user.User, error) {
+	for i := range f.users {
+		if f.users[i].ID == id {
+			u := f.users[i]
+			if f.mutateOnGet != nil {
+				f.mutateOnGet(&u)
+			}
+			return &u, nil
+		}
+	}
+	return nil, nil
+}
 
 func (f *fakeUserStore) GetUserByUsername(_ context.Context, username string) (*user.User, error) {
 	if f.getErr != nil {
@@ -493,7 +508,7 @@ func (f *fakeUserStore) CountUsers(context.Context) (int, error) { return len(f.
 // the supplied user store, with an isolated session store and temp config.
 // apply may override the default "forms" auth method (e.g. to test the method
 // guard).
-func newLoginTestServer(t *testing.T, store user.Store, apply func(*config.Config)) (*Server, *sessionStore) {
+func newLoginTestServer(t *testing.T, store user.Store, apply func(*config.Config)) (*Server, *session.Service) {
 	t.Helper()
 	cfg := testPersistence(t)
 	if err := cfg.Update(func(c *config.Config) error {
@@ -505,7 +520,7 @@ func newLoginTestServer(t *testing.T, store user.Store, apply func(*config.Confi
 	}); err != nil {
 		t.Fatalf("config update: %v", err)
 	}
-	sessions := newSessionStore()
+	sessions := newTestSessions(t)
 	t.Cleanup(sessions.Shutdown)
 	return &Server{cfg: cfg, log: testAPILogger(), sessions: sessions, userStore: store}, sessions
 }
@@ -677,7 +692,10 @@ func TestHandleLogin(t *testing.T) {
 			if !cookie.HttpOnly || cookie.Path != "/" || cookie.SameSite != http.SameSiteLaxMode {
 				t.Errorf("cookie attrs = %+v, want HttpOnly, Path=/, SameSite=Lax", cookie)
 			}
-			ses, ok := sessions.Validate(cookie.Value)
+			ses, ok, err := sessions.Validate(req.Context(), cookie.Value)
+			if err != nil {
+				t.Fatalf("validate session: %v", err)
+			}
 			if !ok {
 				t.Fatal("session token from the login cookie did not validate")
 			}
@@ -686,6 +704,51 @@ func TestHandleLogin(t *testing.T) {
 			}
 			if ses.Username != tt.wantUser {
 				t.Errorf("session username = %q, want %q", ses.Username, tt.wantUser)
+			}
+		})
+	}
+}
+
+// TestHandleLoginChangeRaceIssuesNoSession covers the post-login re-check: a
+// security-relevant account change racing the credential check (disable,
+// demotion, or password reset) must not leave the caller with a session that
+// the purge already missed.
+func TestHandleLoginChangeRaceIssuesNoSession(t *testing.T) {
+	hash, err := config.HashPassword("admin-pass")
+	if err != nil {
+		t.Fatalf("hash password: %v", err)
+	}
+	newHash, err := config.HashPassword("new-password")
+	if err != nil {
+		t.Fatalf("hash new password: %v", err)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*user.User)
+	}{
+		{name: "disabled", mutate: func(u *user.User) { u.Disabled = true }},
+		{name: "demoted", mutate: func(u *user.User) { u.Role = user.RoleUser }},
+		{name: "password reset", mutate: func(u *user.User) { u.PasswordHash = newHash }},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := &fakeUserStore{
+				users:       []user.User{{ID: 1, Username: "admin", PasswordHash: hash, Role: user.RoleAdmin}},
+				mutateOnGet: tt.mutate,
+			}
+			srv, _ := newLoginTestServer(t, store, nil)
+
+			req := httptest.NewRequest(http.MethodPost, "/api/login", strings.NewReader(`{"username":"admin","password":"admin-pass"}`))
+			rec := httptest.NewRecorder()
+			srv.handleLogin(rec, req)
+
+			if rec.Code != http.StatusUnauthorized {
+				t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+			}
+			if cookie := findSessionCookie(rec.Result().Cookies()); cookie != nil {
+				t.Fatal("a session cookie was issued for an account changed mid-login")
 			}
 		})
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/tls"
 	"net/http"
 	"net/http/httptest"
@@ -83,7 +84,7 @@ func TestHandleLogout_ClearsCookie(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			token, _, err := sessions.Create(user.User{ID: 1, Username: "admin", Role: user.RoleAdmin})
+			token, _, err := sessions.Create(context.Background(), user.User{ID: 1, Username: "admin", Role: user.RoleAdmin})
 			if err != nil {
 				t.Fatalf("create session: %v", err)
 			}
@@ -112,8 +113,8 @@ func TestHandleLogout_ClearsCookie(t *testing.T) {
 			if cookie.Secure != tc.wantSecure {
 				t.Fatalf("cookie.Secure = %v, want %v", cookie.Secure, tc.wantSecure)
 			}
-			if _, ok := sessions.Validate(token); ok {
-				t.Fatal("logout did not invalidate the session")
+			if _, ok, err := sessions.Validate(context.Background(), token); err != nil || ok {
+				t.Fatalf("logout did not invalidate the session (ok=%v, err=%v)", ok, err)
 			}
 		})
 	}

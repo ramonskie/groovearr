@@ -40,6 +40,8 @@ import (
 	"github.com/ramonskie/groovearr/internal/providers/tidal"
 	"github.com/ramonskie/groovearr/internal/quality"
 	"github.com/ramonskie/groovearr/internal/refresh"
+	"github.com/ramonskie/groovearr/internal/session"
+	sessionsqlite "github.com/ramonskie/groovearr/internal/session/sqlite"
 	"github.com/ramonskie/groovearr/internal/sse"
 	"github.com/ramonskie/groovearr/internal/tracking"
 	trackingsqlite "github.com/ramonskie/groovearr/internal/tracking/sqlite"
@@ -166,6 +168,16 @@ func NewApp(configPath string) (*App, error) {
 		log.Error("bootstrap admin failed", "error", err, "component", "main")
 		return nil, fmt.Errorf("bootstrap admin: %w", err)
 	}
+
+	// Session store (SQLite — shares the library db connection). Sessions are
+	// persisted so a container restart no longer logs every browser out; the
+	// service owns the 30-day sliding expiry and its prune loop.
+	sessionStore, err := sessionsqlite.New(libStore.DB())
+	if err != nil {
+		log.Error("session store init failed", "error", err, "component", "main")
+		return nil, err
+	}
+	sessionSvc := session.NewService(sessionStore, log)
 
 	// Ensure required directories exist.
 	for _, p := range []string{currentCfg.Library.DownloadPath, currentCfg.Library.LibraryPath, currentCfg.Library.PlaylistPath} {
@@ -451,7 +463,7 @@ func NewApp(configPath string) (*App, error) {
 		addr = ":8008"
 	}
 
-	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, catalogStore, userStore, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
+	srv := api.NewServer(addr, bgCtx, log, cfg, registry, mdRegistry, discoveryReg, downloadSvc, libStore, catalogStore, userStore, sessionSvc, scanner, playlistSvc, trackingSvc, // artist-tracking-09 wiring
 		qualityProfileStore, eventBus, sseHub, metadataResolver, enrichmentHandler, orch, healthChecker, logRot, accessLog, logPath, jobStatePath,
 		func(r plugin.RouteRegistrar) {
 			spotify.RegisterOAuthRoutes(r, cfg, log, func(name string, rawCfg json.RawMessage) error {

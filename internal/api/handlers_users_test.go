@@ -42,7 +42,7 @@ func newUserMgmtServerDB(t *testing.T) (*Server, user.Store, *sql.DB) {
 	if err != nil {
 		t.Fatalf("new user store: %v", err)
 	}
-	sessions := newSessionStore()
+	sessions := newTestSessions(t)
 	t.Cleanup(sessions.Shutdown)
 	return &Server{userStore: store, sessions: sessions, log: testAPILogger()}, store, db
 }
@@ -532,13 +532,16 @@ func TestUpdateUserInvalidationOnActualChange(t *testing.T) {
 			s, store := newUserMgmtServer(t)
 			seedUser(t, store, "root", "password1", user.RoleAdmin, false)
 			target := seedUser(t, store, "bob", "password1", user.RoleUser, false)
-			token, _, _ := s.sessions.Create(target)
+			token, _, _ := s.sessions.Create(context.Background(), target)
 
 			rec := dispatchUser(userMux(s), http.MethodPatch, "/api/users/"+itoa(target.ID), adminActor, tt.body)
 			if rec.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 			}
-			_, live := s.sessions.Validate(token)
+			_, live, err := s.sessions.Validate(context.Background(), token)
+			if err != nil {
+				t.Fatalf("validate session: %v", err)
+			}
 			if wantLive := !tt.wantInvalidated; live != wantLive {
 				t.Errorf("session live = %v, want %v (body %s)", live, wantLive, tt.body)
 			}
@@ -551,17 +554,17 @@ func TestUpdateUserInvalidationOnActualChange(t *testing.T) {
 func TestUpdateUserInvalidatesSessions(t *testing.T) {
 	s, store := newUserMgmtServer(t)
 	target := seedUser(t, store, "bob", "password1", user.RoleUser, false)
-	token, _, _ := s.sessions.Create(target)
-	if _, ok := s.sessions.Validate(token); !ok {
-		t.Fatal("precondition: session should be valid")
+	token, _, _ := s.sessions.Create(context.Background(), target)
+	if _, ok, err := s.sessions.Validate(context.Background(), token); err != nil || !ok {
+		t.Fatalf("precondition: session should be valid (ok=%v, err=%v)", ok, err)
 	}
 
 	rec := dispatchUser(userMux(s), http.MethodPatch, "/api/users/"+itoa(target.ID), adminActor, `{"disabled":true}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (%s)", rec.Code, rec.Body.String())
 	}
-	if _, ok := s.sessions.Validate(token); ok {
-		t.Error("session survived a disable; must be invalidated")
+	if _, ok, err := s.sessions.Validate(context.Background(), token); err != nil || ok {
+		t.Errorf("session survived a disable; must be invalidated (ok=%v, err=%v)", ok, err)
 	}
 }
 
@@ -632,8 +635,8 @@ func TestSessionInvalidationRejectsNextRequest(t *testing.T) {
 			admin := seedUser(t, store, "root", "password1", user.RoleAdmin, false)
 			target := seedUser(t, store, "bob", "password1", user.RoleUser, false)
 
-			adminToken, _, _ := s.sessions.Create(admin)
-			targetToken, _, _ := s.sessions.Create(target)
+			adminToken, _, _ := s.sessions.Create(context.Background(), admin)
+			targetToken, _, _ := s.sessions.Create(context.Background(), target)
 			mux := userMux(s)
 
 			// The session that must be retired, and the account it belongs to.

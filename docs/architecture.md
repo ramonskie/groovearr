@@ -69,6 +69,8 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `cmd/groovearr` | Entry point, wiring, graceful shutdown | `main()` |
 | `internal/api` | HTTP server + REST handlers + SSE endpoint | `Server`, handlers |
 | `internal/user` | Persistent accounts + first-admin bootstrap; role source of truth | `User`, `Role` (`admin`/`user`), `Store` (interface), `EnsureBootstrapAdmin` |
+| `internal/session` | Persistent login sessions: token hashing, 30-day sliding expiry, prune loop | `Session`, `Store` (interface), `Service` |
+| `internal/session/sqlite` | SQLite session store (shared DB connection, additive `sessions` table) | `Store` (implements `session.Store`) |
 | `internal/config` | JSON config load/validate/persist (thread-safe) | `Config`, `Persistence` |
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Download lifecycle, album provider contract, import pipeline, monitoring | `Record`, `MonitoredProvider`, `DownloadClient`, `AlbumProvider`, `AlbumImportHandler`, import handler chain, `CompletedDownloadService`, `MonitoringService` |
@@ -557,7 +559,11 @@ Idempotent `CREATE TABLE IF NOT EXISTS` (no migration versioning).
 > track now raises a foreign-key constraint error instead of silently leaving a
 > dangling reference.
 
-Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache` (deprecated, §Album Discovery Cache), `tracked_artists`, `tracked_albums`, `users`.
+Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `album_discovery_cache` (deprecated, §Album Discovery Cache), `tracked_artists`, `tracked_albums`, `users`, `sessions`.
+
+The `users` and `sessions` tables are created by their own stores
+(`internal/user/sqlite`, `internal/session/sqlite`) on the same shared
+connection; the library `initSchema()` owns the rest.
 
 The tracking store (`internal/tracking/sqlite`) is a dedicated store that does
 not own a database: it wraps the same `*sql.DB` as the library store (via
@@ -641,6 +647,18 @@ Accounts live in the `users` table (`internal/user`, with the SQLite store in
   downgraded by their source subnet.
 - **`adminOnly`** — per-route gate. It rejects a non-admin with
   `403 {"error":"forbidden"}` and fails closed when no identity is present.
+
+Sessions are persisted, not in-memory: `internal/session` owns the policy and
+the contract, `internal/session/sqlite` stores rows in the `sessions` table on
+the same database as accounts and the library. Only the SHA-256 hash of the
+cookie token is stored, so a database or backup leak cannot be replayed as a
+cookie. The idle window is 30 days and slides forward: when a request finds
+fewer than 15 days remaining, it extends the row to a fresh 30 days and re-sends
+the same token (no rotation, so parallel tabs cannot race). This is why a
+container restart no longer logs users out; it also means an expired row is
+reclaimed lazily on access and by an hourly prune. A store failure during
+lookup fails closed — the request resolves no session identity and the other
+transports (API key, local bypass) decide, or it is `401`.
 
 The admin-only surface is config, rate limits, background jobs, artist tracking,
 quality profiles, logs, debug, and user management. Everything else (search,

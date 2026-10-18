@@ -73,6 +73,8 @@ Every store and service has an interface defined in its package:
 | `download.MonitoredProvider` | `internal/download/provider.go` | `internal/download/soulseek/`, `internal/download/deezer/` |
 | `events.IEventAggregator` | `internal/events/bus.go` | `InMemoryEventBus` |
 | `playlist.Source` | `internal/playlist/source.go` | `internal/playlist/deezer/` |
+| `session.Store` | `internal/session/store.go` | `internal/session/sqlite/store.go` |
+| `user.Store` | `internal/user/store.go` | `internal/user/sqlite/store.go` |
 
 ### Struct field alignment
 
@@ -259,14 +261,15 @@ type Source interface {
 ## Database Schema
 
 SQLite via `modernc.org/sqlite`. No migration framework — schema is created by
-`CREATE TABLE IF NOT EXISTS` in `internal/library/sqlite/store.go`. When adding
-tables or columns:
+`CREATE TABLE IF NOT EXISTS` in each store's `init()`: the library
+`initSchema()` (`internal/library/sqlite`), `internal/user/sqlite` for accounts,
+and `internal/session/sqlite` for sessions. When adding tables or columns:
 
 1. Add the `CREATE TABLE IF NOT EXISTS` statement to `initSchema()`
 2. For new columns on existing tables, use `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`
 3. Test against an existing database (schema changes are additive only)
 
-Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`.
+Tables: `artists`, `albums`, `tracks`, `playlists`, `playlist_tracks`, `downloads`, `download_events`, `users`, `sessions`.
 
 ## File Organization
 

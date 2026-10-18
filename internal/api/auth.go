@@ -8,10 +8,15 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/config"
+	"github.com/ramonskie/groovearr/internal/session"
 	"github.com/ramonskie/groovearr/internal/user"
 )
+
+// sessionCookieName is the cookie carrying the opaque session token.
+const sessionCookieName = "groovearr_sid"
 
 // withAuth returns middleware that enforces authentication based on the
 // configured auth method and injects the resolved Identity into the request
@@ -29,6 +34,11 @@ import (
 //   - valid API key      -> {Role: admin, ViaAPIKey: true} (any transport);
 //   - local bypass       -> {Role: user} (see security note below);
 //   - otherwise          -> 401, no identity.
+//
+// Sessions are persisted (internal/session) and survive a process restart. They
+// use a 30-day idle window and slide forward on activity: once fewer than 15
+// days remain, the same request extends the expiry to a fresh 30 days and
+// re-sends the cookie (same token, no rotation).
 //
 // Security note (finding C4): local_bypass_subnets used to grant the same
 // full access as a valid credential. Now a LAN-bypassed host that presents no
@@ -59,13 +69,10 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 
 		// Session cookie (forms/basic methods) — credentials take precedence
 		// over the local bypass so a session's real role governs.
-		if cookie, err := r.Cookie("groovearr_sid"); err == nil && cookie.Value != "" {
-			if ses, ok := s.sessions.Validate(cookie.Value); ok {
-				id := Identity{UserID: ses.UserID, Username: ses.Username, Role: ses.Role}
-				accessIdentityFrom(r.Context()).record(id)
-				next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
-				return
-			}
+		if id, ok := s.sessionIdentity(w, r); ok {
+			accessIdentityFrom(r.Context()).record(id)
+			next.ServeHTTP(w, r.WithContext(contextWithIdentity(r.Context(), id)))
+			return
 		}
 
 		// API key (any supported transport) — an explicit admin credential.
@@ -96,6 +103,89 @@ func (s *Server) withAuth(next http.Handler) http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusUnauthorized)
 		json.NewEncoder(w).Encode(map[string]string{"error": "unauthorized"})
+	})
+}
+
+// sessionIdentity resolves the session cookie to an Identity.
+//
+// It renews the session in passing when the sliding-expiry threshold is
+// reached: the same token is re-sent with a fresh expiry, so parallel tabs and
+// in-flight requests can never be handed a stale cookie.
+//
+// Every ambiguous outcome is unauthenticated, never an error to the client: an
+// absent, unknown, or expired cookie, a nil session service (test wiring), and
+// a store failure all return false. A database outage fails closed; the caller
+// then falls through to the API key and local bypass checks, or 401s.
+func (s *Server) sessionIdentity(w http.ResponseWriter, r *http.Request) (Identity, bool) {
+	cookie, err := r.Cookie(sessionCookieName)
+	if err != nil || cookie.Value == "" || s.sessions == nil {
+		return Identity{}, false
+	}
+
+	ses, ok, err := s.sessions.Validate(r.Context(), cookie.Value)
+	if err != nil {
+		s.log.Error("auth: session lookup failed",
+			"remote_addr", r.RemoteAddr,
+			"error", err,
+			"component", "api",
+		)
+		return Identity{}, false
+	}
+	if !ok {
+		return Identity{}, false
+	}
+
+	if s.sessions.NeedsRenewal(ses) {
+		expires, renewed, err := s.sessions.Renew(r.Context(), cookie.Value)
+		if err != nil {
+			// The session is still valid; a failed renewal only means the
+			// expiry did not move. Keep the caller authenticated.
+			s.log.Warn("auth: session renewal failed",
+				"remote_addr", r.RemoteAddr,
+				"error", err,
+				"component", "api",
+			)
+		} else if renewed {
+			writeSessionCookie(w, r, cookie.Value, expires)
+		}
+	}
+
+	return Identity{UserID: ses.UserID, Username: ses.Username, Role: ses.Role}, true
+}
+
+// sessionPurgeContext detaches a security-relevant session mutation from the
+// request lifetime. A client that disconnects mid-request must not cancel the
+// delete and leave a credential live; the operation stays bounded.
+func sessionPurgeContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), sessionPurgeTimeout)
+}
+
+// discardSession removes a session that must not be released to the client
+// (e.g. the account was disabled between the credential check and the insert).
+// It uses a detached, bounded context and only logs a failure — the caller is
+// already returning an error response.
+func (s *Server) discardSession(ctx context.Context, token string) {
+	ctx, cancel := sessionPurgeContext(ctx)
+	defer cancel()
+	if err := s.sessions.Delete(ctx, token); err != nil {
+		s.log.Error("auth: discard session failed", "error", err, "component", "api")
+	}
+}
+
+// writeSessionCookie sets the session cookie for token with the given expiry.
+// MaxAge mirrors the sliding TTL so a browser discards the cookie at the same
+// time the server-side row would expire; HttpOnly keeps it away from scripts and
+// Secure is only ever added (see secureRequest).
+func writeSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     sessionCookieName,
+		Value:    token,
+		Path:     "/",
+		Expires:  expires,
+		MaxAge:   int(session.TTL / time.Second),
+		HttpOnly: true,
+		Secure:   secureRequest(r),
+		SameSite: http.SameSiteLaxMode,
 	})
 }
 
@@ -204,6 +294,14 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Without a session service no cookie can be issued, so a valid credential
+	// would be discarded. Treat it as the same server misconfiguration.
+	if s.sessions == nil {
+		s.log.Error("auth: login attempted without a session service", "component", "api")
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "authentication unavailable"})
+		return
+	}
+
 	var req loginRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
@@ -254,7 +352,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 
 	// Session carries the persisted identity (ID, username, role) so every
 	// authenticated request resolves the real role via withAuth.
-	token, expires, err := s.sessions.Create(*u)
+	token, expires, err := s.sessions.Create(r.Context(), *u)
 	if err != nil {
 		// Entropy failure: surface a 500 and issue no cookie. The credential
 		// was valid but no session can be created safely.
@@ -262,15 +360,36 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
 		return
 	}
-	http.SetCookie(w, &http.Cookie{
-		Name:     "groovearr_sid",
-		Value:    token,
-		Path:     "/",
-		Expires:  expires,
-		HttpOnly: true,
-		Secure:   secureRequest(r),
-		SameSite: http.SameSiteLaxMode,
-	})
+	// A security-relevant account change racing the bcrypt comparison can land
+	// between the lookup above and this insert: a disable, delete, demotion, or
+	// password reset whose purge completed before Create wrote the row. Compare
+	// every field the purge protects — not just disabled — so a stale role or a
+	// credential that was just revoked cannot be handed a session (with a
+	// 30-day idle window the race would otherwise persist far longer than it
+	// used to).
+	refresh, err := s.userStore.GetUser(r.Context(), u.ID)
+	if err != nil {
+		s.log.Error("auth: post-login user re-check failed",
+			"username", u.Username,
+			"error", err,
+			"component", "api",
+		)
+		s.discardSession(r.Context(), token)
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "internal error"})
+		return
+	}
+	if refresh == nil || refresh.Disabled || refresh.Role != u.Role || refresh.PasswordHash != u.PasswordHash {
+		s.discardSession(r.Context(), token)
+		s.log.Warn("auth: login raced an account change",
+			"username", u.Username,
+			"remote_addr", r.RemoteAddr,
+			"component", "api",
+		)
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		return
+	}
+
+	writeSessionCookie(w, r, token, expires)
 
 	s.log.Info("auth: login succeeded",
 		"username", u.Username,
@@ -305,13 +424,24 @@ func isInSubnet(addr string, subnets []string) bool {
 
 // handleLogout clears the session cookie.
 // POST /api/logout
+//
+// The server-side row is deleted first, so the cookie is dead even if the
+// browser ignores the clearing Set-Cookie.
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	if cookie, err := r.Cookie("groovearr_sid"); err == nil && cookie.Value != "" {
-		s.sessions.Delete(cookie.Value)
+	if cookie, err := r.Cookie(sessionCookieName); err == nil && cookie.Value != "" && s.sessions != nil {
+		ctx, cancel := sessionPurgeContext(r.Context())
+		defer cancel()
+		if err := s.sessions.Delete(ctx, cookie.Value); err != nil {
+			s.log.Warn("auth: session delete failed",
+				"remote_addr", r.RemoteAddr,
+				"error", err,
+				"component", "api",
+			)
+		}
 	}
 
 	http.SetCookie(w, &http.Cookie{
-		Name:     "groovearr_sid",
+		Name:     sessionCookieName,
 		Value:    "",
 		Path:     "/",
 		MaxAge:   -1,

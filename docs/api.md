@@ -40,7 +40,12 @@ and `POST /api/login`. Three transports resolve an identity:
   It is `HttpOnly`, `SameSite=Lax`, and `Secure` when the request arrived over
   TLS directly or via a reverse proxy that set `X-Forwarded-Proto: https`
   (`Secure` is only ever added, never removed, so a spoofed header cannot
-  downgrade it).
+  downgrade it). Sessions are persisted in the `sessions` table (only the
+  SHA-256 hash of the token is stored), so a server or container restart does
+  not log anyone out. The cookie has a **30-day idle window**: once fewer than
+  15 days remain, any authenticated request pushes the expiry back to a fresh
+  30 days and re-sends the same token. Logout, disable, password change, role
+  change, and account deletion retire the session row immediately.
 - **API key** — a full **admin** credential, accepted as `X-Api-Key: <key>`,
   `?apikey=<key>`, or `Authorization: Bearer <key>`. The key itself is never
   returned by any endpoint and is masked in `GET /api/config`.
@@ -85,7 +90,8 @@ Return the caller's coarse identity. Never exposes the API key.
 
 Only available when `auth.method` is `forms`. Authenticates a username/password
 against the `users` table and, on success, sets the `groovearr_sid` session
-cookie. The bootstrap `auth.username` / `auth.password` are not consulted here.
+cookie (expires in 30 days, extended on activity — see the session-cookie note
+above). The bootstrap `auth.username` / `auth.password` are not consulted here.
 
 **Request**:
 ```json
@@ -104,9 +110,11 @@ cookie. The bootstrap `auth.username` / `auth.password` are not consulted here.
 
 ### `POST /api/logout`
 
-Clear the `groovearr_sid` session cookie. The clearing cookie carries the same
-`HttpOnly` / `SameSite=Lax` treatment (and `Secure` when the request is TLS, per
-the same rule as login) so the browser matches and drops it.
+Clear the `groovearr_sid` session cookie. The server-side session row is deleted
+first, so the token is dead even if the browser ignores the clearing cookie. The
+clearing cookie carries the same `HttpOnly` / `SameSite=Lax` treatment (and
+`Secure` when the request is TLS, per the same rule as login) so the browser
+matches and drops it.
 
 **Response** `200`:
 ```json
