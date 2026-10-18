@@ -580,8 +580,8 @@ func TestGetAlbumTracks_MapsTracks(t *testing.T) {
 		t.Fatalf("tracks = %d, want 2", len(tracks))
 	}
 	first := tracks[0]
-	if first.ProviderID != "1" {
-		t.Errorf("ProviderID = %q, want the release-scoped track number 1", first.ProviderID)
+	if first.ProviderID != "rec-1" {
+		t.Errorf("ProviderID = %q, want the recording MBID rec-1", first.ProviderID)
 	}
 	if first.ArtistName != "Nirvana" {
 		t.Errorf("ArtistName = %q, want Nirvana", first.ArtistName)

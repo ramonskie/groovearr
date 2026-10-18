@@ -6,6 +6,7 @@ package tidal
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -779,12 +780,12 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	album, err := c.api.GetAlbum(ctx, providerAlbumID)
 	if err != nil {
 		c.log.Error("tidal get album failed", "error", err, "albumID", providerAlbumID, "component", "tidal")
-		return nil, err
+		return nil, tidalNotFound(err, providerAlbumID)
 	}
 	tracks, err := c.api.GetAlbumTracks(ctx, providerAlbumID)
 	if err != nil {
 		c.log.Error("tidal get album tracks failed", "error", err, "albumID", providerAlbumID, "component", "tidal")
-		return nil, err
+		return nil, tidalNotFound(err, providerAlbumID)
 	}
 	artistName := primaryArtistName(album.Artist, album.Artists)
 	out := make([]discovery.TrackInfo, len(tracks))
@@ -804,6 +805,16 @@ func (c *Client) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 		}
 	}
 	return out, nil
+}
+
+// tidalNotFound maps a Tidal HTTP 404 to the provider-neutral not-found
+// sentinel so the manual match path can answer 404 instead of 500.
+func tidalNotFound(err error, albumID string) error {
+	var statusErr *httpStatusError
+	if errors.As(err, &statusErr) && statusErr.StatusCode == http.StatusNotFound {
+		return fmt.Errorf("tidal: album %s: %w", albumID, discovery.ErrNotFound)
+	}
+	return err
 }
 
 // SearchAlbums searches Tidal for albums by name.

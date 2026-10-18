@@ -461,8 +461,17 @@ Resolve parked unmatched albums from **track identity**, not more album-string
 matching:
 
 - An optional `discovery.TrackIdentityProvider` capability resolves one track by
-  provider id (`GetTrackIdentity`) or ISRC (`LookupTrackByISRC`). Deezer and
-  Spotify implement it; core packages reference only the interface.
+  provider id (`GetTrackIdentity`) or ISRC (`LookupTrackByISRC`). Deezer, Spotify,
+  Tidal, and MusicBrainz implement it; core packages reference only the
+  interface. MusicBrainz also implements the optional
+  `discovery.ReviewOnlyIdentity` marker: its ISRC lookup is a multi-step,
+  one-request-per-second sequence, so it is offered in manual review but excluded
+  from the bulk automatic resolve pass. An exact ISRC that maps to multiple
+  distinct recordings/releases is ambiguous; both Tidal and MusicBrainz return
+  no identity so the album stays a manual review/search case. MusicBrainz fills
+  `AlbumTrackCount` from the representative release's media counts in the
+  release-group lookup, so a manual one-track match knows whether it belongs to
+  a larger release and is marked partial correctly.
 - `internal/identity` probes duration only for the parked albums' tracks, scores
   each candidate with `matching.CandidateScore`, and auto-applies only when the
   title agrees and either artist or duration confirms the recording; a known

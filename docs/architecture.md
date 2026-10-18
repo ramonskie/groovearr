@@ -73,7 +73,7 @@ cmd/groovearr/main.go  ─── entry point, wires all components via dependenc
 | `internal/domain` | Core domain types (no behavior, plain structs) | `Track`, `Album`, `Artist`, `Playlist`, `PlaylistTrack`, `DownloadRecord`, `DownloadState`, `SearchResult`, `TrackResult`, `AlbumResult` |
 | `internal/download` | Download lifecycle, album provider contract, import pipeline, monitoring | `Record`, `MonitoredProvider`, `DownloadClient`, `AlbumProvider`, `AlbumImportHandler`, import handler chain, `CompletedDownloadService`, `MonitoringService` |
 | `internal/metadata` | Metadata provider interface + resolver + registry + app-wide rate-limit cooldown | `Provider`, `MetadataResolver`, `Registry`, `ProviderCooldown`, `RateLimitError`, `CoverResult`, `TrackMetadata` |
-| `internal/providers/musicbrainz` | MusicBrainz metadata + discovery provider; release-group/release lookup and the `ReleaseResolver` capability | `Client` (implements `metadata.Provider`, `metadata.ArtistNameProvider`, `discovery.Provider`, `discovery.ReleaseResolver`) |
+| `internal/providers/musicbrainz` | MusicBrainz metadata + discovery provider; release-group/release lookup, `ReleaseResolver`, and review-only track identity | `Client` (implements `metadata.Provider`, `metadata.ArtistNameProvider`, `discovery.Provider`, `discovery.ReleaseResolver`, `discovery.TrackIdentityProvider`, `discovery.ReviewOnlyIdentity`) |
 | `internal/providers/coverartarchive` | Cover Art Archive (MBID-based cover lookup) | `Client` (implements `metadata.Provider`) |
 | `internal/providers/deezer` | Deezer plugin — download (ARL) + metadata (public API) | `DownloadClient` (implements `download.Plugin` + `metadata.Provider`), `Client` (API) |
 | `internal/providers/prowlarr` | Prowlarr album provider — searches RuTracker via Torznab, resolves tracks via the injected `discovery.ReleaseResolver` (no MusicBrainz import) | `Plugin` (implements `download.AlbumProvider`, `discovery.ReleaseResolverConsumer`) |
@@ -477,8 +477,9 @@ this is the fix for the enrichment convoy stall.
 
 `SearchReleasesByGroup(rgMBID)` queries the MusicBrainz search endpoint
 (`/release?query=rgid:{mbid}`) and returns ALL releases in a release group with their
-`track_count`. Unlike the release-group endpoint (which doesn't include track counts),
-the search endpoint provides this field, enabling a single API call to resolve all
+`track_count`. The release-group endpoint can also expose counts, but only as
+per-medium `media[].track-count` entries that must be summed; the search endpoint
+provides a release-level `track_count` in a single API call to resolve all
 release variants:
 
 ```go

@@ -20,6 +20,14 @@ type IdentityAvailability interface {
 	IdentityAvailable() bool
 }
 
+// ReviewOnlyIdentity is an optional marker for a TrackIdentityProvider whose
+// lookups are valid manual-review candidates but too slow or too costly for a
+// bulk automatic resolve pass. The identity resolver excludes these providers
+// from ResolveUnmatched while the review dialog still offers them.
+type ReviewOnlyIdentity interface {
+	IdentityReviewOnly() bool
+}
+
 // TrackIdentity is one provider track with the release context needed to
 // resolve a local track to a provider release. It is deliberately
 // provider-neutral: a provider maps its own response onto it and the caller

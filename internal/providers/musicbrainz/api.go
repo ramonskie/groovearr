@@ -14,6 +14,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
+	"github.com/ramonskie/groovearr/internal/matching"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/strutil"
 )
@@ -67,13 +69,69 @@ type ReleaseInfo struct {
 
 // ReleaseTrack represents a single track within a release lookup.
 type ReleaseTrack struct {
-	Position   int    // 1-based track position (parsed from Number)
-	Number     string // display number from MusicBrainz (e.g. "1", "A1")
-	Title      string
-	Length     int64  // milliseconds
-	Artist     string // per-track artist credit (for compilations)
-	ISRCs      []string
-	DiscNumber int // 1-based medium/disc index within the release
+	Position    int    // 1-based track position (parsed from Number)
+	Number      string // display number from MusicBrainz (e.g. "1", "A1")
+	Title       string
+	Length      int64  // milliseconds
+	Artist      string // per-track artist credit (for compilations)
+	ISRCs       []string
+	DiscNumber  int    // 1-based medium/disc index within the release
+	RecordingID string // global recording MBID (used for track identity)
+}
+
+// ISRCRecording is one recording returned by an ISRC lookup.
+type ISRCRecording struct {
+	ID             string
+	Title          string
+	Length         int64
+	ISRCs          []string
+	ArtistCredit   []artistCreditEntry
+	Disambiguation string
+}
+
+// RecordingInfo is one recording with its releases, media, and track context.
+type RecordingInfo struct {
+	ID             string
+	Title          string
+	Length         int64
+	ISRCs          []string
+	ArtistCredit   []artistCreditEntry
+	Disambiguation string
+	Releases       []RecordingRelease
+}
+
+// RecordingRelease is a release linked to a recording. Media contains only the
+// tracks for that recording, while TrackCount is the full medium size.
+type RecordingRelease struct {
+	ID           string
+	Title        string
+	Status       string
+	Date         string
+	ReleaseGroup *RecordingReleaseGroup
+	Media        []RecordingMedium
+}
+
+// RecordingReleaseGroup is the release group linked to a recording release.
+type RecordingReleaseGroup struct {
+	ID          string
+	Title       string
+	PrimaryType string
+}
+
+// RecordingMedium is one disc/volume of a release.
+type RecordingMedium struct {
+	Position   int
+	TrackCount int
+	Tracks     []RecordingTrack
+}
+
+// RecordingTrack is the release track that carries the recording.
+type RecordingTrack struct {
+	ID       string
+	Number   string
+	Position int
+	Length   int64
+	Title    string
 }
 
 // ─── API client ────────────────────────────────────────────────────────
@@ -504,13 +562,14 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 				artist += t.Recording.ArtistCredit[i].Name
 			}
 			track := ReleaseTrack{
-				Position:   pos,
-				Number:     t.Number,
-				Title:      t.Title,
-				Length:     t.Length,
-				Artist:     artist,
-				ISRCs:      t.Recording.ISRCs,
-				DiscNumber: disc,
+				Position:    pos,
+				Number:      t.Number,
+				Title:       t.Title,
+				Length:      t.Length,
+				Artist:      artist,
+				ISRCs:       t.Recording.ISRCs,
+				DiscNumber:  disc,
+				RecordingID: t.Recording.ID,
 			}
 			info.Tracks = append(info.Tracks, track)
 			for _, isrc := range t.Recording.ISRCs {
@@ -521,6 +580,152 @@ func (c *APIClient) LookupRelease(ctx context.Context, mbid string) (*ReleaseInf
 		}
 	}
 
+	return info, nil
+}
+
+// LookupISRC resolves an ISRC to its recording(s). MusicBrainz's JSON ISRC
+// response does not include releases, so callers that need release context must
+// follow up with LookupRecording for the chosen recording MBID.
+func (c *APIClient) LookupISRC(ctx context.Context, isrc string) ([]ISRCRecording, error) {
+	isrc = matching.NormalizeISRC(isrc)
+	if isrc == "" {
+		return nil, nil
+	}
+	data, err := c.apiGet(ctx, "/isrc/"+url.PathEscape(isrc), map[string]string{
+		"inc": "artist-credits+isrcs",
+		"fmt": "json",
+	})
+	if err != nil {
+		c.logOpError("musicbrainz lookup isrc failed", "error", err, "isrc", isrc, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil // 404 or empty response
+	}
+
+	var resp struct {
+		ISRC       string `json:"isrc"`
+		Recordings []struct {
+			ID             string              `json:"id"`
+			Title          string              `json:"title"`
+			Length         int64               `json:"length"`
+			ISRCs          []string            `json:"isrcs"`
+			ArtistCredit   []artistCreditEntry `json:"artist-credit"`
+			Disambiguation string              `json:"disambiguation"`
+		} `json:"recordings"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.logOpError("musicbrainz unmarshal lookup isrc failed", "error", err, "isrc", isrc, "component", "musicbrainz_api")
+		return nil, err
+	}
+	out := make([]ISRCRecording, 0, len(resp.Recordings))
+	for _, rec := range resp.Recordings {
+		out = append(out, ISRCRecording{
+			ID:             rec.ID,
+			Title:          rec.Title,
+			Length:         rec.Length,
+			ISRCs:          rec.ISRCs,
+			ArtistCredit:   rec.ArtistCredit,
+			Disambiguation: rec.Disambiguation,
+		})
+	}
+	return out, nil
+}
+
+// LookupRecording fetches one recording with its releases, media, and track
+// context. linked entities are capped by MusicBrainz (25 by default).
+func (c *APIClient) LookupRecording(ctx context.Context, mbid string) (*RecordingInfo, error) {
+	mbid = strings.TrimSpace(mbid)
+	if mbid == "" {
+		return nil, nil
+	}
+	data, err := c.apiGet(ctx, "/recording/"+url.PathEscape(mbid), map[string]string{
+		"inc": "artist-credits+releases+release-groups+media+isrcs",
+		"fmt": "json",
+	})
+	if err != nil {
+		c.logOpError("musicbrainz lookup recording failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
+		return nil, err
+	}
+	if data == nil {
+		return nil, nil // 404 or empty response
+	}
+
+	var resp struct {
+		ID             string              `json:"id"`
+		Title          string              `json:"title"`
+		Length         int64               `json:"length"`
+		ISRCs          []string            `json:"isrcs"`
+		ArtistCredit   []artistCreditEntry `json:"artist-credit"`
+		Disambiguation string              `json:"disambiguation"`
+		Releases       []struct {
+			ID           string `json:"id"`
+			Title        string `json:"title"`
+			Status       string `json:"status"`
+			Date         string `json:"date"`
+			ReleaseGroup *struct {
+				ID          string `json:"id"`
+				Title       string `json:"title"`
+				PrimaryType string `json:"primary-type"`
+			} `json:"release-group"`
+			Media []struct {
+				Position   int `json:"position"`
+				TrackCount int `json:"track-count"`
+				Tracks     []struct {
+					ID       string `json:"id"`
+					Number   string `json:"number"`
+					Position int    `json:"position"`
+					Length   int64  `json:"length"`
+					Title    string `json:"title"`
+				} `json:"tracks"`
+			} `json:"media"`
+		} `json:"releases"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		c.logOpError("musicbrainz unmarshal lookup recording failed", "error", err, "mbid", mbid, "component", "musicbrainz_api")
+		return nil, err
+	}
+
+	info := &RecordingInfo{
+		ID:             resp.ID,
+		Title:          resp.Title,
+		Length:         resp.Length,
+		ISRCs:          resp.ISRCs,
+		ArtistCredit:   resp.ArtistCredit,
+		Disambiguation: resp.Disambiguation,
+	}
+	for _, rel := range resp.Releases {
+		release := RecordingRelease{
+			ID:     rel.ID,
+			Title:  rel.Title,
+			Status: rel.Status,
+			Date:   rel.Date,
+		}
+		if rel.ReleaseGroup != nil {
+			release.ReleaseGroup = &RecordingReleaseGroup{
+				ID:          rel.ReleaseGroup.ID,
+				Title:       rel.ReleaseGroup.Title,
+				PrimaryType: rel.ReleaseGroup.PrimaryType,
+			}
+		}
+		for _, medium := range rel.Media {
+			m := RecordingMedium{
+				Position:   medium.Position,
+				TrackCount: medium.TrackCount,
+			}
+			for _, track := range medium.Tracks {
+				m.Tracks = append(m.Tracks, RecordingTrack{
+					ID:       track.ID,
+					Number:   track.Number,
+					Position: track.Position,
+					Length:   track.Length,
+					Title:    track.Title,
+				})
+			}
+			release.Media = append(release.Media, m)
+		}
+		info.Releases = append(info.Releases, release)
+	}
 	return info, nil
 }
 
@@ -535,10 +740,13 @@ type ReleaseGroupRelease struct {
 	TrackCount     int    // total tracks across all media
 }
 
-// LookupReleaseGroup retrieves all releases within a release group.
+// LookupReleaseGroup retrieves all releases within a release group, including
+// each release's total track count from its media. The media subquery is what
+// lets identity resolution report a real release-group size instead of guessing
+// from the one medium that carries a recording.
 func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]ReleaseGroupRelease, error) {
 	data, err := c.apiGet(ctx, "/release-group/"+url.PathEscape(rgMBID), map[string]string{
-		"inc": "releases",
+		"inc": "releases+media",
 		"fmt": "json",
 	})
 	if err != nil {
@@ -557,6 +765,9 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 			Disambiguation string `json:"disambiguation"`
 			Status         string `json:"status"`
 			Date           string `json:"date"`
+			Media          []struct {
+				TrackCount int `json:"track-count"`
+			} `json:"media"`
 		} `json:"releases"`
 	}
 	if err := json.Unmarshal(data, &resp); err != nil {
@@ -566,6 +777,18 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 
 	releases := make([]ReleaseGroupRelease, len(resp.Releases))
 	for i, r := range resp.Releases {
+		// Only trust the total when every medium reports a count. A missing
+		// medium count would otherwise become a smaller, known-wrong total.
+		trackCount := 0
+		if len(r.Media) > 0 {
+			for _, medium := range r.Media {
+				if medium.TrackCount <= 0 {
+					trackCount = 0
+					break
+				}
+				trackCount += medium.TrackCount
+			}
+		}
 		releases[i] = ReleaseGroupRelease{
 			ID:             r.ID,
 			Title:          r.Title,
@@ -573,6 +796,7 @@ func (c *APIClient) LookupReleaseGroup(ctx context.Context, rgMBID string) ([]Re
 			Status:         r.Status,
 			Date:           r.Date,
 			PrimaryType:    resp.PrimaryType,
+			TrackCount:     trackCount,
 		}
 	}
 	return releases, nil
@@ -680,6 +904,17 @@ func (c *APIClient) apiGet(ctx context.Context, path string, params map[string]s
 
 	if resp.StatusCode == http.StatusNotFound {
 		return nil, nil // not found is not an error
+	}
+	if resp.StatusCode == http.StatusBadRequest {
+		// MusicBrainz answers 400 for a malformed MBID/ISRC. The provider-neutral
+		// contract treats an unresolvable id as not found, so the admin API can
+		// answer 404 instead of leaking a 500.
+		return nil, fmt.Errorf("musicbrainz: invalid request: %w", discovery.ErrNotFound)
+	}
+	if resp.StatusCode == http.StatusTooManyRequests {
+		ra := metadata.ParseRetryAfterHeader(resp.Header.Get("Retry-After"))
+		c.log.Warn("musicbrainz rate limited", "path", path, "retry_after", ra.String(), "component", "musicbrainz_api")
+		return nil, metadata.NewRateLimitError("musicbrainz", ra, "HTTP 429")
 	}
 	if resp.StatusCode == http.StatusServiceUnavailable {
 		// MusicBrainz answers 503 for two distinct conditions:

@@ -31,6 +31,81 @@ func trackItem(id int64, title string) string {
 	return fmt.Sprintf(`{"id":%d,"title":%q,"duration":200,"isrc":"US-ABC-12-34567","audioQuality":"LOSSLESS","artist":{"id":1,"name":"Mock Artist"},"album":{"id":10,"title":"Mock Album"}}`, id, title)
 }
 
+func TestGetTracksByISRCPaginates(t *testing.T) {
+	calls := 0
+	api, _ := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		offset := r.URL.Query().Get("offset")
+		items := 100
+		if offset == "100" {
+			items = 1
+		}
+		fmt.Fprint(w, `{"items":[`)
+		for i := 0; i < items; i++ {
+			if i > 0 {
+				fmt.Fprint(w, ",")
+			}
+			fmt.Fprintf(w, `{"id":%d,"title":"t","isrc":"US1"}`, i)
+		}
+		fmt.Fprint(w, `],"totalNumberOfItems":101}`)
+	})
+
+	tracks, err := api.GetTracksByISRC(context.Background(), "US1")
+	if err != nil {
+		t.Fatalf("GetTracksByISRC: %v", err)
+	}
+	if len(tracks) != 101 || calls != 2 {
+		t.Fatalf("tracks=%d calls=%d, want 101 tracks across 2 pages", len(tracks), calls)
+	}
+}
+
+func TestGetTracksByISRCUsesTotalWhenServerClampsPage(t *testing.T) {
+	calls := 0
+	api, _ := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		calls++
+		if got := r.URL.Query().Get("isrc"); got != "US1" {
+			t.Errorf("isrc query = %q, want US1", got)
+		}
+		offset := r.URL.Query().Get("offset")
+		items := 50
+		if offset == "100" {
+			items = 1
+		}
+		fmt.Fprint(w, `{"items":[`)
+		for i := 0; i < items; i++ {
+			if i > 0 {
+				fmt.Fprint(w, ",")
+			}
+			fmt.Fprintf(w, `{"id":%d,"title":"t","isrc":"US1"}`, i)
+		}
+		fmt.Fprint(w, `],"totalNumberOfItems":101}`)
+	})
+
+	tracks, err := api.GetTracksByISRC(context.Background(), "US1")
+	if err != nil {
+		t.Fatalf("GetTracksByISRC: %v", err)
+	}
+	if len(tracks) != 101 || calls != 3 {
+		t.Fatalf("tracks=%d calls=%d, want 101 tracks across 3 clamped pages", len(tracks), calls)
+	}
+}
+
+func TestDoRequestParksLongRateLimitWithoutSleeping(t *testing.T) {
+	api, _ := newTestAPI(t, func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Retry-After", "60")
+		w.WriteHeader(http.StatusTooManyRequests)
+	})
+
+	start := time.Now()
+	_, err := api.doRequest(context.Background(), http.MethodGet, api.v1BaseURL+"/tracks", nil)
+	if !errors.Is(err, metadata.ErrRateLimited) {
+		t.Fatalf("err = %v, want metadata.ErrRateLimited", err)
+	}
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Fatalf("elapsed = %s, want a long Retry-After returned without an inline sleep", elapsed)
+	}
+}
+
 // ─── Search ─────────────────────────────────────────────────────────────
 
 func TestSearchTracks(t *testing.T) {

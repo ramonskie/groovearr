@@ -3,6 +3,7 @@ package tidal
 import (
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/ramonskie/groovearr/internal/plugin"
 )
@@ -337,6 +338,7 @@ func TestParseRetryAfter(t *testing.T) {
 		{name: "zero seconds", header: "0", wantMinSec: 0, wantMaxSec: 1},
 		{name: "empty header defaults to 5s", header: "", wantMinSec: 5, wantMaxSec: 5},
 		{name: "invalid string defaults to 5s", header: "not-a-number", wantMinSec: 5, wantMaxSec: 5},
+		{name: "past http-date clamps to zero", header: time.Now().Add(-time.Hour).UTC().Format(time.RFC1123), wantMinSec: 0, wantMaxSec: 0},
 	}
 
 	for _, tt := range tests {

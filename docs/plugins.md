@@ -221,6 +221,46 @@ for _, p := range registry.All() {
 }
 ```
 
+### TrackIdentityProvider — resolve one track by id or ISRC
+
+Implement when the source can resolve an exact track identity with the release
+context needed to materialize a catalog release. The unmatched-album resolver
+and the manual review dialog use this optional capability.
+
+```go
+// internal/discovery/identity.go
+type TrackIdentityProvider interface {
+    Provider
+
+    GetTrackIdentity(ctx context.Context, providerTrackID string) (*TrackIdentity, error)
+    LookupTrackByISRC(ctx context.Context, isrc string) (*TrackIdentity, error)
+}
+```
+
+- Return `(nil, nil)` when the provider has no such track/ISRC. Wrap
+  `discovery.ErrNotFound` only when a supplied id is malformed.
+- If one ISRC resolves to multiple distinct recordings or releases, return
+  `(nil, nil)` instead of picking one arbitrarily. The album stays a manual
+  review/search case, matching the Tidal and MusicBrainz exact-ISRC guards.
+- Fill `ProviderTrackID`, `ProviderAlbumID`, title/artist/album, album
+  type/count (when known), track/disc number, duration, and ISRC. If a
+  recording lookup only returns the medium carrying that track, fetch the
+  release/release-group size separately instead of summing one medium.
+  `ProviderAlbumID` must be an id the same provider's `GetAlbumTracks` accepts,
+  because a resolved album is materialized through that release. `ProviderTrackID`
+  must be resolvable by `GetTrackIdentity` without the release context; do not
+  return a release-scoped track number if the provider also has a global track
+  MBID/recording id.
+- `IdentityAvailability` (`IdentityAvailable() bool`) is an optional marker for
+  a configured-but-unusable provider (for example Spotify free mode, which has
+  no Web API). Unavailable providers are omitted from identity candidates.
+- `ReviewOnlyIdentity` (`IdentityReviewOnly() bool`) is an optional marker for a
+  provider whose lookup is too slow/costly for the bulk automatic pass but is
+  still valid for manual review. MusicBrainz uses it because one ISRC needs an
+  ISRC lookup, a recording lookup, and a release-group media lookup.
+- Current implementations: Deezer, Spotify, Tidal (automatic + review), and
+  MusicBrainz (review-only).
+
 ### Enabler — Enable/Disable toggle
 
 Implement when the plugin supports user-facing enable/disable. Plugins that do NOT implement

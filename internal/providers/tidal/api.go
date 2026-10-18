@@ -109,38 +109,38 @@ func (c *apiClient) SetCountry(code string) {
 
 // TrackSearchResult is a track from /v1/search results (sparse).
 type TrackSearchResult struct {
-	ID          int64              `json:"id"`
-	Title       string             `json:"title"`
-	Duration    int                `json:"duration"`
-	Explicit    bool               `json:"explicit"`
-	TrackNumber int                `json:"trackNumber"`
-	VolumeNumber int               `json:"volumeNumber"`
-	ISRC        string             `json:"isrc"`
-	Version     string             `json:"version"`
-	AudioQuality string            `json:"audioQuality"`
-	Popularity  int                `json:"popularity"`
-	URL         string             `json:"url"`
-	Artist      ArtistSearchResult `json:"artist"`
-	Album       AlbumSearchResult  `json:"album"`
-	Artists     []ArtistSearchResult `json:"artists"`
+	ID           int64                `json:"id"`
+	Title        string               `json:"title"`
+	Duration     int                  `json:"duration"`
+	Explicit     bool                 `json:"explicit"`
+	TrackNumber  int                  `json:"trackNumber"`
+	VolumeNumber int                  `json:"volumeNumber"`
+	ISRC         string               `json:"isrc"`
+	Version      string               `json:"version"`
+	AudioQuality string               `json:"audioQuality"`
+	Popularity   int                  `json:"popularity"`
+	URL          string               `json:"url"`
+	Artist       ArtistSearchResult   `json:"artist"`
+	Album        AlbumSearchResult    `json:"album"`
+	Artists      []ArtistSearchResult `json:"artists"`
 }
 
 // AlbumSearchResult is an album from /v1/search results (sparse).
 type AlbumSearchResult struct {
-	ID          int64                `json:"id"`
-	Title       string               `json:"title"`
-	Cover       string               `json:"cover"`
-	Type        string               `json:"type"`
-	Explicit    bool                 `json:"explicit"`
-	NumTracks   int                  `json:"numTracks"`
-	NumVolumes  int                  `json:"numVolumes"`
-	Duration    int                  `json:"duration"`
-	ReleaseDate string               `json:"releaseDate"`
-	AudioQuality string              `json:"audioQuality"`
-	Popularity  int                  `json:"popularity"`
-	Artist      ArtistSearchResult   `json:"artist"`
-	Artists     []ArtistSearchResult `json:"artists"`
-	URL         string               `json:"url"`
+	ID           int64                `json:"id"`
+	Title        string               `json:"title"`
+	Cover        string               `json:"cover"`
+	Type         string               `json:"type"`
+	Explicit     bool                 `json:"explicit"`
+	NumTracks    int                  `json:"numTracks"`
+	NumVolumes   int                  `json:"numVolumes"`
+	Duration     int                  `json:"duration"`
+	ReleaseDate  string               `json:"releaseDate"`
+	AudioQuality string               `json:"audioQuality"`
+	Popularity   int                  `json:"popularity"`
+	Artist       ArtistSearchResult   `json:"artist"`
+	Artists      []ArtistSearchResult `json:"artists"`
+	URL          string               `json:"url"`
 }
 
 // ArtistSearchResult is an artist from /v1/search results (sparse).
@@ -154,32 +154,32 @@ type ArtistSearchResult struct {
 
 // AlbumDetail is the full album response from /v1/albums/{id}.
 type AlbumDetail struct {
-	ID                   int64                `json:"id"`
-	Title                string               `json:"title"`
-	Cover                string               `json:"cover"`
-	VideoCover           string               `json:"videoCover"`
-	Type                 string               `json:"type"`
-	Duration             int                  `json:"duration"`
-	Available            bool                 `json:"available"`
-	AllowStreaming       bool                 `json:"allowStreaming"`
-	PremiumStreamingOnly bool                 `json:"premiumStreamingOnly"`
-	NumTracks            int                  `json:"numTracks"`
-	NumVideos            int                  `json:"numVideos"`
-	NumVolumes           int                  `json:"numVolumes"`
-	TidalReleaseDate     string               `json:"tidalReleaseDate"`
-	ReleaseDate          string               `json:"releaseDate"`
-	Copyright            string               `json:"copyright"`
-	UPC                  string               `json:"upc"`
-	Version              string               `json:"version"`
-	Explicit             bool                 `json:"explicit"`
-	UniversalProductNumber int                `json:"universalProductNumber"`
-	Popularity           int                  `json:"popularity"`
-	AudioQuality         string               `json:"audioQuality"`
-	AudioModes           []string             `json:"audioModes"`
-	MediaMetadataTags    []string             `json:"mediaMetadataTags"`
-	Artist               ArtistSearchResult   `json:"artist"`
-	Artists              []ArtistSearchResult `json:"artists"`
-	Tracks               []TrackSearchResult  `json:"tracks,omitempty"`
+	ID                     int64                `json:"id"`
+	Title                  string               `json:"title"`
+	Cover                  string               `json:"cover"`
+	VideoCover             string               `json:"videoCover"`
+	Type                   string               `json:"type"`
+	Duration               int                  `json:"duration"`
+	Available              bool                 `json:"available"`
+	AllowStreaming         bool                 `json:"allowStreaming"`
+	PremiumStreamingOnly   bool                 `json:"premiumStreamingOnly"`
+	NumTracks              int                  `json:"numTracks"`
+	NumVideos              int                  `json:"numVideos"`
+	NumVolumes             int                  `json:"numVolumes"`
+	TidalReleaseDate       string               `json:"tidalReleaseDate"`
+	ReleaseDate            string               `json:"releaseDate"`
+	Copyright              string               `json:"copyright"`
+	UPC                    string               `json:"upc"`
+	Version                string               `json:"version"`
+	Explicit               bool                 `json:"explicit"`
+	UniversalProductNumber int                  `json:"universalProductNumber"`
+	Popularity             int                  `json:"popularity"`
+	AudioQuality           string               `json:"audioQuality"`
+	AudioModes             []string             `json:"audioModes"`
+	MediaMetadataTags      []string             `json:"mediaMetadataTags"`
+	Artist                 ArtistSearchResult   `json:"artist"`
+	Artists                []ArtistSearchResult `json:"artists"`
+	Tracks                 []TrackSearchResult  `json:"tracks,omitempty"`
 }
 
 // TrackInfo is a full track from /v1/tracks/{id}, /v1/albums/{id}/tracks,
@@ -333,6 +333,19 @@ func (e tidalError) Error() string {
 	return "unknown tidal API error"
 }
 
+// httpStatusError preserves the HTTP status of a non-2xx Tidal response so a
+// caller can distinguish a genuine not-found (404) from a transport or server
+// failure without parsing the message. The Error string stays compatible with
+// the messages this client returned before the type was introduced.
+type httpStatusError struct {
+	StatusCode int
+	Body       string
+}
+
+func (e *httpStatusError) Error() string {
+	return fmt.Sprintf("tidal API HTTP %d: %s", e.StatusCode, e.Body)
+}
+
 // ─── Search methods ────────────────────────────────────────────────────
 
 // SearchTracks searches for tracks matching a query.
@@ -343,6 +356,51 @@ func (c *apiClient) SearchTracks(ctx context.Context, query string, limit, offse
 		return nil, fmt.Errorf("tidal search tracks: %w", err)
 	}
 	return payload.Tracks.Items, nil
+}
+
+// GetTracksByISRC resolves tracks by exact ISRC through the legacy v1 tracks
+// endpoint. A single ISRC may map to several Tidal tracks/releases; callers
+// must verify the returned ISRC themselves before treating one as an identity.
+func (c *apiClient) GetTracksByISRC(ctx context.Context, isrc string) ([]TrackSearchResult, error) {
+	isrc = strings.TrimSpace(isrc)
+	if isrc == "" {
+		return nil, nil
+	}
+	const pageSize = 100
+	const maxPages = 10
+	var out []TrackSearchResult
+	offset := 0
+	for page := 0; page < maxPages; page++ {
+		data, err := c.doRequest(ctx, http.MethodGet, c.v1BaseURL+"/tracks", map[string]string{
+			"isrc":   isrc,
+			"limit":  strconv.Itoa(pageSize),
+			"offset": strconv.Itoa(offset),
+		})
+		if err != nil {
+			return nil, fmt.Errorf("tidal get tracks by isrc: %w", err)
+		}
+		var payload struct {
+			Items              []TrackSearchResult `json:"items"`
+			TotalNumberOfItems int                 `json:"totalNumberOfItems"`
+		}
+		if err := json.Unmarshal(data, &payload); err != nil {
+			return nil, fmt.Errorf("tidal get tracks by isrc unmarshal: %w", err)
+		}
+		if len(payload.Items) == 0 {
+			break
+		}
+		out = append(out, payload.Items...)
+		offset += len(payload.Items)
+		if payload.TotalNumberOfItems > 0 && len(out) >= payload.TotalNumberOfItems {
+			break
+		}
+		// Use the server total when present: Tidal may clamp a requested page
+		// below pageSize, and a short page must not be mistaken for the last.
+		if payload.TotalNumberOfItems <= 0 && len(payload.Items) < pageSize {
+			break
+		}
+	}
+	return out, nil
 }
 
 // SearchAlbums searches for albums matching a query.
@@ -623,11 +681,18 @@ func (c *apiClient) doRequest(ctx context.Context, method, urlStr string, params
 			return nil, fmt.Errorf("tidal HTTP request: %w", err)
 		}
 
-		// Handle 429 with Retry-After.
+		// Handle 429 with Retry-After. A long server backoff must park the
+		// shared bucket immediately; sleeping it inline can outlive the
+		// caller's per-call context and turn the rate limit into a plain
+		// deadline, which never marks the cooldown (AGENTS §8).
 		if resp.StatusCode == http.StatusTooManyRequests {
 			retryAfter := parseRetryAfter(resp.Header.Get("Retry-After"))
 			resp.Body.Close()
-			if attempt < maxRetries-1 && retryAfter > 0 {
+			const maxInline429Wait = 2 * time.Second
+			if attempt >= maxRetries-1 || retryAfter > maxInline429Wait {
+				return nil, metadata.NewRateLimitError("tidal", retryAfter, fmt.Sprintf("HTTP 429 after %d attempts", attempt+1))
+			}
+			if retryAfter > 0 {
 				timer := time.NewTimer(retryAfter)
 				select {
 				case <-timer.C:
@@ -662,9 +727,9 @@ func (c *apiClient) doRequest(ctx context.Context, method, urlStr string, params
 		// Try to parse the Tidal error body for a more specific message.
 		var apiErr tidalError
 		if json.Unmarshal(body, &apiErr) == nil && (len(apiErr.Errors) > 0 || apiErr.UserMessage != "") {
-			return nil, fmt.Errorf("tidal API HTTP %d: %w", resp.StatusCode, apiErr)
+			return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: apiErr.Error()}
 		}
-		return nil, fmt.Errorf("tidal API HTTP %d: %s", resp.StatusCode, string(body))
+		return nil, &httpStatusError{StatusCode: resp.StatusCode, Body: string(body)}
 	}
 
 	return json.RawMessage(body), nil
@@ -679,7 +744,10 @@ func parseRetryAfter(header string) time.Duration {
 		return time.Duration(sec) * time.Second
 	}
 	if t, err := time.Parse(time.RFC1123, header); err == nil {
-		return time.Until(t)
+		if d := time.Until(t); d > 0 {
+			return d
+		}
+		return 0
 	}
 	return 5 * time.Second
 }

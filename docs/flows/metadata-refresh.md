@@ -7,13 +7,15 @@
 > `internal/catalog/migrate/backfill.go`, `internal/refresh/service.go`,
 > `internal/refresh/enqueue.go`, `internal/refresh/cold.go`,
 > `internal/refresh/bulk.go`, `internal/matching/match.go`,
-> `internal/discovery/provider.go`,
+> `internal/matching/isrc.go`, `internal/discovery/provider.go`,
 > `internal/jobs/warm_library.go`, `internal/jobs/recheck_unmatched.go`,
 > `internal/identity/resolver.go`, `internal/identity/score.go`,
 > `internal/identity/review.go`, `internal/discovery/identity.go`,
 > `internal/providers/deezer/download.go`, `internal/providers/spotify/identity.go`,
+> `internal/providers/tidal/identity.go`,
 > `internal/providers/musicbrainz/provider.go`,
 > `internal/providers/musicbrainz/api.go`,
+> `internal/providers/musicbrainz/identity.go`,
 > `internal/api/handlers_library.go`, `internal/api/handlers_discover.go`,
 > `internal/api/handlers_jobs.go`, `internal/api/handlers_catalog.go`,
 > `internal/config/config.go`,
@@ -469,9 +471,13 @@ The identity pass is the explicit, user-triggered override of the 90-day
 `UnmatchedRetry` park. It does **not** re-run the album-string search for
 ambiguous albums: identity evidence has already shown that the album string is
 not enough, so those rows stay parked for the review UI. Provider access is
-through the optional `discovery.TrackIdentityProvider` capability (Deezer by
-ISRC, Spotify by track id / ISRC); core packages never reference a provider
-name (§1). Every call consults and marks the one shared
+through the optional `discovery.TrackIdentityProvider` capability (Deezer,
+Spotify, and Tidal by track id / ISRC); core packages never reference a provider
+name (§1). MusicBrainz implements the same capability but marks itself
+`ReviewOnlyIdentity` because its ISRC resolution needs a paced ISRC lookup, a
+recording lookup, and a release-group media lookup, so it is offered in the
+manual review dialog and excluded from the bulk automatic pass. Every call
+consults and marks the one shared
 `metadata.ProviderCooldown` bucket (§8).
 
 `MaterializeResolved` uses the same per-album in-flight coalescer as

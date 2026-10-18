@@ -178,8 +178,8 @@ func TestResolveTracksForCount_PopulatesProviderIDAndDiscNumber(t *testing.T) {
 	if len(tracks) != 2 {
 		t.Fatalf("track count = %d, want 2", len(tracks))
 	}
-	if tracks[0].ProviderID != "1" || tracks[1].ProviderID != "1" {
-		t.Errorf("ProviderIDs = %q,%q, want \"1\",\"1\"", tracks[0].ProviderID, tracks[1].ProviderID)
+	if tracks[0].ProviderID != "r1" || tracks[1].ProviderID != "r2" {
+		t.Errorf("ProviderIDs = %q,%q, want \"r1\",\"r2\"", tracks[0].ProviderID, tracks[1].ProviderID)
 	}
 	if tracks[0].DiscNumber != 1 || tracks[1].DiscNumber != 2 {
 		t.Errorf("disc numbers = %d,%d, want 1,2", tracks[0].DiscNumber, tracks[1].DiscNumber)

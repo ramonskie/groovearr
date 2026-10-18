@@ -213,7 +213,7 @@ func (c *Client) ResolveTracksForCount(ctx context.Context, artist, album string
 
 	// 2. Pick a release. When a file count is known, use the search endpoint
 	// (one call, all releases with track counts). Otherwise fall back to the
-	// release-group lookup (first release only, no track counts).
+	// release-group lookup and pick a deterministic representative release.
 	var best ReleaseGroupRelease
 	if fileCount > 0 {
 		allReleases, err := c.api.SearchReleasesByGroup(ctx, rg.MBID)
@@ -678,11 +678,15 @@ func trackInfoFromReleaseTrack(t ReleaseTrack, albumTitle string) discovery.Trac
 	}
 }
 
-// releaseTrackID returns a provider-scoped track identifier. The shared
-// APIClient does not surface the recording MBID from a release lookup, so the
-// release-scoped track "number" (e.g. "1", "A1") is the best stable handle;
-// fall back to the numeric position when the number is absent.
+// releaseTrackID returns the global recording MBID when the release lookup
+// carries one. That is the only MusicBrainz track id that can be resolved
+// without the release context (a track number is release-scoped and repeats
+// across discs). Older fixtures or sparse responses fall back to the display
+// number and then the numeric position.
 func releaseTrackID(t ReleaseTrack) string {
+	if t.RecordingID != "" {
+		return t.RecordingID
+	}
 	if t.Number != "" {
 		return t.Number
 	}
