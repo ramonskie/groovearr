@@ -251,6 +251,11 @@ type TrackIdentityProvider interface {
   must be resolvable by `GetTrackIdentity` without the release context; do not
   return a release-scoped track number if the provider also has a global track
   MBID/recording id.
+- Optional release context must not fail a usable track identity. Propagate
+  rate-limit errors and context cancellation/deadline; a 5xx without
+  `Retry-After` (`metadata.ErrProviderBusy`, e.g. MusicBrainz's 503) or any
+  other optional-context failure keeps the identity with an unknown track count
+  (and any optional context that was not fetched).
 - `IdentityAvailability` (`IdentityAvailable() bool`) is an optional marker for
   a configured-but-unusable provider (for example Spotify free mode, which has
   no Web API). Unavailable providers are omitted from identity candidates.

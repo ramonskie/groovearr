@@ -471,7 +471,10 @@ matching:
   no identity so the album stays a manual review/search case. MusicBrainz fills
   `AlbumTrackCount` from the representative release's media counts in the
   release-group lookup, so a manual one-track match knows whether it belongs to
-  a larger release and is marked partial correctly.
+  a larger release and is marked partial correctly. That count is optional
+  evidence: a 5xx without `Retry-After` (busy) or another optional-context
+  failure keeps the track identity with an unknown count, while rate-limit and
+  context cancellation/deadline errors still propagate.
 - `internal/identity` probes duration only for the parked albums' tracks, scores
   each candidate with `matching.CandidateScore`, and auto-applies only when the
   title agrees and either artist or duration confirms the recording; a known

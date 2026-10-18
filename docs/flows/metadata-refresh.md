@@ -417,7 +417,10 @@ startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.
     |      |      ISRC -> LookupTrackByISRC (skipped once the id candidate
     |      |              already auto-applies)
     |      |      resolved identity fills AlbumTrackCount from the provider's
-    |      |              representative release media counts (when available)
+    |      |              representative release media counts (when available);
+    |      |              a 5xx without Retry-After (busy) or other optional-
+    |      |              context failure keeps the identity with an unknown count;
+    |      |              rate-limit and context errors still propagate
     |      |      score -> matching.CandidateScore
     |      |      auto only when:
     |      |        score >= 75, title agrees,
@@ -484,7 +487,10 @@ name (§1). MusicBrainz implements the same capability but marks itself
 recording lookup, and a release-group media lookup, so it is offered in the
 manual review dialog and excluded from the bulk automatic pass. Every call
 consults and marks the one shared
-`metadata.ProviderCooldown` bucket (§8).
+`metadata.ProviderCooldown` bucket (§8). Optional release context (album or
+release-group size) never fails a usable identity: rate-limit and context
+errors propagate, while a transient busy/5xx without a rate-limit signal keeps
+the identity with an unknown count.
 
 `MaterializeResolved` uses the same per-album in-flight coalescer as
 `RefreshAlbum`, so an identity result and a concurrent engine refresh cannot
