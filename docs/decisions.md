@@ -443,7 +443,7 @@ the `*APIClient` and resetting its pacer bucket; the cooldown bucket is separate
 and survives the rebuild. No code change; recorded to close the pacing audit's
 D2 finding.
 
-## D-008 — Identity-first unmatched resolution (Phase A)
+## D-008 — Identity-first unmatched resolution (Phases A/B)
 
 ### Context
 
@@ -478,12 +478,56 @@ matching:
   the old re-arm path remains as a fallback when no resolver is wired or no
   configured provider exposes the identity capability.
 
+### Phase B — equivalent tie-break and manual review
+
+- **Equivalent ties are not ambiguity.** Two exact-score candidates that
+  describe the same recording are equivalent only when their non-empty ISRCs
+  match, or when neither side has a conflicting ISRC and the normalized title +
+  compatible artist agree with both known durations within 2s. Two different
+  non-empty ISRCs are never equivalent, and an unknown duration is not treated
+  as confirmation. The earlier configured provider wins, so the earlier
+  provider's title spelling is what materializes (e.g. Spotify's
+  `Anywhere You Go - DJ Antoine vs Mad Mark 2K12 Radio Edit` over Deezer's
+  parenthetical form). This is driven by `provider_order`, never a hardcoded
+  provider name. Equal-score complete release groups follow the same rule, but
+  only when every local track is equivalent and both providers report the same
+  known release track count; an unknown or inconsistent count stays parked.
+- **Manual review is admin-only and resolver-owned.** `GET
+  /api/catalog/unmatched/{albumID}/review` returns the local tracks plus, for a
+  one-track release, the identity candidates and the available identity-capable
+  providers. `POST /api/catalog/unmatched/{albumID}/match` applies an
+  explicitly chosen track or release through `refresh.MaterializeResolved`, so
+  queue/coalescing/SSE and the "album is no longer unmatched" guard are identical
+  to an automatic resolution. The handler is thin; no direct SQL writes.
+- **Multi-track review applies a complete provider release.** Per-track merges
+  are deliberately unsupported: a 20-track album is not allowed to replace the
+  catalog with one partial row. A provider release smaller than the local album
+  is rejected so a release match can never silently delete catalog rows. A
+  one-track local release applies a single track match (partial only when the
+  provider album is known to have more than one track). A release match for a
+  one-track local release is accepted only when the provider release also has
+  one track; a multi-track provider release is rejected for it.
+- **Wrong stored ID/ISRC has a search fallback.** The dialog reuses the existing
+  discovery album search and album-tracks endpoints, then calls the same match
+  endpoint. Release matches use the base discovery tracklist capability, so any
+  configured provider works; track matches require an identity-capable provider
+  and the UI only offers them for one. The provider identity is re-fetched
+  server-side before writing, so a stale search result cannot materialize
+  unchecked.
+- **Playback without a new file route.** The existing library track download
+  route accepts `?inline=1`; it changes `Content-Disposition` only for known
+  audio content types and adds `Cache-Control: private, no-store`, keeping the
+  same auth, root-containment and range handling.
+
 ### Consequences
 
 - Positive: high-confidence identities are used directly; wrong ISRCs cannot
   auto-apply on ID alone; singles/EPs are valid releases; duration is probed
   only for the backlog (495 tracks), not the 33k library.
+- Positive: equivalent cross-provider ties resolve deterministically instead of
+  parking; the remaining parked set is reachable from one admin dialog, with a
+  local audio player and a provider-search fallback for wrong IDs.
 - Positive: one shared provider cooldown still governs every lookup; partial
   materializations are never expanded by the refresh engine.
-- Deferred: the review UI for 50–74 confident candidates (Phase B) and a
-  targeted "play local track / choose candidate" flow.
+- Deferred: per-track merge for a multi-track album whose tracks are spread
+  across provider releases; a bulk "apply all review candidates" action.

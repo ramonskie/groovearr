@@ -45,6 +45,8 @@ var adminRoutes = []roleRoute{
 	{"jobs", http.MethodPost, "/api/jobs/cancel"},
 	{"catalog", http.MethodGet, "/api/catalog/status"},
 	{"catalog", http.MethodGet, "/api/catalog/unmatched"},
+	{"catalog", http.MethodGet, "/api/catalog/unmatched/1/review"},
+	{"catalog", http.MethodPost, "/api/catalog/unmatched/1/match"},
 	{"tracking", http.MethodGet, "/api/tracking/artists"},
 	{"tracking", http.MethodPost, "/api/tracking/artists"},
 	{"tracking", http.MethodGet, "/api/tracking/artists/1"},
@@ -82,6 +84,7 @@ var sharedRoutes = []roleRoute{
 	{"downloads", http.MethodPost, "/api/download"},
 	{"library", http.MethodGet, "/api/library/tracks"},
 	{"library", http.MethodGet, "/api/library/tracks/1/download"},
+	{"library", http.MethodGet, "/api/library/tracks/1/download?inline=1"},
 	{"library", http.MethodGet, "/api/library/albums/1/download"},
 	{"library", http.MethodGet, "/api/library/artists"},
 	{"library", http.MethodGet, "/api/library/albums"},
@@ -233,7 +236,7 @@ func TestProviderOAuthRoutesAreAdmin(t *testing.T) {
 // roleTestBuckets returns generous rate-limit buckets so the authorization
 // test never trips a 429 (which would obscure a missing 403).
 func roleTestBuckets() []rateLimitBucket {
-	names := []string{"search", "download", "scan", "enrich", "duplicates", "login"}
+	names := []string{"search", "download", "scan", "enrich", "duplicates", "match", "login"}
 	buckets := make([]rateLimitBucket, 0, len(names))
 	for _, name := range names {
 		buckets = append(buckets, rateLimitBucket{name: name, max: 10000, window: time.Minute})

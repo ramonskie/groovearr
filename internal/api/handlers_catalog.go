@@ -2,13 +2,41 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/catalog"
+	"github.com/ramonskie/groovearr/internal/identity"
+	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/refresh"
 )
+
+// unmatchedReviewer is the admin review surface over the identity resolver.
+// The api package depends on behavior, not the concrete resolver (AGENTS §3).
+type unmatchedReviewer interface {
+	ReviewAlbum(ctx context.Context, albumID int64) (identity.AlbumReview, error)
+	ApplyTrackMatch(ctx context.Context, albumID, localTrackID int64, provider, providerTrackID string) (bool, error)
+	ApplyReleaseMatch(ctx context.Context, albumID int64, provider, providerAlbumID string) (int, bool, error)
+}
+
+// errUnmatchedReviewUnavailable is the defensive 503 when app.go did not wire
+// the reviewer (tests / a Server built without one).
+var (
+	errUnmatchedReviewUnavailable = errors.New("unmatched review not available")
+	errProviderRateLimited        = errors.New("provider rate limited")
+)
+
+// catalogReviewTimeout bounds the provider-backed review read. The server's
+// global write timeout is 30s; leaving headroom keeps the response intact.
+const catalogReviewTimeout = 25 * time.Second
+
+// catalogMatchTimeout bounds one manual apply (a provider lookup or release
+// fetch plus the catalog materialization).
+const catalogMatchTimeout = 25 * time.Second
 
 // refreshStatusReader is the narrow slice of the refresh engine the status
 // handler reads. The engine is a service-owned loop (AGENTS §2), not a job, so a
@@ -162,6 +190,159 @@ func (s *Server) handleCatalogUnmatched(w http.ResponseWriter, r *http.Request) 
 		})
 	}
 	writeJSON(w, http.StatusOK, resp)
+}
+
+// handleCatalogUnmatchedReview returns one parked album's local tracks and, for
+// a one-track release, the provider identity candidates. It never applies a
+// match; the admin chooses one explicitly via the match endpoint.
+func (s *Server) handleCatalogUnmatchedReview(w http.ResponseWriter, r *http.Request) {
+	if s.unmatchedReviewer == nil {
+		writeError(w, http.StatusServiceUnavailable, errUnmatchedReviewUnavailable)
+		return
+	}
+	albumID, err := strconv.ParseInt(r.PathValue("albumID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("unmatched album not found"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), catalogReviewTimeout)
+	defer cancel()
+	review, err := s.unmatchedReviewer.ReviewAlbum(ctx, albumID)
+	if err != nil {
+		s.catalogReviewError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, review)
+}
+
+// catalogUnmatchedMatchRequest is the manual-match payload. A track match sets
+// local_track_id + provider_track_id; a release match sets provider_album_id.
+type catalogUnmatchedMatchRequest struct {
+	LocalTrackID    int64  `json:"local_track_id"`
+	Provider        string `json:"provider"`
+	ProviderTrackID string `json:"provider_track_id"`
+	ProviderAlbumID string `json:"provider_album_id"`
+}
+
+// handleCatalogUnmatchedMatch applies one admin-chosen candidate through the
+// identity resolver (which calls refresh.MaterializeResolved). The handler is
+// thin: parse -> validate shape -> service call -> JSON (AGENTS §4).
+func (s *Server) handleCatalogUnmatchedMatch(w http.ResponseWriter, r *http.Request) {
+	if s.unmatchedReviewer == nil {
+		writeError(w, http.StatusServiceUnavailable, errUnmatchedReviewUnavailable)
+		return
+	}
+	albumID, err := strconv.ParseInt(r.PathValue("albumID"), 10, 64)
+	if err != nil {
+		writeError(w, http.StatusNotFound, errors.New("unmatched album not found"))
+		return
+	}
+	// This is a small, admin-only mutation payload; cap it so a malformed or
+	// hostile body cannot allocate unbounded strings.
+	r.Body = http.MaxBytesReader(w, r.Body, 8<<10)
+	var req catalogUnmatchedMatchRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, errors.New("invalid match payload"))
+		return
+	}
+	provider := strings.TrimSpace(req.Provider)
+	if provider == "" {
+		writeError(w, http.StatusBadRequest, errors.New("provider is required"))
+		return
+	}
+	providerTrackID := strings.TrimSpace(req.ProviderTrackID)
+	providerAlbumID := strings.TrimSpace(req.ProviderAlbumID)
+	if (providerTrackID == "") == (providerAlbumID == "") {
+		writeError(w, http.StatusBadRequest, errors.New("exactly one of provider_track_id or provider_album_id is required"))
+		return
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), catalogMatchTimeout)
+	defer cancel()
+
+	if providerTrackID != "" {
+		if req.LocalTrackID <= 0 {
+			writeError(w, http.StatusBadRequest, errors.New("local_track_id is required for a track match"))
+			return
+		}
+		applied, err := s.unmatchedReviewer.ApplyTrackMatch(ctx, albumID, req.LocalTrackID, provider, providerTrackID)
+		if err != nil {
+			s.catalogMatchError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"mode": "track", "applied": applied})
+		return
+	}
+	tracks, applied, err := s.unmatchedReviewer.ApplyReleaseMatch(ctx, albumID, provider, providerAlbumID)
+	if err != nil {
+		s.catalogMatchError(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"mode": "release", "applied": applied, "tracks": tracks})
+}
+
+// catalogReviewError maps review failures to stable client-visible statuses.
+// Unknown errors are logged and reduced to a generic body, never echoing
+// provider/SQL text (AGENTS §10).
+func (s *Server) catalogReviewError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		// The client disconnected; there is no response to write.
+		return
+	case errors.Is(err, identity.ErrAlbumNotUnmatched):
+		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, identity.ErrProviderCoolingDown):
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusTooManyRequests, identity.ErrProviderCoolingDown)
+	case errors.Is(err, metadata.ErrRateLimited):
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusTooManyRequests, errProviderRateLimited)
+	case errors.Is(err, identity.ErrProviderUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, identity.ErrCandidateNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, errors.New("unmatched review timed out"))
+	default:
+		if s.log != nil {
+			s.log.Error("catalog unmatched review failed", "component", "api", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, errors.New("unmatched review unavailable"))
+	}
+}
+
+// catalogMatchError maps manual-apply failures to stable statuses. A resolved
+// album is a conflict; a wrong provider/candidate is a client error; an empty
+// release or the single/multi guard is a bad request.
+func (s *Server) catalogMatchError(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, context.Canceled):
+		// The client disconnected; there is no response to write.
+		return
+	case errors.Is(err, identity.ErrAlbumNotUnmatched):
+		writeError(w, http.StatusConflict, err)
+	case errors.Is(err, identity.ErrProviderCoolingDown):
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusTooManyRequests, identity.ErrProviderCoolingDown)
+	case errors.Is(err, metadata.ErrRateLimited):
+		w.Header().Set("Retry-After", "30")
+		writeError(w, http.StatusTooManyRequests, errProviderRateLimited)
+	case errors.Is(err, identity.ErrProviderUnavailable):
+		writeError(w, http.StatusServiceUnavailable, err)
+	case errors.Is(err, identity.ErrCandidateNotFound):
+		writeError(w, http.StatusNotFound, err)
+	case errors.Is(err, identity.ErrReleaseEmpty),
+		errors.Is(err, identity.ErrReleaseTooSmall),
+		errors.Is(err, identity.ErrReleaseMatchRequired),
+		errors.Is(err, identity.ErrTrackMatchRequired):
+		writeError(w, http.StatusBadRequest, err)
+	case errors.Is(err, context.DeadlineExceeded):
+		writeError(w, http.StatusGatewayTimeout, errors.New("unmatched match timed out"))
+	default:
+		if s.log != nil {
+			s.log.Error("catalog unmatched match failed", "component", "api", "error", err)
+		}
+		writeError(w, http.StatusInternalServerError, errors.New("unmatched match unavailable"))
+	}
 }
 
 // catalogStatusError logs the wrapped store error server-side and returns a

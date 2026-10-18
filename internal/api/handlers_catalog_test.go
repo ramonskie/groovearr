@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ramonskie/groovearr/internal/catalog"
+	"github.com/ramonskie/groovearr/internal/identity"
 	"github.com/ramonskie/groovearr/internal/refresh"
 )
 
@@ -336,5 +337,197 @@ func TestHandleCatalogUnmatched_StoreError(t *testing.T) {
 	}
 	if body := strings.TrimSpace(rec.Body.String()); body != `{"error":"catalog unmatched unavailable"}` {
 		t.Errorf("body = %s, want catalog unmatched unavailable", body)
+	}
+}
+
+type fakeUnmatchedReviewer struct {
+	review identity.AlbumReview
+	revErr error
+
+	trackApplied bool
+	trackErr     error
+	trackAlbum   int64
+	trackID      int64
+	trackProv    string
+	trackProvID  string
+
+	releaseTracks  int
+	releaseApplied bool
+	releaseErr     error
+	releaseAlbum   int64
+	releaseProv    string
+	releaseAlbumID string
+}
+
+func (f *fakeUnmatchedReviewer) ReviewAlbum(_ context.Context, _ int64) (identity.AlbumReview, error) {
+	return f.review, f.revErr
+}
+
+func (f *fakeUnmatchedReviewer) ApplyTrackMatch(_ context.Context, albumID, localTrackID int64, provider, providerTrackID string) (bool, error) {
+	f.trackAlbum, f.trackID, f.trackProv, f.trackProvID = albumID, localTrackID, provider, providerTrackID
+	return f.trackApplied, f.trackErr
+}
+
+func (f *fakeUnmatchedReviewer) ApplyReleaseMatch(_ context.Context, albumID int64, provider, providerAlbumID string) (int, bool, error) {
+	f.releaseAlbum, f.releaseProv, f.releaseAlbumID = albumID, provider, providerAlbumID
+	return f.releaseTracks, f.releaseApplied, f.releaseErr
+}
+
+func TestHandleCatalogUnmatchedReview_OK(t *testing.T) {
+	f := &fakeUnmatchedReviewer{review: identity.AlbumReview{
+		AlbumID: 7, Artist: "Artist", Title: "Song", TrackCount: 1,
+		Tracks: []identity.ReviewTrack{{TrackID: 10, Title: "Song", Candidates: []identity.ReviewCandidate{
+			{Provider: "spotify", ProviderTrackID: "sp1", ProviderAlbumID: "al1", Score: 100, Auto: true},
+		}}},
+	}}
+	s := &Server{unmatchedReviewer: f}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/unmatched/7/review", nil)
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedReview(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var got identity.AlbumReview
+	if err := json.Unmarshal(rec.Body.Bytes(), &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.AlbumID != 7 || len(got.Tracks) != 1 || len(got.Tracks[0].Candidates) != 1 {
+		t.Fatalf("review = %+v", got)
+	}
+	if got.Tracks[0].Candidates[0].Provider != "spotify" {
+		t.Errorf("candidate = %+v", got.Tracks[0].Candidates[0])
+	}
+}
+
+func TestHandleCatalogUnmatchedReview_NotUnmatched(t *testing.T) {
+	s := &Server{unmatchedReviewer: &fakeUnmatchedReviewer{revErr: identity.ErrAlbumNotUnmatched}}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/unmatched/7/review", nil)
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedReview(rec, req)
+
+	if rec.Code != http.StatusConflict {
+		t.Fatalf("status = %d, want 409", rec.Code)
+	}
+}
+
+func TestHandleCatalogUnmatchedReview_NoReviewer(t *testing.T) {
+	s := &Server{}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/unmatched/7/review", nil)
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedReview(rec, req)
+
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_Track(t *testing.T) {
+	f := &fakeUnmatchedReviewer{trackApplied: true}
+	s := &Server{unmatchedReviewer: f}
+	body := `{"local_track_id":10,"provider":"spotify","provider_track_id":"sp1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(body))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedMatch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if f.trackAlbum != 7 || f.trackID != 10 || f.trackProv != "spotify" || f.trackProvID != "sp1" {
+		t.Fatalf("args = %+v", f)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"mode":"track"`) || !strings.Contains(body, `"applied":true`) {
+		t.Errorf("body = %s", body)
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_Release(t *testing.T) {
+	f := &fakeUnmatchedReviewer{releaseTracks: 2, releaseApplied: true}
+	s := &Server{unmatchedReviewer: f}
+	body := `{"provider":"deezer","provider_album_id":"al1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(body))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedMatch(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if f.releaseAlbum != 7 || f.releaseProv != "deezer" || f.releaseAlbumID != "al1" {
+		t.Fatalf("args = %+v", f)
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"mode":"release"`) || !strings.Contains(body, `"tracks":2`) {
+		t.Errorf("body = %s", body)
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_RequiresCandidate(t *testing.T) {
+	s := &Server{unmatchedReviewer: &fakeUnmatchedReviewer{}}
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(`{"provider":"spotify"}`))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+
+	s.handleCatalogUnmatchedMatch(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleCatalogUnmatchedReview_ProviderUnavailable(t *testing.T) {
+	s := &Server{unmatchedReviewer: &fakeUnmatchedReviewer{revErr: identity.ErrProviderUnavailable}}
+	req := httptest.NewRequest(http.MethodGet, "/api/catalog/unmatched/7/review", nil)
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+	s.handleCatalogUnmatchedReview(rec, req)
+	if rec.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status = %d, want 503", rec.Code)
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_ReleaseTooSmall(t *testing.T) {
+	f := &fakeUnmatchedReviewer{releaseErr: identity.ErrReleaseTooSmall}
+	s := &Server{unmatchedReviewer: f}
+	body := `{"provider":"spotify","provider_album_id":"al1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(body))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+	s.handleCatalogUnmatchedMatch(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_RejectsBothCandidateIDs(t *testing.T) {
+	s := &Server{unmatchedReviewer: &fakeUnmatchedReviewer{}}
+	body := `{"provider":"spotify","local_track_id":1,"provider_track_id":"sp1","provider_album_id":"al1"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(body))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+	s.handleCatalogUnmatchedMatch(rec, req)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+}
+
+func TestHandleCatalogUnmatchedMatch_ProviderNotFound(t *testing.T) {
+	f := &fakeUnmatchedReviewer{releaseErr: identity.ErrCandidateNotFound}
+	s := &Server{unmatchedReviewer: f}
+	body := `{"provider":"deezer","provider_album_id":"missing"}`
+	req := httptest.NewRequest(http.MethodPost, "/api/catalog/unmatched/7/match", strings.NewReader(body))
+	req.SetPathValue("albumID", "7")
+	rec := httptest.NewRecorder()
+	s.handleCatalogUnmatchedMatch(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
 	}
 }

@@ -75,6 +75,7 @@ type Server struct {
 	albumStaleAfter     func() time.Duration
 	catalogEnabled      func() bool
 	catalogStats        catalog.StatsStore
+	unmatchedReviewer   unmatchedReviewer
 	refreshStatus       refreshStatusReader
 	userStore           user.Store
 	scanner             *library.Scanner
@@ -351,6 +352,10 @@ func (s *Server) registerAPIRoutes(mux *http.ServeMux) {
 	// surface (AGENTS §2).
 	mux.HandleFunc("GET /api/catalog/status", s.adminOnly(s.handleCatalogStatus))
 	mux.HandleFunc("GET /api/catalog/unmatched", s.adminOnly(s.handleCatalogUnmatched))
+	// Manual unmatched review: the read is provider-backed (identity lookup),
+	// the write reuses the catalog materialization path. Both are admin-only.
+	mux.Handle("GET /api/catalog/unmatched/{albumID}/review", withRateLimit("search", s.rateLimiter, s.adminOnly(s.handleCatalogUnmatchedReview)))
+	mux.Handle("POST /api/catalog/unmatched/{albumID}/match", withRateLimit("match", s.rateLimiter, s.adminOnly(s.handleCatalogUnmatchedMatch)))
 
 	// ── Shared surface: playlists ──────────────────────────────────────
 	mux.HandleFunc("GET /api/playlists/sources", s.handlePlaylistSources)
@@ -592,6 +597,13 @@ func (s *Server) SetUnmatchedResolver(x identity.UnmatchedResolver) {
 	if s.runners != nil {
 		s.runners.SetUnmatchedResolver(x)
 	}
+}
+
+// SetUnmatchedReviewer injects the admin manual-review service behind
+// GET /api/catalog/unmatched/{albumID}/review and its match endpoint. The same
+// identity resolver satisfies both ports. Pass nil to keep the endpoints at 503.
+func (s *Server) SetUnmatchedReviewer(x unmatchedReviewer) {
+	s.unmatchedReviewer = x
 }
 
 // ListenAndServe starts the HTTP server (blocking).

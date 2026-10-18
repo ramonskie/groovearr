@@ -18,7 +18,7 @@ func TestRateLimitBucketsRegistered(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	limiter := newIPRateLimiter(defaultRateBuckets(), logger)
 
-	used := []string{"search", "download", "scan", "enrich", "duplicates", "login"}
+	used := []string{"search", "download", "scan", "enrich", "duplicates", "match", "login"}
 	for _, bucket := range used {
 		ok, _ := limiter.allow("127.0.0.1", bucket)
 		if !ok {
@@ -37,6 +37,7 @@ func testBuckets(downloadMax int) []rateLimitBucket {
 		{name: "scan", max: 10000, window: time.Minute},
 		{name: "enrich", max: 10000, window: time.Minute},
 		{name: "duplicates", max: 10000, window: time.Minute},
+		{name: "match", max: 10000, window: time.Minute},
 		{name: "login", max: 10000, window: time.Minute},
 	}
 }

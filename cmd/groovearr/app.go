@@ -518,6 +518,10 @@ func NewApp(configPath string) (*App, error) {
 	// the same job: it resolves what identity can prove and leaves the rest
 	// parked for review instead of re-running the failed album strings.
 	srv.SetUnmatchedResolver(identitySvc)
+	// The same resolver is the admin manual-review service: it can return the
+	// candidates for one parked album and apply an explicitly chosen track or
+	// release through the same MaterializeResolved write path.
+	srv.SetUnmatchedReviewer(identitySvc)
 	// Cold lazy fetch (Option A): the first open of an unmaterialized album does
 	// one bounded, deduplicated provider fetch through the refresh engine, which
 	// reuses the shared cooldown and materializes the album. Its goroutines are

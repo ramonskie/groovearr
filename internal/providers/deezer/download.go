@@ -1252,7 +1252,7 @@ func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID str
 	id, err := strconv.Atoi(providerAlbumID)
 	if err != nil {
 		d.log.Error("get album tracks invalid id", "error", err, "providerAlbumID", providerAlbumID, "component", "deezer")
-		return nil, fmt.Errorf("deezer: invalid album id: %w", err)
+		return nil, fmt.Errorf("deezer: invalid album id %q: %w", providerAlbumID, discovery.ErrNotFound)
 	}
 	album, err := d.api.GetAlbum(ctx, id)
 	if err != nil {
@@ -1291,7 +1291,7 @@ func (d *DownloadClient) GetAlbumTracks(ctx context.Context, providerAlbumID str
 func (d *DownloadClient) GetTrackIdentity(ctx context.Context, providerTrackID string) (*discovery.TrackIdentity, error) {
 	id, err := strconv.Atoi(strings.TrimSpace(providerTrackID))
 	if err != nil {
-		return nil, fmt.Errorf("deezer: invalid track id %q: %w", providerTrackID, err)
+		return nil, fmt.Errorf("deezer: invalid track id %q: %w", providerTrackID, discovery.ErrNotFound)
 	}
 	t, err := d.api.GetTrack(ctx, id)
 	if err != nil {
@@ -1417,6 +1417,10 @@ var _ metadata.Provider = (*DownloadClient)(nil)
 var _ download.MonitoredProvider = (*DownloadClient)(nil)
 var _ discovery.Provider = (*DownloadClient)(nil)
 var _ discovery.TrackIdentityProvider = (*DownloadClient)(nil)
+
+// IdentityAvailable reports that the Deezer download client can perform
+// identity lookups. It is only registered when the ARL-backed client exists.
+func (d *DownloadClient) IdentityAvailable() bool { return true }
 
 // SearchAlbum finds the album title for a track via Deezer's public search API.
 // Returns ("", nil) when no match is found; a failure (including

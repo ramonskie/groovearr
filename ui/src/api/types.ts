@@ -759,6 +759,85 @@ export interface VersionInfo {
 
 // ─── Catalog status ─────────────────────────────────────────────────
 
+export interface UnmatchedAlbum {
+  album_id: number;
+  artist_id: number;
+  artist: string;
+  title: string;
+  status: "unmatched";
+  /** Persisted refresh_error; omitted when empty. */
+  error?: string;
+  updated_at: string;
+}
+
+/** Evidence behind one manual-review candidate score. */
+export interface UnmatchedReviewSignals {
+  isrc_exact: boolean;
+  provider_track_id_exact: boolean;
+  title_matches: boolean;
+  artist_matches: boolean;
+  duration_known: boolean;
+  duration_within_tolerance: boolean;
+  album_title_matches: boolean;
+  track_count_matches: boolean;
+  track_number_matches: boolean;
+}
+
+export interface UnmatchedReviewCandidate {
+  provider: string;
+  provider_track_id: string;
+  provider_album_id: string;
+  title: string;
+  artist: string;
+  album: string;
+  album_type?: string;
+  album_track_count?: number;
+  track_number?: number;
+  disc_number?: number;
+  duration_ms?: number;
+  isrc?: string;
+  score: number;
+  /** True when the resolver's automatic policy would have accepted it. */
+  auto: boolean;
+  signals: UnmatchedReviewSignals;
+}
+
+export interface UnmatchedReviewTrack {
+  track_id: number;
+  title: string;
+  artist: string;
+  album: string;
+  track_number?: number;
+  disc_number?: number;
+  duration_ms?: number;
+  isrc?: string;
+  /** Empty for multi-track reviews; use the provider search fallback. */
+  candidates: UnmatchedReviewCandidate[];
+}
+
+export interface UnmatchedAlbumReview {
+  album_id: number;
+  artist: string;
+  title: string;
+  track_count: number;
+  tracks: UnmatchedReviewTrack[];
+  /** Providers that support track-identity lookups (needed for track matches). */
+  identity_providers: string[];
+}
+
+export interface UnmatchedMatchRequest {
+  local_track_id?: number;
+  provider: string;
+  provider_track_id?: string;
+  provider_album_id?: string;
+}
+
+export interface UnmatchedMatchResponse {
+  mode: "track" | "release";
+  applied: boolean;
+  tracks?: number;
+}
+
 /**
  * Read-only snapshot from GET /api/catalog/status: the materialized metadata
  * catalog and its background refresh engine. The engine is a service-owned

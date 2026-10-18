@@ -585,6 +585,11 @@ Stream a single library track file. Available to any authenticated user
 
 **Path**: `trackID` — integer library track ID
 
+**Query param**: `inline=1` (or `true`) switches
+`Content-Disposition` from `attachment` to `inline` for the unmatched-review
+`<audio>` player. Authorization, root containment and range handling are
+identical to a download.
+
 **Response** `200`: the raw audio file, with:
 
 - `Content-Type` from the explicit audio MIME map — `.flac` → `audio/flac`,
@@ -917,7 +922,11 @@ identity-first resolver: probe missing durations for only the parked albums'
 tracks, look up each track by provider track id or ISRC, score the candidate with
 title, artist, duration, album, and track-count evidence, and materialize
 high-confidence releases through the refresh engine's normal catalog write path.
-Ambiguous, wrong-ISRC, and conflicting candidates stay parked for review.
+An exact-score cross-provider tie that is the same recording is resolved in the
+configured `provider_order` (the earlier provider's title spelling wins);
+ambiguous, wrong-ISRC, and conflicting candidates stay parked for review. The
+review dialog and its match endpoint are documented under
+`GET /api/catalog/unmatched/{albumID}/review`.
 
 If no identity resolver is wired (or the resolver reports no configured provider
 with the identity capability), it falls back to the original behavior:
@@ -1040,6 +1049,158 @@ the materialized catalog only — no provider calls, no queue changes.
 **Errors**:
 - `500` — `{"error": "catalog unmatched unavailable"}` when the catalog read fails.
 - `503` — `{"error": "catalog stats not available"}` when no catalog store is wired.
+
+### `GET /api/catalog/unmatched/{albumID}/review`
+
+**Admin only.** Rate-limited: shared `search` bucket.
+
+Return one parked album's local tracks and the identity candidates the admin can
+apply. This is the read side of the Settings → Metadata Catalog **Review
+unmatched** dialog; it does not apply a match or change the album's catalog
+status. It may backfill a missing local track duration while scoring.
+
+For a **one-track** local release, each track carries the provider candidates
+derived from its stored provider id and ISRC, scored with
+`matching.CandidateScore`. For a **multi-track** release, `candidates` is empty:
+the safe action is a complete provider release chosen through discovery search,
+not a per-track merge.
+
+`identity_providers` lists the currently available providers that support
+track-identity lookups. A cooling provider is omitted rather than failing the
+whole review, so the dialog can still open and use provider search. Release
+matches work with any configured discovery provider; a single-track match needs
+one of these.
+
+**Response** `200`:
+```json
+{
+  "album_id": 1227,
+  "artist": "Mad Mark",
+  "title": "WOW",
+  "track_count": 1,
+  "identity_providers": ["spotify", "deezer"],
+  "tracks": [
+    {
+      "track_id": 6500,
+      "title": "Anywhere You Go (DJ Antoine vs Mad Mark 2K12 radio edit)",
+      "artist": "Mad Mark",
+      "album": "WOW",
+      "track_number": 4,
+      "duration_ms": 214076,
+      "isrc": "CH4881102606",
+      "candidates": [
+        {
+          "provider": "spotify",
+          "provider_track_id": "4AkAnumox7l5vrSf8KhInL",
+          "provider_album_id": "1pz...",
+          "title": "Anywhere You Go - DJ Antoine vs Mad Mark 2K12 Radio Edit",
+          "artist": "DJ Antoine",
+          "album": "WOW",
+          "album_type": "album",
+          "album_track_count": 17,
+          "track_number": 4,
+          "duration_ms": 214000,
+          "isrc": "CH4881102606",
+          "score": 100,
+          "auto": true,
+          "signals": {
+            "isrc_exact": true,
+            "provider_track_id_exact": true,
+            "title_matches": true,
+            "artist_matches": true,
+            "duration_known": true,
+            "duration_within_tolerance": true,
+            "album_title_matches": true,
+            "track_count_matches": false,
+            "track_number_matches": true
+          }
+        }
+      ]
+    }
+  ]
+}
+```
+
+Candidates are ordered by score, then by the configured `provider_order` for
+equivalent recordings. An exact-score cross-provider tie is equivalent only
+when the non-empty ISRCs match, or when neither side contradicts the other and
+the normalized title + artist agree with both known durations within 2s. Two
+different non-empty ISRCs are never equivalent, and an unknown duration is not
+treated as confirmation. Equivalent ties are deterministic: the earlier
+provider wins, so its title spelling is the one that materializes.
+
+**Errors**:
+- `404` — `{"error": "unmatched album not found"}` for a non-numeric album id.
+- `409` — `{"error": "album is not unmatched"}` — unknown album or already resolved.
+- `500` — `{"error": "unmatched review unavailable"}`.
+- `503` — `{"error": "unmatched review not available"}` when no reviewer is
+  wired.
+- `504` — the review exceeded its 25s provider budget.
+
+### `POST /api/catalog/unmatched/{albumID}/match`
+
+**Admin only.** Rate-limited: shared `match` bucket (default 20/min, override
+`RATE_MATCH`).
+
+Apply one admin-chosen candidate. The request is revalidated against the live
+provider and materialized through `refresh.MaterializeResolved` — the same write
+path as an automatic identity resolution. The album must still be `unmatched`.
+Exactly one of `provider_track_id` or `provider_album_id` must be set.
+
+**Track match** (one-track local release; requires a provider with track-identity
+support):
+```json
+{
+  "local_track_id": 6500,
+  "provider": "spotify",
+  "provider_track_id": "4AkAnumox7l5vrSf8KhInL"
+}
+```
+
+**Release match** (multi-track local release; or a one-track local release when
+the provider release also has one track). The provider only needs the standard
+discovery tracklist capability, so this is the fallback for providers that do
+not expose track identities:
+```json
+{
+  "provider": "spotify",
+  "provider_album_id": "1pz..."
+}
+```
+
+A multi-track local album is never replaced by a provider release with fewer
+tracks; that would silently drop catalog rows. Choose a complete provider
+release instead; a track match is accepted only for a one-track local album.
+
+**Response** `200`:
+```json
+{"mode": "track", "applied": true}
+```
+or
+```json
+{"mode": "release", "applied": true, "tracks": 12}
+```
+
+`applied: false` means the album stopped being unmatched before the write; the
+UI refreshes the list instead of treating it as an error.
+
+**Errors**:
+- `400` — malformed payload, missing provider/candidate, both candidate ids
+  supplied, an empty provider release, a provider release smaller than a
+  multi-track local album, or a single/multi-track shape mismatch
+  (`multi-track album requires a release match` /
+  `single-track album requires a track match`).
+- `404` — the provider track/release does not exist, or the provider id is
+  invalid and the provider reports it as missing.
+- `409` — the album is no longer unmatched.
+- `429` — either the inbound `match` bucket is exhausted (`Retry-After: N`,
+  `X-RateLimit-Bucket: match`, body `rate limit exceeded, retry after Ns`), or
+  the provider is cooling down / rate-limited (`Retry-After: 30`, static
+  provider error body, never the upstream response text).
+- `500` — `{"error": "unmatched match unavailable"}` for other upstream
+  provider errors.
+- `503` — the chosen provider is not configured or no longer available.
+- `504` — the apply exceeded its 25s budget.
 
 ### `GET /api/covers/{albumID}`
 
@@ -1509,7 +1670,7 @@ All errors follow this format:
 {"error": "human-readable message"}
 ```
 
-HTTP status codes used: `200`, `201`, `202`, `400`, `401`, `403`, `404`, `405`, `409`, `429`, `500`, `503`.
+HTTP status codes used: `200`, `201`, `202`, `400`, `401`, `403`, `404`, `405`, `409`, `429`, `500`, `503`, `504`.
 
 - `401` — no valid credential (any `/api/*` route under `forms`).
 - `403` — authenticated but not allowed (admin-only route reached by a `user`).

@@ -13,12 +13,14 @@ import (
 )
 
 // Incoming rate limits — requests per minute per client IP.
-// Override via env vars: RATE_SEARCH, RATE_DOWNLOAD, RATE_SCAN, RATE_ENRICH.
+// Override via env vars: RATE_SEARCH, RATE_DOWNLOAD, RATE_SCAN, RATE_ENRICH,
+// RATE_MATCH.
 const (
 	defaultSearchRate   = 30 // GET /api/search, GET /api/discover/search
 	defaultDownloadRate = 10 // POST /api/download, playlists import/sync
 	defaultScanRate     = 2  // POST /api/jobs/scan
 	defaultEnrichRate   = 2  // POST /api/jobs/enrich
+	defaultMatchRate    = 20 // POST /api/catalog/unmatched/{id}/match
 	defaultLoginRate    = 5  // POST /api/login
 )
 
@@ -30,12 +32,14 @@ type rateLimitBucket struct {
 }
 
 // defaultRateBuckets returns the standard rate-limit buckets.
-// Override via env vars: RATE_SEARCH, RATE_DOWNLOAD, RATE_SCAN, RATE_ENRICH (req/min).
+// Override via env vars: RATE_SEARCH, RATE_DOWNLOAD, RATE_SCAN, RATE_ENRICH,
+// RATE_MATCH (req/min).
 func defaultRateBuckets() []rateLimitBucket {
 	rateSearch := rateEnv("RATE_SEARCH", defaultSearchRate)
 	rateDownload := rateEnv("RATE_DOWNLOAD", defaultDownloadRate)
 	rateScan := rateEnv("RATE_SCAN", defaultScanRate)
 	rateEnrich := rateEnv("RATE_ENRICH", defaultEnrichRate)
+	rateMatch := rateEnv("RATE_MATCH", defaultMatchRate)
 	rateLogin := rateEnv("RATE_LOGIN", defaultLoginRate)
 	return []rateLimitBucket{
 		{name: "search", max: rateSearch, window: time.Minute},
@@ -43,6 +47,7 @@ func defaultRateBuckets() []rateLimitBucket {
 		{name: "scan", max: rateScan, window: time.Minute},
 		{name: "enrich", max: rateEnrich, window: time.Minute},
 		{name: "duplicates", max: rateScan, window: time.Minute},
+		{name: "match", max: rateMatch, window: time.Minute},
 		{name: "login", max: rateLogin, window: time.Minute},
 	}
 }

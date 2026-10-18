@@ -1,6 +1,24 @@
 package discovery
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// ErrNotFound is the provider-neutral sentinel for a missing provider entity.
+// Providers wrap their own not-found/invalid-id errors with it so callers can
+// map a missing track/release to a client error without importing a provider
+// package (AGENTS §1).
+var ErrNotFound = errors.New("discovery: not found")
+
+// IdentityAvailability is an optional capability for TrackIdentityProvider
+// implementations that can be configured but temporarily unable to perform
+// identity lookups (for example Spotify free mode, which has no Web API).
+// Providers that implement it are excluded from identity candidates when it
+// returns false, while still remaining normal discovery providers.
+type IdentityAvailability interface {
+	IdentityAvailable() bool
+}
 
 // TrackIdentity is one provider track with the release context needed to
 // resolve a local track to a provider release. It is deliberately

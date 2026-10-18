@@ -21,9 +21,11 @@ import {
 import Card from "../../components/Card";
 import Button from "../../components/Button";
 import { useAuth } from "../../context/AuthContext";
+import UnmatchedReviewDialog from "./UnmatchedReviewDialog";
 
 export default function JobsSettings() {
   const { isAdmin } = useAuth();
+  const [reviewOpen, setReviewOpen] = useState(false);
   // GET /api/jobs is admin-only; gate the poll so a non-admin reaching
   // /settings (before the route gate) never issues the request.
   const jobQuery = useJobState(isAdmin);
@@ -280,6 +282,24 @@ export default function JobsSettings() {
             useful after a matching improvement.
           </span>
         </div>
+
+        <div className="mt-3 flex flex-wrap items-center gap-3">
+          <Button
+            variant="ghost"
+            onClick={() => setReviewOpen(true)}
+            disabled={!isAdmin}
+          >
+            Review unmatched
+            {catalogQuery.data
+              ? ` (${catalogQuery.data.albums.unmatched})`
+              : ""}
+          </Button>
+          <span className="text-xs text-slate-500">
+            Play a parked album's local tracks and apply an identity candidate,
+            or search a provider when the stored ID/ISRC is wrong. Multi-track
+            albums use a complete provider release.
+          </span>
+        </div>
       </Card>
 
       <Card title="Organize Report">
@@ -440,6 +460,11 @@ export default function JobsSettings() {
           </div>
         )}
       </Card>
+
+      <UnmatchedReviewDialog
+        open={reviewOpen}
+        onOpenChange={setReviewOpen}
+      />
     </div>
   );
 }

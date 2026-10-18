@@ -22,6 +22,10 @@ import type {
   Job,
   StartJobResponse,
   CatalogStatus,
+  UnmatchedAlbum,
+  UnmatchedAlbumReview,
+  UnmatchedMatchRequest,
+  UnmatchedMatchResponse,
   VersionInfo,
   PaginationParams,
   PlaylistSourceItem,
@@ -340,6 +344,15 @@ export function libraryTrackDownloadUrl(trackId: number | string): string {
   return `${BASE_URL}/api/library/tracks/${trackId}/download`;
 }
 
+/**
+ * Same-origin playback URL for the unmatched-review dialog. The inline flag
+ * changes only Content-Disposition; the server still authorizes and resolves
+ * the file exactly like a download.
+ */
+export function libraryTrackStreamUrl(trackId: number | string): string {
+  return `${BASE_URL}/api/library/tracks/${trackId}/download?inline=1`;
+}
+
 export function libraryAlbumDownloadUrl(albumId: number | string): string {
   return `${BASE_URL}/api/library/albums/${albumId}/download`;
 }
@@ -397,6 +410,34 @@ export function getVersion(): Promise<VersionInfo> {
 /** Read-only snapshot of the materialized catalog and its refresh engine. */
 export function getCatalogStatus(): Promise<CatalogStatus> {
   return request<CatalogStatus>("/api/catalog/status");
+}
+
+/** Parked unmatched albums behind the Metadata Catalog card. Admin-only. */
+export function getUnmatchedAlbums(): Promise<UnmatchedAlbum[]> {
+  return request<UnmatchedAlbum[]>("/api/catalog/unmatched");
+}
+
+/** Local tracks + identity candidates for one parked album. Admin-only. */
+export function getUnmatchedReview(
+  albumId: number,
+): Promise<UnmatchedAlbumReview> {
+  return request<UnmatchedAlbumReview>(
+    `/api/catalog/unmatched/${albumId}/review`,
+  );
+}
+
+/**
+ * Apply one admin-chosen candidate. A track match sets local_track_id +
+ * provider_track_id; a release match sets provider_album_id.
+ */
+export function matchUnmatchedAlbum(
+  albumId: number,
+  payload: UnmatchedMatchRequest,
+): Promise<UnmatchedMatchResponse> {
+  return request<UnmatchedMatchResponse>(
+    `/api/catalog/unmatched/${albumId}/match`,
+    { method: "POST", body: JSON.stringify(payload) },
+  );
 }
 
 export function getOrganizeReport(): Promise<OrganizeReport | null> {

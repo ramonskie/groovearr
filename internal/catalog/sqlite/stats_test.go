@@ -187,3 +187,54 @@ func TestStore_CountArtistMetadata(t *testing.T) {
 		t.Errorf("materialized artists = %d, want 1", n)
 	}
 }
+
+// TestStore_GetUnmatchedAlbum verifies the single-row read used by manual
+// review: it joins artist/title, returns nil for a resolved album, and returns
+// nil for an unknown id (the fail-closed path behind a stale review request).
+func TestStore_GetUnmatchedAlbum(t *testing.T) {
+	ctx := context.Background()
+	s, db := newTestStore(t)
+	at := time.Date(2026, 10, 18, 12, 0, 0, 0, time.UTC)
+
+	artistID := insertArtist(t, db, "Mad Mark")
+	unmatched := insertAlbum(t, db, artistID, "WOW")
+	fresh := insertAlbum(t, db, artistID, "Green")
+
+	for _, row := range []struct {
+		albumID int64
+		status  catalog.RefreshStatus
+		err     string
+	}{
+		{unmatched, catalog.StatusUnmatched, "no provider match"},
+		{fresh, catalog.StatusFresh, ""},
+	} {
+		if err := s.UpsertAlbumMetadata(ctx, catalog.AlbumMetadata{
+			AlbumID:       row.albumID,
+			RefreshStatus: row.status,
+			RefreshError:  row.err,
+			UpdatedAt:     at,
+		}); err != nil {
+			t.Fatalf("upsert album metadata %d: %v", row.albumID, err)
+		}
+	}
+
+	got, err := s.GetUnmatchedAlbum(ctx, unmatched)
+	if err != nil {
+		t.Fatalf("get unmatched: %v", err)
+	}
+	if got == nil {
+		t.Fatal("got nil, want the unmatched row")
+	}
+	if got.AlbumID != unmatched || got.ArtistID != artistID || got.Artist != "Mad Mark" ||
+		got.Title != "WOW" || got.Status != catalog.StatusUnmatched ||
+		got.Error != "no provider match" || !got.UpdatedAt.Equal(at) {
+		t.Fatalf("row = %+v", got)
+	}
+
+	if resolved, err := s.GetUnmatchedAlbum(ctx, fresh); err != nil || resolved != nil {
+		t.Fatalf("resolved = (%+v, %v), want (nil, nil)", resolved, err)
+	}
+	if unknown, err := s.GetUnmatchedAlbum(ctx, 999999); err != nil || unknown != nil {
+		t.Fatalf("unknown = (%+v, %v), want (nil, nil)", unknown, err)
+	}
+}

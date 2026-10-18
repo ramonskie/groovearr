@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,6 +38,7 @@ type Library interface {
 // *catalog/sqlite.Store satisfies it.
 type Catalog interface {
 	ListUnmatchedAlbums(ctx context.Context, limit int) ([]catalog.UnmatchedAlbum, error)
+	GetUnmatchedAlbum(ctx context.Context, albumID int64) (*catalog.UnmatchedAlbum, error)
 	GetAlbumMetadata(ctx context.Context, albumID int64) (*catalog.AlbumMetadata, error)
 	DeleteRefreshByEntity(ctx context.Context, entityType catalog.EntityType, entityID int64) error
 }
@@ -237,6 +239,9 @@ func (r *Resolver) trackProviders() ([]discovery.TrackIdentityProvider, int) {
 		if !ok {
 			continue
 		}
+		if avail, ok := tp.(discovery.IdentityAvailability); ok && !avail.IdentityAvailable() {
+			continue
+		}
 		capable++
 		if r.cooldown != nil && r.cooldown.CoolingDown(p.Name()) {
 			continue
@@ -339,21 +344,12 @@ func (r *Resolver) resolveSingle(ctx context.Context, album catalog.UnmatchedAlb
 		return albumOutcome{hadCandidate: true}, nil
 	}
 	id := best.identity
-	info := discovery.TrackInfo{
-		ProviderID:  id.ProviderTrackID,
-		ArtistName:  id.ArtistName,
-		AlbumTitle:  id.AlbumTitle,
-		Title:       id.Title,
-		TrackNumber: id.TrackNumber,
-		DiscNumber:  id.DiscNumber,
-		DurationMs:  id.DurationMs,
-		ISRC:        id.ISRC,
-	}
 	// A 1-track local release keeps exactly one provider row. Mark it partial
 	// only when the provider release is known to have more than one track, so a
 	// true single (or an unknown count) stays refreshable.
 	partial := id.AlbumTrackCount > 1
-	applied, err := r.materializer.MaterializeResolved(ctx, album.AlbumID, id.ProviderName, id.ProviderAlbumID, []discovery.TrackInfo{info}, partial)
+	applied, err := r.materializer.MaterializeResolved(ctx, album.AlbumID, id.ProviderName, id.ProviderAlbumID,
+		[]discovery.TrackInfo{trackInfoFromIdentity(id)}, partial)
 	if err != nil {
 		return albumOutcome{}, err
 	}
@@ -376,7 +372,57 @@ func (r *Resolver) resolveRelease(ctx context.Context, album catalog.UnmatchedAl
 	tracks []domain.Track, providers []discovery.TrackIdentityProvider) (albumOutcome, error) {
 	type group struct {
 		key     groupKey
+		rank    int
 		byTrack map[int64]scoredCandidate
+	}
+	groupMinScore := func(g *group) int {
+		min := 101
+		for _, c := range g.byTrack {
+			if c.score < min {
+				min = c.score
+			}
+		}
+		return min
+	}
+	// groupTrackCount returns the release track count reported by every
+	// candidate in the group. Zero (unknown) or inconsistent counts are not
+	// equivalence evidence: a standard and a deluxe release must not be merged
+	// just because one provider omitted the count.
+	groupTrackCount := func(g *group) int {
+		count := 0
+		for _, c := range g.byTrack {
+			n := c.identity.AlbumTrackCount
+			if n <= 0 {
+				continue
+			}
+			if count == 0 {
+				count = n
+				continue
+			}
+			if count != n {
+				return -1
+			}
+		}
+		return count
+	}
+	equivalentGroups := func(a, b *group) bool {
+		if len(a.byTrack) != len(b.byTrack) {
+			return false
+		}
+		// A standard release and a deluxe release can cover the same local
+		// tracks but are not the same release. Both providers must report the
+		// same known track count; unknown or inconsistent counts stay parked.
+		caCount, cbCount := groupTrackCount(a), groupTrackCount(b)
+		if caCount <= 0 || cbCount <= 0 || caCount != cbCount {
+			return false
+		}
+		for trackID, ca := range a.byTrack {
+			cb, ok := b.byTrack[trackID]
+			if !ok || !equivalentRecordings(ca.identity, cb.identity) {
+				return false
+			}
+		}
+		return true
 	}
 	groups := make(map[groupKey]*group)
 	anyCandidate := false
@@ -394,8 +440,10 @@ func (r *Resolver) resolveRelease(ctx context.Context, album catalog.UnmatchedAl
 			key := groupKey{provider: c.identity.ProviderName, albumID: c.identity.ProviderAlbumID}
 			g := groups[key]
 			if g == nil {
-				g = &group{key: key, byTrack: make(map[int64]scoredCandidate, len(tracks))}
+				g = &group{key: key, rank: c.rank, byTrack: make(map[int64]scoredCandidate, len(tracks))}
 				groups[key] = g
+			} else if c.rank < g.rank {
+				g.rank = c.rank
 			}
 			// Keep the strongest candidate for this local track within the
 			// provider release.
@@ -405,31 +453,40 @@ func (r *Resolver) resolveRelease(ctx context.Context, album catalog.UnmatchedAl
 		}
 	}
 
-	var best *group
-	bestMin := -1
+	// Only complete groups are eligible. Sort by the weakest link (score), then
+	// by provider order. Equal-score groups are accepted only when every local
+	// track is the same recording across both releases; otherwise the tie is a
+	// review case.
+	complete := make([]*group, 0, len(groups))
 	for _, g := range groups {
-		if len(g.byTrack) != len(tracks) {
-			continue
-		}
-		min := 101
-		for _, c := range g.byTrack {
-			if c.score < min {
-				min = c.score
-			}
-		}
-		if best == nil || min > bestMin {
-			best = g
-			bestMin = min
-			continue
-		}
-		if min == bestMin && g.key != best.key {
-			// Two complete releases are equally plausible; leave it for the
-			// review UI instead of guessing.
-			return albumOutcome{hadCandidate: anyCandidate}, nil
+		if len(g.byTrack) == len(tracks) {
+			complete = append(complete, g)
 		}
 	}
-	if best == nil {
+	if len(complete) == 0 {
 		return albumOutcome{hadCandidate: anyCandidate}, nil
+	}
+	sort.SliceStable(complete, func(i, j int) bool {
+		si, sj := groupMinScore(complete[i]), groupMinScore(complete[j])
+		if si != sj {
+			return si > sj
+		}
+		if complete[i].rank != complete[j].rank {
+			return complete[i].rank < complete[j].rank
+		}
+		return complete[i].key.albumID < complete[j].key.albumID
+	})
+	best := complete[0]
+	bestMin := groupMinScore(best)
+	for _, g := range complete[1:] {
+		if groupMinScore(g) != bestMin {
+			break
+		}
+		if !equivalentGroups(best, g) {
+			// Two complete releases are equally plausible but describe
+			// different recordings; leave it for the review UI.
+			return albumOutcome{hadCandidate: anyCandidate}, nil
+		}
 	}
 
 	provider := findProvider(providers, best.key.provider)
@@ -483,7 +540,10 @@ func (r *Resolver) lookupTrackByISRC(ctx context.Context, p discovery.TrackIdent
 	return p.LookupTrackByISRC(cctx, isrc)
 }
 
-func (r *Resolver) fetchAlbumTracks(ctx context.Context, p discovery.TrackIdentityProvider, albumID string) ([]discovery.TrackInfo, error) {
+// fetchAlbumTracks only needs the base discovery capability: GetAlbumTracks is
+// part of discovery.Provider, so a release match works even for providers that
+// do not expose track-identity lookups (the manual search fallback).
+func (r *Resolver) fetchAlbumTracks(ctx context.Context, p discovery.Provider, albumID string) ([]discovery.TrackInfo, error) {
 	cctx, cancel := context.WithTimeout(ctx, r.opts.CallTimeout)
 	defer cancel()
 	return p.GetAlbumTracks(cctx, albumID)

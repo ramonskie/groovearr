@@ -146,7 +146,7 @@ func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	releaseID, err := strconv.Atoi(providerAlbumID)
 	if err != nil {
 		p.log.Error("discogs get album tracks invalid id", "error", err, "providerAlbumID", providerAlbumID, "component", "discogs")
-		return nil, fmt.Errorf("discogs: invalid release id: %w", err)
+		return nil, fmt.Errorf("discogs: invalid release id %q: %w", providerAlbumID, discovery.ErrNotFound)
 	}
 	release, err := p.client.GetRelease(ctx, releaseID)
 	if err != nil {

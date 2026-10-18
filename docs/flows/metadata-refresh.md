@@ -9,7 +9,8 @@
 > `internal/refresh/bulk.go`, `internal/matching/match.go`,
 > `internal/discovery/provider.go`,
 > `internal/jobs/warm_library.go`, `internal/jobs/recheck_unmatched.go`,
-> `internal/identity/resolver.go`, `internal/discovery/identity.go`,
+> `internal/identity/resolver.go`, `internal/identity/score.go`,
+> `internal/identity/review.go`, `internal/discovery/identity.go`,
 > `internal/providers/deezer/download.go`, `internal/providers/spotify/identity.go`,
 > `internal/providers/musicbrainz/provider.go`,
 > `internal/providers/musicbrainz/api.go`,
@@ -417,6 +418,10 @@ startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.
     |      |        score >= 75, title agrees,
     |      |        (artist agrees OR duration agrees),
     |      |        no known duration conflict
+    |      |      exact-score tie: equivalent only when non-empty ISRCs
+    |      |        match, or neither ISRC conflicts + title/artist agree
+    |      |        + both durations known and <=2s
+    |      |        -> earlier configured provider wins; else parked
     |      |
     |      +-- 1-track local release:
     |      |      MaterializeResolved(one provider row,
@@ -424,13 +429,17 @@ startJob("recheck-unmatched", runners.RecheckUnmatched())    (api/handlers_jobs.
     |      |
     |      +-- multi-track local release:
     |      |      group candidates by provider release
-    |      |      only one complete group (every local track, same album)
+    |      |      only complete groups are eligible
+    |      |        (every local track, same provider album)
+    |      |      equal-score groups accepted only when every local track
+    |      |        is the same recording and known track counts agree;
+    |      |        earlier provider wins
     |      |      -> GetAlbumTracks -> MaterializeResolved(full release)
     |      |
     |      +-- ambiguous / wrong-ISRC / conflicting -> stay parked
     |      |
-    |      v
-    |  catalog.DeleteRefreshByEntity(album) for each resolved album
+    |      +-- each resolved album -> catalog.DeleteRefreshByEntity(album)
+    |      |
     |  report resolved / parked / no-identity / skipped counts
     |
     +-- no resolver OR ErrNoTrackProviders (fallback) --------------------+
@@ -445,6 +454,16 @@ catalog.Store.ReArmTerminalAlbums(now, limit)        (catalog/sqlite/queue.go)
     v
 engine next drain: ClaimDueRefresh(now) -> processBatch -> RefreshAlbum (chart 3)
 ```
+
+Manual review is a separate admin path (Settings → Metadata Catalog **Review
+unmatched**), not part of this job. `GET
+/api/catalog/unmatched/{id}/review` returns the local tracks, the available
+identity-capable providers, and (for a one-track release) the identity
+candidates. `POST /api/catalog/unmatched/{id}/match` re-fetches the chosen
+provider track/release and calls the same `MaterializeResolved`; a track match
+needs identity support, while a release match only needs `GetAlbumTracks`, so
+the discovery-search fallback works for any configured provider. A release
+smaller than a multi-track local album is rejected rather than deleting rows.
 
 The identity pass is the explicit, user-triggered override of the 90-day
 `UnmatchedRetry` park. It does **not** re-run the album-string search for

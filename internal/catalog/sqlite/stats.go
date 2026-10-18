@@ -2,6 +2,8 @@ package sqlite
 
 import (
 	"context"
+	"database/sql"
+	"errors"
 	"fmt"
 	"time"
 
@@ -105,4 +107,31 @@ func (s *Store) ListUnmatchedAlbums(ctx context.Context, limit int) ([]catalog.U
 		return nil, fmt.Errorf("catalog sqlite: iterate unmatched albums: %w", err)
 	}
 	return out, nil
+}
+
+// GetUnmatchedAlbum returns one parked album joined with its library
+// artist/title, or (nil, nil) when the album is unknown or no longer
+// unmatched. It is the single-row read behind the review UI; the status check
+// makes a stale review request fail closed instead of showing a resolved album.
+func (s *Store) GetUnmatchedAlbum(ctx context.Context, albumID int64) (*catalog.UnmatchedAlbum, error) {
+	var a catalog.UnmatchedAlbum
+	var status, updated string
+	err := s.db.QueryRowContext(ctx, `
+		SELECT am.album_id, al.artist_id, COALESCE(ar.name, ''), al.title,
+			am.refresh_status, COALESCE(am.refresh_error, ''), am.updated_at
+		FROM album_metadata am
+		JOIN albums al ON al.id = am.album_id
+		LEFT JOIN artists ar ON ar.id = al.artist_id
+		WHERE am.album_id = ? AND am.refresh_status = ?`,
+		albumID, string(catalog.StatusUnmatched)).
+		Scan(&a.AlbumID, &a.ArtistID, &a.Artist, &a.Title, &status, &a.Error, &updated)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("catalog sqlite: get unmatched album: %w", err)
+	}
+	a.Status = catalog.RefreshStatus(status)
+	a.UpdatedAt = parseTime(updated)
+	return &a, nil
 }

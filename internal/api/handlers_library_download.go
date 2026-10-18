@@ -91,8 +91,19 @@ func zipMethodForName(name string) uint16 {
 // download. It emits both a legacy ASCII `filename=` fallback and an RFC 5987
 // `filename*=` parameter so non-ASCII titles survive intact.
 func contentDispositionAttachment(name string) string {
-	return fmt.Sprintf("attachment; filename=%q; filename*=UTF-8''%s",
-		asciiFilename(name), rfc5987Escape(name))
+	return contentDisposition("attachment", name)
+}
+
+// contentDispositionInline is the playback variant used by the review dialog's
+// <audio> element. The filename parameters are kept so a browser "save as"
+// still gets the real name.
+func contentDispositionInline(name string) string {
+	return contentDisposition("inline", name)
+}
+
+func contentDisposition(kind, name string) string {
+	return fmt.Sprintf("%s; filename=%q; filename*=UTF-8''%s",
+		kind, asciiFilename(name), rfc5987Escape(name))
 }
 
 // asciiFilename reduces a name to a safe ASCII-only legacy `filename=` value.
@@ -158,6 +169,17 @@ const streamWriteDeadline = 30 * time.Minute
 // returned error and keep serving under the server's normal timeout.
 func extendWriteDeadline(w http.ResponseWriter) error {
 	return http.NewResponseController(w).SetWriteDeadline(time.Now().Add(streamWriteDeadline))
+}
+
+// inlinePlayback reports the opt-in playback mode for a library track. It only
+// affects Content-Disposition; every security check is identical to a download.
+func inlinePlayback(r *http.Request) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get("inline"))) {
+	case "1", "true":
+		return true
+	default:
+		return false
+	}
 }
 
 // handleLibraryTrackDownload streams a single library track file to the
@@ -227,9 +249,19 @@ func (s *Server) handleLibraryTrackDownload(w http.ResponseWriter, r *http.Reque
 
 	// nosniff stops a browser from content-sniffing the audio bytes into some
 	// other executable type when the Content-Type is unexpected.
+	contentType := audioContentType(name)
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	w.Header().Set("Content-Type", audioContentType(name))
-	w.Header().Set("Content-Disposition", contentDispositionAttachment(name))
+	w.Header().Set("Content-Type", contentType)
+	// inline=1 is the review dialog's playback mode. It changes only the
+	// Content-Disposition hint for known audio types; the same root check,
+	// range support and auth apply as a download. Non-audio paths fall back to
+	// attachment so a bad file_path cannot become an inline text/html response.
+	if inlinePlayback(r) && strings.HasPrefix(contentType, "audio/") {
+		w.Header().Set("Content-Disposition", contentDispositionInline(name))
+		w.Header().Set("Cache-Control", "private, no-store")
+	} else {
+		w.Header().Set("Content-Disposition", contentDispositionAttachment(name))
+	}
 	http.ServeContent(w, r, name, fi.ModTime(), f)
 }
 

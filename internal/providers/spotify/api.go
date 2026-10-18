@@ -3,16 +3,17 @@ package spotify
 import (
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"net/url"
 	"strconv"
+
+	"github.com/ramonskie/groovearr/internal/discovery"
 )
 
 // ErrNotFound means Spotify has no entity for the requested id.
-var ErrNotFound = errors.New("spotify: not found")
+var ErrNotFound = fmt.Errorf("spotify: not found: %w", discovery.ErrNotFound)
 
 // API provides typed methods for accessing the Spotify Web API.
 // All methods require dev mode (valid access token). Call requireDevMode

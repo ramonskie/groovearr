@@ -179,6 +179,25 @@ func TestHandleLibraryTrackDownload(t *testing.T) {
 		}
 	})
 
+	t.Run("inline=1 returns an inline audio playback disposition", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/api/library/tracks/1/download?inline=1", nil)
+		req.SetPathValue("trackID", "1")
+		rec := httptest.NewRecorder()
+		s.handleLibraryTrackDownload(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Fatalf("status = %d, want 200 (body %q)", rec.Code, rec.Body.String())
+		}
+		if cd := rec.Header().Get("Content-Disposition"); !strings.HasPrefix(cd, "inline;") {
+			t.Errorf("Content-Disposition = %q, want inline", cd)
+		}
+		if cc := rec.Header().Get("Cache-Control"); cc != "private, no-store" {
+			t.Errorf("Cache-Control = %q, want private, no-store", cc)
+		}
+		if ct := rec.Header().Get("Content-Type"); ct != "audio/flac" {
+			t.Errorf("Content-Type = %q, want audio/flac", ct)
+		}
+	})
+
 	t.Run("Range returns 206 partial bytes", func(t *testing.T) {
 		rec := request("1", http.MethodGet, map[string]string{"Range": "bytes=0-3"})
 		if rec.Code != http.StatusPartialContent {

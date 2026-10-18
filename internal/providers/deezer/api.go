@@ -17,6 +17,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ramonskie/groovearr/internal/discovery"
 	"github.com/ramonskie/groovearr/internal/domain"
 	"github.com/ramonskie/groovearr/internal/metadata"
 	"github.com/ramonskie/groovearr/internal/quality"
@@ -27,7 +28,7 @@ const baseURL = "https://api.deezer.com"
 // ErrNotFound means Deezer has no entity for the requested id/ISRC. Callers
 // that treat a miss as "no candidate" can errors.Is it instead of inspecting a
 // provider-specific message.
-var ErrNotFound = errors.New("deezer: not found")
+var ErrNotFound = fmt.Errorf("deezer: not found: %w", discovery.ErrNotFound)
 
 // Track represents a Deezer track from the public API.
 type Track struct {

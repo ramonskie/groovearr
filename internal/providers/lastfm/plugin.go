@@ -148,7 +148,7 @@ func (p *Plugin) GetAlbumTracks(ctx context.Context, providerAlbumID string) ([]
 	parts := splitArtistAlbum(providerAlbumID)
 	if len(parts) != 2 {
 		p.log.Error("lastfm get album tracks invalid id format", "providerAlbumID", providerAlbumID, "component", "lastfm")
-		return nil, fmt.Errorf("lastfm: invalid album id format: %s (expected artist::album)", providerAlbumID)
+		return nil, fmt.Errorf("lastfm: invalid album id format %q: %w", providerAlbumID, discovery.ErrNotFound)
 	}
 	album, err := p.client.GetAlbumInfo(ctx, parts[0], parts[1])
 	if err != nil {

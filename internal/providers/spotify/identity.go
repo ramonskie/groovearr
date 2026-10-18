@@ -10,6 +10,10 @@ import (
 
 var _ discovery.TrackIdentityProvider = (*Plugin)(nil)
 
+// IdentityAvailable reports whether Spotify's Web API is configured. Free mode
+// still discovers/search, but cannot resolve a track identity.
+func (p *Plugin) IdentityAvailable() bool { return p.api != nil }
+
 // GetTrackIdentity resolves one Spotify track by its provider id. It returns
 // (nil, nil) in free mode (no Web API) and when the id is empty.
 func (p *Plugin) GetTrackIdentity(ctx context.Context, providerTrackID string) (*discovery.TrackIdentity, error) {
